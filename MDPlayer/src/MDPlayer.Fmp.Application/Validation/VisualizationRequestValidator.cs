@@ -121,6 +121,9 @@ public static class VisualizationRequestValidator
         if (playback.SampleRate <= 0)
             issues.Add(Error(ValidationCodes.InvalidRequest,
                 $"Sample rate must be positive (got {playback.SampleRate}).", "Playback.SampleRate"));
+        if (!double.IsFinite(playback.SsgGainDb) || playback.SsgGainDb is < -60 or > 12)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"SSG gain must be in [-60, 12] dB (got {playback.SsgGainDb}).", "Playback.SsgGainDb"));
 
         return issues;
     }

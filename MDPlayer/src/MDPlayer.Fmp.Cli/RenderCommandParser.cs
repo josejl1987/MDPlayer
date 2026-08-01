@@ -8,16 +8,18 @@ namespace Fmp.Cli;
 /// Tool paths are process-level settings and are never serialized into the
 /// request (schema-1 rule: ToolPaths is runtime-only).
 /// </summary>
-internal sealed class RenderRuntimeOptions
+internal sealed record RenderRuntimeOptions
 {
     public string? FmpCom { get; init; }
     public string? AssetsDir { get; init; }
+    public IReadOnlyList<string> SearchPaths { get; init; } = Array.Empty<string>();
     public string? CorrscopePath { get; init; }
     public string? FfmpegPath { get; init; }
     public string? AnalysisPython { get; init; }
     public bool Quiet { get; init; }
     public bool Json { get; init; }
     public string? ProgressMode { get; init; }
+    public string Backend { get; init; } = "auto";
     public int ToolTimeoutMinutes { get; init; } = 60;
 }
 
@@ -30,6 +32,12 @@ internal sealed class RenderRuntimeOptions
 /// </summary>
 internal static class RenderCommandParser
 {
+    internal static RenderInvocation ParseInvocationCore(string[] args)
+    {
+        var parsed = ParseCore(args);
+        return new RenderInvocation(parsed.Request, parsed.Runtime);
+    }
+
     /// <summary>
     /// Parses the canonical command. <paramref name="requestJsonPath"/> is the
     /// optional <c>--request-json</c> seed; when present, the request is loaded
@@ -54,30 +62,33 @@ internal static class RenderCommandParser
         string[] args)
     {
         string? input = null;
-        string? requestJsonPath = null;
+        string? requestJsonPath = FindRequestJson(args);
+        VisualizationRequest? seeded = requestJsonPath is null ? null : ReadSeed(requestJsonPath);
 
         // Builder state. Defaults come from the canonical schema defaults so an
         // omitted option keeps its request default (same contract as the GUI).
-        CompositionKind composition = CompositionKind.Diagnostic;
-        OutputSettings output = new();
-        TrackSettings tracks = new();
-        ViewSettings view = new();
-        StyleSettings style = new();
-        PresentationSettings presentation = new();
-        PlaybackSettings playback = new();
+        CompositionKind composition = seeded?.Composition ?? CompositionKind.Diagnostic;
+        OutputSettings output = seeded?.Output ?? new();
+        TrackSettings tracks = seeded?.Tracks ?? new();
+        ViewSettings view = seeded?.View ?? new();
+        StyleSettings style = seeded?.Style ?? new();
+        PresentationSettings presentation = seeded?.Presentation ?? new();
+        PlaybackSettings playback = seeded?.Playback ?? new();
+        input = seeded?.InputPath;
 
         string? fmpCom = null;
         string? assetsDir = null;
         string? corrscope = null;
         string? ffmpeg = null;
         string? analysisPython = null;
+        var searchPaths = new List<string>();
+        string backend = "auto";
         bool quiet = false;
         bool json = false;
         string? progressMode = null;
         int toolTimeoutMinutes = 60;
 
         var reader = new ArgumentReader(args);
-        bool afterRequestSeed = false;
 
         while (reader.HasMore)
         {
@@ -87,8 +98,7 @@ internal static class RenderCommandParser
                 {
                     // ---- request seed ----
                     case "--request-json":
-                        requestJsonPath = reader.RequireValue(name);
-                        afterRequestSeed = true;
+                        reader.RequireValue(name);
                         break;
 
                     // ---- identity / output ----
@@ -200,6 +210,12 @@ internal static class RenderCommandParser
                     case "--sample-rate":
                         playback = playback with { SampleRate = reader.ReadInt(name) };
                         break;
+                    case "--ssg-gain-db":
+                        playback = playback with { SsgGainDb = reader.ReadDouble(name) };
+                        break;
+                    case "--spc-pitch":
+                        playback = playback with { SpcPitch = ParseSpcPitch(reader.RequireValue(name)) };
+                        break;
 
                     // ---- runtime tool options ----
                     case "--fmp-com": fmpCom = reader.RequireValue(name); break;
@@ -207,6 +223,9 @@ internal static class RenderCommandParser
                     case "--corrscope": corrscope = reader.RequireValue(name); break;
                     case "--ffmpeg": ffmpeg = reader.RequireValue(name); break;
                     case "--analysis-python": analysisPython = reader.RequireValue(name); break;
+                    case "-I":
+                    case "--search-path": searchPaths.Add(reader.RequireValue(name)); break;
+                    case "--backend": backend = reader.RequireValue(name); break;
                     case "--tool-timeout-minutes": toolTimeoutMinutes = reader.ReadInt(name); break;
                     case "--quiet" when value == null: quiet = true; break;
                     case "--json" when value == null: json = true; break;
@@ -223,32 +242,14 @@ internal static class RenderCommandParser
                 string positional = reader.Next();
                 if (positional == "--")
                     continue;
-                if (input != null)
+                if (input != null && !string.Equals(input, seeded?.InputPath, StringComparison.Ordinal))
                     throw new ArgumentException($"unexpected argument '{positional}'");
                 input = positional;
             }
         }
 
-        if (string.IsNullOrWhiteSpace(input) && !afterRequestSeed)
+        if (string.IsNullOrWhiteSpace(input))
             throw new ArgumentException("no input file specified");
-
-        // Load the --request-json seed when present; CLI options override it.
-        VisualizationRequest? seeded = null;
-        if (requestJsonPath != null)
-        {
-            try
-            {
-                seeded = VisualizationRequestSerializer.ReadFromFile(requestJsonPath);
-            }
-            catch (VisualizationRequestException ex)
-            {
-                throw new ArgumentException(ex.Message);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                throw new ArgumentException($"reading request file — {ex.Message}");
-            }
-        }
 
         // Resolve the output path (canonical: --output is the final video).
         string outputPath = ResolveOutputPath(args, seeded, input);
@@ -258,13 +259,13 @@ internal static class RenderCommandParser
         {
             InputPath = resolvedInput,
             OutputPath = outputPath,
-            Composition = CompositionExplicit(args) ? composition : seeded?.Composition ?? composition,
-            Output = MergeOutput(output, seeded?.Output ?? new OutputSettings(), args),
-            Tracks = MergeTracks(tracks, seeded?.Tracks ?? new TrackSettings(), args),
-            View = MergeView(view, seeded?.View ?? new ViewSettings(), args),
-            Style = MergeStyle(style, seeded?.Style ?? new StyleSettings(), args),
-            Presentation = MergePresentation(presentation, seeded?.Presentation ?? new PresentationSettings(), args),
-            Playback = MergePlayback(playback, seeded?.Playback ?? new PlaybackSettings(), args),
+            Composition = composition,
+            Output = output,
+            Tracks = tracks,
+            View = view,
+            Style = style,
+            Presentation = presentation,
+            Playback = playback,
         };
 
         var runtime = new RenderRuntimeOptions
@@ -274,6 +275,8 @@ internal static class RenderCommandParser
             CorrscopePath = corrscope,
             FfmpegPath = ffmpeg,
             AnalysisPython = analysisPython,
+            SearchPaths = searchPaths,
+            Backend = backend,
             Quiet = quiet,
             Json = json,
             ProgressMode = progressMode,
@@ -287,9 +290,26 @@ internal static class RenderCommandParser
     // Output / input resolution
     // ------------------------------------------------------------------
 
+    private static string? FindRequestJson(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "--request-json")
+                return args[i + 1];
+        return args.FirstOrDefault(a => a.StartsWith("--request-json=", StringComparison.Ordinal))?
+            ["--request-json=".Length..];
+    }
+
+    private static VisualizationRequest ReadSeed(string path)
+    {
+        try { return VisualizationRequestSerializer.ReadFromFile(path); }
+        catch (VisualizationRequestException ex) { throw new ArgumentException(ex.Message); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { throw new ArgumentException($"reading request file — {ex.Message}"); }
+    }
+
     private static string ResolveOutputPath(string[] args, VisualizationRequest? seeded, string? input)
     {
-        string? fromArgs = ValueOf(args, "--output");
+        string? fromArgs = ReadOutputOverride(args);
         if (fromArgs != null)
             return fromArgs;
         if (seeded?.OutputPath != null)
@@ -309,11 +329,7 @@ internal static class RenderCommandParser
         throw new ArgumentException("no input file specified");
     }
 
-    private static bool CompositionExplicit(string[] args) => Contains(args, "--composition");
-    private static bool Contains(string[] args, string option)
-        => Array.IndexOf(args, option) >= 0 || args.Any(a => a.StartsWith(option + "=", StringComparison.Ordinal));
-
-    private static string? ValueOf(string[] args, string option)
+    private static string? ReadOutputOverride(string[] args, string option = "--output")
     {
         for (int i = 0; i < args.Length - 1; i++)
         {
@@ -328,85 +344,11 @@ internal static class RenderCommandParser
         return null;
     }
 
-    private static bool HasOption(string[] args, string option)
-        => Contains(args, option);
-
     private static VisualizationRequest NewDefaultRequest(string input, string outputPath) => new()
     {
         InputPath = input,
         OutputPath = outputPath,
     };
-
-    // ------------------------------------------------------------------
-    // Merge helpers: CLI option present ? CLI value : seeded request value
-    // ------------------------------------------------------------------
-
-    private static OutputSettings MergeOutput(OutputSettings cli, OutputSettings seeded, string[] args)
-    {
-        OutputSettings merged = seeded;
-        if (HasOption(args, "--quality")) merged = merged with { Quality = cli.Quality };
-        if (HasOption(args, "--width")) merged = merged with { Width = cli.Width };
-        if (HasOption(args, "--height")) merged = merged with { Height = cli.Height };
-        if (HasOption(args, "--fps")) merged = merged with { FpsNumerator = cli.FpsNumerator };
-        if (HasOption(args, "--fps-denominator")) merged = merged with { FpsDenominator = cli.FpsDenominator };
-        if (HasOption(args, "--encoder")) merged = merged with { Encoder = cli.Encoder };
-        if (HasOption(args, "--overwrite")) merged = merged with { Overwrite = true };
-        return merged;
-    }
-
-    private static TrackSettings MergeTracks(TrackSettings cli, TrackSettings seeded, string[] args)
-    {
-        TrackSettings merged = seeded;
-        if (HasOption(args, "--tracks")) merged = merged with { Selection = cli.Selection };
-        if (HasOption(args, "--include-track"))
-            merged = merged with { IncludedIds = cli.IncludedIds };
-        if (HasOption(args, "--exclude-track"))
-            merged = merged with { ExcludedIds = cli.ExcludedIds };
-        if (HasOption(args, "--include-inactive"))
-            merged = merged with { IncludeInactiveDiagnosticTracks = true };
-        return merged;
-    }
-
-    private static ViewSettings MergeView(ViewSettings cli, ViewSettings seeded, string[] args)
-    {
-        ViewSettings merged = seeded;
-        if (HasOption(args, "--past")) merged = merged with { PastSeconds = cli.PastSeconds };
-        if (HasOption(args, "--future")) merged = merged with { FutureSeconds = cli.FutureSeconds };
-        if (HasOption(args, "--time-grid")) merged = merged with { TimeGrid = cli.TimeGrid };
-        if (HasOption(args, "--structure")) merged = merged with { Structure = cli.Structure };
-        return merged;
-    }
-
-    private static StyleSettings MergeStyle(StyleSettings cli, StyleSettings seeded, string[] args)
-    {
-        StyleSettings merged = seeded;
-        if (HasOption(args, "--effects")) merged = merged with { Effects = cli.Effects };
-        if (HasOption(args, "--note-color")) merged = merged with { NoteColor = cli.NoteColor };
-        if (HasOption(args, "--palette")) merged = merged with { Palette = cli.Palette };
-        return merged;
-    }
-
-    private static PresentationSettings MergePresentation(
-        PresentationSettings cli, PresentationSettings seeded, string[] args)
-    {
-        PresentationSettings merged = seeded;
-        if (HasOption(args, "--title")) merged = merged with { Title = cli.Title };
-        if (HasOption(args, "--subtitle")) merged = merged with { Subtitle = cli.Subtitle };
-        if (HasOption(args, "--credits")) merged = merged with { Credits = cli.Credits };
-        if (HasOption(args, "--font")) merged = merged with { FontPath = cli.FontPath };
-        return merged;
-    }
-
-    private static PlaybackSettings MergePlayback(PlaybackSettings cli, PlaybackSettings seeded, string[] args)
-    {
-        PlaybackSettings merged = seeded;
-        if (HasOption(args, "--loops")) merged = merged with { LoopCount = cli.LoopCount };
-        if (HasOption(args, "--fade")) merged = merged with { FadeSeconds = cli.FadeSeconds };
-        if (HasOption(args, "--tail")) merged = merged with { TailSeconds = cli.TailSeconds };
-        if (HasOption(args, "--max-duration")) merged = merged with { MaximumDurationSeconds = cli.MaximumDurationSeconds };
-        if (HasOption(args, "--sample-rate")) merged = merged with { SampleRate = cli.SampleRate };
-        return merged;
-    }
 
     // ------------------------------------------------------------------
     // Enum parsers (mirror the formatter's canonical CLI names)
@@ -418,8 +360,14 @@ internal static class RenderCommandParser
     internal static CompositionKind ParseComposition(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
         "diagnostic" => CompositionKind.Diagnostic,
-        _ => throw new ArgumentException(
-            $"unknown composition '{raw}' (expected diagnostic)"),
+        _ => throw new ArgumentException($"unknown composition '{raw}'"),
+    };
+
+    private static SpcPitchInterpretation ParseSpcPitch(string raw) => raw.Trim().ToLowerInvariant() switch
+    {
+        "estimate" => SpcPitchInterpretation.Estimate,
+        "relative" => SpcPitchInterpretation.Relative,
+        _ => throw new ArgumentException($"unknown SPC pitch interpretation '{raw}'"),
     };
 
     internal static RenderQuality ParseQuality(string raw) => raw?.Trim().ToLowerInvariant() switch

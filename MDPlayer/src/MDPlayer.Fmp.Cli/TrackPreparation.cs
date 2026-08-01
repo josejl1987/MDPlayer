@@ -5,7 +5,7 @@ namespace Fmp.Cli;
 
 /// <summary>
 /// A validated track: the input file, its loaded bytes, and the runtime
-/// assets and file system resolved from the render settings.
+/// assets and file system resolved from runtime settings.
 /// </summary>
 internal sealed record PreparedTrack(
     FileInfo Input,
@@ -30,11 +30,15 @@ internal sealed class TrackPreparationException : Exception
 
 /// <summary>
 /// Validates an FMP-family track input, resolves FMP.COM and the search paths, and loads
-/// the track bytes. Shared by the render, batch and visualize commands.
+/// the track bytes.
 /// </summary>
 internal static class TrackPreparation
 {
-    public static PreparedTrack Prepare(string inputPath, RenderSettings settings)
+    public static PreparedTrack Prepare(
+        string inputPath,
+        string fmpCom,
+        string assetsDir,
+        IReadOnlyList<string> searchPaths)
     {
         var input = new FileInfo(inputPath);
         if (!input.Exists)
@@ -45,15 +49,15 @@ internal static class TrackPreparation
             throw new TrackPreparationException(
                 $"unsupported format: {extension} ({FmpFormat.ExpectedDescription})", 3);
 
-        string fmpCom = ToolResolver.ResolveFile(settings.FmpCom, settings.AssetsDir, "FMP.COM");
-        if (string.IsNullOrEmpty(fmpCom) || !File.Exists(fmpCom))
+        string resolvedFmpCom = ToolResolver.ResolveFile(fmpCom, assetsDir, "FMP.COM");
+        if (string.IsNullOrEmpty(resolvedFmpCom) || !File.Exists(resolvedFmpCom))
             throw new TrackPreparationException("FMP.COM not found", 4);
 
-        var searchPaths = new List<string>();
-        searchPaths.AddRange(settings.SearchPaths);
-        if (!string.IsNullOrEmpty(settings.AssetsDir))
-            searchPaths.Add(settings.AssetsDir);
-        searchPaths.Add(input.DirectoryName ?? ".");
+        var resolvedSearchPaths = new List<string>();
+        resolvedSearchPaths.AddRange(searchPaths);
+        if (!string.IsNullOrEmpty(assetsDir))
+            resolvedSearchPaths.Add(assetsDir);
+        resolvedSearchPaths.Add(input.DirectoryName ?? ".");
 
         byte[] data;
         try
@@ -68,7 +72,8 @@ internal static class TrackPreparation
         return new PreparedTrack(
             input,
             data,
-            new FmpRuntimeAssets(fmpCom),
-            new FmpFileSystem(searchPaths.Distinct()));
+            new FmpRuntimeAssets(resolvedFmpCom),
+            new FmpFileSystem(resolvedSearchPaths.Distinct()));
     }
+
 }

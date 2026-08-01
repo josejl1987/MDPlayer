@@ -210,7 +210,8 @@ internal static class AnalysisRunner
 
     private static VisualizationTimeline CaptureFmpTimeline(AnalyzeOptions options)
     {
-        PreparedTrack track = TrackPreparation.Prepare(options.Input, options);
+        PreparedTrack track = TrackPreparation.Prepare(
+            options.Input, options.FmpCom, options.AssetsDir, options.SearchPaths);
         options.CaptureDependencies["input"] = FileIdentity(track.Input.FullName);
         options.CaptureDependencies["fmpCom"] = FileIdentity(track.Assets.FmpComPath);
         options.CaptureDependencies["virtualFileSystem"] = string.Join("|", track.FileSystem.SearchPaths);

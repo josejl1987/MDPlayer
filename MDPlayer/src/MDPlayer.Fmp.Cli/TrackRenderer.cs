@@ -10,7 +10,7 @@ namespace Fmp.Cli;
 /// </summary>
 internal sealed class TrackRenderer
 {
-    public RenderOutcome Render(PreparedTrack track, string output, RenderSettings settings)
+    public RenderOutcome Render(PreparedTrack track, string output, BatchRenderSettings settings)
     {
         try
         {

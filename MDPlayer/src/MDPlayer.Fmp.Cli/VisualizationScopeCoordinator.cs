@@ -1,5 +1,6 @@
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
+using Fmp.Application.Contracts;
 
 namespace Fmp.Cli;
 
@@ -26,24 +27,27 @@ internal static class VisualizationScopeCoordinator
         string backendId,
         FileInfo input,
         VisualizationWorkspace workspace,
-        VisualizeOptions options,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         IReadOnlyList<DeviceDescriptor> devices,
         IReadOnlyList<VoiceDescriptor> voices,
         long masterSamples)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(workspace);
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(runtime);
+        PlaybackSettings playback = request.Playback;
 
         StemPlan plan = ScopePlanner.Plan(
             backendId,
             devices,
             voices,
-            options.ScopeMode);
+            "auto");
         if (!plan.Supported)
         {
             throw new VisualizationScopeException(
-                $"requested scope mode '{options.ScopeMode}' is unavailable: {plan.Reason}",
+                $"requested scope mode 'auto' is unavailable: {plan.Reason}",
                 4);
         }
 
@@ -53,11 +57,11 @@ internal static class VisualizationScopeCoordinator
                 input.FullName,
                 workspace.ScopeDir,
                 workspace.MasterAudioPath,
-                options.SampleRate,
-                options.Loops,
-                options.Fade,
-                options.Tail,
-                options.MaxDuration),
+                playback.SampleRate,
+                playback.LoopCount,
+                playback.FadeSeconds,
+                playback.TailSeconds,
+                playback.MaximumDurationSeconds ?? 300),
             StemStrategy.MasterCaptured or StemStrategy.None => null,
             StemStrategy.FmpParallelSynthesis => throw new VisualizationScopeException(
                 "FMP channel scopes must use the FMP visualization runner",
@@ -70,7 +74,7 @@ internal static class VisualizationScopeCoordinator
         bool isolated = result?.Success == true
             && result.Stems.Any(stem => stem.Name != "master" && stem.Success);
         if (plan.Strategy == StemStrategy.VgmRenderedStems && !isolated
-            && string.Equals(options.ScopeMode, "channel", StringComparison.Ordinal))
+            && request.Tracks.Selection != TrackSelectionMode.All)
         {
             string detail = string.IsNullOrWhiteSpace(result?.LastError)
                 ? "no isolated stems were produced"
@@ -91,7 +95,7 @@ internal static class VisualizationScopeCoordinator
             result = CreateMasterResult(
                 input,
                 workspace,
-                options.SampleRate,
+                playback.SampleRate,
                 masterSamples,
                 plan.Strategy == StemStrategy.None
                     ? "scope_disabled"

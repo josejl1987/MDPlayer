@@ -15,7 +15,7 @@ public sealed class VisualizationBackendResolverTests
     public void BuildSearchPaths_IncludesExecutableDirectory_SoBundledFmpComResolves()
     {
         var input = new FileInfo(Path.Combine(Path.GetTempPath(), "track.ovi"));
-        var settings = new RenderSettings();
+        var settings = new BatchRenderSettings();
 
         IReadOnlyList<string> paths = VisualizationBackendResolver.BuildSearchPaths(input, settings);
 

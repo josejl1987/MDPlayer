@@ -184,18 +184,26 @@ public static class ReviewCommand
             CancellationToken cancellationToken)
         {
             VisualizationPlanning.PlanOutput output = Prepare(request, cancellationToken);
-            var options = CreateOptions(request, preview.Width, preview.Height);
+            VisualizationRequest previewRequest = request with
+            {
+                Output = request.Output with
+                {
+                    Width = preview.Width ?? request.Output.Width,
+                    Height = preview.Height ?? request.Output.Height,
+                },
+            };
             VisualizationPresentation presentation = VisualizationSupport.ResolvePresentation(
-                options, new FileInfo(options.Input));
+                request, new FileInfo(request.InputPath));
             using PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
                 output.Timeline,
                 output.Layout,
-                VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
+                VisualizationPlanning.CreatePreviewRendererOptions(previewRequest, presentation));
             if (renderer.TotalFrames <= 0)
                 throw new InvalidOperationException("timeline contains no renderable frames");
 
             long frameIndex = (long)Math.Round(
-                preview.TimeSeconds * options.Fps / (double)options.FpsDenominator);
+                preview.TimeSeconds * previewRequest.Output.FpsNumerator /
+                (double)previewRequest.Output.FpsDenominator);
             frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
             byte[] frame = renderer.RenderFrame(frameIndex);
             bool hasApproximations = false;
@@ -203,7 +211,7 @@ public static class ReviewCommand
             if (output.Layout.Geometry.HasScopes)
             {
                 byte[] scopeGrid = GetScopeGrid(
-                    output, options, request, renderer, preview.TimeSeconds, cancellationToken);
+                    output, previewRequest, request, renderer, preview.TimeSeconds, cancellationToken);
                 renderer.RenderCompositeFrame(frameIndex, scopeGrid, frame);
             }
             ValidationIssue warning = output.Plan.ValidationIssues
@@ -249,10 +257,9 @@ public static class ReviewCommand
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            VisualizeOptions options = CreateOptions(request, null, null);
             VisualizationPlanning.PlanOutput output = VisualizationPlanning.Prepare(
-                options,
                 request,
+                new RenderRuntimeOptions(),
                 _hasTimeline && File.Exists(_timelinePath) ? _timelinePath : null,
                 _timelinePath);
             _hasTimeline = true;
@@ -260,24 +267,9 @@ public static class ReviewCommand
             return output;
         }
 
-        private VisualizeOptions CreateOptions(
-            VisualizationRequest request,
-            int? width,
-            int? height)
-        {
-            var options = new VisualizeOptions();
-            options.ApplyRequest(request);
-            options.ReviewMasterAudioPath = _masterAudioPath;
-            if (width.HasValue)
-                options.Width = width.Value;
-            if (height.HasValue)
-                options.Height = height.Value;
-            return VisualizeOptionsParser.Finalize(options);
-        }
-
         private byte[] GetScopeGrid(
             VisualizationPlanning.PlanOutput output,
-            VisualizeOptions options,
+            VisualizationRequest previewRequest,
             VisualizationRequest request,
             PanelOverlayRenderer renderer,
             double timeSeconds,
@@ -293,18 +285,19 @@ public static class ReviewCommand
             string key = $"{request.Composition}-{renderer.Width}x{renderer.Height}-{renderer.ScopeFrameByteCount}";
             if (!_scopeStreams.TryGetValue(key, out ScopeStream stream))
             {
-                stream = StartScopeStream(output, options, request, renderer, key);
+                stream = StartScopeStream(output, previewRequest, request, renderer, key);
                 _scopeStreams.Add(key, stream);
             }
 
             int frameIndex = Math.Max(0, (int)Math.Round(
-                timeSeconds * options.Fps / (double)options.FpsDenominator));
+                timeSeconds * previewRequest.Output.FpsNumerator /
+                (double)previewRequest.Output.FpsDenominator));
             return stream.ReadFrame(frameIndex, cancellationToken);
         }
 
         private ScopeStream StartScopeStream(
             VisualizationPlanning.PlanOutput output,
-            VisualizeOptions options,
+            VisualizationRequest previewRequest,
             VisualizationRequest request,
             PanelOverlayRenderer renderer,
             string key)
@@ -313,19 +306,27 @@ public static class ReviewCommand
                 throw new InvalidOperationException("Scope Stage unavailable: layout has no scope region.");
 
             string outputDirectory = Path.Combine(_scopeRoot, key);
-            VisualizeOptions scopeOptions = CreateOptions(request, renderer.Width, renderer.Height);
-            scopeOptions.OutputDir = outputDirectory;
+            VisualizationRequest scopeRequest = previewRequest with
+            {
+                Output = previewRequest.Output with
+                {
+                    Width = renderer.Width,
+                    Height = renderer.Height,
+                },
+            };
+            RenderRuntimeOptions runtime = new();
             VisualizationWorkspace workspace = VisualizationWorkspace.Create(
-                scopeOptions, new FileInfo(Input.FullPath));
+                scopeRequest, new FileInfo(Input.FullPath));
             workspace.EnsureDirectories();
             File.Copy(output.MasterAudioPath, workspace.MasterAudioPath, overwrite: true);
 
-            VisualizationBackendResolution backend = VisualizationBackendResolver.Resolve(scopeOptions);
+            VisualizationBackendResolution backend = VisualizationBackendResolver.Resolve(scopeRequest, runtime);
             GenericScopeArtifacts artifacts = VisualizationScopeCoordinator.Render(
                 backend.Backend.Id,
                 backend.Input,
                 workspace,
-                scopeOptions,
+                scopeRequest,
+                runtime,
                 output.Timeline.Devices,
                 output.Timeline.Voices,
                 Math.Max(1, output.Timeline.EndSample - output.Timeline.StartSample));
@@ -342,19 +343,19 @@ public static class ReviewCommand
                 audioDir: "../audio",
                 overrides: new CorrscopeOverrides
                 {
-                    Fps = scopeOptions.Fps,
+                    Fps = scopeRequest.Output.FpsNumerator,
                     RenderWidth = output.Layout.Geometry.CorrscopeGridWidth,
                     RenderHeight = output.Layout.Geometry.CorrscopeGridHeight,
                     LayoutNCols = output.Layout.Geometry.ColumnCount,
                     IncludeMasterAsChannel = !artifacts.HasIsolatedStems,
-                    IncludeSilentChannels = scopeOptions.Channels == VisualizationChannelFilter.All,
+                    IncludeSilentChannels = scopeRequest.Tracks.Selection == TrackSelectionMode.All,
                     HideLabels = false,
                     ResDivisor = 1.0,
-                    Antialiasing = scopeOptions.FinalQuality,
+                    Antialiasing = true,
                 });
 
             var runner = new CorrscopeRunner(
-                scopeOptions.ExternalToolTimeoutMinutes, scopeOptions.CorrscopePath);
+                runtime.ToolTimeoutMinutes, runtime.CorrscopePath);
             if (!runner.IsAvailable)
                 throw new InvalidOperationException(
                     "Scope Stage unavailable: Corrscope is not installed or cannot be resolved.");

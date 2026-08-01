@@ -163,29 +163,38 @@ public static class PreviewCommand
     private static int Run(PreviewSettings settings)
     {
         VisualizationRequest request = VisualizationRequestSerializer.ReadFromFile(settings.RequestJsonPath);
-        VisualizeOptions options = VisualizeOptionsParser.ParseForRequest(settings.RequestJsonPath, Array.Empty<string>());
-
-        // Still/motion dimension overrides cap at the preview maximum.
-        if (settings.Width.HasValue)
-            options.Width = Math.Min(settings.Width.Value, MaxPreviewDimension);
-        if (settings.Height.HasValue)
-            options.Height = Math.Min(settings.Height.Value, MaxPreviewDimension);
-
+        // Still/motion dimension overrides are request snapshots, never
+        // mutations of the request loaded from disk.
+        request = request with
+        {
+            Output = request.Output with
+            {
+                Width = settings.Width.HasValue
+                    ? Math.Min(settings.Width.Value, MaxPreviewDimension)
+                    : request.Output.Width,
+                Height = settings.Height.HasValue
+                    ? Math.Min(settings.Height.Value, MaxPreviewDimension)
+                    : request.Output.Height,
+            },
+        };
         VisualizationPlanning.PlanOutput output = VisualizationPlanning.Prepare(
-            options, request, settings.TimelinePath, settings.TimelineOutPath);
+            request,
+            new RenderRuntimeOptions(),
+            settings.TimelinePath,
+            settings.TimelineOutPath);
 
-        var presentation = VisualizationSupport.ResolvePresentation(options, new FileInfo(options.Input));
+        var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(request.InputPath));
         (bool hasApproximations, string[] approximationNotes) = ComputeApproximationNotes(
             output.Layout.Geometry);
 
         if (settings.Motion)
-            return RunMotion(settings, options, output, presentation, hasApproximations, approximationNotes);
-        return RunStill(settings, options, output, presentation, hasApproximations, approximationNotes);
+            return RunMotion(settings, request, output, presentation, hasApproximations, approximationNotes);
+        return RunStill(settings, request, output, presentation, hasApproximations, approximationNotes);
     }
 
     private static int RunStill(
         PreviewSettings settings,
-        VisualizeOptions options,
+        VisualizationRequest request,
         VisualizationPlanning.PlanOutput output,
         Fmp.Core.Visualization.Rendering.VisualizationPresentation presentation,
         bool hasApproximations,
@@ -194,7 +203,7 @@ public static class PreviewCommand
         PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
             output.Timeline,
             output.Layout,
-            VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
+            VisualizationPlanning.CreatePreviewRendererOptions(request, presentation));
 
         if (renderer.TotalFrames <= 0)
             throw new InvalidOperationException("timeline contains no renderable frames");
@@ -209,7 +218,8 @@ public static class PreviewCommand
         else
         {
             long frameIndex = (long)Math.Round(
-                settings.TimeSeconds * options.Fps / (double)options.FpsDenominator);
+                settings.TimeSeconds * request.Output.FpsNumerator /
+                (double)request.Output.FpsDenominator);
             frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
             byte[] frame = renderer.RenderFrame(frameIndex);
             WritePng(renderer.Width, renderer.Height, frame, settings.Output);
@@ -245,7 +255,7 @@ public static class PreviewCommand
 
     private static int RunMotion(
         PreviewSettings settings,
-        VisualizeOptions options,
+        VisualizationRequest request,
         VisualizationPlanning.PlanOutput output,
         Fmp.Core.Visualization.Rendering.VisualizationPresentation presentation,
         bool hasApproximations,
@@ -258,15 +268,15 @@ public static class PreviewCommand
         // Scale the request dimensions to fit the preview max box, preserving
         // aspect ratio.
         double scale = Math.Min(
-            settings.MaxWidth / (double)options.Width,
-            settings.MaxHeight / (double)options.Height);
-        int motionWidth = Math.Max(1, (int)Math.Round(options.Width * scale));
-        int motionHeight = Math.Max(1, (int)Math.Round(options.Height * scale));
+            settings.MaxWidth / (double)request.Output.Width,
+            settings.MaxHeight / (double)request.Output.Height);
+        int motionWidth = Math.Max(1, (int)Math.Round(request.Output.Width * scale));
+        int motionHeight = Math.Max(1, (int)Math.Round(request.Output.Height * scale));
 
         PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
             output.Timeline,
             output.Layout,
-            VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
+            VisualizationPlanning.CreatePreviewRendererOptions(request, presentation));
 
         if (renderer.TotalFrames <= 0)
             throw new InvalidOperationException("timeline contains no renderable frames");
@@ -277,7 +287,8 @@ public static class PreviewCommand
         {
             double timeSeconds = settings.StartSeconds + i / (double)settings.Fps;
             long frameIndex = (long)Math.Round(
-                timeSeconds * options.Fps / (double)options.FpsDenominator);
+                timeSeconds * request.Output.FpsNumerator /
+                (double)request.Output.FpsDenominator);
             frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
             byte[] frame = renderer.RenderFrame(frameIndex);
             string fileName = $"frame-{i:D4}.png";

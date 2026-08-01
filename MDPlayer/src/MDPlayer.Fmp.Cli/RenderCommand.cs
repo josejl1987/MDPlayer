@@ -19,7 +19,7 @@ public static class RenderCommand
             return genericExitCode;
 
         PreparedTrack track;
-        try { track = TrackPreparation.Prepare(opts.Input, opts); }
+        try { track = TrackPreparation.Prepare(opts.Input, opts.FmpCom, opts.AssetsDir, opts.SearchPaths); }
         catch (TrackPreparationException ex)
         {
             Console.Error.WriteLine($"error: {ex.Message}");
@@ -230,7 +230,7 @@ public static class RenderCommand
         }
     }
 
-    private class RenderOptions : RenderSettings
+    private class RenderOptions : BatchRenderSettings
     {
         public string Input { get; set; }
         public string Output { get; set; }

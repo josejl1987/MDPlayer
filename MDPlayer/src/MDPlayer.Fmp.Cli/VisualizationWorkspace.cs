@@ -1,3 +1,5 @@
+using Fmp.Application.Contracts;
+
 namespace Fmp.Cli;
 
 internal sealed record VisualizationWorkspace(
@@ -10,12 +12,14 @@ internal sealed record VisualizationWorkspace(
     string CorrscopeConfigPath,
     string VideoPath)
 {
-    public static VisualizationWorkspace Create(VisualizeOptions options, FileInfo input)
+    public static VisualizationWorkspace Create(VisualizationRequest request, FileInfo input)
     {
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(input);
 
-        string outputDir = options.OutputDir;
+        string outputDir = Path.GetDirectoryName(Path.GetFullPath(request.OutputPath))
+            ?? input.DirectoryName
+            ?? ".";
         if (string.IsNullOrWhiteSpace(outputDir))
             outputDir = Path.Combine(
                 input.DirectoryName ?? ".",
@@ -27,7 +31,7 @@ internal sealed record VisualizationWorkspace(
         string scopeDir = Path.Combine(outputDir, "scope");
         string scopeMetadataPath = Path.Combine(scopeDir, "metadata.json");
         string corrscopeConfigPath = Path.Combine(scopeDir, "corrscope-grid.yaml");
-        string videoPath = options.VideoPath ?? Path.Combine(outputDir, "visualization.mp4");
+        string videoPath = request.OutputPath;
         return new VisualizationWorkspace(
             outputDir,
             timelinePath,

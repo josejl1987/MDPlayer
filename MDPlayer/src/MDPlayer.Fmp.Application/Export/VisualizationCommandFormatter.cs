@@ -94,6 +94,8 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         AddIf(arguments, "--tail", Format(playback.TailSeconds), mode, playback.TailSeconds != 0.5);
         AddIf(arguments, "--max-duration", Format(playback.MaximumDurationSeconds), mode, playback.MaximumDurationSeconds != 300.0);
         AddIf(arguments, "--sample-rate", playback.SampleRate.ToString(), mode, playback.SampleRate != 48_000);
+        AddIf(arguments, "--ssg-gain-db", Format(playback.SsgGainDb), mode, playback.SsgGainDb != 0);
+        AddIf(arguments, "--spc-pitch", playback.SpcPitch.ToString().ToLowerInvariant(), mode, playback.SpcPitch != SpcPitchInterpretation.Estimate);
 
         // Encoder and overwrite.
         AddIf(arguments, "--encoder", EncoderName(output.Encoder), mode, output.Encoder != VideoEncoder.Auto);
@@ -108,7 +110,11 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         };
     }
 
-    internal static string CompositionName(CompositionKind composition) => "diagnostic";
+    internal static string CompositionName(CompositionKind composition) => composition switch
+    {
+        CompositionKind.Diagnostic => "diagnostic",
+        _ => throw new ArgumentOutOfRangeException(nameof(composition)),
+    };
 
     internal static string QualityName(RenderQuality quality) => quality.ToString().ToLowerInvariant();
 

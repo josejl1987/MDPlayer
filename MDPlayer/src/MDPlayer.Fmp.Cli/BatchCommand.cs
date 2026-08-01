@@ -123,7 +123,14 @@ public static class BatchCommand
                 Console.Error.WriteLine($"render: {inputLabel}");
 
             PreparedTrack track;
-            try { track = TrackPreparation.Prepare(input.FullName, opts); }
+            try
+            {
+                track = TrackPreparation.Prepare(
+                    input.FullName,
+                    opts.FmpCom,
+                    opts.AssetsDir,
+                    opts.SearchPaths);
+            }
             catch (TrackPreparationException ex)
             {
                 results.Add(new BatchResult(inputLabel, null, Success: false, Error: ex.Message));
@@ -237,7 +244,7 @@ public static class BatchCommand
 
     private sealed record BatchPlan(FileInfo Input, string OutputPath);
 
-    private class BatchOptions : RenderSettings
+    private class BatchOptions : BatchRenderSettings
     {
         public string InputDir { get; set; }
         public string OutputDir { get; set; }

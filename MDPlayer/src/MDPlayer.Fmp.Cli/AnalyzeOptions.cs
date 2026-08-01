@@ -4,7 +4,7 @@ using Fmp.Core.Visualization;
 
 internal enum AnalysisDetail { Minimal, Standard, Full }
 
-internal sealed class AnalyzeOptions : RenderSettings
+internal sealed class AnalyzeOptions : BatchRenderSettings
 {
     public string Input { get; set; }
     public string Timeline { get; set; }

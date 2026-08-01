@@ -8,8 +8,7 @@ namespace Fmp.Cli;
 /// full option set the Application formatter emits (the same option set the
 /// GUI and parity tests pin), builds an authoritative schema-1
 /// <see cref="VisualizationRequest"/>, maps it onto the Core-backed pipeline
-/// model via <see cref="VisualizeOptions.ApplyRequest"/>, and runs the same
-/// capture → prepare → compose pipeline as the visualize command.
+/// request/runtime contract and runs the capture → prepare → compose pipeline.
 ///
 /// Runtime tool paths (--fmp-com, --corrscope, --ffmpeg, --analysis-python)
 /// are process-level and never serialized into the request.
@@ -25,11 +24,7 @@ public static class VisualizationRenderCommand
 
         (VisualizationRequest request, RenderRuntimeOptions runtime, _) = parsed.Value;
 
-        var options = new VisualizeOptions();
-        options.ApplyRequest(request);
-        ApplyRuntimeOptions(options, runtime);
-
-        if (string.IsNullOrEmpty(options.Input))
+        if (string.IsNullOrEmpty(request.InputPath))
         {
             Console.Error.WriteLine("error: no input file specified");
             return 2;
@@ -38,7 +33,7 @@ public static class VisualizationRenderCommand
         VisualizationBackendResolution resolution;
         try
         {
-            resolution = VisualizationBackendResolver.Resolve(options);
+            resolution = VisualizationBackendResolver.Resolve(request, runtime);
         }
         catch (VisualizationBackendResolutionException ex)
         {
@@ -47,29 +42,8 @@ public static class VisualizationRenderCommand
         }
 
         return string.Equals(resolution.Backend.Id, "fmp", StringComparison.Ordinal)
-            ? VisualizationRunner.Run(options)
-            : VgmVisualizeCommand.Handle(options, resolution);
-    }
-
-    private static void ApplyRuntimeOptions(VisualizeOptions options, RenderRuntimeOptions runtime)
-    {
-        if (runtime.FmpCom != null)
-        {
-            options.FmpCom = runtime.FmpCom;
-            options.FmpComExplicit = true;
-        }
-        if (runtime.AssetsDir != null)
-            options.AssetsDir = runtime.AssetsDir;
-        if (runtime.CorrscopePath != null)
-            options.CorrscopePath = runtime.CorrscopePath;
-        if (runtime.FfmpegPath != null)
-            options.FfmpegPath = runtime.FfmpegPath;
-        if (runtime.AnalysisPython != null)
-            options.AnalysisPython = runtime.AnalysisPython;
-        options.Quiet = runtime.Quiet;
-        options.Json = runtime.Json;
-        options.ProgressMode = runtime.ProgressMode;
-        options.ExternalToolTimeoutMinutes = runtime.ToolTimeoutMinutes;
+            ? VisualizationRunner.Run(request, runtime)
+            : VgmVisualizeCommand.Handle(request, runtime, resolution);
     }
 
     /// <summary>Parser seam for parity tests.</summary>

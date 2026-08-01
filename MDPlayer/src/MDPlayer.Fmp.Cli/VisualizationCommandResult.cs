@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Fmp.Application.Contracts;
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
@@ -84,7 +85,7 @@ internal sealed record VisualizationStageMetrics
 /// Single serializer for visualization command results. Deserializes a
 /// <see cref="VisualizationCommandResult"/> into identical human-readable and
 /// JSON forms for every backend. Human output is emitted only when requested;
-/// JSON is keyed on the <see cref="VisualizeOptions.Json"/> flag.
+/// JSON output is controlled by the render runtime options.
 /// </summary>
 /// <summary>
 /// Shared builder that maps the workspace, timeline, scope, and composer
@@ -94,7 +95,8 @@ internal sealed record VisualizationStageMetrics
 internal static class VisualizationResultBuilder
 {
     public static VisualizationCommandResult Build(
-        VisualizeOptions options,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         VisualizationWorkspace workspace,
         VisualizationPipeline.Result capture,
         ScopeRenderer.ScopeResult scope,
@@ -116,7 +118,7 @@ internal static class VisualizationResultBuilder
     {
         VisualizationTimeline timeline = capture?.Timeline;
         return BuildCore(
-            options, workspace, timeline, scope,
+            request, runtime, workspace, timeline, scope,
             backend, availability, portable, encoder, encoderFallback,
             preparationSeconds, captureSeconds, stemExportSeconds, energySeconds,
             compositionSeconds, backendResolutionSeconds, overallSeconds,
@@ -130,7 +132,8 @@ internal static class VisualizationResultBuilder
     /// writer, same emitted JSON shape.
     /// </summary>
     public static VisualizationCommandResult BuildGeneric(
-        VisualizeOptions options,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         VisualizationWorkspace workspace,
         VisualizationTimeline timeline,
         ScopeRenderer.ScopeResult scope,
@@ -148,7 +151,7 @@ internal static class VisualizationResultBuilder
         IReadOnlyList<string> warnings,
         string error = null) =>
         BuildCore(
-            options, workspace, timeline, scope,
+            request, runtime, workspace, timeline, scope,
             backend, availability, portable, encoder, encoderFallback,
             preparationSeconds: backendResolutionSeconds, captureSeconds, stemExportSeconds,
             energySeconds: 0, compositionSeconds, backendResolutionSeconds, overallSeconds,
@@ -156,7 +159,8 @@ internal static class VisualizationResultBuilder
             timelineSamples: timeline?.EndSample ?? 0);
 
     private static VisualizationCommandResult BuildCore(
-        VisualizeOptions options,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         VisualizationWorkspace workspace,
         VisualizationTimeline timeline,
         ScopeRenderer.ScopeResult scope,
@@ -177,7 +181,7 @@ internal static class VisualizationResultBuilder
         string error,
         long timelineSamples)
     {
-        int sampleRate = scope?.SampleRate ?? timeline?.SampleRate ?? options.SampleRate;
+        int sampleRate = scope?.SampleRate ?? timeline?.SampleRate ?? request.Playback.SampleRate;
         long audioSamples = scope?.MasterSamples ?? 0;
         double trackDurationSeconds = sampleRate > 0
             ? audioSamples / (double)sampleRate : 0;
@@ -207,11 +211,11 @@ internal static class VisualizationResultBuilder
             OutputSizeBytes = outputSizeBytes,
             TrackDurationSeconds = trackDurationSeconds,
             EffectiveOutputFps = compositionSeconds > 0 && sampleRate > 0
-                ? Math.Ceiling(audioSamples * options.Fps / (double)sampleRate) / compositionSeconds
+                ? Math.Ceiling(audioSamples * request.Output.FpsNumerator / (double)sampleRate) / compositionSeconds
                 : 0,
             RealTimeFactor = trackDurationSeconds > 0 && compositionSeconds > 0
                 ? trackDurationSeconds / compositionSeconds : 0,
-            Scope = BuildScope(options.ScopeMode, options.StemsOnly, scope),
+            Scope = BuildScope("channel", false, scope),
             Stages = BuildStages(preparationSeconds, captureSeconds, stemExportSeconds,
                 energySeconds, compositionSeconds, backendResolutionSeconds, overallSeconds, composeMetrics),
             Warnings = warnings,

@@ -1,10 +1,12 @@
 using System.Text.Json;
+using Fmp.Application.Contracts;
 using Fmp.Core.Audio;
 using Fmp.Core.Metadata;
 using Fmp.Core.Rendering;
 using Fmp.Core.Rendering.Corrscope;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
+using VideoEncoder = Fmp.Core.Visualization.Rendering.VideoEncoder;
 
 namespace Fmp.Cli;
 
@@ -35,14 +37,14 @@ internal static class VisualizationSupport
         }
     }
 
-    public static VisualizationPresentation ResolvePresentation(VisualizeOptions options, FileInfo input)
+    public static VisualizationPresentation ResolvePresentation(VisualizationRequest request, FileInfo input)
     {
-        string title = options.Title;
+        string title = request.Presentation.Title;
         if (string.IsNullOrWhiteSpace(title))
         {
             try
             {
-                title = FmpMetadata.FromFmpFile(input.FullName, options.SampleRate, options.Loops, options.Fade).Title;
+                title = FmpMetadata.FromFmpFile(input.FullName, request.Playback.SampleRate, request.Playback.LoopCount, request.Playback.FadeSeconds).Title;
             }
             catch { title = null; }
         }
@@ -51,8 +53,8 @@ internal static class VisualizationSupport
             : title.Trim();
         return new VisualizationPresentation(
             title,
-            string.IsNullOrWhiteSpace(options.Subtitle) ? "" : options.Subtitle.Trim(),
-            string.IsNullOrWhiteSpace(options.Credits) ? "" : options.Credits.Trim());
+            string.IsNullOrWhiteSpace(request.Presentation.Subtitle) ? "" : request.Presentation.Subtitle.Trim(),
+            string.IsNullOrWhiteSpace(request.Presentation.Credits) ? "" : request.Presentation.Credits.Trim());
     }
 
     public static VisualizationTimeline AlignTimelineToAudio(
@@ -109,7 +111,8 @@ internal static class VisualizationSupport
         => quiet ? new NullScopeProgressReporter() : new ConsoleScopeProgressReporter();
 
     public static void WriteSummary(
-        VisualizeOptions options,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         string timelinePath,
         string videoPath,
         VisualizationPipeline.Result capture,
@@ -123,7 +126,7 @@ internal static class VisualizationSupport
         SinglePassComposer.ComposeMetrics composeMetrics = null,
         EncoderFallbackState encoderFallback = null)
     {
-        if (!options.Quiet)
+        if (!runtime.Quiet)
         {
             Console.WriteLine($"Visualization events written to: {timelinePath}");
             Console.WriteLine($"  Samples: {capture.CapturedSamples}");
@@ -139,14 +142,14 @@ internal static class VisualizationSupport
                 Console.Error.WriteLine($"encoder fallback: {encoderFallback.Reason} ({encoderFallback.Diagnostics})");
         }
 
-        if (!options.Json)
+        if (!runtime.Json)
             return;
         double trackDurationSeconds = scope?.SampleRate > 0
             ? scope.MasterSamples / (double)scope.SampleRate : 0;
         long outputSizeBytes = !string.IsNullOrWhiteSpace(videoPath) && File.Exists(videoPath)
             ? new FileInfo(videoPath).Length : 0;
         double effectiveFps = compositionSeconds > 0 && scope?.SampleRate > 0
-            ? Math.Ceiling(scope.MasterSamples * options.Fps / (double)scope.SampleRate) / compositionSeconds : 0;
+            ? Math.Ceiling(scope.MasterSamples * request.Output.FpsNumerator / (double)scope.SampleRate) / compositionSeconds : 0;
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             success = true,
@@ -158,7 +161,7 @@ internal static class VisualizationSupport
             notes = capture.Timeline.Notes.Count,
             rhythmEvents = capture.Timeline.Rhythm.Count,
             instruments = capture.Timeline.Instruments.Count,
-            encoder = options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264",
+            encoder = request.Output.Encoder == Fmp.Application.Contracts.VideoEncoder.Nvenc ? "h264_nvenc" : "libx264",
             encoderFallbackPhase = encoderFallback?.Phase ?? "none",
             encoderFallbackReason = encoderFallback?.Reason,
             encoderFallbackDiagnostics = encoderFallback?.Diagnostics,

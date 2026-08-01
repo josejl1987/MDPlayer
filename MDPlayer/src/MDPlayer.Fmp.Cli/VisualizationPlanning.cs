@@ -22,49 +22,44 @@ internal static class VisualizationPlanning
         ResolvedVisualizationLayout Layout,
         string MasterAudioPath);
 
-    /// <summary>
-    /// Full plan for a request. <paramref name="timelinePath"/> reuses an
-    /// existing captured timeline when it exists (capture is skipped);
-    /// <paramref name="timelineOutPath"/> writes the used timeline so the
-    /// caller can keep it for later previews.
-    /// </summary>
     public static PlanOutput Prepare(
-        VisualizeOptions options,
         VisualizationRequest request,
+        RenderRuntimeOptions runtime,
         string timelinePath,
         string timelineOutPath)
     {
-        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(runtime);
 
         PreparedTrack? track = null;
         VisualizationTimeline timeline;
-        string masterAudioPath = options.ReviewMasterAudioPath;
+        string masterAudioPath = string.Empty;
         if (timelinePath != null && File.Exists(timelinePath))
         {
             timeline = VisualizationJsonWriter.Read(timelinePath);
         }
         else
         {
-            VisualizationBackendResolution resolution = VisualizationBackendResolver.Resolve(options);
+            VisualizationBackendResolution resolution = VisualizationBackendResolver.Resolve(request, runtime);
 
             if (string.Equals(resolution.Backend.Id, "fmp", StringComparison.Ordinal))
             {
                 // Legacy FMP emulation capture path.
-                track = TrackPreparation.Prepare(options.Input, options);
+                track = TrackPreparation.Prepare(
+                    request.InputPath, runtime.FmpCom, runtime.AssetsDir, runtime.SearchPaths);
                 var capture = new VisualizationPipeline(
                     track.Assets,
                     track.FileSystem,
-                    options.SampleRate).Capture(
+                    request.Playback.SampleRate).Capture(
                         track.Data,
                         track.Input.FullName,
                         new VisualizationPipeline.Options
                         {
-                            LoopCount = options.Loops,
-                            FadeSeconds = options.Fade,
-                            TailSeconds = options.Tail,
-                            MaxDurationSeconds = options.MaxDuration,
-                            TimeoutSeconds = options.Timeout,
+                            LoopCount = request.Playback.LoopCount,
+                            FadeSeconds = request.Playback.FadeSeconds,
+                            TailSeconds = request.Playback.TailSeconds,
+                            MaxDurationSeconds = request.Playback.MaximumDurationSeconds ?? 300,
+                            TimeoutSeconds = runtime.ToolTimeoutMinutes * 60,
                         });
                 if (!capture.Success || capture.Timeline == null)
                     throw new InvalidOperationException(
@@ -76,7 +71,7 @@ internal static class VisualizationPlanning
                 // Generic register-log backend (VGM/VGZ/MID/SPC/S98/XGM/...).
                 int timelineSampleRate = resolution.Probe.NativeSampleRate > 0
                     ? resolution.Probe.NativeSampleRate
-                    : options.SampleRate;
+                    : request.Playback.SampleRate;
                 var eventSink = new TimelineDecoderEventSink(timelineSampleRate);
                 string audioDir = Path.Combine(
                     Path.GetTempPath(), "mdplayer-plan", Guid.NewGuid().ToString("N"));
@@ -87,25 +82,18 @@ internal static class VisualizationPlanning
                     using IPlaybackCaptureSession session = resolution.Backend.Open(
                         resolution.Input,
                         new PlaybackOptions(
-                            options.Loops,
-                            options.Fade,
-                            options.Tail,
-                            options.MaxDuration,
+                            request.Playback.LoopCount,
+                            request.Playback.FadeSeconds,
+                            request.Playback.TailSeconds,
+                            request.Playback.MaximumDurationSeconds ?? 300,
                             audioPath,
-                            options.SampleRate,
-                            options.SpcStems,
-                            options.SpcPitchMode,
-                            options.SsgGainDb),
+                            request.Playback.SampleRate,
+                            true,
+                            MapSpcPitch(request.Playback.SpcPitch),
+                            request.Playback.SsgGainDb),
                         eventSink);
                     session.Run();
-                    if (!string.IsNullOrWhiteSpace(options.ReviewMasterAudioPath)
-                        && File.Exists(audioPath))
-                    {
-                        string audioDirectory = Path.GetDirectoryName(options.ReviewMasterAudioPath) ?? ".";
-                        Directory.CreateDirectory(audioDirectory);
-                        File.Copy(audioPath, options.ReviewMasterAudioPath, overwrite: true);
-                        masterAudioPath = options.ReviewMasterAudioPath;
-                    }
+                    masterAudioPath = audioPath;
                     timeline = eventSink.Complete(
                         session.SamplePosition,
                         "completed",
@@ -130,7 +118,7 @@ internal static class VisualizationPlanning
         ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
             timeline,
             mode,
-            options.ToLayoutSettings());
+            request.ToLayoutSettings());
         VisualizationTopology topology = layout.Topology;
         OverlayLayout geometry = layout.Geometry;
 
@@ -143,17 +131,17 @@ internal static class VisualizationPlanning
             ? (timeline.EndSample - timeline.StartSample) / (double)timeline.SampleRate
             : 0.0;
         long frameCount = duration > 0
-            ? (long)Math.Ceiling(duration * options.Fps / (double)options.FpsDenominator)
+            ? (long)Math.Ceiling(duration * request.Output.FpsNumerator / (double)request.Output.FpsDenominator)
             : 0;
 
         var plan = new VisualizationPlanResult
         {
             ResolvedLayout = VisualizationLayoutNames.ToCliName(layout.Mode),
             RequestedLayout = VisualizationLayoutNames.ToCliName(layout.Mode),
-            InputPath = Path.GetFullPath(options.Input),
-            Tracks = BuildTracks(timeline, options),
-            ExcludedTrackIds = options.ExcludeTracks.ToArray(),
-            IncludedTrackIds = options.IncludeTracks.ToArray(),
+            InputPath = Path.GetFullPath(request.InputPath),
+            Tracks = BuildTracks(timeline, request),
+            ExcludedTrackIds = request.Tracks.ExcludedIds.ToArray(),
+            IncludedTrackIds = request.Tracks.IncludedIds.ToArray(),
             Regions = BuildRegions(topology, geometry),
             ToolRequirements = toolRequirements,
             ValidationIssues = issues,
@@ -187,22 +175,25 @@ internal static class VisualizationPlanning
     }
 
     internal static PanelOverlayRenderer.Options CreatePreviewRendererOptions(
-        VisualizeOptions options,
+        VisualizationRequest request,
         VisualizationPresentation presentation)
     {
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(request);
+        OutputSettings output = request.Output;
+        ViewSettings view = request.View;
+        StyleSettings style = request.Style;
         return new PanelOverlayRenderer.Options
         {
-            FpsNumerator = options.Fps,
-            FpsDenominator = options.FpsDenominator,
-            TimeGrid = options.TimeGrid,
+            FpsNumerator = output.FpsNumerator,
+            FpsDenominator = output.FpsDenominator,
+            TimeGrid = MapTimeGrid(view.TimeGrid),
             Presentation = presentation,
-            FontPath = options.FontPath,
-            PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic,
-            Effects = options.Effects,
-            NoteColor = options.NoteColor,
+            FontPath = request.Presentation.FontPath,
+            PreferAntialiasedText = output.Quality != RenderQuality.Draft,
+            Effects = MapEffects(style.Effects),
+            NoteColor = MapNoteColor(style.NoteColor),
             IntroSeconds = 0.75,
-            OutroSeconds = Math.Min(0.45, options.Tail),
+            OutroSeconds = Math.Min(0.45, request.Playback.TailSeconds),
             AnalysisOverlay = Fmp.Core.Analysis.AnalysisOverlayScene.Empty,
             Energy = null,
         };
@@ -210,9 +201,9 @@ internal static class VisualizationPlanning
 
     private static IReadOnlyList<TrackSelectionInfo> BuildTracks(
         VisualizationTimeline timeline,
-        VisualizeOptions options)
+        VisualizationRequest request)
     {
-        var excluded = new HashSet<string>(options.ExcludeTracks, StringComparer.Ordinal);
+        var excluded = new HashSet<string>(request.Tracks.ExcludedIds, StringComparer.Ordinal);
         return timeline.Voices.Select(voice =>
         {
             string id = voice.Id.ToString();
@@ -231,6 +222,38 @@ internal static class VisualizationPlanning
             };
         }).ToArray();
     }
+
+    private static VisualizationTimeGrid MapTimeGrid(TimeGridMode grid) => grid switch
+    {
+        TimeGridMode.None => VisualizationTimeGrid.None,
+        TimeGridMode.Authoritative => VisualizationTimeGrid.Authoritative,
+        TimeGridMode.Analytical => VisualizationTimeGrid.Analytical,
+        _ => VisualizationTimeGrid.Automatic,
+    };
+
+    private static EffectsMode MapEffects(VisualEffects effects) => effects switch
+    {
+        VisualEffects.Off => EffectsMode.None,
+        VisualEffects.Cinematic => EffectsMode.Cinematic,
+        _ => EffectsMode.Minimal,
+    };
+
+    private static Fmp.Core.Visualization.Rendering.NoteColorMode MapNoteColor(
+        Fmp.Application.Contracts.NoteColorMode mode) => mode switch
+    {
+        Fmp.Application.Contracts.NoteColorMode.Channel =>
+            Fmp.Core.Visualization.Rendering.NoteColorMode.Channel,
+        Fmp.Application.Contracts.NoteColorMode.PitchClass =>
+            Fmp.Core.Visualization.Rendering.NoteColorMode.Pitch,
+        _ => Fmp.Core.Visualization.Rendering.NoteColorMode.Instrument,
+    };
+
+    private static SpcPitchMode MapSpcPitch(SpcPitchInterpretation pitch) => pitch switch
+    {
+        SpcPitchInterpretation.Estimate => SpcPitchMode.Estimate,
+        SpcPitchInterpretation.Relative => SpcPitchMode.Relative,
+        _ => throw new ArgumentOutOfRangeException(nameof(pitch)),
+    };
 
     private static IReadOnlyList<PanelRegionInfo> BuildRegions(
         VisualizationTopology topology,

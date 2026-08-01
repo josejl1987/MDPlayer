@@ -96,4 +96,12 @@ public sealed record PlaybackSettings
     public double TailSeconds { get; init; } = 0.5;
     public double? MaximumDurationSeconds { get; init; } = 300;
     public int SampleRate { get; init; } = 48_000;
+    public double SsgGainDb { get; init; }
+    public SpcPitchInterpretation SpcPitch { get; init; } = SpcPitchInterpretation.Estimate;
+}
+
+public enum SpcPitchInterpretation
+{
+    Estimate,
+    Relative,
 }

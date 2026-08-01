@@ -32,7 +32,8 @@ public class Program
                 case "inspect":
                     return InspectCommand.Handle(args.Skip(1).ToArray());
                 case "visualize":
-                    return VisualizeCommand.Handle(args.Skip(1).ToArray());
+                    Console.Error.WriteLine("warning: 'visualize' is deprecated; use 'render'");
+                    return VisualizationRenderCommand.Handle(args.Skip(1).ToArray());
                 case "analyze":
                     return AnalyzeCommand.Handle(args.Skip(1).ToArray());
                 case "plan":
@@ -140,7 +141,6 @@ public class Program
         Console.WriteLine("Examples:");
         Console.WriteLine("  mdplayer-render analyze track.ovi --fmp-com /path/FMP.COM");
         Console.WriteLine("  mdplayer-render analyze --timeline track.visualization/timeline.json");
-        Console.WriteLine("  mdplayer-render visualize track.ovi");
-        Console.WriteLine("  mdplayer-render visualize track.vgm --stems-only");
+        Console.WriteLine("  mdplayer-render render track.ovi");
     }
 }

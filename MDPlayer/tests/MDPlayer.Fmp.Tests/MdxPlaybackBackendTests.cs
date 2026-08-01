@@ -46,7 +46,7 @@ public sealed class MdxPlaybackBackendTests
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Legacy visualize integration fixture; canonical render coverage is in CanonicalRenderRequestTests.")]
     public void CliVisualize_DispatchesMdxThroughGenericBackend()
     {
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-mdx-cli-{Guid.NewGuid():N}.mdx");
@@ -54,14 +54,13 @@ public sealed class MdxPlaybackBackendTests
         try
         {
             File.WriteAllBytes(path, CreateMdx());
-            int exitCode = VisualizeCommand.Handle(
+            int exitCode = VisualizationRenderCommand.Handle(
             [
                 path,
                 "--output", output,
                 "--loops", "1",
                 "--fade", "0",
                 "--tail", "0",
-                "--stems-only",
                 "--overwrite",
                 "--quiet",
             ]);

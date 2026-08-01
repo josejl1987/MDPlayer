@@ -33,6 +33,8 @@ public class FormatterTests
         Assert.DoesNotContain("--effects", command.Arguments);
         Assert.DoesNotContain("--note-color", command.Arguments);
         Assert.DoesNotContain("--palette", command.Arguments);
+        Assert.DoesNotContain("--ssg-gain-db", command.Arguments);
+        Assert.DoesNotContain("--spc-pitch", command.Arguments);
         Assert.DoesNotContain("--encoder", command.Arguments);
         Assert.DoesNotContain("--overwrite", command.Arguments);
         // The output path is always emitted.
@@ -98,6 +100,8 @@ public class FormatterTests
             "--tail", "1",
             "--max-duration", "120",
             "--sample-rate", "48000",
+            "--ssg-gain-db", "0",
+            "--spc-pitch", "estimate",
             "--encoder", "nvenc",
             "--overwrite",
         ];
@@ -122,6 +126,7 @@ public class FormatterTests
             "--effects", "--note-color", "--palette",
             "--title", "--subtitle", "--credits", "--font",
             "--loops", "--fade", "--tail", "--max-duration", "--sample-rate",
+            "--ssg-gain-db", "--spc-pitch",
             "--encoder", "--overwrite",
         ];
 

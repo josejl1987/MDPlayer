@@ -257,20 +257,6 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void VisualizeDefaultsUseBalancedDiagnosticPublishingSettings()
-    {
-        var options = VisualizeCommand.ParseArgs(["song.ovi"]);
-
-        Assert.NotNull(options);
-        Assert.Equal(1280, options.Width);
-        Assert.Equal(720, options.Height);
-        Assert.Equal(60, options.Fps);
-        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
-        Assert.Equal(EffectsMode.Minimal, options.Effects);
-        Assert.Equal(VisualizationChannelFilter.Active, options.Channels);
-    }
-
-    [Fact]
     public void MetadataSafeAreasScaleWithOutputResolution()
     {
         var layout = new OverlayLayout(1920, 1080, 0.75, 2.25);
@@ -280,36 +266,6 @@ public sealed class VisualizationV3ContractTests
         var preview = new OverlayLayout(960, 540, 0.75, 2.25);
         Assert.Equal(16, preview.SafeHorizontalMargin);
         Assert.Equal(12, preview.SafeVerticalMargin);
-    }
-
-    [Fact]
-    public void PresetsAndTimeWindowFlagsOverrideBalancedDefaults()
-    {
-        var options = VisualizeCommand.ParseArgs([
-            "song.ovi",
-            "--preset", "final",
-            "--width", "1600",
-            "--time-window", "1.25:3.5",
-            "--channels", "semantic",
-            "--effects", "diagnostic",
-            "--layout", "diagnostic",
-            "--scope-ratio", "0.32",
-            "--time-grid", "authoritative",
-            "--layout-json", "plan.json",
-        ]);
-
-        Assert.NotNull(options);
-        Assert.Equal(1600, options.Width);
-        Assert.Equal(1080, options.Height);
-        Assert.Equal(60, options.Fps);
-        Assert.Equal(1.25, options.PastSeconds);
-        Assert.Equal(3.5, options.FutureSeconds);
-        Assert.Equal(VisualizationChannelFilter.Semantic, options.Channels);
-        Assert.Equal(EffectsMode.Diagnostic, options.Effects);
-        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
-        Assert.Equal(0.32, options.ScopeRatio);
-        Assert.Equal(VisualizationTimeGrid.Authoritative, options.TimeGrid);
-        Assert.Equal("plan.json", options.LayoutJson);
     }
 
     [Fact]
@@ -599,13 +555,6 @@ public sealed class VisualizationV3ContractTests
         Assert.Equal("", note.InstrumentId);
         Assert.Equal(new[] { 71d }, note.Pitch.Select(point => point.MidiNote));
         Assert.Equal(0, note.InitialFrequencyHz);
-    }
-
-    [Fact]
-    public void TimeWindowParserRejectsOutOfRangeValues()
-    {
-        Assert.Null(VisualizeCommand.ParseArgs(["song.ovi", "--past-seconds", "0.01"]));
-        Assert.Null(VisualizeCommand.ParseArgs(["song.ovi", "--time-window", "15:6"]));
     }
 
     [Fact]

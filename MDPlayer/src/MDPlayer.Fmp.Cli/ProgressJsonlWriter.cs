@@ -7,8 +7,8 @@ namespace Fmp.Cli;
 
 /// <summary>
 /// Emits structured export-progress events as one compact JSON line per event
-/// (JSON-lines, camelCase names, string enums). Active only when the visualize
-/// command runs with <c>--progress jsonl</c>.
+/// (JSON-lines, camelCase names, string enums). Active when the render command
+/// runs with <c>--progress jsonl</c>.
 /// </summary>
 internal sealed class ProgressJsonlWriter
 {
@@ -62,8 +62,8 @@ internal sealed class ProgressJsonlWriter
         => Emit(new ExportProgressEvent { Type = ExportEventTypes.Cancelled, TimestampUtc = Now(), Message = message });
 
     /// <summary>Creates the writer when the options request structured progress.</summary>
-    internal static ProgressJsonlWriter? CreateIfRequested(VisualizeOptions options)
-        => string.Equals(options.ProgressMode, "jsonl", StringComparison.Ordinal)
+    internal static ProgressJsonlWriter? CreateIfRequested(RenderRuntimeOptions runtime)
+        => string.Equals(runtime.ProgressMode, "jsonl", StringComparison.Ordinal)
             ? new ProgressJsonlWriter(Console.Out)
             : null;
 

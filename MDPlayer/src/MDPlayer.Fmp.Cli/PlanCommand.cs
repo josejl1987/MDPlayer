@@ -76,12 +76,9 @@ public static class PlanCommand
 
     private static int Run(string requestJsonPath, string timelinePath, string timelineOutPath, bool json)
     {
-        // Read once for the contract, once inside the parser (which seeds the
-        // options); the file is small and immutable between the two reads.
         VisualizationRequest request = VisualizationRequestSerializer.ReadFromFile(requestJsonPath);
-        VisualizeOptions options = VisualizeOptionsParser.ParseForRequest(requestJsonPath, Array.Empty<string>());
         VisualizationPlanning.PlanOutput output = VisualizationPlanning.Prepare(
-            options, request, timelinePath, timelineOutPath);
+            request, new RenderRuntimeOptions(), timelinePath, timelineOutPath);
 
         if (json)
         {

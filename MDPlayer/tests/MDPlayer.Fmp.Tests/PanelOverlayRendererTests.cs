@@ -642,17 +642,16 @@ public sealed class PanelOverlayRendererTests
     {
         // ResolvePresentation with a null CLI title and a fake input file
         // falls back to the filename (no real FMP metadata in the test file).
-        var options = new VisualizeOptions
-        {
-            Title = null,
-            Subtitle = null,
-            Credits = null,
-        };
         string tempFile = Path.Combine(Path.GetTempPath(), "TestTrack.ovi");
+        var request = new global::Fmp.Application.Contracts.VisualizationRequest
+        {
+            InputPath = tempFile,
+            OutputPath = tempFile + ".mp4",
+        };
         File.WriteAllBytes(tempFile, new byte[16]);
         try
         {
-            var presentation = VisualizeCommand.ResolvePresentation(options, new FileInfo(tempFile));
+            var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(tempFile));
             Assert.Equal("TestTrack", presentation.Title);
             Assert.Equal("", presentation.Subtitle);
             Assert.Equal("", presentation.Credits);
@@ -666,17 +665,22 @@ public sealed class PanelOverlayRendererTests
     [Fact]
     public void CliTitle_OverridesExtractedTitle()
     {
-        var options = new VisualizeOptions
-        {
-            Title = "PALACE OF DESTRUCTION",
-            Subtitle = "YS I",
-            Credits = "JOSEJL",
-        };
         string tempFile = Path.Combine(Path.GetTempPath(), "TestTrack.ovi");
+        var request = new global::Fmp.Application.Contracts.VisualizationRequest
+        {
+            InputPath = tempFile,
+            OutputPath = tempFile + ".mp4",
+            Presentation = new global::Fmp.Application.Contracts.PresentationSettings
+            {
+                Title = "PALACE OF DESTRUCTION",
+                Subtitle = "YS I",
+                Credits = "JOSEJL",
+            },
+        };
         File.WriteAllBytes(tempFile, new byte[16]);
         try
         {
-            var presentation = VisualizeCommand.ResolvePresentation(options, new FileInfo(tempFile));
+            var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(tempFile));
             Assert.Equal("PALACE OF DESTRUCTION", presentation.Title);
             Assert.Equal("YS I", presentation.Subtitle);
             Assert.Equal("JOSEJL", presentation.Credits);

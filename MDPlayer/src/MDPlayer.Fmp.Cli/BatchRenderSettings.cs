@@ -1,10 +1,10 @@
 namespace Fmp.Cli;
 
 /// <summary>
-/// Render options shared by the render, batch and visualize commands.
-/// Command-specific option classes derive from this.
+/// Audio/tool settings used by the standalone FMP render, batch, and analysis
+/// commands. Visualization owns its request/runtime contract separately.
 /// </summary>
-internal class RenderSettings
+internal class BatchRenderSettings
 {
     public string FmpCom { get; set; }
     public bool FmpComExplicit { get; set; }
@@ -54,14 +54,14 @@ internal class RenderSettings
 }
 
 /// <summary>
-/// Parses the options shared by the render, batch and visualize commands.
+/// Parses the common audio/tool options used by standalone FMP commands.
 /// Returns true when <paramref name="name"/> was recognized and applied to
 /// <paramref name="settings"/>; false when it is a command-specific option.
 /// Malformed values throw ArgumentException via <see cref="ArgumentReader"/>.
 /// </summary>
 internal static class RenderOptionsParser
 {
-    public static bool TryParse(ref ArgumentReader reader, string name, RenderSettings settings)
+    public static bool TryParse(ref ArgumentReader reader, string name, BatchRenderSettings settings)
     {
         switch (name)
         {

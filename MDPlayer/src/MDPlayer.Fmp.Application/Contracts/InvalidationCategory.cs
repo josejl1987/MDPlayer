@@ -57,6 +57,8 @@ public static class InvalidationCategorizer
             or nameof(PlaybackSettings.TailSeconds)
             or nameof(PlaybackSettings.MaximumDurationSeconds)
             or nameof(PlaybackSettings.SampleRate)
+            or nameof(PlaybackSettings.SsgGainDb)
+            or nameof(PlaybackSettings.SpcPitch)
             => InvalidationCategory.CaptureAffecting,
 
             nameof(VisualizationRequest.OutputPath)
