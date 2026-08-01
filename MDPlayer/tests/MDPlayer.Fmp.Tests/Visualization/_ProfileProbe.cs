@@ -18,13 +18,14 @@ public sealed class ProfileProbe
             "/home/jose/MDPlayer/18 U.S.A. (Ken) I.visualization/timeline.json");
         var renderer = new PanelOverlayRenderer(
             timeline,
+            RendererTestLayout.Build(
+                timeline,
+                1920,
+                1080,
+                channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options
             {
-                Width = 1920,
-                Height = 1080,
                 FpsNumerator = 60,
-                LayoutMode = VisualizationLayoutMode.Diagnostic,
-                Channels = VisualizationChannelFilter.Active,
                 Effects = EffectsMode.Minimal,
             });
         byte[] destination = new byte[renderer.FrameByteCount];

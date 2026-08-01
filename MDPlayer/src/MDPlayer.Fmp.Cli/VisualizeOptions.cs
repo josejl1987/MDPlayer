@@ -32,7 +32,7 @@ internal sealed class VisualizeOptions : RenderSettings
     public VideoEncoder Encoder { get; set; } = VideoEncoder.Auto;
     public EffectsMode Effects { get; set; } = EffectsMode.Minimal;
     public NoteColorMode NoteColor { get; set; } = NoteColorMode.Instrument;
-    public VisualizationLayoutMode LayoutMode { get; set; } = VisualizationLayoutMode.Auto;
+    public VisualizationLayoutMode LayoutMode { get; set; } = VisualizationLayoutMode.Diagnostic;
     public string Backend { get; set; } = "auto";
     public string ScopeMode { get; set; } = "auto";
     public bool SpcStems { get; set; }
@@ -124,7 +124,7 @@ internal sealed class VisualizeOptions : RenderSettings
         VideoPath = request.OutputPath;
 
         Preset = MapQuality(request.Output.Quality);
-        LayoutMode = MapComposition(request.Composition);
+        LayoutMode = VisualizationLayoutModeMapper.FromComposition(request.Composition);
         Width = request.Output.Width;
         Height = request.Output.Height;
         Fps = request.Output.FpsNumerator;
@@ -194,9 +194,6 @@ internal sealed class VisualizeOptions : RenderSettings
         Fmp.Application.Contracts.RenderQuality.Final => VisualizationPreset.Final,
         _ => VisualizationPreset.Balanced,
     };
-
-    private static VisualizationLayoutMode MapComposition(Fmp.Application.Contracts.CompositionKind composition)
-        => VisualizationLayoutMode.Diagnostic;
 
     private static VisualizationChannelFilter MapTrackSelection(
         Fmp.Application.Contracts.TrackSelectionMode mode) => mode switch
@@ -616,9 +613,11 @@ internal static class VisualizeOptionsParser
 
     private static VisualizationLayoutMode ParseLayout(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
-        "auto" => VisualizationLayoutMode.Auto,
         "diagnostic" => VisualizationLayoutMode.Diagnostic,
-        _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto or diagnostic)"),
+        // Compatibility alias for the legacy visualize command. It is
+        // normalized at the parser boundary and never enters the domain model.
+        "auto" => VisualizationLayoutMode.Diagnostic,
+        _ => throw new ArgumentException($"unknown layout '{raw}' (expected diagnostic)"),
     };
 
     private static void ApplyLayoutTemplate(VisualizeOptions options)

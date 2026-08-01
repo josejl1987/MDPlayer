@@ -48,35 +48,17 @@ internal sealed class VisualizationTopology
 internal static class VisualizationTopologyBuilder
 {
     public static VisualizationTopology Build(VisualizationTimeline timeline)
-        => Build(timeline, VisualizationLayoutMode.Diagnostic);
+        => Build(timeline, VisualizationChannelFilter.All);
 
     public static VisualizationTopology Build(
         VisualizationTimeline timeline,
-        VisualizationLayoutMode layoutMode)
-        => Build(
-            timeline,
-            layoutMode,
-            layoutMode is VisualizationLayoutMode.Diagnostic
-                ? VisualizationChannelFilter.All
-                : VisualizationChannelFilter.Active);
-
-    public static VisualizationTopology Build(
-        VisualizationTimeline timeline,
-        VisualizationLayoutMode layoutMode,
-        VisualizationChannelFilter channelFilter)
-        => Build(timeline, layoutMode, channelFilter, VisualizationGroupBy.None);
-
-    public static VisualizationTopology Build(
-        VisualizationTimeline timeline,
-        VisualizationLayoutMode layoutMode,
         VisualizationChannelFilter channelFilter,
-        VisualizationGroupBy groupBy)
+        VisualizationGroupBy groupBy = VisualizationGroupBy.None)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        layoutMode = VisualizationLayoutModeResolver.Resolve(timeline, layoutMode);
         VisualizationTopology inventory = BuildInventory(timeline);
         VisualizationTopology visible = FilterTopology(
-            inventory, timeline, layoutMode, channelFilter);
+            inventory, timeline, channelFilter);
 
         if (groupBy != VisualizationGroupBy.None)
         {
@@ -192,14 +174,13 @@ internal static class VisualizationTopologyBuilder
     private static VisualizationTopology FilterTopology(
         VisualizationTopology topology,
         VisualizationTimeline timeline,
-        VisualizationLayoutMode layoutMode,
         VisualizationChannelFilter filter)
     {
         if (filter == VisualizationChannelFilter.All)
             return topology;
 
         VisualizationPanel[] panels = topology.Panels
-            .Where(panel => ShouldInclude(timeline, panel, layoutMode, filter))
+            .Where(panel => ShouldInclude(timeline, panel, filter))
             .ToArray();
         return panels.Length > 0
             ? new VisualizationTopology(panels)
@@ -327,7 +308,6 @@ internal static class VisualizationTopologyBuilder
     private static bool ShouldInclude(
         VisualizationTimeline timeline,
         VisualizationPanel panel,
-        VisualizationLayoutMode layoutMode,
         VisualizationChannelFilter filter)
     {
         if (filter == VisualizationChannelFilter.All)

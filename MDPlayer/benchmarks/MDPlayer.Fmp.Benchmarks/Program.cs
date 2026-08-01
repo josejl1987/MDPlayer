@@ -50,10 +50,11 @@ internal static class Program
         int fps = 60;
 
         var stopwatch = Stopwatch.StartNew();
-        var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+        var renderer = new PanelOverlayRenderer(
+            timeline,
+            BenchmarkLayout.Build(timeline, width, height),
+            new PanelOverlayRenderer.Options
         {
-            Width = width,
-            Height = height,
             FpsNumerator = fps,
             FpsDenominator = 1,
         });

@@ -112,23 +112,11 @@ internal static class VisualizationRunner
                 "visualization capture contains neither semantic events nor waveform activity",
                 10);
 
-        VisualizationLayoutMode layoutMode = VisualizationLayoutModeResolver.Resolve(
-            capture.Timeline, options.LayoutMode);
-        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
-            capture.Timeline, layoutMode, options.Channels, options.GroupBy);
-        OverlayLayout layout = new(
-            options.Width,
-            options.Height,
-            options.PastSeconds,
-            options.FutureSeconds,
-            topology.Panels.Count,
-            layoutMode,
-            options.ScopeHeight,
-            options.TimelineHeight,
-            options.RollZoom,
-            options.ScopeRatio,
-            options.ScopePosition);
-        VisualizationLayoutValidator.Validate(layout, topology);
+        ResolvedVisualizationLayout resolvedLayout = VisualizationLayoutBuilder.Build(
+            capture.Timeline,
+            options.LayoutMode,
+            options.ToLayoutSettings());
+        OverlayLayout layout = resolvedLayout.Geometry;
         if (!string.IsNullOrWhiteSpace(options.PreviewHtmlPath))
         {
             VisualizationPreviewWriter.Write(
@@ -136,9 +124,7 @@ internal static class VisualizationRunner
                 capture.Timeline,
                 VisualizationLayoutPlan.Create(
                     capture.Timeline,
-                    topology,
-                    layout,
-                    options.LayoutMode,
+                    resolvedLayout,
                     options.Channels,
                     options.GroupBy,
                     options.TimeGrid,
@@ -151,33 +137,13 @@ internal static class VisualizationRunner
         }
         if (!string.IsNullOrWhiteSpace(options.DiagnosticPagesPath))
         {
-            VisualizationTopology diagnosticTopology = VisualizationTopologyBuilder.Build(
-                capture.Timeline,
-                VisualizationLayoutMode.Diagnostic,
-                VisualizationChannelFilter.All,
-                options.GroupBy);
-            OverlayLayout diagnosticLayout = new(
-                options.Width,
-                options.Height,
-                options.PastSeconds,
-                options.FutureSeconds,
-                diagnosticTopology.Panels.Count,
-                VisualizationLayoutMode.Diagnostic,
-                options.ScopeHeight,
-                options.TimelineHeight,
-                options.RollZoom,
-                options.ScopeRatio,
-                options.ScopePosition);
-            VisualizationLayoutValidator.Validate(diagnosticLayout, diagnosticTopology);
             VisualizationDiagnosticPagesWriter.Write(
                 options.DiagnosticPagesPath,
                 capture.Timeline,
                 VisualizationLayoutPlan.Create(
                     capture.Timeline,
-                    diagnosticTopology,
-                    diagnosticLayout,
-                    VisualizationLayoutMode.Diagnostic,
-                    VisualizationChannelFilter.All,
+                    resolvedLayout,
+                    options.Channels,
                     options.GroupBy,
                     options.TimeGrid,
                     options.ScopePosition,
@@ -189,9 +155,7 @@ internal static class VisualizationRunner
         }
         VisualizationPlanOutput.Emit(
             capture.Timeline,
-            topology,
-            layout,
-            options.LayoutMode,
+            resolvedLayout,
             options.Channels,
             options.GroupBy,
             options.TimeGrid,
@@ -355,21 +319,11 @@ internal static class VisualizationRunner
 
         var panelRenderer = new PanelOverlayRenderer(
             videoTimeline,
+            resolvedLayout,
             new PanelOverlayRenderer.Options
             {
-                Width = options.Width,
-                Height = options.Height,
                 FpsNumerator = options.Fps,
                 FpsDenominator = options.FpsDenominator,
-                PastSeconds = options.PastSeconds,
-                FutureSeconds = options.FutureSeconds,
-                RollZoom = options.RollZoom,
-                ScopeHeight = options.ScopeHeight,
-                TimelineHeight = options.TimelineHeight,
-                ScopeRatio = options.ScopeRatio,
-                ScopePosition = options.ScopePosition,
-                Channels = options.Channels,
-                GroupBy = options.GroupBy,
                 TimeGrid = options.TimeGrid,
                 Presentation = presentation,
                 FontPath = options.FontPath,
@@ -378,7 +332,6 @@ internal static class VisualizationRunner
                 NoteColor = options.NoteColor,
                 Palette = options.Palette,
                 MotionBlurSamples = options.MotionBlurSamples,
-                LayoutMode = layoutMode,
                 IntroSeconds = 0.75,
                 OutroSeconds = Math.Min(0.45, options.Tail),
                 AnalysisOverlay = analysisOverlay,

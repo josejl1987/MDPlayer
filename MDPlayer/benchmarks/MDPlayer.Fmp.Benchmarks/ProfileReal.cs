@@ -9,10 +9,11 @@ internal static class ProfileReal
     public static void Run(string timelinePath)
     {
         VisualizationTimeline timeline = VisualizationJsonWriter.Read(timelinePath);
-        var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+        var renderer = new PanelOverlayRenderer(
+            timeline,
+            BenchmarkLayout.Build(timeline, 1920, 1080),
+            new PanelOverlayRenderer.Options
         {
-            Width = 1920,
-            Height = 1080,
             FpsNumerator = 60,
             FpsDenominator = 1,
         });

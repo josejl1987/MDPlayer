@@ -7,9 +7,7 @@ internal static class VisualizationPlanOutput
 {
     public static void Emit(
         VisualizationTimeline timeline,
-        VisualizationTopology topology,
-        OverlayLayout layout,
-        VisualizationLayoutMode requestedLayout,
+        ResolvedVisualizationLayout layout,
         VisualizationChannelFilter channelFilter,
         VisualizationGroupBy groupBy,
         VisualizationTimeGrid timeGrid,
@@ -27,9 +25,7 @@ internal static class VisualizationPlanOutput
 
         VisualizationLayoutPlan plan = VisualizationLayoutPlan.Create(
             timeline,
-            topology,
             layout,
-            requestedLayout,
             channelFilter,
             groupBy,
             timeGrid,

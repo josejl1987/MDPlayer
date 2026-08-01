@@ -6,6 +6,7 @@ using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 #nullable enable
 
 namespace Fmp.Cli;
@@ -175,7 +176,7 @@ public static class PreviewCommand
 
         var presentation = VisualizationSupport.ResolvePresentation(options, new FileInfo(options.Input));
         (bool hasApproximations, string[] approximationNotes) = ComputeApproximationNotes(
-            output.Layout);
+            output.Layout.Geometry);
 
         if (settings.Motion)
             return RunMotion(settings, options, output, presentation, hasApproximations, approximationNotes);
@@ -191,7 +192,9 @@ public static class PreviewCommand
         string[] approximationNotes)
     {
         PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
-            output.Timeline, options, output.ResolvedLayout, presentation);
+            output.Timeline,
+            output.Layout,
+            VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
 
         if (renderer.TotalFrames <= 0)
             throw new InvalidOperationException("timeline contains no renderable frames");
@@ -260,14 +263,10 @@ public static class PreviewCommand
         int motionWidth = Math.Max(1, (int)Math.Round(options.Width * scale));
         int motionHeight = Math.Max(1, (int)Math.Round(options.Height * scale));
 
-        int originalWidth = options.Width;
-        int originalHeight = options.Height;
-        options.Width = motionWidth;
-        options.Height = motionHeight;
         PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
-            output.Timeline, options, output.ResolvedLayout, presentation);
-        options.Width = originalWidth;
-        options.Height = originalHeight;
+            output.Timeline,
+            output.Layout,
+            VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
 
         if (renderer.TotalFrames <= 0)
             throw new InvalidOperationException("timeline contains no renderable frames");
@@ -282,7 +281,13 @@ public static class PreviewCommand
             frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
             byte[] frame = renderer.RenderFrame(frameIndex);
             string fileName = $"frame-{i:D4}.png";
-            WritePng(motionWidth, motionHeight, frame, Path.Combine(settings.OutputDir, fileName));
+            WriteScaledPng(
+                renderer.Width,
+                renderer.Height,
+                motionWidth,
+                motionHeight,
+                frame,
+                Path.Combine(settings.OutputDir, fileName));
             frames.Add(fileName);
         }
 
@@ -334,7 +339,30 @@ public static class PreviewCommand
         string directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
-        using var image = new Image<Rgba32>(width, height);
+        using Image<Rgba32> image = CreateImage(width, height, rgba);
+        image.SaveAsPng(path);
+    }
+
+    private static void WriteScaledPng(
+        int sourceWidth,
+        int sourceHeight,
+        int width,
+        int height,
+        byte[] rgba,
+        string path)
+    {
+        string directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        using Image<Rgba32> image = CreateImage(sourceWidth, sourceHeight, rgba);
+        if (sourceWidth != width || sourceHeight != height)
+            image.Mutate(context => context.Resize(width, height));
+        image.SaveAsPng(path);
+    }
+
+    private static Image<Rgba32> CreateImage(int width, int height, byte[] rgba)
+    {
+        var image = new Image<Rgba32>(width, height);
         // Load the RGBA frame buffer into the image. (CopyPixelDataTo would
         // copy the empty image into the buffer; the row accessor is the
         // supported ImageSharp 3.x write path.)
@@ -355,7 +383,7 @@ public static class PreviewCommand
                 }
             }
         });
-        image.SaveAsPng(path);
+        return image;
     }
 
     private static string ParseFidelity(string raw)

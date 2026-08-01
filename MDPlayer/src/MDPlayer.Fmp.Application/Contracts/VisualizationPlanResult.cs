@@ -10,10 +10,10 @@ public sealed record VisualizationPlanResult
 {
     public int SchemaVersion { get; init; } = 1;
 
-    /// <summary>Concrete layout after Auto resolution (never <see cref="VisualizationLayout.Auto"/>).</summary>
+    /// <summary>Concrete layout selected from the explicit composition.</summary>
     public required string ResolvedLayout { get; init; }
 
-    /// <summary>The user-requested layout (may be "auto").</summary>
+    /// <summary>The user-requested composition name.</summary>
     public required string RequestedLayout { get; init; }
 
     public required string InputPath { get; init; }

@@ -12,27 +12,25 @@ public sealed class PanelOverlayRendererTests
 {
     private static PanelOverlayRenderer CreateRenderer()
     {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         return new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            timeline,
+            RendererTestLayout.Build(timeline),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
-                PastSeconds = 0.75,
-                FutureSeconds = 2.25,
             });
     }
 
     private static PanelOverlayRenderer CreateRendererWithPresentation(VisualizationPresentation presentation)
     {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         return new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            timeline,
+            RendererTestLayout.Build(timeline, 1920, 1080),
             new PanelOverlayRenderer.Options
             {
-                Width = 1920,
-                Height = 1080,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
                 Presentation = presentation,
@@ -80,12 +78,12 @@ public sealed class PanelOverlayRendererTests
     [Fact]
     public void PresentationTransition_FadesGridInAndLeavesEndCardVisible()
     {
+        VisualizationTimeline timelineData = VisualizationTimelineFixture.Create();
         var renderer = new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            timelineData,
+            RendererTestLayout.Build(timelineData),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
                 IntroSeconds = 1,
@@ -126,22 +124,22 @@ public sealed class PanelOverlayRendererTests
             Harmony = [new AnalysisHarmonyMarker(500, 1_500, "C:maj")],
             PhraseMarkers = [new AnalysisProgressMarker(1_000, AnalysisMarkerKind.Phrase)],
         };
+        VisualizationTimeline withAnalysisTimeline = VisualizationTimelineFixture.Create();
+        VisualizationTimeline withoutAnalysisTimeline = VisualizationTimelineFixture.Create();
         var withAnalysis = new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            withAnalysisTimeline,
+            RendererTestLayout.Build(withAnalysisTimeline),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
                 AnalysisOverlay = analysis,
             });
         var withoutAnalysis = new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            withoutAnalysisTimeline,
+            RendererTestLayout.Build(withoutAnalysisTimeline),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
             });
@@ -248,16 +246,14 @@ public sealed class PanelOverlayRendererTests
 
     private static PanelOverlayRenderer CreateRhythmRenderer()
     {
+        VisualizationTimeline timeline = RhythmTimelineFixture.Create();
         return new PanelOverlayRenderer(
-            RhythmTimelineFixture.Create(),
+            timeline,
+            RendererTestLayout.Build(timeline),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
-                PastSeconds = 0.75,
-                FutureSeconds = 2.25,
             });
     }
 
@@ -379,10 +375,14 @@ public sealed class PanelOverlayRendererTests
             Rhythm = [new RhythmEvent("bd", "ym2608.0.rhythm.bd", RhythmTimelineFixture.OnsetSample, 0.1f, 0f)],
         };
 
-        var strongRenderer = new PanelOverlayRenderer(strongTimeline, new PanelOverlayRenderer.Options
-        { Width = 960, Height = 540, FpsNumerator = 20, FpsDenominator = 1 });
-        var weakRenderer = new PanelOverlayRenderer(weakTimeline, new PanelOverlayRenderer.Options
-        { Width = 960, Height = 540, FpsNumerator = 20, FpsDenominator = 1 });
+        var strongRenderer = new PanelOverlayRenderer(
+            strongTimeline,
+            RendererTestLayout.Build(strongTimeline),
+            new PanelOverlayRenderer.Options { FpsNumerator = 20, FpsDenominator = 1 });
+        var weakRenderer = new PanelOverlayRenderer(
+            weakTimeline,
+            RendererTestLayout.Build(weakTimeline),
+            new PanelOverlayRenderer.Options { FpsNumerator = 20, FpsDenominator = 1 });
 
         byte[] strongFrame = strongRenderer.RenderFrame(20);
         byte[] weakFrame = weakRenderer.RenderFrame(20);
@@ -724,15 +724,17 @@ public sealed class PanelOverlayRendererTests
     {
         string missing = Path.Combine(Path.GetTempPath(), $"missing-cjk-{Guid.NewGuid():N}.ttf");
         var exception = Assert.Throws<FileNotFoundException>(() =>
-            new PanelOverlayRenderer(
-                VisualizationTimelineFixture.Create(),
+        {
+            VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+            return new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline),
                 new PanelOverlayRenderer.Options
                 {
-                    Width = 960,
-                    Height = 540,
                     Presentation = new VisualizationPresentation("風", "", ""),
                     FontPath = missing,
-                }));
+                });
+        });
 
         Assert.Contains(missing, exception.Message, StringComparison.Ordinal);
     }
@@ -748,15 +750,17 @@ public sealed class PanelOverlayRendererTests
         Skip.If(asciiFont == null, "No ASCII font is installed for coverage test.");
 
         var exception = Assert.Throws<InvalidOperationException>(() =>
-            new PanelOverlayRenderer(
-                VisualizationTimelineFixture.Create(),
+        {
+            VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+            return new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline),
                 new PanelOverlayRenderer.Options
                 {
-                    Width = 960,
-                    Height = 540,
                     Presentation = new VisualizationPresentation("風", "", ""),
                     FontPath = asciiFont,
-                }));
+                });
+        });
 
         Assert.Contains("U+98A8", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("風", exception.Message, StringComparison.Ordinal);

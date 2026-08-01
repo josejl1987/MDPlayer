@@ -12,26 +12,14 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 {
     public sealed class Options
     {
-        public int Width { get; set; } = 1920;
-        public int Height { get; set; } = 1080;
         public int FpsNumerator { get; set; } = 60;
         public int FpsDenominator { get; set; } = 1;
-        public double PastSeconds { get; set; } = 0.75;
-        public double FutureSeconds { get; set; } = 2.25;
-        public double RollZoom { get; set; } = 1.0;
-        public int? ScopeHeight { get; set; }
-        public int? TimelineHeight { get; set; }
-        public double? ScopeRatio { get; set; }
-        public VisualizationScopePosition ScopePosition { get; set; } = VisualizationScopePosition.Top;
-        public VisualizationChannelFilter Channels { get; set; } = VisualizationChannelFilter.All;
-        public VisualizationGroupBy GroupBy { get; set; } = VisualizationGroupBy.None;
         public VisualizationTimeGrid TimeGrid { get; set; } = VisualizationTimeGrid.None;
         public VisualizationPresentation Presentation { get; set; } = VisualizationPresentation.Empty;
         public string FontPath { get; set; }
         public bool PreferAntialiasedText { get; set; }
         public EffectsMode Effects { get; set; } = EffectsMode.Minimal;
         public NoteColorMode NoteColor { get; set; } = NoteColorMode.Instrument;
-        public VisualizationLayoutMode LayoutMode { get; set; } = VisualizationLayoutMode.Diagnostic;
         public AnalysisOverlayScene AnalysisOverlay { get; set; } = AnalysisOverlayScene.Empty;
         public VisualizationPalette Palette { get; set; } = VisualizationPalette.Default;
         public int MotionBlurSamples { get; set; } = 1;
@@ -191,9 +179,13 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly VisualizationTimeGridLine[] _timeGrid;
     private readonly object _motionBlurGate = new();
 
-    public PanelOverlayRenderer(VisualizationTimeline timeline, Options options = null)
+    public PanelOverlayRenderer(
+        VisualizationTimeline timeline,
+        ResolvedVisualizationLayout layout,
+        Options options = null)
     {
         _timeline = timeline ?? throw new ArgumentNullException(nameof(timeline));
+        ArgumentNullException.ThrowIfNull(layout);
         if (timeline.SampleRate <= 0)
             throw new ArgumentException("Timeline sample rate must be positive.", nameof(timeline));
         if (timeline.EndSample < timeline.StartSample)
@@ -206,27 +198,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         if (_options.FpsNumerator <= 0 || _options.FpsDenominator <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Frame rate must be positive.");
 
-        VisualizationLayoutMode selectedLayout = VisualizationLayoutModeResolver.Resolve(
-            timeline, _options.LayoutMode);
-        _topology = VisualizationTopologyBuilder.Build(
-            timeline, selectedLayout, _options.Channels, _options.GroupBy);
-        _layout = new OverlayLayout(
-            _options.Width,
-            _options.Height,
-            _options.PastSeconds,
-            _options.FutureSeconds,
-            _topology.Panels.Count,
-            selectedLayout,
-            _options.ScopeHeight,
-            _options.TimelineHeight,
-            _options.RollZoom,
-            _options.ScopeRatio,
-            _options.ScopePosition);
-        // The compositor remains constructible for synthetic empty timelines
-        // used by low-level video-pipeline tests. The publishing CLI rejects
-        // such captures before it reaches this renderer (§10.4).
-        if (VisualizationContentAvailability.HasRenderableContent(timeline))
-            VisualizationLayoutValidator.Validate(_layout, _topology);
+        _topology = layout.Topology;
+        _layout = layout.Geometry;
         _presentation = _options.Presentation ?? VisualizationPresentation.Empty;
         _instrumentById = timeline.Instruments.ToDictionary(x => x.Id, StringComparer.Ordinal);
         if (!double.IsFinite(_options.IntroSeconds) || _options.IntroSeconds < 0)
@@ -303,6 +276,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     public int Width => _layout.Width;
     public int Height => _layout.Height;
+    internal VisualizationTopology Topology => _topology;
     public int FrameByteCount => checked(Width * Height * 4);
     public int ScopeFrameByteCount => checked(
         _layout.CorrscopeGridWidth * _layout.CorrscopeGridHeight * 4);

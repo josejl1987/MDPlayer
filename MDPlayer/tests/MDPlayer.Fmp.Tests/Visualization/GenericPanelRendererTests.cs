@@ -145,10 +145,8 @@ public sealed class GenericPanelRendererTests
 
     private static byte[] Render(VisualizationTimeline timeline, long frame)
     {
-        var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline), new PanelOverlayRenderer.Options
         {
-            Width = 960,
-            Height = 540,
             FpsNumerator = 10,
             FpsDenominator = 1,
         });

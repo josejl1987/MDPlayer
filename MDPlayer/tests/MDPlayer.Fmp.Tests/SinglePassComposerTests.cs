@@ -23,10 +23,11 @@ public sealed class SinglePassComposerTests
                 StartSample = 0,
                 EndSample = 1_000,
             };
-            var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+            var renderer = new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline, 480, 360),
+                new PanelOverlayRenderer.Options
             {
-                Width = 480,
-                Height = 360,
                 FpsNumerator = 10,
                 FpsDenominator = 1,
                 Presentation = new VisualizationPresentation("SYNTHETIC", "", ""),
@@ -88,10 +89,11 @@ public sealed class SinglePassComposerTests
                 StartSample = 0,
                 EndSample = 1_000,
             };
-            var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+            var renderer = new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline, 480, 360),
+                new PanelOverlayRenderer.Options
             {
-                Width = 480,
-                Height = 360,
                 FpsNumerator = 5,
                 FpsDenominator = 1,
                 Presentation = new VisualizationPresentation("MASTER", "", ""),

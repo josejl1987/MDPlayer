@@ -57,9 +57,7 @@ internal sealed record VisualizationLayoutPlan(
 {
     public static VisualizationLayoutPlan Create(
         VisualizationTimeline timeline,
-        VisualizationTopology topology,
-        OverlayLayout layout,
-        VisualizationLayoutMode requestedLayout,
+        ResolvedVisualizationLayout resolvedLayout,
         VisualizationChannelFilter channelFilter,
         VisualizationGroupBy groupBy = VisualizationGroupBy.None,
         VisualizationTimeGrid timeGrid = VisualizationTimeGrid.None,
@@ -71,8 +69,10 @@ internal sealed record VisualizationLayoutPlan(
         string analysisAvailability = "none")
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        ArgumentNullException.ThrowIfNull(topology);
-        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(resolvedLayout);
+
+        VisualizationTopology topology = resolvedLayout.Topology;
+        OverlayLayout layout = resolvedLayout.Geometry;
 
         var selected = topology.Panels
             .SelectMany(panel => panel.VoiceIds.Concat(panel.OperatorVoiceIds))
@@ -175,8 +175,8 @@ internal sealed record VisualizationLayoutPlan(
             : 0;
 
         return new VisualizationLayoutPlan(
-            VisualizationLayoutNames.ToCliName(requestedLayout),
-            VisualizationLayoutNames.ToCliName(layout.Mode),
+            VisualizationLayoutNames.ToCliName(resolvedLayout.Mode),
+            VisualizationLayoutNames.ToCliName(resolvedLayout.Mode),
             channelFilter.ToString(),
             layout.Width,
             layout.Height,

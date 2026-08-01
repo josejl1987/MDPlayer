@@ -10,9 +10,8 @@ namespace Fmp.Cli;
 /// <summary>
 /// Shared planning pipeline for the <c>plan</c> and <c>preview</c> commands:
 /// prepares the track, captures (or reuses) the timeline, resolves the
-/// concrete layout, applies include/exclude track filtering, and builds the
-/// <see cref="VisualizationPlanResult"/> contract plus the renderable pieces
-/// (timeline, resolved layout mode, overlay layout) the preview commands need.
+/// concrete layout, and builds the <see cref="VisualizationPlanResult"/>
+/// contract plus the renderable pieces the preview commands need.
 /// </summary>
 internal static class VisualizationPlanning
 {
@@ -20,8 +19,7 @@ internal static class VisualizationPlanning
         VisualizationRequest Request,
         VisualizationPlanResult Plan,
         VisualizationTimeline Timeline,
-        VisualizationLayoutMode ResolvedLayout,
-        OverlayLayout Layout,
+        ResolvedVisualizationLayout Layout,
         string MasterAudioPath);
 
     /// <summary>
@@ -127,41 +125,16 @@ internal static class VisualizationPlanning
         if (timelineOutPath != null)
             VisualizationJsonWriter.Write(timelineOutPath, timeline);
 
-        VisualizationLayoutMode resolvedMode = VisualizationLayoutModeResolver.Resolve(
-            timeline, options.LayoutMode);
-        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
-            timeline, resolvedMode, options.Channels, options.GroupBy);
-        topology = ApplyTrackFiltering(topology, options);
-
-        OverlayLayout layout = new(
-            options.Width,
-            options.Height,
-            options.PastSeconds,
-            options.FutureSeconds,
-            topology.Panels.Count,
-            resolvedMode,
-            options.ScopeHeight,
-            options.TimelineHeight,
-            options.RollZoom,
-            options.ScopeRatio,
-            options.ScopePosition);
+        VisualizationLayoutMode mode = VisualizationLayoutModeMapper.FromComposition(
+            request.Composition);
+        ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
+            timeline,
+            mode,
+            options.ToLayoutSettings());
+        VisualizationTopology topology = layout.Topology;
+        OverlayLayout geometry = layout.Geometry;
 
         var issues = new List<ValidationIssue>(VisualizationRequestValidator.Validate(request));
-        try
-        {
-            VisualizationLayoutValidator.Validate(layout, topology);
-        }
-        catch (Exception)
-        {
-            issues.Add(new ValidationIssue
-            {
-                Code = ValidationCodes.LayoutTooSmall,
-                Severity = ValidationSeverity.Warning,
-                Message = "The requested resolution is too small for the selected layout and panels.",
-                SettingPath = nameof(request.Output.Width),
-                SuggestedAction = "Increase the output resolution or reduce the number of channels.",
-            });
-        }
 
         IReadOnlyList<ToolRequirement> toolRequirements = ToolRequirementResolver.Resolve(request);
         IReadOnlyList<RepresentativePoint> points = RepresentativePointAnalyzer.Compute(timeline, 0.75);
@@ -175,13 +148,13 @@ internal static class VisualizationPlanning
 
         var plan = new VisualizationPlanResult
         {
-            ResolvedLayout = VisualizationLayoutNames.ToCliName(resolvedMode),
-            RequestedLayout = RequestedLayoutName(request.Composition),
+            ResolvedLayout = VisualizationLayoutNames.ToCliName(layout.Mode),
+            RequestedLayout = VisualizationLayoutNames.ToCliName(layout.Mode),
             InputPath = Path.GetFullPath(options.Input),
             Tracks = BuildTracks(timeline, options),
             ExcludedTrackIds = options.ExcludeTracks.ToArray(),
             IncludedTrackIds = options.IncludeTracks.ToArray(),
-            Regions = BuildRegions(topology, layout),
+            Regions = BuildRegions(topology, geometry),
             ToolRequirements = toolRequirements,
             ValidationIssues = issues,
             RepresentativePoints = points,
@@ -191,7 +164,7 @@ internal static class VisualizationPlanning
             TimelinePath = timelineOutPath,
         };
 
-        return new PlanOutput(request, plan, timeline, resolvedMode, layout, masterAudioPath);
+        return new PlanOutput(request, plan, timeline, layout, masterAudioPath);
     }
 
     /// <summary>
@@ -201,81 +174,38 @@ internal static class VisualizationPlanning
     /// </summary>
     internal static PanelOverlayRenderer BuildPanelRenderer(
         VisualizationTimeline timeline,
-        VisualizeOptions options,
-        VisualizationLayoutMode resolvedMode,
-        Fmp.Core.Visualization.Rendering.VisualizationPresentation presentation)
+        ResolvedVisualizationLayout layout,
+        PanelOverlayRenderer.Options rendering)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(rendering);
         return new PanelOverlayRenderer(
             timeline,
-            new PanelOverlayRenderer.Options
-            {
-                Width = options.Width,
-                Height = options.Height,
-                FpsNumerator = options.Fps,
-                FpsDenominator = options.FpsDenominator,
-                PastSeconds = options.PastSeconds,
-                FutureSeconds = options.FutureSeconds,
-                RollZoom = options.RollZoom,
-                ScopeHeight = options.ScopeHeight,
-                TimelineHeight = options.TimelineHeight,
-                ScopeRatio = options.ScopeRatio,
-                ScopePosition = options.ScopePosition,
-                Channels = options.Channels,
-                GroupBy = options.GroupBy,
-                TimeGrid = options.TimeGrid,
-                Presentation = presentation,
-                FontPath = options.FontPath,
-                PreferAntialiasedText = options.Preset != Fmp.Core.Visualization.Rendering.VisualizationPreset.Diagnostic,
-                Effects = options.Effects,
-                NoteColor = options.NoteColor,
-                LayoutMode = resolvedMode,
-                IntroSeconds = 0.75,
-                OutroSeconds = Math.Min(0.45, options.Tail),
-                AnalysisOverlay = Fmp.Core.Analysis.AnalysisOverlayScene.Empty,
-                Energy = null,
-            });
+            layout,
+            rendering);
     }
 
-    /// <summary>
-    /// Applies --include-track/--exclude-track filtering to the topology
-    /// panels. A panel is dropped when its panel id or any of its voice ids
-    /// intersects the exclude list; when an include list is present only
-    /// panels intersecting it survive, except panels whose id contains
-    /// "master" which are always kept. An empty result falls back to the
-    /// unfiltered topology.
-    /// </summary>
-    private static VisualizationTopology ApplyTrackFiltering(
-        VisualizationTopology topology,
-        VisualizeOptions options)
+    internal static PanelOverlayRenderer.Options CreatePreviewRendererOptions(
+        VisualizeOptions options,
+        VisualizationPresentation presentation)
     {
-        if (options.ExcludeTracks.Count == 0 && options.IncludeTracks.Count == 0)
-            return topology;
-
-        var exclude = new HashSet<string>(options.ExcludeTracks, StringComparer.Ordinal);
-        var include = new HashSet<string>(options.IncludeTracks, StringComparer.Ordinal);
-
-        bool Excluded(VisualizationPanel panel)
-            => exclude.Contains(panel.Id)
-                || panel.VoiceIds.Any(exclude.Contains)
-                || panel.OperatorVoiceIds.Any(exclude.Contains);
-
-        bool Included(VisualizationPanel panel)
-            => include.Contains(panel.Id)
-                || panel.VoiceIds.Any(include.Contains)
-                || panel.OperatorVoiceIds.Any(include.Contains);
-
-        VisualizationPanel[] filtered = topology.Panels
-            .Where(panel => !Excluded(panel))
-            .Where(panel => options.IncludeTracks.Count == 0
-                || Included(panel)
-                || panel.Id.Contains("master", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-
-        return filtered.Length > 0
-            ? new VisualizationTopology(filtered)
-            : topology;
+        ArgumentNullException.ThrowIfNull(options);
+        return new PanelOverlayRenderer.Options
+        {
+            FpsNumerator = options.Fps,
+            FpsDenominator = options.FpsDenominator,
+            TimeGrid = options.TimeGrid,
+            Presentation = presentation,
+            FontPath = options.FontPath,
+            PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic,
+            Effects = options.Effects,
+            NoteColor = options.NoteColor,
+            IntroSeconds = 0.75,
+            OutroSeconds = Math.Min(0.45, options.Tail),
+            AnalysisOverlay = Fmp.Core.Analysis.AnalysisOverlayScene.Empty,
+            Energy = null,
+        };
     }
 
     private static IReadOnlyList<TrackSelectionInfo> BuildTracks(
@@ -357,8 +287,6 @@ internal static class VisualizationPlanning
             || timeline.AggregateHits.Any(evt => evt.VoiceId == voiceId)
             || timeline.WaveformChanges.Any(evt => evt.VoiceId == voiceId);
     }
-
-    internal static string RequestedLayoutName(CompositionKind composition) => "diagnostic";
 
     private static string SemanticTypeName(VoicePresentationKind presentation) => presentation switch
     {

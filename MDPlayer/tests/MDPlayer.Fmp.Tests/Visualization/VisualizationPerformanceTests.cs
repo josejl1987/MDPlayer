@@ -33,13 +33,14 @@ public sealed class VisualizationPerformanceTests
             Stopwatch preparation = Stopwatch.StartNew();
             var renderer = new PanelOverlayRenderer(
                 timeline,
+                RendererTestLayout.Build(
+                    timeline,
+                    width,
+                    height,
+                    channels: VisualizationChannelFilter.Active),
                 new PanelOverlayRenderer.Options
                 {
-                    Width = width,
-                    Height = height,
                     FpsNumerator = 60,
-                    LayoutMode = VisualizationLayoutMode.Diagnostic,
-                    Channels = VisualizationChannelFilter.Active,
                     Effects = EffectsMode.Minimal,
                 });
             preparation.Stop();

@@ -58,18 +58,17 @@ public sealed class CompositionTests
     // ------------------------------------------------------------------
 
     private static PanelOverlayRenderer CreateRenderer(VisualizationLayoutMode mode, int width = 960, int height = 540)
-        => new(
-            VisualizationTimelineFixture.Create(),
+    {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        return new(
+            timeline,
+            RendererTestLayout.Build(timeline, width, height),
             new PanelOverlayRenderer.Options
             {
-                Width = width,
-                Height = height,
                 FpsNumerator = 20,
                 FpsDenominator = 1,
-                PastSeconds = 0.75,
-                FutureSeconds = 2.25,
-                LayoutMode = mode,
             });
+    }
 
     [Fact]
     public void Diagnostic_RendersFramesWithoutThrowing()

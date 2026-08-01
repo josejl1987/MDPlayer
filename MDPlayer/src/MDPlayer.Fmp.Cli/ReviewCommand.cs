@@ -188,7 +188,9 @@ public static class ReviewCommand
             VisualizationPresentation presentation = VisualizationSupport.ResolvePresentation(
                 options, new FileInfo(options.Input));
             using PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
-                output.Timeline, options, output.ResolvedLayout, presentation);
+                output.Timeline,
+                output.Layout,
+                VisualizationPlanning.CreatePreviewRendererOptions(options, presentation));
             if (renderer.TotalFrames <= 0)
                 throw new InvalidOperationException("timeline contains no renderable frames");
 
@@ -198,7 +200,7 @@ public static class ReviewCommand
             byte[] frame = renderer.RenderFrame(frameIndex);
             bool hasApproximations = false;
             string[] approximationNotes = Array.Empty<string>();
-            if (output.Layout.HasScopes)
+            if (output.Layout.Geometry.HasScopes)
             {
                 byte[] scopeGrid = GetScopeGrid(
                     output, options, request, renderer, preview.TimeSeconds, cancellationToken);
@@ -307,7 +309,7 @@ public static class ReviewCommand
             PanelOverlayRenderer renderer,
             string key)
         {
-            if (!output.Layout.HasScopes)
+            if (!output.Layout.Geometry.HasScopes)
                 throw new InvalidOperationException("Scope Stage unavailable: layout has no scope region.");
 
             string outputDirectory = Path.Combine(_scopeRoot, key);
@@ -341,9 +343,9 @@ public static class ReviewCommand
                 overrides: new CorrscopeOverrides
                 {
                     Fps = scopeOptions.Fps,
-                    RenderWidth = output.Layout.CorrscopeGridWidth,
-                    RenderHeight = output.Layout.CorrscopeGridHeight,
-                    LayoutNCols = output.Layout.ColumnCount,
+                    RenderWidth = output.Layout.Geometry.CorrscopeGridWidth,
+                    RenderHeight = output.Layout.Geometry.CorrscopeGridHeight,
+                    LayoutNCols = output.Layout.Geometry.ColumnCount,
                     IncludeMasterAsChannel = !artifacts.HasIsolatedStems,
                     IncludeSilentChannels = scopeOptions.Channels == VisualizationChannelFilter.All,
                     HideLabels = false,

@@ -69,13 +69,13 @@ internal static class VisualizationOptionParsing
 
     public static VisualizationPresetValues PresetValues(VisualizationPreset preset) => preset switch
     {
-        VisualizationPreset.Preview => new(960, 540, 30, VisualizationLayoutMode.Auto,
+        VisualizationPreset.Preview => new(960, 540, 30, VisualizationLayoutMode.Diagnostic,
             EffectsMode.Minimal, "none", VisualizationChannelFilter.Active),
-        VisualizationPreset.Final => new(1920, 1080, 60, VisualizationLayoutMode.Auto,
+        VisualizationPreset.Final => new(1920, 1080, 60, VisualizationLayoutMode.Diagnostic,
             EffectsMode.Cinematic, "minimal", VisualizationChannelFilter.Active),
         VisualizationPreset.Diagnostic => new(1920, 1080, 60, VisualizationLayoutMode.Diagnostic,
             EffectsMode.Diagnostic, "standard", VisualizationChannelFilter.All),
-        _ => new(1280, 720, 60, VisualizationLayoutMode.Auto,
+        _ => new(1280, 720, 60, VisualizationLayoutMode.Diagnostic,
             EffectsMode.Minimal, "minimal", VisualizationChannelFilter.Active),
     };
 
@@ -147,28 +147,6 @@ internal static class VisualizationOptionParsing
     }
 }
 
-internal static class VisualizationLayoutModeResolver
-{
-    /// <summary>
-    /// The canonical publishing compositions. Currently exactly one: Diagnostic.
-    /// Auto resolves to it; the array is the extension point for future layouts.
-    /// </summary>
-    public static readonly VisualizationLayoutMode[] CanonicalCompositions =
-    [
-        VisualizationLayoutMode.Diagnostic,
-    ];
-
-    public static VisualizationLayoutMode Resolve(
-        VisualizationTimeline timeline,
-        VisualizationLayoutMode requested)
-    {
-        ArgumentNullException.ThrowIfNull(timeline);
-        return requested == VisualizationLayoutMode.Auto
-            ? VisualizationLayoutMode.Diagnostic
-            : requested;
-    }
-}
-
 internal static class VisualizationContentAvailability
 {
     public static bool HasRenderableContent(VisualizationTimeline timeline)
@@ -190,19 +168,7 @@ internal static class VisualizationLayoutNames
 {
     public static string ToCliName(VisualizationLayoutMode mode) => mode switch
     {
-        VisualizationLayoutMode.Auto => "auto",
         VisualizationLayoutMode.Diagnostic => "diagnostic",
-        _ => mode.ToString().ToLowerInvariant(),
+        _ => throw new ArgumentOutOfRangeException(nameof(mode)),
     };
-
-    /// <summary>
-    /// The canonical composition family of a resolved mode. Currently every
-    /// mode maps to Diagnostic; kept as a switch so future layouts can map
-    /// onto their publishing equivalent.
-    /// </summary>
-    public static VisualizationLayoutMode CanonicalFamily(VisualizationLayoutMode mode)
-        => mode is VisualizationLayoutMode.Auto ? VisualizationLayoutMode.Diagnostic : mode;
-
-    public static string ToCompositionName(VisualizationLayoutMode mode)
-        => ToCliName(CanonicalFamily(mode));
 }

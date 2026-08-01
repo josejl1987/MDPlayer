@@ -129,23 +129,11 @@ internal static class VgmVisualizeCommand
                     ProgressJsonlWriter.StageName(ExportStage.RunningAnalysis), null);
             }
 
-            VisualizationLayoutMode layoutMode = VisualizationLayoutModeResolver.Resolve(
-                timeline, options.LayoutMode);
-            VisualizationTopology topology = VisualizationTopologyBuilder.Build(
-                timeline, layoutMode, options.Channels, options.GroupBy);
-            OverlayLayout layout = new(
-                options.Width,
-                options.Height,
-                options.PastSeconds,
-                options.FutureSeconds,
-                topology.Panels.Count,
-                layoutMode,
-                options.ScopeHeight,
-                options.TimelineHeight,
-                options.RollZoom,
-                options.ScopeRatio,
-                options.ScopePosition);
-            VisualizationLayoutValidator.Validate(layout, topology);
+            ResolvedVisualizationLayout resolvedLayout = VisualizationLayoutBuilder.Build(
+                timeline,
+                options.LayoutMode,
+                options.ToLayoutSettings());
+            OverlayLayout layout = resolvedLayout.Geometry;
             if (!string.IsNullOrWhiteSpace(options.PreviewHtmlPath))
             {
                 VisualizationPreviewWriter.Write(
@@ -153,9 +141,7 @@ internal static class VgmVisualizeCommand
                     timeline,
                     VisualizationLayoutPlan.Create(
                         timeline,
-                        topology,
-                        layout,
-                        options.LayoutMode,
+                        resolvedLayout,
                         options.Channels,
                         options.GroupBy,
                         options.TimeGrid,
@@ -168,33 +154,13 @@ internal static class VgmVisualizeCommand
             }
             if (!string.IsNullOrWhiteSpace(options.DiagnosticPagesPath))
             {
-                VisualizationTopology diagnosticTopology = VisualizationTopologyBuilder.Build(
-                    timeline,
-                    VisualizationLayoutMode.Diagnostic,
-                    VisualizationChannelFilter.All,
-                    options.GroupBy);
-                OverlayLayout diagnosticLayout = new(
-                    options.Width,
-                    options.Height,
-                    options.PastSeconds,
-                    options.FutureSeconds,
-                    diagnosticTopology.Panels.Count,
-                    VisualizationLayoutMode.Diagnostic,
-                    options.ScopeHeight,
-                    options.TimelineHeight,
-                    options.RollZoom,
-                    options.ScopeRatio,
-                    options.ScopePosition);
-                VisualizationLayoutValidator.Validate(diagnosticLayout, diagnosticTopology);
                 VisualizationDiagnosticPagesWriter.Write(
                     options.DiagnosticPagesPath,
                     timeline,
                     VisualizationLayoutPlan.Create(
                         timeline,
-                        diagnosticTopology,
-                        diagnosticLayout,
-                        VisualizationLayoutMode.Diagnostic,
-                        VisualizationChannelFilter.All,
+                        resolvedLayout,
+                        options.Channels,
                         options.GroupBy,
                         options.TimeGrid,
                         options.ScopePosition,
@@ -206,9 +172,7 @@ internal static class VgmVisualizeCommand
             }
             VisualizationPlanOutput.Emit(
                 timeline,
-                topology,
-                layout,
-                options.LayoutMode,
+                resolvedLayout,
                 options.Channels,
                 options.GroupBy,
                 options.TimeGrid,
@@ -280,9 +244,7 @@ internal static class VgmVisualizeCommand
             {
                 VisualizationPlanOutput.Emit(
                     timeline,
-                    topology,
-                    layout,
-                    options.LayoutMode,
+                    resolvedLayout,
                     options.Channels,
                     options.GroupBy,
                     options.TimeGrid,
@@ -311,21 +273,11 @@ internal static class VgmVisualizeCommand
             {
                 var panelRenderer = new PanelOverlayRenderer(
                     timeline,
+                    resolvedLayout,
                     new PanelOverlayRenderer.Options
                     {
-                        Width = options.Width,
-                        Height = options.Height,
                         FpsNumerator = options.Fps,
                         FpsDenominator = options.FpsDenominator,
-                        PastSeconds = options.PastSeconds,
-                        FutureSeconds = options.FutureSeconds,
-                        RollZoom = options.RollZoom,
-                        ScopeHeight = options.ScopeHeight,
-                        TimelineHeight = options.TimelineHeight,
-                        ScopeRatio = options.ScopeRatio,
-                        ScopePosition = options.ScopePosition,
-                        Channels = options.Channels,
-                        GroupBy = options.GroupBy,
                         TimeGrid = options.TimeGrid,
                         Presentation = new VisualizationPresentation(
                             string.IsNullOrWhiteSpace(options.Title)
@@ -339,7 +291,6 @@ internal static class VgmVisualizeCommand
                         NoteColor = options.NoteColor,
                         Palette = options.Palette,
                         MotionBlurSamples = options.MotionBlurSamples,
-                        LayoutMode = layoutMode,
                         AnalysisOverlay = analysisOutput is null
                             || options.AnalysisOverlay == "none"
                             ? AnalysisOverlayScene.Empty
@@ -384,9 +335,7 @@ internal static class VgmVisualizeCommand
                 // make --print-layout lie about the actual output.
                 VisualizationPlanOutput.Emit(
                     timeline,
-                    topology,
-                    layout,
-                    options.LayoutMode,
+                    resolvedLayout,
                     options.Channels,
                     options.GroupBy,
                     options.TimeGrid,

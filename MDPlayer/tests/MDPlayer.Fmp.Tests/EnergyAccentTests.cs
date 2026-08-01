@@ -29,14 +29,10 @@ public sealed class EnergyAccentTests
         };
 
     private static PanelOverlayRenderer Renderer(VisualizationTimeline timeline, ChannelEnergyEnvelope[] energy = null)
-        => new(timeline, new PanelOverlayRenderer.Options
+        => new(timeline, RendererTestLayout.Build(timeline), new PanelOverlayRenderer.Options
         {
-            Width = 960,
-            Height = 540,
             FpsNumerator = 20,
             FpsDenominator = 1,
-            PastSeconds = 0.75,
-            FutureSeconds = 2.25,
             Energy = energy,
         });
 

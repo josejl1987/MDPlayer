@@ -16,12 +16,12 @@ public sealed class PanelOverlayRendererSplitTests
 {
     private static PanelOverlayRenderer CreateRenderer()
     {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         return new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
+            timeline,
+            RendererTestLayout.Build(timeline),
             new PanelOverlayRenderer.Options
             {
-                Width = 960,
-                Height = 540,
                 FpsNumerator = 30,
                 FpsDenominator = 1,
             });

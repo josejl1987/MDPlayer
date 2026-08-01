@@ -22,12 +22,21 @@ public sealed class VgmVisualizeFlagTests
     }
 
     [Fact]
-    public void Parse_LayoutDefaultsToBalancedAutoPublishing()
+    public void Parse_LegacyAutoLayoutAliasSelectsDiagnostic()
+    {
+        var options = VisualizeCommand.ParseArgs(["track.vgm", "--layout", "auto"]);
+
+        Assert.NotNull(options);
+        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
+    }
+
+    [Fact]
+    public void Parse_LayoutDefaultsToBalancedDiagnosticPublishing()
     {
         var options = VisualizeCommand.ParseArgs(["track.vgm"]);
 
         Assert.NotNull(options);
-        Assert.Equal(VisualizationLayoutMode.Auto, options.LayoutMode);
+        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
         Assert.Equal(VisualizationChannelFilter.Active, options.Channels);
     }
 
@@ -37,7 +46,7 @@ public sealed class VgmVisualizeFlagTests
         (VisualizeOptions options, string stderr) = ParseCapture(["track.vgm", "--layout", "mosaic"]);
 
         Assert.Null(options);
-        Assert.Contains("auto or diagnostic", stderr, StringComparison.Ordinal);
+        Assert.Contains("expected diagnostic", stderr, StringComparison.Ordinal);
     }
 
     [Fact]
