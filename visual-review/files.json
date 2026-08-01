@@ -1,0 +1,67 @@
+{
+  "files": [
+    {
+      "path": "02 Stranger ~ Wandering Swordsman.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "05 - Twilight Express.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "120 Smash Up.spc",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "18 U.S.A. (Ken) I.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "21 Master Ninja.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "26 - Robotnik.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    },
+    {
+      "path": "32 Arctic Wind.vgz",
+      "moments": [
+        {
+          "name": "representative",
+          "time": 8.0
+        }
+      ]
+    }
+  ]
+}
