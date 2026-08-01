@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schemaVersion", "sampleRate", "startSample", "endSample", "track", "timing", "channels"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "sampleRate": {"type": "number", "exclusiveMinimum": 0},
+    "startSample": {"type": "integer", "minimum": 0},
+    "endSample": {"type": "integer", "minimum": 0},
+    "analysisId": {"type": "string"},
+    "track": {"type": "object"},
+    "timing": {
+      "type": "object",
+      "properties": {
+        "timingMode": {"enum": ["seconds", "beats"]},
+        "tempoEvents": {"type": "array"}, "beats": {"type": "array"},
+        "measures": {"type": "array"}, "loops": {"type": "array"}
+      },
+      "additionalProperties": true
+    },
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "notes"],
+        "properties": {
+          "id": {"type": "string"}, "kind": {"type": "string"},
+          "analysisWeight": {"type": "number", "minimum": 0, "maximum": 1},
+          "notes": {"type": "array", "items": {
+            "type": "object", "required": ["id", "startSample", "endSample"],
+            "properties": {
+              "id": {"type": "string"}, "startSample": {"type": "integer", "minimum": 0},
+              "endSample": {"type": "integer", "minimum": 0},
+              "structuralMidiPitch": {"type": "number"}, "pitchClass": {"type": "integer", "minimum": -1, "maximum": 11},
+              "octave": {"type": "integer"}, "instrumentId": {"type": "string"},
+              "isPitched": {"type": "boolean"}, "isNoise": {"type": "boolean"},
+              "isRetrigger": {"type": "boolean"}, "microtonal": {"type": "boolean"}, "gliding": {"type": "boolean"},
+              "pitchRegions": {"type": "array", "items": {"type": "object"}}
+            },
+            "additionalProperties": true
+          }}
+        }
+      }
+    },
+    "arpeggioEvidence": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

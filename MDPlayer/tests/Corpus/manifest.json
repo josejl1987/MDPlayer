@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FMP Linux Characterization Corpus",
+  "description": "Track corpus for regression, determinism and extraction baselines. Synthetic tracks are distributable; local tracks reference user-provided content and require FMP.COM.",
+  "version": 1,
+  "created": "2026-07-28",
+  "synthetic": {
+    "description": "Synthetic or freely-distributable test fixtures. Currently limited to COM programs used by Nise98 unit tests. Future OVI files may be added if license-compatible source material is available.",
+    "tracks": [
+      {
+        "name": "exit-com",
+        "path": "synthetic/exit.com",
+        "format": "COM",
+        "description": "COM program that exits immediately. 2 bytes.",
+        "type": "synthetic"
+      },
+      {
+        "name": "halt-com",
+        "path": "synthetic/halt.com",
+        "format": "COM",
+        "description": "COM program that halts (HLT instruction). 1 byte.",
+        "type": "synthetic"
+      },
+      {
+        "name": "test-com",
+        "path": "synthetic/test.com",
+        "format": "COM",
+        "description": "COM program that writes values to memory. 4 bytes.",
+        "type": "synthetic"
+      }
+    ]
+  },
+  "local": {
+    "description": "User-provided tracks. Configured via local/local-config.json (gitignored). These are used for integration-level rendering tests and golden artifact generation.",
+    "configFile": "local/local-config.json",
+    "configSchema": {
+      "fmpComPath": "/path/to/FMP.COM",
+      "tracks": [
+        {
+          "name": "track-name",
+          "path": "/path/to/track.OVI",
+          "format": "OVI",
+          "tags": ["fm-only", "ppz8", "ssg", "rhythm", "adpcm"]
+        }
+      ]
+    }
+  }
+}

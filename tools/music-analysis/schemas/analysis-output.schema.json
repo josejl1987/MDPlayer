@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schemaVersion", "analysisId", "engine", "timingMode", "global", "channels", "keys", "harmony", "motifs", "relationships", "pedalTones", "ostinatos", "boundaries", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "analysisId": {"type": "string", "minLength": 1},
+    "engine": {"$ref": "#/$defs/engine"},
+    "timingMode": {"enum": ["seconds", "beats"]},
+    "global": {"$ref": "#/$defs/global"},
+    "channels": {"type": "array", "items": {"$ref": "#/$defs/channel"}},
+    "keys": {"type": "array", "items": {"$ref": "#/$defs/keyRegion"}},
+    "harmony": {"type": "array", "items": {"$ref": "#/$defs/harmony"}},
+    "motifs": {"type": "array", "items": {"$ref": "#/$defs/motif"}},
+    "relationships": {"type": "array", "items": {"$ref": "#/$defs/relationship"}},
+    "pedalTones": {"type": "array", "items": {"$ref": "#/$defs/pedalTone"}},
+    "ostinatos": {"type": "array", "items": {"$ref": "#/$defs/ostinato"}},
+    "boundaries": {"type": "array", "items": {"$ref": "#/$defs/boundary"}},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/warning"}}
+  },
+  "$defs": {
+    "confidence": {
+      "type": "object",
+      "required": ["score", "certainty"],
+      "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "certainty": {"enum": ["observed", "strong", "tentative", "withheld"]},
+        "method": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "limitations": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "engine": {
+      "type": "object",
+      "required": ["name", "version", "music21Version", "partituraVersion"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "music21Version": {"type": "string"},
+        "partituraVersion": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "keyCandidate": {
+      "type": "object",
+      "required": ["tonicPitchClass", "tonic", "mode", "confidence"],
+      "properties": {
+        "tonicPitchClass": {"type": "integer", "minimum": 0, "maximum": 11},
+        "tonic": {"type": "string"},
+        "mode": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    "key": {
+      "type": "object",
+      "required": ["primary", "alternatives", "methods", "winnerVotes", "winnerCorrelations", "alternativeCorrelations", "confidence"],
+      "properties": {
+        "primary": {"anyOf": [{"$ref": "#/$defs/keyCandidate"}, {"type": "null"}]},
+        "alternatives": {"type": "array", "items": {"$ref": "#/$defs/keyCandidate"}},
+        "methods": {"type": "array", "items": {"type": "object"}},
+        "winnerVotes": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "winnerCorrelations": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 1}}},
+        "alternativeCorrelations": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 1}}},
+        "confidence": {"$ref": "#/$defs/confidence"}
+      },
+      "additionalProperties": false
+    },
+    "global": {
+      "type": "object",
+      "required": ["key", "pitch"],
+      "properties": {
+        "key": {"$ref": "#/$defs/key"},
+        "pitch": {"type": "object", "required": ["pitchClassDistribution", "jSymbolic"], "properties": {"noteCount": {"type": "integer", "minimum": 0}, "minPitchClass": {"type": "integer", "minimum": -1, "maximum": 11}, "maxPitchClass": {"type": "integer", "minimum": -1, "maximum": 11}, "minMidiPitch": {"type": "number"}, "maxMidiPitch": {"type": "number"}, "ambitus": {"type": "number", "minimum": 0}, "averageNoteDuration": {"type": "number", "minimum": 0}, "noteDensity": {"type": "number", "minimum": 0}, "pitchClassDistribution": {"$ref": "#/$defs/distribution"}, "jSymbolic": {"$ref": "#/$defs/jSymbolic"}}, "additionalProperties": false}
+      },
+      "additionalProperties": false
+    },
+    "distribution": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"type": "number"}},
+    "jSymbolic": {"type": "object", "required": ["pitchClassDistribution", "melodicIntervalHistogram", "noteDensity", "averageNoteDuration", "pitchVariety", "pitchClassVariety", "mostCommonPitchClassPrevalence", "relativeStrengthOfTopPitchClasses"], "properties": {"pitchClassDistribution": {"$ref": "#/$defs/distribution"}, "melodicIntervalHistogram": {"type": "array", "minItems": 1, "items": {"type": "number"}}, "noteDensity": {"type": "number", "minimum": 0}, "averageNoteDuration": {"type": "number", "minimum": 0}, "pitchVariety": {"type": "number", "minimum": 0}, "pitchClassVariety": {"type": "number", "minimum": 0}, "mostCommonPitchClassPrevalence": {"type": "number", "minimum": 0, "maximum": 1}, "relativeStrengthOfTopPitchClasses": {"type": "number", "minimum": 0}}, "additionalProperties": false},
+    "channel": {
+      "type": "object",
+      "required": ["channelId", "noteCount", "minMidiPitch", "maxMidiPitch", "ambitus", "medianMidiPitch", "stepRatio", "repetitionRatio", "directedIntervals", "undirectedIntervals", "pitchClassDistribution"],
+      "properties": {
+        "channelId": {"type": "string"}, "noteCount": {"type": "integer", "minimum": 0},
+        "minMidiPitch": {"type": "number"}, "maxMidiPitch": {"type": "number"}, "ambitus": {"type": "number"}, "medianMidiPitch": {"type": "number"},
+        "stepRatio": {"type": "number", "minimum": 0, "maximum": 1}, "repetitionRatio": {"type": "number", "minimum": 0, "maximum": 1},
+        "directedIntervals": {"type": "array", "items": {"type": "integer"}}, "undirectedIntervals": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "intervalDiversity": {"type": "number", "minimum": 0, "maximum": 1}, "pitchClassDistribution": {"$ref": "#/$defs/distribution"}
+      },
+      "additionalProperties": false
+    },
+    "keyRegion": {"type": "object", "required": ["startSample", "endSample", "tonicPitchClass", "tonic", "mode", "confidence"], "properties": {"startSample": {"type": "integer"}, "endSample": {"type": "integer"}, "tonicPitchClass": {"type": "integer", "minimum": 0, "maximum": 11}, "tonic": {"type": "string"}, "mode": {"type": "string"}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "harmony": {"type": "object", "required": ["startSample", "endSample", "pitchClasses", "bassPitchClass", "chord", "symbol", "roman", "romanConfidence", "alternatives", "confidence"], "properties": {"status": {"enum": ["experimental"]}, "startSample": {"type": "integer"}, "endSample": {"type": "integer"}, "pitchClasses": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 11}}, "bassPitchClass": {"type": "integer", "minimum": -1, "maximum": 11}, "chord": {"type": "string"}, "symbol": {"type": "string"}, "roman": {"type": ["string", "null"]}, "romanConfidence": {"anyOf": [{"$ref": "#/$defs/confidence"}, {"type": "null"}]}, "alternatives": {"type": "array", "items": {"type": "string"}}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "motif": {"type": "object", "required": ["motifId", "channelId", "startSample", "endSample", "transposition", "similarity"], "properties": {"status": {"enum": ["experimental"]}, "motifId": {"type": "string"}, "channelId": {"type": "string"}, "startSample": {"type": "integer"}, "endSample": {"type": "integer"}, "transposition": {"type": "integer"}, "similarity": {"type": "number", "minimum": 0, "maximum": 1}}, "additionalProperties": false},
+    "relationship": {"type": "object", "required": ["sourceChannelId", "targetChannelId", "relationship", "interval", "coverage", "confidence"], "properties": {"status": {"enum": ["experimental"]}, "sourceChannelId": {"type": "string"}, "targetChannelId": {"type": "string"}, "relationship": {"type": "string"}, "interval": {"type": "integer"}, "coverage": {"type": "number", "minimum": 0, "maximum": 1}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "pedalTone": {"type": "object", "required": ["channelId", "pitchClass", "startSample", "endSample", "coverage", "confidence"], "properties": {"status": {"enum": ["experimental"]}, "channelId": {"type": "string"}, "pitchClass": {"type": "integer", "minimum": 0, "maximum": 11}, "startSample": {"type": "integer"}, "endSample": {"type": "integer"}, "coverage": {"type": "number", "minimum": 0, "maximum": 1}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "ostinato": {"type": "object", "required": ["channelId", "pitchClasses", "occurrences", "startSample", "endSample", "regularity", "confidence"], "properties": {"status": {"enum": ["experimental"]}, "channelId": {"type": "string"}, "pitchClasses": {"type": "array", "minItems": 2, "items": {"type": "integer", "minimum": 0, "maximum": 11}}, "occurrences": {"type": "integer", "minimum": 3}, "startSample": {"type": "integer"}, "endSample": {"type": "integer"}, "regularity": {"type": "number", "minimum": 0, "maximum": 1}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "boundary": {"type": "object", "required": ["sample", "kind", "confidence"], "properties": {"status": {"enum": ["experimental"]}, "sample": {"type": "integer"}, "kind": {"type": "string"}, "confidence": {"$ref": "#/$defs/confidence"}}, "additionalProperties": false},
+    "warning": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": false}
+  }
+}

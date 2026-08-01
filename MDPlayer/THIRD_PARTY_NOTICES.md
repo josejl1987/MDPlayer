@@ -1,0 +1,77 @@
+# Third-Party Notices
+
+This project uses or references the following third-party software.
+
+## Game_Music_Emu (SNES SPC core)
+
+- **Licence:** LGPL-2.1 with the static-linking exception in `gme/gme.h`
+- **Source:** https://github.com/libgme/game-music-emu
+- **Pinned commit:** `fe8da4b6d3876d7542c2fb69d94487e19836d678`
+- **Usage:** The SPC backend vendors the SPC core (`gme/Spc_Emu.cpp`,
+  `Snes_Spc.cpp`, `Spc_Cpu.cpp`, `Spc_Dsp.cpp`, `SPC_Filter.cpp`,
+  `Music_Emu.*`, `Gme_File.*`, `Data_Reader.*`, `Blip_Buffer.*`,
+  `Multi_Buffer.*`, `Effects_Buffer.*`, `Fir_Resampler.h`, `M3u_Playlist.h`
+  and the shared blargg headers) byte-identical into
+  `native/MDPlayer.SpcNative/upstream/` and compiles it into the
+  `mdplayer_spc` native library. The full library text is in
+  `licenses/game-music-emu-LGPL-2.1.txt`; see
+  `native/MDPlayer.SpcNative/UPSTREAM.md` for the pin, the update procedure and
+  the build-time instrumentation.
+- **Local modifications:** PR 3 applies `patches/0001-voice-capture.patch` at
+  build time to a *copy* of the vendored tree
+  (`build/upstream_patched/`); the patch only adds read-only inline accessors
+  for voice-state capture and never changes emulation. The vendored files on
+  disk stay byte-identical. PR 10 packaging/sanitizer changes live entirely in
+  `CMakeLists.txt`/managed code and add no further upstream edits. (0002/0003
+  are reserved for future instrumentation patches; none are applied today.)
+
+## Corrscope
+
+- **Licence:** BSD-2-Clause
+- **Source:** https://github.com/corrscope/corrscope
+- **Usage:** Corrscope is used as an external tool for oscilloscope rendering.
+  It is not vendored; it must be installed separately. The renderer reads
+  Corrscope's raw RGB frame output via a bridge script.
+
+## FFmpeg
+
+- **Licence:** LGPL-2.1+ (or GPL, depending on build configuration)
+- **Source:** https://ffmpeg.org
+- **Usage:** FFmpeg is used as an external tool for video encoding. It is not
+  vendored; it must be installed separately.
+
+## music21
+
+- **Licence:** BSD-3-Clause
+- **Source:** https://github.com/cuthbertLab/music21
+- **Usage:** Optional external Python dependency for offline symbolic music
+  analysis. It is not vendored and its corpus files are not distributed.
+
+## .NET Runtime
+
+- **Licence:** MIT
+- **Source:** https://github.com/dotnet/runtime
+- **Usage:** The project targets .NET 8.0+.
+
+## MIDITrail (design reference)
+
+- **Licence:** BSD-3-Clause
+- **Source:** https://github.com/AzraelK/MIDITrail
+- **Usage:** Design reference only. No MIDITrail source code is included in
+  this repository. See `docs/visualization-references.md` for details.
+
+## Kiva (design reference)
+
+- **Licence:** Don't Be a Dick (incompatible — no code used)
+- **Source:** https://github.com/SayuriForce/Kiva
+- **Usage:** Design reference only.
+
+## Pianola (design reference)
+
+- **Licence:** AGPL-3.0 (incompatible — no code used)
+- **Usage:** Design reference only.
+
+## SeeMusic (design reference)
+
+- **Licence:** Proprietary
+- **Usage:** Visual design reference only. No code or assets used.

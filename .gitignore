@@ -183,6 +183,8 @@ ClientBin/
 *.dbproj.schemaview
 *.pfx
 *.publishsettings
+__pycache__/
+*.py[cod]
 node_modules/
 orleans.codegen.cs
 
@@ -239,3 +241,70 @@ output
 lib
 plugin
 /MDPlayer/MDPlayer_InstKit/mdplayer
+
+# FMP renderer: local track config (user-provided)
+MDPlayer/tests/Corpus/local/local-config.json
+
+# FMP renderer: generated golden artifacts and baseline files
+MDPlayer/artifacts/
+
+# FMP renderer: large generated test output
+MDPlayer/e2e-test.wav
+MDPlayer/e2e-test.jsonl
+MDPlayer/e2e-test.metadata.json
+
+# FMP renderer: build outputs are covered by the repository-wide bin/obj
+# patterns above.
+
+# Root render outputs (XM20* wav/json files)
+XA20*.wav
+XA20*.metadata.json
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Modern IDE / editor directories
+.idea/
+.vscode/
+*.code-workspace
+
+# Local tool caches and configuration
+.codegraph/
+.reasonix/
+reasonix.toml
+
+# Python virtual environments
+.venv/
+venv/
+ENV/
+.corr-venv/
+_venv/
+
+# Corrosion / corrscope local home directory
+_corr_home/
+
+# Root render outputs (in addition to XA20*.wav / XA20*.metadata.json above)
+XA20*.events.jsonl
+
+# OVI → visualization render outputs
+*.visualization/
+*.scope/
+*.visualization.partial.mp4
+# User-provided FMP tracks stay in the ignored local corpus, never at repo root.
+*.ovi
+*.OVI
+MDPlayer.zip
+
+# NuGet caches and local package restore state
+.nuget/
+**/nuget-packages/
+**/nuget-http-cache/
+**/nuget-test/
+
+# FMP renderer / test run outputs
+MDPlayer/test-video-output/
+
+# Build executables at project root
+*.exe

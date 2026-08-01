@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Allow running on machines with only a newer .NET runtime (e.g. .NET 10). -->
+    <RollForward>LatestMajor</RollForward>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>mdplayer-render</AssemblyName>
+    <RootNamespace>Fmp.Cli</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MDPlayer.Fmp.Tests" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MDPlayer.Fmp.Core\MDPlayer.Fmp.Core.csproj" />
+    <Reference Include="MDSound">
+      <HintPath>..\..\lib\MDSound.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="corrscope-frames.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\mdplayer_music_analysis.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\score_builder.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\key_analysis.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\harmony_analysis.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\motif_analysis.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\feature_analysis.py" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\requirements.lock" LinkBase="tools\music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\..\tools\music-analysis\schemas\*.json" LinkBase="tools\music-analysis\schemas">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SPC native backend packaging: copied from runtimes/<rid>/native by the
+         native cmake build (linux-x64 on non-Windows, win-x64 on Windows); the
+         SpcNativeSession wrapper probes the current-OS path under
+         AppContext.BaseDirectory (or MDPLAYER_SPC_NATIVE). -->
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_spc.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_spc.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_spc.so</Link>
+    </None>
+    <None Include="..\..\runtimes\win-x64\native\mdplayer_spc.dll"
+          Condition="Exists('..\..\runtimes\win-x64\native\mdplayer_spc.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/mdplayer_spc.dll</Link>
+    </None>
+
+    <Content Include="../../../tools/music-analysis/pattern_analysis.py" LinkBase="tools/music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="../../../tools/music-analysis/local_key_analysis.py" LinkBase="tools/music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="../../../tools/music-analysis/relationship_analysis.py" LinkBase="tools/music-analysis">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,4 @@
+{
+  "key": {"accepted": ["C major"], "mustWithhold": false},
+  "harmony": [{"startSample": 0, "endSample": 1000, "accepted": ["C", "C major"], "mustWithhold": false}]
+}

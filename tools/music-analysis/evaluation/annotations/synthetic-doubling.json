@@ -1,0 +1,5 @@
+{
+  "key": {"accepted": [], "mustWithhold": true},
+  "harmony": [],
+  "relationships": [{"accepted": ["octave-doubling"], "mustWithhold": false}]
+}

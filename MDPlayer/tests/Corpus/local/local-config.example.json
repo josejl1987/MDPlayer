@@ -1,0 +1,19 @@
+{
+  "$schema": "../manifest.json",
+  "description": "Local (user-provided) track configuration. This file is gitignored — customize for your environment.",
+  "fmpComPath": "/home/jose/fmp/FMP.COM",
+  "tracks": [
+    {
+      "name": "example-fm-only",
+      "path": "/home/jose/Downloads/Field.OVI",
+      "format": "OVI",
+      "tags": ["fm-only"]
+    },
+    {
+      "name": "example-ppz8",
+      "path": "/home/jose/Downloads/Action 1.OVI",
+      "format": "OVI",
+      "tags": ["ppz8"]
+    }
+  ]
+}
