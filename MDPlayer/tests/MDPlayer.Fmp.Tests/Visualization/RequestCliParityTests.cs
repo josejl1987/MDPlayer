@@ -284,6 +284,54 @@ public class RequestCliParityTests
         Assert.Equal(request.Playback.SampleRate, parsed.Playback.SampleRate);
     }
 
+    /// <summary>
+    /// The canonical render parser's --request-json seeding: explicit CLI
+    /// options override the seeded request fields, everything else keeps the
+    /// seeded values, and --output/--request-json never leak into the request.
+    /// </summary>
+    [Fact]
+    public void RenderCommandParser_RequestJsonSeed_AppliesCliOverrides()
+    {
+        VisualizationRequest seed = FinalWithMetadata();
+        string jsonPath = Path.Combine(Path.GetTempPath(), $"parity-{Guid.NewGuid():N}.json");
+        try
+        {
+            VisualizationRequestSerializer.WriteToFile(seed, jsonPath);
+
+            (VisualizationRequest parsed, RenderRuntimeOptions runtime, string? requestJsonPath) =
+                RenderCommandParser.ParseCore(new[]
+                {
+                    "--request-json", jsonPath,
+                    "--composition", "scope-stage",
+                    "--width", "1280",
+                    "--fps", "30",
+                    "--quality", "draft",
+                    "--title", "Overridden Title",
+                });
+
+            // CLI overrides win.
+            Assert.Equal(CompositionKind.ScopeStage, parsed.Composition);
+            Assert.Equal(1280, parsed.Output.Width);
+            Assert.Equal(30, parsed.Output.FpsNumerator);
+            Assert.Equal(RenderQuality.Draft, parsed.Output.Quality);
+            Assert.Equal("Overridden Title", parsed.Presentation.Title);
+
+            // Seeded values persist where not overridden.
+            Assert.Equal(seed.OutputPath, parsed.OutputPath);
+            Assert.Equal(seed.Output.Encoder, parsed.Output.Encoder);
+            Assert.Equal(seed.Playback.SampleRate, parsed.Playback.SampleRate);
+            Assert.Equal(seed.Presentation.Subtitle, parsed.Presentation.Subtitle);
+
+            // The seed path is runtime metadata, not a request field.
+            Assert.Equal(jsonPath, requestJsonPath);
+            Assert.Null(runtime.FmpCom);
+        }
+        finally
+        {
+            File.Delete(jsonPath);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Round-trip subset helpers
     // ------------------------------------------------------------------
