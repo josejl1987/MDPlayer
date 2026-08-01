@@ -117,76 +117,58 @@ internal sealed class VisualizeOptions : RenderSettings
     /// </summary>
     internal void ApplyRequest(Fmp.Application.Contracts.VisualizationRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request);
-
         Input = request.InputPath;
         OutputDir = Path.GetDirectoryName(request.OutputPath) ?? ".";
         VideoPath = request.OutputPath;
 
-        Preset = MapPreset(request.Preset);
-        LayoutMode = MapLayout(request.Layout);
-        Width = request.Width;
-        Height = request.Height;
-        Fps = request.FpsNumerator;
-        FpsDenominator = request.FpsDenominator;
-        PastSeconds = request.PastSeconds;
-        FutureSeconds = request.FutureSeconds;
-        RollZoom = request.RollZoom;
-        ScopeRatio = request.ScopeRatio;
-        ScopePosition = MapScopePosition(request.ScopePosition);
-        Channels = request.ChannelSelection == Fmp.Application.Contracts.ChannelSelectionMode.Custom
+        Preset = MapQuality(request.Output.Quality);
+        LayoutMode = MapComposition(request.Composition);
+        Width = request.Output.Width;
+        Height = request.Output.Height;
+        Fps = request.Output.FpsNumerator;
+        FpsDenominator = request.Output.FpsDenominator;
+        PastSeconds = request.View.PastSeconds;
+        FutureSeconds = request.View.FutureSeconds;
+        RollZoom = 1.0;
+        ScopeRatio = null;
+        ScopePosition = VisualizationScopePosition.Bottom;
+        Channels = request.Tracks.Selection == Fmp.Application.Contracts.TrackSelectionMode.Custom
             ? VisualizationChannelFilter.All
-            : MapChannelFilter(request.ChannelSelection);
+            : MapTrackSelection(request.Tracks.Selection);
         IncludeTracks.Clear();
-        IncludeTracks.AddRange(request.IncludedTrackIds);
+        IncludeTracks.AddRange(request.Tracks.IncludedIds);
         ExcludeTracks.Clear();
-        ExcludeTracks.AddRange(request.ExcludedTrackIds);
-        GroupBy = MapGroupBy(request.Grouping);
-        TimeGrid = MapTimeGrid(request.TimeGrid);
-        Effects = MapEffects(request.Effects);
-        NoteColor = MapNoteColor(request.NoteColor);
-        Title = request.Title;
-        Subtitle = request.Subtitle;
-        Credits = request.Credits;
-        FontPath = request.FontPath;
+        ExcludeTracks.AddRange(request.Tracks.ExcludedIds);
+        GroupBy = VisualizationGroupBy.None;
+        TimeGrid = MapTimeGrid(request.View.TimeGrid);
+        Effects = MapEffects(request.Style.Effects);
+        NoteColor = MapNoteColor(request.Style.NoteColor);
+        Title = request.Presentation.Title;
+        Subtitle = request.Presentation.Subtitle;
+        Credits = request.Presentation.Credits;
+        FontPath = request.Presentation.FontPath;
 
-        Loops = request.LoopCount;
-        Fade = request.FadeSeconds;
-        Tail = request.TailSeconds;
-        MaxDuration = request.MaximumDurationSeconds ?? 300.0;
-        Timeout = request.TimeoutSeconds;
-        SampleRate = request.SampleRate;
-        SsgGainDb = request.SsgGainDb;
-        SpcPitchMode = MapSpcPitch(request.SpcPitch);
-        Encoder = MapEncoder(request.Encoder);
-        Backend = MapBackend(request.Backend);
-        ScopeMode = MapScopeMode(request.ScopeMode);
-        FinalQuality = request.FinalQuality;
-        StemsOnly = request.StemsOnly;
-        Overwrite = request.Overwrite;
+        Loops = request.Playback.LoopCount;
+        Fade = request.Playback.FadeSeconds;
+        Tail = request.Playback.TailSeconds;
+        MaxDuration = request.Playback.MaximumDurationSeconds ?? 300.0;
+        Timeout = null;
+        SampleRate = request.Playback.SampleRate;
+        SsgGainDb = 0;
+        SpcPitchMode = SpcPitchMode.Estimate;
+        Encoder = MapEncoder(request.Output.Encoder);
+        Backend = "auto";
+        ScopeMode = "auto";
+        FinalQuality = request.Output.Quality == Fmp.Application.Contracts.RenderQuality.Final;
+        StemsOnly = false;
+        Overwrite = request.Output.Overwrite;
 
-        CorrscopePath = request.Tools.CorrscopePath;
-        FfmpegPath = request.Tools.FfmpegPath;
-        AnalysisPython = request.Tools.AnalysisPython;
-        AnalysisCache = request.Tools.AnalysisCache;
-        AnalysisOutput = request.Tools.AnalysisOutput;
-        AnalysisForce = request.Tools.AnalysisForce;
-        AnalysisDetail = MapAnalysisDetail(request.AnalysisDetail);
-        AnalysisTimeoutMinutes = request.Tools.AnalysisTimeoutMinutes ?? 10;
-        AnalysisOverlay = MapAnalysisOverlay(request.AnalysisOverlay);
-        Analysis = request.AnalysisEnabled;
-        ExternalToolTimeoutMinutes = request.Tools.ToolTimeoutMinutes ?? 60;
-        CorrscopeVideoTemplate = request.Tools.CorrscopeVideoTemplate;
-        FmpCom = request.Tools.FmpComPath;
-        AssetsDir = request.Tools.AssetsDir;
-        SearchPaths.Clear();
-        SearchPaths.AddRange(request.Tools.SearchPaths);
+        // Runtime tool paths are process-level, not serialized in the request.
+        ExternalToolTimeoutMinutes = 60;
 
         // Every request-seeded field counts as explicitly configured so
         // preset defaulting and backend applicability treat it like a CLI
-        // option. Flags whose default value means "not requested" stay false
-        // (e.g. ScopeMode Auto, SpcPitch Estimate) so generic backends are not
-        // spuriously rejected.
+        // option.
         WidthExplicit = true;
         HeightExplicit = true;
         FpsExplicit = true;
@@ -196,59 +178,34 @@ internal sealed class VisualizeOptions : RenderSettings
         AnalysisOverlayExplicit = true;
         PastExplicit = true;
         FutureExplicit = true;
-        FmpComExplicit = !string.IsNullOrEmpty(request.Tools.FmpComPath);
-        SsgGainExplicit = request.SsgGainDb != 0;
-        TimeoutExplicit = request.TimeoutSeconds.HasValue;
-        SpcPitchExplicit = request.SpcPitch != Fmp.Application.Contracts.SpcPitchMode.Estimate;
-        ScopeModeExplicit = request.ScopeMode != Fmp.Application.Contracts.ScopeMode.Auto;
         BackendExplicit = true;
+        ScopeModeExplicit = false;
+        SpcPitchExplicit = false;
+        SsgGainExplicit = false;
+        TimeoutExplicit = false;
+        FmpComExplicit = false;
     }
 
-    private static VisualizationPreset MapPreset(Fmp.Application.Contracts.VisualizationPreset preset) => preset switch
+    private static VisualizationPreset MapQuality(Fmp.Application.Contracts.RenderQuality quality) => quality switch
     {
-        Fmp.Application.Contracts.VisualizationPreset.Preview => VisualizationPreset.Preview,
-        Fmp.Application.Contracts.VisualizationPreset.Final => VisualizationPreset.Final,
-        Fmp.Application.Contracts.VisualizationPreset.Diagnostic => VisualizationPreset.Diagnostic,
+        Fmp.Application.Contracts.RenderQuality.Draft => VisualizationPreset.Preview,
+        Fmp.Application.Contracts.RenderQuality.Final => VisualizationPreset.Final,
         _ => VisualizationPreset.Balanced,
     };
 
-    private static VisualizationLayoutMode MapLayout(Fmp.Application.Contracts.VisualizationLayout layout) => layout switch
+    private static VisualizationLayoutMode MapComposition(Fmp.Application.Contracts.CompositionKind composition) => composition switch
     {
-        Fmp.Application.Contracts.VisualizationLayout.UnifiedRoll => VisualizationLayoutMode.UnifiedRoll,
-        Fmp.Application.Contracts.VisualizationLayout.SplitRoll => VisualizationLayoutMode.SplitRoll,
-        Fmp.Application.Contracts.VisualizationLayout.Scopes => VisualizationLayoutMode.Scope,
-        Fmp.Application.Contracts.VisualizationLayout.Hybrid => VisualizationLayoutMode.Hybrid,
-        Fmp.Application.Contracts.VisualizationLayout.Diagnostic => VisualizationLayoutMode.Diagnostic,
-        Fmp.Application.Contracts.VisualizationLayout.LegacyDiagnostic => VisualizationLayoutMode.DiagnosticV2,
-        Fmp.Application.Contracts.VisualizationLayout.Performance => VisualizationLayoutMode.Performance,
-        Fmp.Application.Contracts.VisualizationLayout.ScopeStage => VisualizationLayoutMode.ScopeStage,
-        _ => VisualizationLayoutMode.Auto,
+        Fmp.Application.Contracts.CompositionKind.ScopeStage => VisualizationLayoutMode.ScopeStage,
+        Fmp.Application.Contracts.CompositionKind.Diagnostic => VisualizationLayoutMode.Diagnostic,
+        _ => VisualizationLayoutMode.Performance,
     };
 
-    private static VisualizationChannelFilter MapChannelFilter(
-        Fmp.Application.Contracts.ChannelSelectionMode mode) => mode switch
+    private static VisualizationChannelFilter MapTrackSelection(
+        Fmp.Application.Contracts.TrackSelectionMode mode) => mode switch
     {
-        Fmp.Application.Contracts.ChannelSelectionMode.Audible => VisualizationChannelFilter.Audible,
-        Fmp.Application.Contracts.ChannelSelectionMode.Semantic => VisualizationChannelFilter.Semantic,
-        Fmp.Application.Contracts.ChannelSelectionMode.All => VisualizationChannelFilter.All,
-        Fmp.Application.Contracts.ChannelSelectionMode.Custom => VisualizationChannelFilter.All,
+        Fmp.Application.Contracts.TrackSelectionMode.All => VisualizationChannelFilter.All,
+        Fmp.Application.Contracts.TrackSelectionMode.Custom => VisualizationChannelFilter.All,
         _ => VisualizationChannelFilter.Active,
-    };
-
-    private static VisualizationScopePosition MapScopePosition(
-        Fmp.Application.Contracts.ScopePosition position) => position switch
-    {
-        Fmp.Application.Contracts.ScopePosition.Top => VisualizationScopePosition.Top,
-        Fmp.Application.Contracts.ScopePosition.Left => VisualizationScopePosition.Left,
-        Fmp.Application.Contracts.ScopePosition.Right => VisualizationScopePosition.Right,
-        _ => VisualizationScopePosition.Bottom,
-    };
-
-    private static VisualizationGroupBy MapGroupBy(Fmp.Application.Contracts.TrackGroupingMode grouping) => grouping switch
-    {
-        Fmp.Application.Contracts.TrackGroupingMode.Device => VisualizationGroupBy.Device,
-        Fmp.Application.Contracts.TrackGroupingMode.Family => VisualizationGroupBy.Family,
-        _ => VisualizationGroupBy.None,
     };
 
     private static VisualizationTimeGrid MapTimeGrid(Fmp.Application.Contracts.TimeGridMode grid) => grid switch
@@ -259,13 +216,10 @@ internal sealed class VisualizeOptions : RenderSettings
         _ => VisualizationTimeGrid.Automatic,
     };
 
-    private static EffectsMode MapEffects(Fmp.Application.Contracts.VisualizationEffects effects) => effects switch
+    private static EffectsMode MapEffects(Fmp.Application.Contracts.VisualEffects effects) => effects switch
     {
-        Fmp.Application.Contracts.VisualizationEffects.None => EffectsMode.None,
-        Fmp.Application.Contracts.VisualizationEffects.Diagnostic => EffectsMode.Diagnostic,
-        Fmp.Application.Contracts.VisualizationEffects.Cinematic => EffectsMode.Cinematic,
-        // The request model exposes four effect presets; CLI-only "all" maps to
-        // the closest request-representable value.
+        Fmp.Application.Contracts.VisualEffects.Off => EffectsMode.None,
+        Fmp.Application.Contracts.VisualEffects.Cinematic => EffectsMode.Cinematic,
         _ => EffectsMode.Minimal,
     };
 
@@ -276,48 +230,11 @@ internal sealed class VisualizeOptions : RenderSettings
         _ => NoteColorMode.Instrument,
     };
 
-    private static SpcPitchMode MapSpcPitch(Fmp.Application.Contracts.SpcPitchMode mode) => mode switch
-    {
-        Fmp.Application.Contracts.SpcPitchMode.Relative => SpcPitchMode.Relative,
-        _ => SpcPitchMode.Estimate,
-    };
-
     private static VideoEncoder MapEncoder(Fmp.Application.Contracts.VideoEncoder encoder) => encoder switch
     {
         Fmp.Application.Contracts.VideoEncoder.LibX264 => VideoEncoder.LibX264,
         Fmp.Application.Contracts.VideoEncoder.Nvenc => VideoEncoder.Nvenc,
         _ => VideoEncoder.Auto,
-    };
-
-    private static string MapBackend(Fmp.Application.Contracts.BackendPreference backend) => backend switch
-    {
-        Fmp.Application.Contracts.BackendPreference.Fmp => "fmp",
-        Fmp.Application.Contracts.BackendPreference.Mdplayer => "mdplayer",
-        _ => "auto",
-    };
-
-    private static string MapScopeMode(Fmp.Application.Contracts.ScopeMode mode) => mode switch
-    {
-        Fmp.Application.Contracts.ScopeMode.Master => "master",
-        Fmp.Application.Contracts.ScopeMode.Device => "device",
-        Fmp.Application.Contracts.ScopeMode.Channel => "channel",
-        Fmp.Application.Contracts.ScopeMode.Off => "off",
-        _ => "auto",
-    };
-
-    private static AnalysisDetail MapAnalysisDetail(Fmp.Application.Contracts.AnalysisDetail detail) => detail switch
-    {
-        Fmp.Application.Contracts.AnalysisDetail.Minimal => AnalysisDetail.Minimal,
-        Fmp.Application.Contracts.AnalysisDetail.Full => AnalysisDetail.Full,
-        _ => AnalysisDetail.Standard,
-    };
-
-    private static string MapAnalysisOverlay(Fmp.Application.Contracts.AnalysisOverlayMode mode) => mode switch
-    {
-        Fmp.Application.Contracts.AnalysisOverlayMode.None => "none",
-        Fmp.Application.Contracts.AnalysisOverlayMode.Standard => "standard",
-        Fmp.Application.Contracts.AnalysisOverlayMode.Full => "full",
-        _ => "minimal",
     };
 }
 

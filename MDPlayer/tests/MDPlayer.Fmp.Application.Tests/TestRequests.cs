@@ -2,7 +2,7 @@ using Fmp.Application.Contracts;
 
 namespace Fmp.Application.Tests;
 
-/// <summary>Shared request builders.</summary>
+/// <summary>Shared request builders for the final (schema 1 / greenfield) contract.</summary>
 internal static class TestRequests
 {
     public static VisualizationRequest Valid(string? inputPath = null, string? outputPath = null)
@@ -34,54 +34,52 @@ internal static class TestRequests
         VisualizationRequest request = Valid();
         return request with
         {
-            Preset = VisualizationPreset.Final,
-            Layout = VisualizationLayout.Hybrid,
-            Width = 1920,
-            Height = 1080,
-            FpsNumerator = 60000,
-            FpsDenominator = 1001,
-            ChannelSelection = ChannelSelectionMode.Custom,
-            IncludedTrackIds = new[] { "ym2608.0.fm.1", "ym2608.0.fm.2" },
-            ExcludedTrackIds = new[] { "ym2608.0.rhythm.1" },
-            PastSeconds = 0.4,
-            FutureSeconds = 1.6,
-            Effects = VisualizationEffects.Cinematic,
-            NoteColor = NoteColorMode.Channel,
-            ScopeRatio = 0.3,
-            ScopePosition = ScopePosition.Left,
-            Grouping = TrackGroupingMode.Device,
-            TimeGrid = TimeGridMode.Analytical,
-            RollZoom = 1.25,
-            AnalysisEnabled = true,
-            AnalysisDetail = AnalysisDetail.Full,
-            AnalysisOverlay = AnalysisOverlayMode.Standard,
-            Title = "My Song",
-            Subtitle = "Sub",
-            Credits = "Cred",
-            FontPath = "/fonts/noto.ttf",
-            LoopCount = 4,
-            FadeSeconds = 3.0,
-            TailSeconds = 1.0,
-            MaximumDurationSeconds = 120,
-            TimeoutSeconds = 90,
-            SampleRate = 48000,
-            SsgGainDb = 2.0,
-            Encoder = VideoEncoder.Nvenc,
-            Backend = BackendPreference.Auto,
-            ScopeMode = ScopeMode.Channel,
-            FinalQuality = true,
-            StemsOnly = false,
-            Overwrite = true,
-            Tools = new ToolOverrides
+            Composition = CompositionKind.ScopeStage,
+            Output = new OutputSettings
             {
-                CorrscopePath = "/opt/corrscope/corrscope",
-                FfmpegPath = "/usr/bin/ffmpeg",
-                AnalysisPython = "/usr/bin/python3",
-                AnalysisCache = "/cache/analysis",
-                AnalysisForce = true,
-                AnalysisTimeoutMinutes = 20,
-                ToolTimeoutMinutes = 45,
-                FmpComPath = "/opt/fmp/FMP.COM",
+                Quality = RenderQuality.Final,
+                Width = 1920,
+                Height = 1080,
+                FpsNumerator = 60000,
+                FpsDenominator = 1001,
+                Encoder = VideoEncoder.Nvenc,
+                Overwrite = true,
+            },
+            Tracks = new TrackSettings
+            {
+                Selection = TrackSelectionMode.Custom,
+                IncludedIds = new[] { "ym2608.0.fm.1", "ym2608.0.fm.2" },
+                ExcludedIds = new[] { "ym2608.0.rhythm.1" },
+                IncludeInactiveDiagnosticTracks = true,
+            },
+            View = new ViewSettings
+            {
+                PastSeconds = 0.4,
+                FutureSeconds = 1.6,
+                TimeGrid = TimeGridMode.Analytical,
+                Structure = StructureOverlayMode.Off,
+                PerformanceSignalStrip = true,
+            },
+            Style = new StyleSettings
+            {
+                Effects = VisualEffects.Cinematic,
+                NoteColor = NoteColorMode.Channel,
+                Palette = PaletteKind.Accessible,
+            },
+            Presentation = new PresentationSettings
+            {
+                Title = "My Song",
+                Subtitle = "Sub",
+                Credits = "Cred",
+                FontPath = "/fonts/noto.ttf",
+            },
+            Playback = new PlaybackSettings
+            {
+                LoopCount = 4,
+                FadeSeconds = 3.0,
+                TailSeconds = 1.0,
+                MaximumDurationSeconds = 120,
+                SampleRate = 48_000,
             },
         };
     }

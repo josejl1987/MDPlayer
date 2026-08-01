@@ -29,13 +29,11 @@ public static class PreviewCacheKey
         builder.Append(Path.GetFullPath(inputPath));
         builder.Append('|').Append(inputLength);
         builder.Append('|').Append(lastWriteUtc.Ticks);
-        builder.Append('|').Append(request.LoopCount);
-        builder.Append('|').Append(request.FadeSeconds.ToString("R"));
-        builder.Append('|').Append(request.TailSeconds.ToString("R"));
-        builder.Append('|').Append(request.MaximumDurationSeconds?.ToString("R") ?? "-");
-        builder.Append('|').Append(request.SampleRate);
-        builder.Append('|').Append(request.TimeoutSeconds?.ToString("R") ?? "-");
-        builder.Append('|').Append(request.Backend);
+        builder.Append('|').Append(request.Playback.LoopCount);
+        builder.Append('|').Append(request.Playback.FadeSeconds.ToString("R"));
+        builder.Append('|').Append(request.Playback.TailSeconds.ToString("R"));
+        builder.Append('|').Append(request.Playback.MaximumDurationSeconds?.ToString("R") ?? "-");
+        builder.Append('|').Append(request.Playback.SampleRate);
         return Sha1Hex(builder.ToString());
     }
 

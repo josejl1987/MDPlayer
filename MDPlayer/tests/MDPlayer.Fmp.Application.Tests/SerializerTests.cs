@@ -17,15 +17,39 @@ public class SerializerTests
         // Lists deserialize as List<T> (reference-based record equality), so
         // assert canonical JSON stability plus targeted field checks.
         Assert.Equal(json, VisualizationRequestSerializer.Serialize(restored));
-        Assert.Equal(original.Tools.CorrscopePath, restored.Tools.CorrscopePath);
-        Assert.Equal(original.Tools.AnalysisForce, restored.Tools.AnalysisForce);
-        Assert.Equal(original.IncludedTrackIds, restored.IncludedTrackIds);
-        Assert.Equal(original.ExcludedTrackIds, restored.ExcludedTrackIds);
-        Assert.Equal(60000, restored.FpsNumerator);
-        Assert.Equal(1001, restored.FpsDenominator);
-        Assert.Equal(VisualizationLayout.Hybrid, restored.Layout);
-        Assert.Equal(VisualizationEffects.Cinematic, restored.Effects);
-        Assert.Equal("My Song", restored.Title);
+
+        Assert.Equal(CompositionKind.ScopeStage, restored.Composition);
+        Assert.Equal(RenderQuality.Final, restored.Output.Quality);
+        Assert.Equal(60000, restored.Output.FpsNumerator);
+        Assert.Equal(1001, restored.Output.FpsDenominator);
+        Assert.Equal(VideoEncoder.Nvenc, restored.Output.Encoder);
+        Assert.True(restored.Output.Overwrite);
+
+        Assert.Equal(TrackSelectionMode.Custom, restored.Tracks.Selection);
+        Assert.Equal(original.Tracks.IncludedIds, restored.Tracks.IncludedIds);
+        Assert.Equal(original.Tracks.ExcludedIds, restored.Tracks.ExcludedIds);
+        Assert.True(restored.Tracks.IncludeInactiveDiagnosticTracks);
+
+        Assert.Equal(0.4, restored.View.PastSeconds);
+        Assert.Equal(1.6, restored.View.FutureSeconds);
+        Assert.Equal(TimeGridMode.Analytical, restored.View.TimeGrid);
+        Assert.Equal(StructureOverlayMode.Off, restored.View.Structure);
+        Assert.True(restored.View.PerformanceSignalStrip);
+
+        Assert.Equal(VisualEffects.Cinematic, restored.Style.Effects);
+        Assert.Equal(NoteColorMode.Channel, restored.Style.NoteColor);
+        Assert.Equal(PaletteKind.Accessible, restored.Style.Palette);
+
+        Assert.Equal("My Song", restored.Presentation.Title);
+        Assert.Equal("Sub", restored.Presentation.Subtitle);
+        Assert.Equal("Cred", restored.Presentation.Credits);
+        Assert.Equal("/fonts/noto.ttf", restored.Presentation.FontPath);
+
+        Assert.Equal(4, restored.Playback.LoopCount);
+        Assert.Equal(3.0, restored.Playback.FadeSeconds);
+        Assert.Equal(1.0, restored.Playback.TailSeconds);
+        Assert.Equal(120.0, restored.Playback.MaximumDurationSeconds);
+        Assert.Equal(48_000, restored.Playback.SampleRate);
     }
 
     [Fact]
@@ -51,6 +75,35 @@ public class SerializerTests
         VisualizationRequest request = VisualizationRequestSerializer.Deserialize(json);
         Assert.Equal("/tmp/x.vgz", request.InputPath);
         Assert.Equal(1, request.SchemaVersion);
+    }
+
+    [Fact]
+    public void MissingSchema_DefaultsToOne()
+    {
+        string json = """
+            {
+              "inputPath": "/tmp/x.vgz",
+              "outputPath": "/tmp/x.visualization/v.mp4"
+            }
+            """;
+        Assert.Equal(1, VisualizationRequestSerializer.Deserialize(json).SchemaVersion);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void OlderOrNegativeSchema_IsAccepted(int schemaVersion)
+    {
+        // The serializer rejects only schemas *newer* than MaxSchemaVersion.
+        string json = $$"""
+            {
+              "schemaVersion": {{schemaVersion}},
+              "inputPath": "/tmp/x.vgz",
+              "outputPath": "/tmp/x.visualization/v.mp4"
+            }
+            """;
+        VisualizationRequest request = VisualizationRequestSerializer.Deserialize(json);
+        Assert.Equal(schemaVersion, request.SchemaVersion);
     }
 
     [Fact]
@@ -98,9 +151,26 @@ public class SerializerTests
     public void EnumJson_UsesStringNames()
     {
         string json = VisualizationRequestSerializer.Serialize(
-            TestRequests.Valid() with { Layout = VisualizationLayout.Hybrid, Encoder = VideoEncoder.Nvenc });
+            TestRequests.Valid() with
+            {
+                Composition = CompositionKind.Diagnostic,
+                Output = new OutputSettings { Encoder = VideoEncoder.Nvenc },
+                Tracks = new TrackSettings { Selection = TrackSelectionMode.All },
+                View = new ViewSettings { TimeGrid = TimeGridMode.Authoritative },
+                Style = new StyleSettings
+                {
+                    Effects = VisualEffects.Cinematic,
+                    NoteColor = NoteColorMode.PitchClass,
+                    Palette = PaletteKind.Monochrome,
+                },
+            });
         using JsonDocument document = JsonDocument.Parse(json);
-        Assert.Equal("Hybrid", document.RootElement.GetProperty("layout").GetString());
-        Assert.Equal("Nvenc", document.RootElement.GetProperty("encoder").GetString());
+        Assert.Equal("Diagnostic", document.RootElement.GetProperty("composition").GetString());
+        Assert.Equal("Nvenc", document.RootElement.GetProperty("output").GetProperty("encoder").GetString());
+        Assert.Equal("All", document.RootElement.GetProperty("tracks").GetProperty("selection").GetString());
+        Assert.Equal("Authoritative", document.RootElement.GetProperty("view").GetProperty("timeGrid").GetString());
+        Assert.Equal("Cinematic", document.RootElement.GetProperty("style").GetProperty("effects").GetString());
+        Assert.Equal("PitchClass", document.RootElement.GetProperty("style").GetProperty("noteColor").GetString());
+        Assert.Equal("Monochrome", document.RootElement.GetProperty("style").GetProperty("palette").GetString());
     }
 }

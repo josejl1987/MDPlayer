@@ -48,50 +48,137 @@ public class ValidationTests
     }
 
     [Theory]
-    [InlineData(479, 720, "Width")]
-    [InlineData(1280, 269, "Height")]
+    [InlineData(479, 720, "Output.Width")]
+    [InlineData(1280, 269, "Output.Height")]
     public void TooSmallResolution_IsError(int width, int height, string setting)
     {
-        VisualizationRequest request = ValidRequest() with { Width = width, Height = height };
+        VisualizationRequest request = ValidRequest() with
+        {
+            Output = new OutputSettings { Width = width, Height = height },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
             issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == setting);
     }
 
     [Fact]
-    public void NonPositiveFps_IsError()
+    public void NonPositiveFpsNumerator_IsError()
     {
-        VisualizationRequest request = ValidRequest() with { FpsNumerator = 0 };
+        VisualizationRequest request = ValidRequest() with
+        {
+            Output = new OutputSettings { FpsNumerator = 0 },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
-            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "FpsNumerator");
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Output.FpsNumerator");
+    }
+
+    [Fact]
+    public void NonPositiveFpsDenominator_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Output = new OutputSettings { FpsDenominator = 0 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Output.FpsDenominator");
     }
 
     [Fact]
     public void OutOfRangePastSeconds_IsError()
     {
-        VisualizationRequest request = ValidRequest() with { PastSeconds = 20 };
+        VisualizationRequest request = ValidRequest() with
+        {
+            View = new ViewSettings { PastSeconds = 20 },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
-            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "PastSeconds");
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "View.PastSeconds");
     }
 
     [Fact]
-    public void ExcessiveScopeRatio_IsError()
+    public void OutOfRangeFutureSeconds_IsError()
     {
-        VisualizationRequest request = ValidRequest() with { ScopeRatio = 0.9 };
+        VisualizationRequest request = ValidRequest() with
+        {
+            View = new ViewSettings { FutureSeconds = 16 },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
-            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "ScopeRatio");
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "View.FutureSeconds");
+    }
+
+    [Fact]
+    public void ExcessiveTimeWindow_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            View = new ViewSettings { PastSeconds = 12, FutureSeconds = 12 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "View.PastSeconds");
     }
 
     [Fact]
     public void NonPositiveLoopCount_IsError()
     {
-        VisualizationRequest request = ValidRequest() with { LoopCount = 0 };
+        VisualizationRequest request = ValidRequest() with
+        {
+            Playback = new PlaybackSettings { LoopCount = 0 },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
-            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "LoopCount");
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Playback.LoopCount");
+    }
+
+    [Fact]
+    public void NegativeFadeSeconds_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Playback = new PlaybackSettings { FadeSeconds = -1 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Playback.FadeSeconds");
+    }
+
+    [Fact]
+    public void NegativeTailSeconds_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Playback = new PlaybackSettings { TailSeconds = -0.1 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Playback.TailSeconds");
+    }
+
+    [Fact]
+    public void NonPositiveMaximumDuration_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Playback = new PlaybackSettings { MaximumDurationSeconds = 0 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Playback.MaximumDurationSeconds");
+    }
+
+    [Fact]
+    public void NonPositiveSampleRate_IsError()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Playback = new PlaybackSettings { SampleRate = 0 },
+        };
+        Assert.Contains(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.Code == ValidationCodes.InvalidRequest && issue.SettingPath == "Playback.SampleRate");
     }
 
     [Fact]
@@ -105,13 +192,33 @@ public class ValidationTests
     }
 
     [Fact]
-    public void CustomSelectionWithoutTracks_IsWarning()
+    public void CustomSelectionWithoutTracks_IsError()
     {
-        VisualizationRequest request = ValidRequest() with { ChannelSelection = ChannelSelectionMode.Custom };
+        VisualizationRequest request = ValidRequest() with
+        {
+            Tracks = new TrackSettings { Selection = TrackSelectionMode.Custom },
+        };
         Assert.Contains(
             VisualizationRequestValidator.Validate(request),
-            issue => issue.Severity == ValidationSeverity.Warning
-                && issue.SettingPath == nameof(VisualizationRequest.ChannelSelection));
+            issue => issue.Code == ValidationCodes.InvalidRequest
+                && issue.Severity == ValidationSeverity.Error
+                && issue.SettingPath == "Tracks.Selection");
+    }
+
+    [Fact]
+    public void CustomSelectionWithTracks_Passes()
+    {
+        VisualizationRequest request = ValidRequest() with
+        {
+            Tracks = new TrackSettings
+            {
+                Selection = TrackSelectionMode.Custom,
+                IncludedIds = new[] { "ym2608.0.fm.1" },
+            },
+        };
+        Assert.DoesNotContain(
+            VisualizationRequestValidator.Validate(request),
+            issue => issue.SettingPath == "Tracks.Selection" && issue.Severity == ValidationSeverity.Error);
     }
 
     [Fact]
@@ -142,16 +249,6 @@ public class ValidationTests
         Assert.DoesNotContain(
             VisualizationRequestValidator.Validate(request),
             issue => issue.Code == ValidationCodes.OutputOverlapsInput
-                && issue.Severity == ValidationSeverity.Warning);
-    }
-
-    [Fact]
-    public void OverlayWithoutAnalysis_IsWarning()
-    {
-        VisualizationRequest request = ValidRequest() with { AnalysisOverlay = AnalysisOverlayMode.Standard };
-        Assert.Contains(
-            VisualizationRequestValidator.Validate(request),
-            issue => issue.Code == ValidationCodes.AnalysisFailed
                 && issue.Severity == ValidationSeverity.Warning);
     }
 }

@@ -15,7 +15,7 @@ public class CommandViewModelTests
 
         viewModel.SetDisplay(command);
 
-        Assert.StartsWith("visualize /tmp/test.vgz", viewModel.DisplayText);
+        Assert.StartsWith("render /tmp/test.vgz", viewModel.DisplayText);
         Assert.True(viewModel.IsValid);
     }
 

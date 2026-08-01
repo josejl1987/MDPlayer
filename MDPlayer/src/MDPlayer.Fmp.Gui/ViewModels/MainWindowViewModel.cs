@@ -216,7 +216,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public string OutputPath => _request?.OutputPath ?? "";
     public bool HasOutputConflict => !string.IsNullOrWhiteSpace(OutputPath)
         && File.Exists(OutputPath)
-        && !(_request?.Overwrite ?? false);
+        && !(_request?.Output.Overwrite ?? false);
     public bool CanOpenOutput => !string.IsNullOrWhiteSpace(OutputPath) && File.Exists(OutputPath);
     public long? OutputAvailableBytes => GetAvailableBytes(OutputPath);
     public bool HasLowDiskSpace => OutputAvailableBytes is long bytes && bytes < 1_000_000_000;
@@ -461,11 +461,14 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         if (_session is null)
             return;
-        ApplySetting(nameof(VisualizationRequest.Title), r => r with
+        ApplySetting(nameof(PresentationSettings.Title), r => r with
         {
-            Title = _session.Input.Title ?? Path.GetFileNameWithoutExtension(_session.Input.FullPath),
-            Subtitle = _session.Input.Game ?? _session.Input.System,
-            Credits = _session.Input.Composer,
+            Presentation = r.Presentation with
+            {
+                Title = _session.Input.Title ?? Path.GetFileNameWithoutExtension(_session.Input.FullPath),
+                Subtitle = _session.Input.Game ?? _session.Input.System,
+                Credits = _session.Input.Composer,
+            },
         });
     }
 
@@ -672,7 +675,6 @@ public sealed class MainWindowViewModel : ObservableObject
         VisualizationPlanResult plan = await _session.PlanAsync(request, ct);
         _plan = plan;
         Settings.SynchronizePlan(plan, _session.Input);
-        Settings.SynchronizeAnalysisStatus(_session.Capabilities);
         Timeline.SynchronizePlan(plan);
         _ = Tools.RefreshAsync(ct);
     }

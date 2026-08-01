@@ -116,16 +116,16 @@ public sealed class MainWindowHeadlessTests
             IReadOnlyList<CompositionCardViewModel> cards = viewModel.Settings.Basic.CompositionCards;
             Assert.Equal(3, cards.Count);
 
-            CompositionCardViewModel scope = cards.First(card => card.Layout == VisualizationLayout.ScopeStage);
+            CompositionCardViewModel scope = cards.First(card => card.Composition == CompositionKind.ScopeStage);
             scope.SelectCommand.Execute(null);
 
             Assert.True(scope.IsSelected, "The clicked composition card must highlight.");
-            Assert.False(cards.First(card => card.Layout == VisualizationLayout.Performance).IsSelected);
-            Assert.Equal("Scope Stage", viewModel.Settings.Basic.SelectedLayout);
+            Assert.False(cards.First(card => card.Composition == CompositionKind.Performance).IsSelected);
+            Assert.Equal(CompositionKind.ScopeStage, cards.Single(card => card.IsSelected).Composition);
 
-            // The formatted command carries the explicit --layout flag.
+            // The formatted command carries the explicit --composition flag.
             await viewModel.UpdateCommandAsync();
-            Assert.Contains("--layout scope-stage", viewModel.Command.DisplayText);
+            Assert.Contains("--composition scope-stage", viewModel.Command.DisplayText);
         }
         finally
         {

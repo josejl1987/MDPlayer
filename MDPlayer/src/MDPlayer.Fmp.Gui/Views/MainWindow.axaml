@@ -164,11 +164,6 @@
                   </StackPanel>
                 </StackPanel>
                 <StackPanel Spacing="4">
-                  <TextBlock Text="Preset"/>
-                  <ComboBox ItemsSource="{Binding Settings.Basic.PresetOptions}" SelectedItem="{Binding Settings.Basic.SelectedPreset}"/>
-                  <TextBlock Text="{Binding Settings.Basic.PresetStatus}" FontSize="11" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
-                </StackPanel>
-                <StackPanel Spacing="4">
                   <TextBlock Text="Composition"/>
                   <ItemsControl ItemsSource="{Binding Settings.Basic.CompositionCards}">
                     <ItemsControl.ItemsPanel>
@@ -193,11 +188,10 @@
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
-                  <ComboBox ItemsSource="{Binding Settings.Basic.LayoutOptions}" SelectedItem="{Binding Settings.Basic.SelectedLayout}"/>
-                  <TextBlock Text="{Binding Settings.Basic.LayoutExplanation}" FontSize="11" TextWrapping="Wrap"
-                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
-                  <TextBlock Text="{Binding Settings.Basic.ResolvedLayoutText}" FontSize="11" FontWeight="SemiBold"
-                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Quality"/>
+                  <ComboBox ItemsSource="{Binding Settings.Basic.QualityOptions}" SelectedItem="{Binding Settings.Basic.SelectedQuality}"/>
                 </StackPanel>
                 <StackPanel Spacing="4">
                   <TextBlock Text="Resolution"/>
@@ -219,11 +213,13 @@
             <Expander Header="CONTENT" IsExpanded="{Binding Settings.Content.IsExpanded}">
               <StackPanel Spacing="8" Margin="0,8,0,0">
                 <StackPanel Spacing="4">
-                  <TextBlock Text="Channel mode"/>
-                  <ComboBox ItemsSource="{Binding Settings.Content.ChannelModeOptions}" SelectedItem="{Binding Settings.Content.SelectedChannelMode}"/>
+                  <TextBlock Text="Track selection"/>
+                  <ComboBox ItemsSource="{Binding Settings.Content.TrackSelectionOptions}" SelectedItem="{Binding Settings.Content.SelectedTrackSelection}"/>
                 </StackPanel>
 
-                <StackPanel IsVisible="{Binding Settings.Content.IsCustomChannels}" Spacing="4">
+                <CheckBox Content="Include inactive diagnostic tracks" IsChecked="{Binding Settings.Content.IncludeInactiveDiagnostics}"/>
+
+                <StackPanel Spacing="4">
                   <TextBlock Text="Tracks"/>
                   <ItemsControl ItemsSource="{Binding Settings.Content.Tracks}" MaxHeight="200">
                     <ItemsControl.ItemTemplate>
@@ -246,31 +242,6 @@
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
-                </StackPanel>
-
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Grouping"/>
-                  <ComboBox ItemsSource="{Binding Settings.Content.GroupingOptions}" SelectedItem="{Binding Settings.Content.SelectedGrouping}"/>
-                </StackPanel>
-
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Scopes"/>
-                  <StackPanel IsEnabled="{Binding Settings.Content.IsScopePanelEnabled}" Spacing="4">
-                    <NumericUpDown Value="{Binding Settings.Content.ScopeRatio}" Minimum="0" Maximum="0.8" Increment="0.05" FormatString="0.00"/>
-                    <ComboBox ItemsSource="{Binding Settings.Content.ScopePositionOptions}" SelectedItem="{Binding Settings.Content.SelectedScopePosition}"/>
-                  </StackPanel>
-                  <TextBlock Text="{Binding Settings.Content.ScopeDisabledReason}" FontSize="11" TextWrapping="Wrap"
-                             IsVisible="{Binding !Settings.Content.IsScopePanelEnabled}"
-                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
-                </StackPanel>
-
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Analysis"/>
-                  <CheckBox Content="Enable analysis" IsChecked="{Binding Settings.Content.AnalysisEnabled}"/>
-                  <ComboBox ItemsSource="{Binding Settings.Content.AnalysisDetailOptions}" SelectedItem="{Binding Settings.Content.SelectedAnalysisDetail}"/>
-                  <ComboBox ItemsSource="{Binding Settings.Content.AnalysisOverlayOptions}" SelectedItem="{Binding Settings.Content.SelectedAnalysisOverlay}"/>
-                  <TextBlock Text="{Binding Settings.Content.AnalysisStatusText}" FontSize="11"
-                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
                 </StackPanel>
               </StackPanel>
             </Expander>
@@ -343,30 +314,10 @@
                   <NumericUpDown Value="{Binding Settings.Advanced.SampleRate}" Minimum="8000" Maximum="192000" Increment="1000" FormatString="0"/>
                 </StackPanel>
                 <StackPanel Spacing="4">
-                  <TextBlock Text="SSG gain (dB)"/>
-                  <NumericUpDown Value="{Binding Settings.Advanced.SsgGainDb}" Minimum="-12" Maximum="12" Increment="0.5" FormatString="0.0"/>
-                </StackPanel>
-                <StackPanel Spacing="4">
                   <TextBlock Text="Encoder"/>
                   <ComboBox ItemsSource="{Binding Settings.Advanced.EncoderOptions}" SelectedItem="{Binding Settings.Advanced.SelectedEncoder}"/>
                 </StackPanel>
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Backend"/>
-                  <ComboBox ItemsSource="{Binding Settings.Advanced.BackendOptions}" SelectedItem="{Binding Settings.Advanced.SelectedBackend}"/>
-                </StackPanel>
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Scope mode"/>
-                  <ComboBox ItemsSource="{Binding Settings.Advanced.ScopeModeOptions}" SelectedItem="{Binding Settings.Advanced.SelectedScopeMode}"/>
-                </StackPanel>
                 <CheckBox Content="Overwrite existing outputs" IsChecked="{Binding Settings.Advanced.Overwrite}"/>
-                <TextBox Watermark="Corrscope path" Text="{Binding Settings.Advanced.CorrscopePath}"/>
-                <TextBox Watermark="FFmpeg path" Text="{Binding Settings.Advanced.FfmpegPath}"/>
-                <TextBox Watermark="Analysis Python" Text="{Binding Settings.Advanced.AnalysisPython}"/>
-                <CheckBox Content="Force analysis re-run" IsChecked="{Binding Settings.Advanced.AnalysisForce}"/>
-                <StackPanel Spacing="4">
-                  <TextBlock Text="Tool timeout (minutes)"/>
-                  <NumericUpDown Value="{Binding Settings.Advanced.ToolTimeoutMinutes}" Minimum="1" Maximum="600" Increment="5" FormatString="0"/>
-                </StackPanel>
               </StackPanel>
             </Expander>
 

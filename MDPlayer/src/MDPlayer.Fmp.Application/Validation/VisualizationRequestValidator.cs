@@ -3,11 +3,9 @@ using Fmp.Application.Contracts;
 namespace Fmp.Application.Validation;
 
 /// <summary>
-/// Request-level validation. Mirrors the CLI's numeric validation exactly and
-/// adds the spec's project-level checks (input exists, output != input,
-/// schema version, output path present). Layout-vs-timeline validation needs a
-/// captured timeline and lives in the planner; it is reported through the same
-/// <see cref="ValidationIssue"/> shape.
+/// Request-level validation for the final schema 2 contract. Layout-vs-timeline
+/// validation needs a captured timeline and lives in the planner; it is
+/// reported through the same <see cref="ValidationIssue"/> shape.
 /// </summary>
 public static class VisualizationRequestValidator
 {
@@ -24,7 +22,8 @@ public static class VisualizationRequestValidator
             {
                 Code = ValidationCodes.UnsupportedSchema,
                 Severity = ValidationSeverity.Error,
-                Message = $"Project schema {request.SchemaVersion} is newer than this build supports ({MaxSchemaVersion}).",
+                Message =
+                    $"Project schema {request.SchemaVersion} is newer than this build supports ({MaxSchemaVersion}).",
                 SettingPath = nameof(request.SchemaVersion),
                 SuggestedAction = "Open read-only or upgrade the application.",
             });
@@ -51,8 +50,6 @@ public static class VisualizationRequestValidator
         }
         else if (!string.IsNullOrWhiteSpace(request.InputPath))
         {
-            // Security/UX: an output outside the input's directory tree (e.g.
-            // from an untrusted project file) must never be written silently.
             string? outputDir = SafeDirectoryName(request.OutputPath);
             string? inputDir = SafeDirectoryName(request.InputPath);
             if (outputDir is not null && inputDir is not null
@@ -70,77 +67,64 @@ public static class VisualizationRequestValidator
             }
         }
 
-        // Numeric validation — mirrors VisualizeOptionsParser's rules exactly.
-        if (request.Width < 480)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Width {request.Width} is below the renderer minimum of 480.", "Width"));
-        if (request.Height < 270)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Height {request.Height} is below the renderer minimum of 270.", "Height"));
-        if (request.FpsNumerator <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Frame rate numerator must be positive (got {request.FpsNumerator}).", "FpsNumerator"));
-        if (request.FpsDenominator <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Frame rate denominator must be positive (got {request.FpsDenominator}).", "FpsDenominator"));
-
-        if (!double.IsFinite(request.PastSeconds) || request.PastSeconds is < 0.1 or > 15)
+        // Output profile validation.
+        OutputSettings output = request.Output;
+        if (output.Width < 480)
             issues.Add(Error(ValidationCodes.InvalidRequest,
-                $"Past seconds must be in [0.1, 15] (got {request.PastSeconds}).", "PastSeconds"));
-        if (!double.IsFinite(request.FutureSeconds) || request.FutureSeconds is < 0.1 or > 15)
+                $"Width {output.Width} is below the renderer minimum of 480.", "Output.Width"));
+        if (output.Height < 270)
             issues.Add(Error(ValidationCodes.InvalidRequest,
-                $"Future seconds must be in [0.1, 15] (got {request.FutureSeconds}).", "FutureSeconds"));
-        if (request.PastSeconds + request.FutureSeconds is < 0.5 or > 20)
+                $"Height {output.Height} is below the renderer minimum of 270.", "Output.Height"));
+        if (output.FpsNumerator <= 0)
             issues.Add(Error(ValidationCodes.InvalidRequest,
-                "The time window (past + future) must be in [0.5, 20] seconds.", "PastSeconds"));
+                $"Frame rate numerator must be positive (got {output.FpsNumerator}).", "Output.FpsNumerator"));
+        if (output.FpsDenominator <= 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Frame rate denominator must be positive (got {output.FpsDenominator}).", "Output.FpsDenominator"));
 
-        if (!double.IsFinite(request.RollZoom) || request.RollZoom <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Roll zoom must be positive (got {request.RollZoom}).", "RollZoom"));
-        if (request.ScopeRatio is < 0 or > 0.8)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Scope ratio must be in [0, 0.8] (got {request.ScopeRatio}).", "ScopeRatio"));
+        // View settings (time window).
+        double past = request.View.PastSeconds;
+        double future = request.View.FutureSeconds;
+        if (!double.IsFinite(past) || past is < 0.2 or > 15)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Past seconds must be in [0.2, 15] (got {past}).", "View.PastSeconds"));
+        if (!double.IsFinite(future) || future is < 0.1 or > 15)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Future seconds must be in [0.1, 15] (got {future}).", "View.FutureSeconds"));
+        if (past + future is < 0.5 or > 20)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                "The time window (past + future) must be in [0.5, 20] seconds.", "View.PastSeconds"));
 
-        if (request.LoopCount <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Loop count must be positive (got {request.LoopCount}).", "LoopCount"));
-        if (request.FadeSeconds < 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Fade seconds must be non-negative (got {request.FadeSeconds}).", "FadeSeconds"));
-        if (request.TailSeconds < 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Tail seconds must be non-negative (got {request.TailSeconds}).", "TailSeconds"));
-        if (request.MaximumDurationSeconds is <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Maximum duration must be positive (got {request.MaximumDurationSeconds}).", "MaximumDurationSeconds"));
-        if (request.TimeoutSeconds is <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Playback timeout must be positive (got {request.TimeoutSeconds}).", "TimeoutSeconds"));
-        if (request.SampleRate <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, $"Sample rate must be positive (got {request.SampleRate}).", "SampleRate"));
-        if (request.Tools.AnalysisTimeoutMinutes is <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, "Analysis timeout must be positive.", "Tools"));
-        if (request.Tools.ToolTimeoutMinutes is <= 0)
-            issues.Add(Error(ValidationCodes.InvalidRequest, "External tool timeout must be positive.", "Tools"));
-
-        if (request.ChannelSelection == ChannelSelectionMode.Custom
-            && request.IncludedTrackIds.Count == 0 && request.ExcludedTrackIds.Count == 0)
+        // Track settings.
+        if (request.Tracks.Selection == TrackSelectionMode.Custom
+            && request.Tracks.IncludedIds.Count == 0 && request.Tracks.ExcludedIds.Count == 0)
         {
-            issues.Add(new ValidationIssue
-            {
-                Code = ValidationCodes.InvalidRequest,
-                Severity = ValidationSeverity.Warning,
-                Message = "Custom channel mode is selected but no tracks are included or excluded.",
-                SettingPath = nameof(request.ChannelSelection),
-                SuggestedAction = "Toggle at least one track in the channel list.",
-            });
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                "Custom track selection is set but no tracks are included or excluded.", "Tracks.Selection",
+                "Toggle at least one track in the track list."));
         }
 
-        if (request.AnalysisOverlay != AnalysisOverlayMode.None && !request.AnalysisEnabled)
-        {
-            issues.Add(new ValidationIssue
-            {
-                Code = ValidationCodes.AnalysisFailed,
-                Severity = ValidationSeverity.Warning,
-                Message = "An analysis overlay is selected but analysis is disabled.",
-                SettingPath = nameof(request.AnalysisOverlay),
-                SuggestedAction = "Enable analysis or set the overlay to None.",
-            });
-        }
+        // Playback settings.
+        PlaybackSettings playback = request.Playback;
+        if (playback.LoopCount <= 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Loop count must be positive (got {playback.LoopCount}).", "Playback.LoopCount"));
+        if (playback.FadeSeconds < 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Fade seconds must be non-negative (got {playback.FadeSeconds}).", "Playback.FadeSeconds"));
+        if (playback.TailSeconds < 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Tail seconds must be non-negative (got {playback.TailSeconds}).", "Playback.TailSeconds"));
+        if (playback.MaximumDurationSeconds is <= 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Maximum duration must be positive (got {playback.MaximumDurationSeconds}).", "Playback.MaximumDurationSeconds"));
+        if (playback.SampleRate <= 0)
+            issues.Add(Error(ValidationCodes.InvalidRequest,
+                $"Sample rate must be positive (got {playback.SampleRate}).", "Playback.SampleRate"));
 
         return issues;
     }
 
-    /// <summary>True when there are no Error-severity issues.</summary>
     public static bool IsValid(IReadOnlyList<ValidationIssue> issues)
         => issues.All(issue => issue.Severity != ValidationSeverity.Error);
 

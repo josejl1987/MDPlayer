@@ -2,9 +2,9 @@ namespace Fmp.Application.Contracts;
 
 /// <summary>
 /// The one authoritative, immutable request contract shared by the CLI and the
-/// GUI. Every UI edit produces a new snapshot; long-running operations retain
-/// the snapshot with which they started. All enums serialize as strings so the
-/// JSON is stable and human-readable.
+/// GUI (final greenfield schema 2). Every UI edit produces a new snapshot;
+/// long-running operations retain the snapshot with which they started. All
+/// enums serialize as strings so the JSON is stable and human-readable.
 /// </summary>
 public sealed record VisualizationRequest
 {
@@ -17,64 +17,15 @@ public sealed record VisualizationRequest
     /// <summary>Absolute (or project-relative) path of the final video.</summary>
     public required string OutputPath { get; init; }
 
-    // ---- Basic ----
-    public VisualizationPreset Preset { get; init; } = VisualizationPreset.Balanced;
-    public VisualizationLayout Layout { get; init; } = VisualizationLayout.Auto;
-    public int Width { get; init; } = 1280;
-    public int Height { get; init; } = 720;
-    public int FpsNumerator { get; init; } = 60;
-    public int FpsDenominator { get; init; } = 1;
+    /// <summary>Explicit composition. Never auto-resolved; CLI never silently substitutes.</summary>
+    public CompositionKind Composition { get; init; } = CompositionKind.Performance;
 
-    // ---- Content ----
-    public ChannelSelectionMode ChannelSelection { get; init; } = ChannelSelectionMode.Active;
-    public IReadOnlyList<string> IncludedTrackIds { get; init; } = Array.Empty<string>();
-    public IReadOnlyList<string> ExcludedTrackIds { get; init; } = Array.Empty<string>();
-
-    public double PastSeconds { get; init; } = 0.75;
-    public double FutureSeconds { get; init; } = 2.25;
-
-    // ---- Style ----
-    public VisualizationEffects Effects { get; init; } = VisualizationEffects.Minimal;
-    public NoteColorMode NoteColor { get; init; } = NoteColorMode.Instrument;
-    public double? ScopeRatio { get; init; }
-    public ScopePosition ScopePosition { get; init; } = ScopePosition.Bottom;
-    public TrackGroupingMode Grouping { get; init; } = TrackGroupingMode.None;
-    public TimeGridMode TimeGrid { get; init; } = TimeGridMode.Automatic;
-    public double RollZoom { get; init; } = 1.0;
-
-    // ---- Analysis ----
-    public bool AnalysisEnabled { get; init; }
-    public AnalysisDetail AnalysisDetail { get; init; } = AnalysisDetail.Standard;
-
-    /// <summary>Default matches the CLI/Balanced preset value (minimal).</summary>
-    public AnalysisOverlayMode AnalysisOverlay { get; init; } = AnalysisOverlayMode.Minimal;
-
-    // ---- Metadata ----
-    public string? Title { get; init; }
-    public string? Subtitle { get; init; }
-    public string? Credits { get; init; }
-    public string? FontPath { get; init; }
-
-    // ---- Playback / capture ----
-    public int LoopCount { get; init; } = 2;
-    public double FadeSeconds { get; init; } = 5.0;
-    public double TailSeconds { get; init; } = 0.5;
-    public double? MaximumDurationSeconds { get; init; } = 300.0;
-    public double? TimeoutSeconds { get; init; }
-    public int SampleRate { get; init; } = 44_100;
-    public double SsgGainDb { get; init; }
-    public SpcPitchMode SpcPitch { get; init; } = SpcPitchMode.Estimate;
-
-    // ---- Export ----
-    public VideoEncoder Encoder { get; init; } = VideoEncoder.Auto;
-    public BackendPreference Backend { get; init; } = BackendPreference.Auto;
-    public ScopeMode ScopeMode { get; init; } = ScopeMode.Auto;
-    public bool FinalQuality { get; init; }
-    public bool StemsOnly { get; init; }
-    public bool Overwrite { get; init; }
-
-    /// <summary>Tool-path overrides and timeouts. Null leaves CLI defaults.</summary>
-    public ToolOverrides Tools { get; init; } = new();
+    public OutputSettings Output { get; init; } = new();
+    public TrackSettings Tracks { get; init; } = new();
+    public ViewSettings View { get; init; } = new();
+    public StyleSettings Style { get; init; } = new();
+    public PresentationSettings Presentation { get; init; } = new();
+    public PlaybackSettings Playback { get; init; } = new();
 
     public VisualizationRequest WithPathResolved(string inputPath, string outputPath) => this with
     {
@@ -83,19 +34,69 @@ public sealed record VisualizationRequest
     };
 }
 
-/// <summary>Tool overrides for a single request (all nullable = use defaults).</summary>
-public sealed record ToolOverrides
+/// <summary>Output resolution, frame rate and encoding.</summary>
+public sealed record OutputSettings
 {
-    public string? FmpComPath { get; init; }
-    public string? AssetsDir { get; init; }
-    public IReadOnlyList<string> SearchPaths { get; init; } = Array.Empty<string>();
-    public string? CorrscopePath { get; init; }
-    public string? FfmpegPath { get; init; }
-    public string? AnalysisPython { get; init; }
-    public string? AnalysisCache { get; init; }
-    public string? AnalysisOutput { get; init; }
-    public bool AnalysisForce { get; init; }
-    public int? AnalysisTimeoutMinutes { get; init; }
-    public int? ToolTimeoutMinutes { get; init; }
-    public string? CorrscopeVideoTemplate { get; init; }
+    public RenderQuality Quality { get; init; } = RenderQuality.Standard;
+
+    public int Width { get; init; } = 1920;
+    public int Height { get; init; } = 1080;
+
+    public int FpsNumerator { get; init; } = 60;
+    public int FpsDenominator { get; init; } = 1;
+
+    public VideoEncoder Encoder { get; init; } = VideoEncoder.Auto;
+    public bool Overwrite { get; init; }
+}
+
+/// <summary>Which tracks participate and how inactive diagnostic tracks are handled.</summary>
+public sealed record TrackSettings
+{
+    public TrackSelectionMode Selection { get; init; } = TrackSelectionMode.Active;
+
+    public IReadOnlyList<string> IncludedIds { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> ExcludedIds { get; init; } = Array.Empty<string>();
+
+    public bool IncludeInactiveDiagnosticTracks { get; init; }
+}
+
+/// <summary>Time window, grid and structural overlays.</summary>
+public sealed record ViewSettings
+{
+    public double PastSeconds { get; init; } = 0.8;
+    public double FutureSeconds { get; init; } = 3.2;
+
+    public TimeGridMode TimeGrid { get; init; } = TimeGridMode.Automatic;
+
+    public StructureOverlayMode Structure { get; init; } = StructureOverlayMode.Automatic;
+
+    /// <summary>Performance-only: show the compact signal strip (off by default).</summary>
+    public bool PerformanceSignalStrip { get; init; }
+}
+
+/// <summary>Visual style: effects, note coloring and palette.</summary>
+public sealed record StyleSettings
+{
+    public VisualEffects Effects { get; init; } = VisualEffects.Subtle;
+    public NoteColorMode NoteColor { get; init; } = NoteColorMode.Instrument;
+    public PaletteKind Palette { get; init; } = PaletteKind.Default;
+}
+
+/// <summary>Optional publication text and font.</summary>
+public sealed record PresentationSettings
+{
+    public string? Title { get; init; }
+    public string? Subtitle { get; init; }
+    public string? Credits { get; init; }
+    public string? FontPath { get; init; }
+}
+
+/// <summary>Playback / capture behavior. Runtime tool paths are intentionally absent.</summary>
+public sealed record PlaybackSettings
+{
+    public int LoopCount { get; init; } = 2;
+    public double FadeSeconds { get; init; } = 5;
+    public double TailSeconds { get; init; } = 0.5;
+    public double? MaximumDurationSeconds { get; init; } = 300;
+    public int SampleRate { get; init; } = 48_000;
 }

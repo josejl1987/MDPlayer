@@ -1,63 +1,56 @@
 namespace Fmp.Application.Contracts;
 
 /// <summary>
-/// Canonical publishing preset. These values are the single source of truth;
-/// the CLI and GUI MUST both resolve defaults through
-/// <see cref="Presets.VisualizationPresetCatalog"/>. "Custom" is a GUI-only
-/// display state (a request whose values differ from any named preset); it is
-/// never persisted as a preset selector value.
+/// The three public publishing compositions (final greenfield contract).
+/// There are no legacy aliases, no Auto, and no deprecation period.
+/// The canonical type lives in Core
+/// (<c>Fmp.Core.Visualization.Composition.Contracts.CompositionKind</c>); this
+/// alias keeps the public request contract readable.
 /// </summary>
-public enum VisualizationPreset
+public enum CompositionKind
 {
-    Preview,
-    Balanced,
-    Final,
-    Diagnostic,
-}
-
-/// <summary>
-/// Layout family requested by the user. <see cref="Auto"/> resolves to a
-/// concrete layout from the captured timeline; every other value is explicit.
-/// <see cref="Performance"/>, <see cref="ScopeStage"/> and <see cref="Diagnostic"/>
-/// are the three canonical publishing compositions; the remaining values are
-/// legacy aliases retained for back-compatibility.
-/// </summary>
-public enum VisualizationLayout
-{
-    Auto,
-    UnifiedRoll,
-    SplitRoll,
-    Scopes,
-    Hybrid,
-    Diagnostic,
-    LegacyDiagnostic,
+    /// <summary>Default audience-facing composition: a shared pitch roll.</summary>
     Performance,
+
+    /// <summary>Waveform-focused composition: a large scope mosaic.</summary>
     ScopeStage,
+
+    /// <summary>Technical inspection output: a semantic channel grid.</summary>
+    Diagnostic,
 }
 
-/// <summary>
-/// Channel/track inclusion policy. <see cref="Custom"/> uses the explicit
-/// included/excluded track id lists from the request.
-/// </summary>
-public enum ChannelSelectionMode
+/// <summary>Output quality profile. Quality selects resolution/fps/encoding, never the composition.</summary>
+public enum RenderQuality
+{
+    Draft,
+    Standard,
+    Final,
+}
+
+/// <summary>Track selection policy (active by default).</summary>
+public enum TrackSelectionMode
 {
     Active,
-    Audible,
-    Semantic,
     All,
     Custom,
 }
 
-/// <summary>Dynamic effect preset (visual density of overlays).</summary>
-public enum VisualizationEffects
+/// <summary>Structural-analysis overlay policy.</summary>
+public enum StructureOverlayMode
 {
-    None,
-    Minimal,
-    Diagnostic,
+    Off,
+    Automatic,
+}
+
+/// <summary>Visual-effect intensity. Subtle is the default for Performance.</summary>
+public enum VisualEffects
+{
+    Off,
+    Subtle,
     Cinematic,
 }
 
-/// <summary>Note coloring strategy.</summary>
+/// <summary>Note coloring strategy (retained concept from the old contract).</summary>
 public enum NoteColorMode
 {
     Instrument,
@@ -65,24 +58,7 @@ public enum NoteColorMode
     PitchClass,
 }
 
-/// <summary>Scope wall placement inside the composition.</summary>
-public enum ScopePosition
-{
-    Bottom,
-    Top,
-    Left,
-    Right,
-}
-
-/// <summary>Panel grouping policy for channel panels.</summary>
-public enum TrackGroupingMode
-{
-    None,
-    Device,
-    Family,
-}
-
-/// <summary>Time-grid source for the composition.</summary>
+/// <summary>Time grid source for the composition.</summary>
 public enum TimeGridMode
 {
     None,
@@ -91,21 +67,12 @@ public enum TimeGridMode
     Analytical,
 }
 
-/// <summary>Symbolic analysis depth.</summary>
-public enum AnalysisDetail
+/// <summary>Visualization palette family.</summary>
+public enum PaletteKind
 {
-    Minimal,
-    Standard,
-    Full,
-}
-
-/// <summary>Analysis overlay density.</summary>
-public enum AnalysisOverlayMode
-{
-    None,
-    Minimal,
-    Standard,
-    Full,
+    Default,
+    Accessible,
+    Monochrome,
 }
 
 /// <summary>Video encoder selection policy.</summary>
@@ -114,31 +81,6 @@ public enum VideoEncoder
     Auto,
     LibX264,
     Nvenc,
-}
-
-/// <summary>Playback backend preference.</summary>
-public enum BackendPreference
-{
-    Auto,
-    Fmp,
-    Mdplayer,
-}
-
-/// <summary>Generic backend scope mode.</summary>
-public enum ScopeMode
-{
-    Auto,
-    Master,
-    Device,
-    Channel,
-    Off,
-}
-
-/// <summary>SPC diagnostic pitch handling.</summary>
-public enum SpcPitchMode
-{
-    Estimate,
-    Relative,
 }
 
 /// <summary>

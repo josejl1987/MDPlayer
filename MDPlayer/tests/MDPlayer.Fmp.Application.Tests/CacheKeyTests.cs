@@ -36,15 +36,19 @@ public class CacheKeyTests
     [Fact]
     public void CaptureKey_ChangesWithCaptureAffectingOptions()
     {
-        Assert.NotEqual(Key1(), Key1(request: Request() with { LoopCount = 3 }));
-        Assert.NotEqual(Key1(), Key1(request: Request() with { SampleRate = 48000 }));
-        Assert.NotEqual(Key1(), Key1(request: Request() with { TailSeconds = 2.0 }));
+        Assert.NotEqual(Key1(), Key1(request: Request() with { Playback = new PlaybackSettings { LoopCount = 3 } }));
+        Assert.NotEqual(Key1(), Key1(request: Request() with { Playback = new PlaybackSettings { SampleRate = 44_100 } }));
+        Assert.NotEqual(Key1(), Key1(request: Request() with { Playback = new PlaybackSettings { TailSeconds = 2.0 } }));
+        Assert.NotEqual(Key1(), Key1(request: Request() with { Playback = new PlaybackSettings { FadeSeconds = 7.0 } }));
+        Assert.NotEqual(Key1(), Key1(request: Request() with { Playback = new PlaybackSettings { MaximumDurationSeconds = 200 } }));
     }
 
     [Fact]
     public void CaptureKey_IgnoresExportOnlyOptions()
     {
-        Assert.Equal(Key1(), Key1(request: Request() with { Encoder = VideoEncoder.Nvenc, Overwrite = true }));
+        Assert.Equal(
+            Key1(),
+            Key1(request: Request() with { Output = new OutputSettings { Encoder = VideoEncoder.Nvenc, Overwrite = true } }));
     }
 
     [Fact]
@@ -63,7 +67,9 @@ public class CacheKeyTests
     {
         Assert.NotEqual(
             PreviewCacheKey.FrameKey(Request(), 5, 960, 540, PreviewFidelity.AccurateStill),
-            PreviewCacheKey.FrameKey(Request() with { Width = 1920 }, 5, 960, 540, PreviewFidelity.AccurateStill));
+            PreviewCacheKey.FrameKey(
+                Request() with { Output = new OutputSettings { Width = 1280 } },
+                5, 960, 540, PreviewFidelity.AccurateStill));
     }
 
     [Fact]
@@ -71,6 +77,8 @@ public class CacheKeyTests
     {
         string hash = PreviewCacheKey.RequestHash(Request());
         Assert.Equal(hash, PreviewCacheKey.RequestHash(Request()));
-        Assert.NotEqual(hash, PreviewCacheKey.RequestHash(Request() with { Title = "other" }));
+        Assert.NotEqual(
+            hash,
+            PreviewCacheKey.RequestHash(Request() with { Presentation = new PresentationSettings { Title = "other" } }));
     }
 }

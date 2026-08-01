@@ -3,51 +3,33 @@ using Fmp.Application.Contracts;
 namespace Fmp.Application.Validation;
 
 /// <summary>
-/// Feature-dependent tool requirement calculation (spec §19.2). A pure
-/// function of the request — previews that do not use a feature never require
-/// its tools. Layouts that may resolve to scope content mark Corrscope as
-/// required when the request explicitly asks for scopes; for Auto the planner
-/// resolves the concrete layout first and re-evaluates.
+/// Feature-dependent tool requirement calculation for schema 2. A pure function
+/// of the request — previews that do not use a feature never require its tools.
 /// </summary>
 public static class ToolRequirementResolver
 {
-    /// <summary>
-    /// Computes tool requirements. <paramref name="resolvedLayout"/> is the
-    /// concrete layout (from the planner) when known; null defers scope
-    /// decisions to "auto" semantics.
-    /// </summary>
-    public static IReadOnlyList<ToolRequirement> Resolve(VisualizationRequest request, string? resolvedLayout = null)
+    public static IReadOnlyList<ToolRequirement> Resolve(VisualizationRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         var requirements = new List<ToolRequirement>();
 
-        // Final video encoding always requires FFmpeg. A semantic-only still
-        // preview or stems-only job does not.
-        if (!request.StemsOnly)
+        // Final video encoding always requires FFmpeg.
+        requirements.Add(new ToolRequirement
         {
-            requirements.Add(new ToolRequirement
-            {
-                Role = ToolRoles.Ffmpeg,
-                Kind = ToolRequirementKind.Required,
-                Feature = "final video",
-                Reason = "FFmpeg encodes the composed raw frames into the output video.",
-            });
-        }
+            Role = ToolRoles.Ffmpeg,
+            Kind = ToolRequirementKind.Required,
+            Feature = "final video",
+            Reason = "FFmpeg encodes the composed raw frames into the output video.",
+        });
 
-        // Scope content requires Corrscope (external scope renderer). Scope
-        // Stage and Diagnostic make scopes the primary content; Performance
-        // treats the scope strip as an optional enhancement.
-        bool needsScopes = request.Layout switch
+        // Scope Stage always needs scope content → Corrscope. Performance needs
+        // Corrscope only when the optional signal strip is enabled. Diagnostic
+        // may include compact scopes when scope sources exist.
+        bool needsScopes = request.Composition switch
         {
-            VisualizationLayout.Scopes
-                or VisualizationLayout.Hybrid
-                or VisualizationLayout.Diagnostic
-                or VisualizationLayout.LegacyDiagnostic
-                or VisualizationLayout.ScopeStage => true,
-            VisualizationLayout.Performance => false,
-            VisualizationLayout.Auto => resolvedLayout is "scopes" or "hybrid" or "diagnostic" or "diagnostic-v2"
-                or "scope-stage",
-            _ => false,
+            CompositionKind.ScopeStage => true,
+            CompositionKind.Diagnostic => true,
+            _ => request.View.PerformanceSignalStrip,
         };
         if (needsScopes)
         {
@@ -55,33 +37,22 @@ public static class ToolRequirementResolver
             {
                 Role = ToolRoles.Corrscope,
                 Kind = ToolRequirementKind.Required,
-                Feature = "scope wall",
-                Reason = "This layout renders synchronized scope stems through Corrscope.",
+                Feature = "scope content",
+                Reason = "This composition renders synchronized scope frames through Corrscope.",
             });
         }
-        else if (request.Layout is (VisualizationLayout.Auto or VisualizationLayout.Performance) && resolvedLayout is null)
+        else if (request.Composition == CompositionKind.Performance)
         {
             requirements.Add(new ToolRequirement
             {
                 Role = ToolRoles.Corrscope,
                 Kind = ToolRequirementKind.Optional,
-                Feature = "scope strip",
-                Reason = "Scopes are an optional enhancement for this layout; Corrscope is needed only when they are enabled.",
+                Feature = "signal strip",
+                Reason = "Scopes are an optional enhancement for Performance; Corrscope is needed only when the signal strip is enabled.",
             });
         }
 
-        if (request.AnalysisEnabled)
-        {
-            requirements.Add(new ToolRequirement
-            {
-                Role = ToolRoles.AnalysisPython,
-                Kind = ToolRequirementKind.Required,
-                Feature = "symbolic analysis",
-                Reason = "Analysis runs in a Python worker environment.",
-            });
-        }
-
-        if (request.Encoder == VideoEncoder.Nvenc)
+        if (request.Output.Encoder == VideoEncoder.Nvenc)
         {
             requirements.Add(new ToolRequirement
             {
@@ -89,18 +60,6 @@ public static class ToolRequirementResolver
                 Kind = ToolRequirementKind.Required,
                 Feature = "hardware encoding",
                 Reason = "Explicit NVENC requires an FFmpeg build exposing h264_nvenc.",
-            });
-        }
-
-        if (!string.IsNullOrEmpty(request.Tools.FmpComPath)
-            || !string.IsNullOrEmpty(request.Tools.AssetsDir))
-        {
-            requirements.Add(new ToolRequirement
-            {
-                Role = ToolRoles.FmpCom,
-                Kind = ToolRequirementKind.Required,
-                Feature = "FMP capture",
-                Reason = "FMP-family capture requires the FMP.COM emulator runtime asset.",
             });
         }
 

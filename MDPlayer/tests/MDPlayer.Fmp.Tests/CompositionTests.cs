@@ -68,21 +68,6 @@ public sealed class CompositionTests
         Assert.Equal(main.Bottom, firstLane.Y);
     }
 
-    [Fact]
-    public void LegacyUnifiedAndHybrid_KeepPriorGeometry()
-    {
-        var unified = new OverlayLayout(
-            1920, 1080, 0.75, 2.25, panelCount: 8, VisualizationLayoutMode.UnifiedRoll);
-        var hybrid = new OverlayLayout(
-            1920, 1080, 0.75, 2.25, panelCount: 8, VisualizationLayoutMode.Hybrid);
-
-        Assert.True(unified.IsSharedComposition);
-        Assert.False(unified.HasScopes, "legacy UnifiedRoll has no scope strip");
-        Assert.True(hybrid.HasScopes);
-        // Legacy Hybrid keeps its previous 0.32 scope ratio.
-        Assert.Equal((int)Math.Round(hybrid.GridHeight * 0.32), hybrid.ScopeHeight);
-    }
-
     // ------------------------------------------------------------------
     // ScopeStage geometry
     // ------------------------------------------------------------------
@@ -134,45 +119,6 @@ public sealed class CompositionTests
             Assert.Equal(layout.ScopeHeight, scope.Height);
             Assert.Equal(0, layout.GetHeaderRect(firstInRow).Height);
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Canonical naming
-    // ------------------------------------------------------------------
-
-    [Theory]
-    [InlineData("Performance", "performance")]
-    [InlineData("ScopeStage", "scope-stage")]
-    [InlineData("Diagnostic", "diagnostic")]
-    [InlineData("UnifiedRoll", "unified")]
-    public void CliNames_ExposeCanonicalCompositions(string modeName, string expected)
-    {
-        var mode = Enum.Parse<VisualizationLayoutMode>(modeName);
-        Assert.Equal(expected, VisualizationLayoutNames.ToCliName(mode));
-        Assert.Equal(
-            VisualizationLayoutNames.ToCompositionName(mode),
-            VisualizationLayoutNames.ToCliName(
-                VisualizationLayoutNames.CanonicalFamily(mode)));
-    }
-
-    [Fact]
-    public void CanonicalFamily_MapsLegacyModesOntoTheThreeCompositions()
-    {
-        Assert.Equal(
-            VisualizationLayoutMode.Performance,
-            VisualizationLayoutNames.CanonicalFamily(VisualizationLayoutMode.UnifiedRoll));
-        Assert.Equal(
-            VisualizationLayoutMode.Performance,
-            VisualizationLayoutNames.CanonicalFamily(VisualizationLayoutMode.Hybrid));
-        Assert.Equal(
-            VisualizationLayoutMode.Performance,
-            VisualizationLayoutNames.CanonicalFamily(VisualizationLayoutMode.SplitRoll));
-        Assert.Equal(
-            VisualizationLayoutMode.ScopeStage,
-            VisualizationLayoutNames.CanonicalFamily(VisualizationLayoutMode.Scope));
-        Assert.Equal(
-            VisualizationLayoutMode.Diagnostic,
-            VisualizationLayoutNames.CanonicalFamily(VisualizationLayoutMode.DiagnosticV2));
     }
 
     // ------------------------------------------------------------------
@@ -247,16 +193,6 @@ public sealed class CompositionTests
         // Scope cells stay transparent (Corrscope fills them in the final pass).
         OverlayRect scope = renderer.Layout.GetScopeRect(0);
         Assert.Equal(0, AlphaAt(frame, renderer.Width, scope.X + scope.Width / 2, scope.Y + scope.Height / 2));
-    }
-
-    [Fact]
-    public void Diagnostic_RemainsTheFullGrid()
-    {
-        PanelOverlayRenderer renderer = CreateRenderer(VisualizationLayoutMode.Diagnostic);
-        Assert.False(renderer.Layout.IsSharedComposition);
-        Assert.False(renderer.Layout.IsScopeStage);
-        Assert.Equal(12, renderer.Layout.PanelCount);
-        Assert.Equal(0, renderer.Layout.ScopeStageStripHeight);
     }
 
     private static byte AlphaAt(byte[] frame, int width, int x, int y)

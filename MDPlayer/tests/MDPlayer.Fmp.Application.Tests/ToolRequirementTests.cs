@@ -9,33 +9,25 @@ public class ToolRequirementTests
     private static VisualizationRequest Request() => TestRequests.Valid();
 
     [Fact]
-    public void FinalVideo_RequiresFfmpeg()
+    public void FinalVideo_AlwaysRequiresFfmpeg()
     {
         IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
         Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Ffmpeg
             && requirement.Kind == ToolRequirementKind.Required);
     }
 
-    [Fact]
-    public void StemsOnly_DoesNotRequireFfmpeg()
-    {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { StemsOnly = true });
-        Assert.DoesNotContain(requirements, requirement => requirement.Role == ToolRoles.Ffmpeg);
-    }
-
     [Theory]
-    [InlineData(VisualizationLayout.Scopes)]
-    [InlineData(VisualizationLayout.Hybrid)]
-    [InlineData(VisualizationLayout.Diagnostic)]
-    public void ScopeLayouts_RequireCorrscope(VisualizationLayout layout)
+    [InlineData(CompositionKind.ScopeStage)]
+    [InlineData(CompositionKind.Diagnostic)]
+    public void ScopeCompositions_RequireCorrscope(CompositionKind composition)
     {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { Layout = layout });
+        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { Composition = composition });
         Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
             && requirement.Kind == ToolRequirementKind.Required);
     }
 
     [Fact]
-    public void AutoLayout_WithoutResolvedLayout_CorrscopeIsOptional()
+    public void Performance_WithoutSignalStrip_CorrscopeIsOptional()
     {
         IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
         Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
@@ -43,52 +35,42 @@ public class ToolRequirementTests
     }
 
     [Fact]
-    public void UnifiedRoll_DoesNotRequireCorrscope()
+    public void Performance_WithSignalStrip_RequiresCorrscope()
     {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(
-            Request() with { Layout = VisualizationLayout.UnifiedRoll }, resolvedLayout: "unified");
-        Assert.DoesNotContain(requirements, requirement => requirement.Role == ToolRoles.Corrscope);
-    }
-
-    [Fact]
-    public void AutoResolvedToUnified_DoesNotRequireCorrscope()
-    {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(
-            Request(), resolvedLayout: "unified");
-        Assert.DoesNotContain(requirements, requirement => requirement.Role == ToolRoles.Corrscope);
-    }
-
-    [Fact]
-    public void AnalysisEnabled_RequiresPythonEnvironment()
-    {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { AnalysisEnabled = true });
-        Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.AnalysisPython
+        VisualizationRequest request = Request() with
+        {
+            View = new ViewSettings { PerformanceSignalStrip = true },
+        };
+        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(request);
+        Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
             && requirement.Kind == ToolRequirementKind.Required);
-    }
-
-    [Fact]
-    public void AnalysisDisabled_DoesNotRequirePythonEnvironment()
-    {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
-        Assert.DoesNotContain(requirements, requirement => requirement.Role == ToolRoles.AnalysisPython);
     }
 
     [Fact]
     public void ExplicitNvenc_RequiresNvencRole()
     {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { Encoder = VideoEncoder.Nvenc });
+        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(
+            Request() with { Output = new OutputSettings { Encoder = VideoEncoder.Nvenc } });
         Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Nvenc
             && requirement.Kind == ToolRequirementKind.Required);
     }
 
     [Fact]
+    public void AutoEncoder_DoesNotRequireNvencRole()
+    {
+        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
+        Assert.DoesNotContain(requirements, requirement => requirement.Role == ToolRoles.Nvenc);
+    }
+
+    [Fact]
     public void AllAvailable_ChecksOnlyRequiredRoles()
     {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { Layout = VisualizationLayout.UnifiedRoll });
+        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
         var statuses = new Dictionary<string, ToolStatus>
         {
             [ToolRoles.Ffmpeg] = new() { Role = ToolRoles.Ffmpeg, IsRequired = true, IsAvailable = true },
         };
+        // Default Performance request requires only FFmpeg.
         Assert.True(ToolRequirementResolver.AllAvailable(requirements, statuses));
 
         statuses[ToolRoles.Ffmpeg] = statuses[ToolRoles.Ffmpeg] with { IsAvailable = false };

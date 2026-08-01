@@ -170,8 +170,8 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
     {
         VisualizationRequestSerializer.WriteToFile(request, _requestJsonPath);
 
-        int width = preview.Width ?? request.Width;
-        int height = preview.Height ?? request.Height;
+        int width = preview.Width ?? request.Output.Width;
+        int height = preview.Height ?? request.Output.Height;
         int revision = ++_frameRevision;
         string pngPath = Path.Combine(_workspace, $"frame-{revision}.png");
 

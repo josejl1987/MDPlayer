@@ -22,9 +22,9 @@ public static class VisualizationToolResolver
     /// Resolves a single tool. For <see cref="ToolRoles.RenderCli"/> the
     /// explicit path comes from <paramref name="userSettingPath"/> (a user
     /// preference, reported as source "user setting"); for the other roles it
-    /// comes from the corresponding <see cref="ToolOverrides"/> override.
+    /// comes from the corresponding <see cref="ToolPaths"/> override.
     /// </summary>
-    public static ToolStatus Resolve(string role, ToolOverrides overrides, string? userSettingPath = null)
+    public static ToolStatus Resolve(string role, ToolPaths overrides, string? userSettingPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(role);
 
@@ -65,7 +65,7 @@ public static class VisualizationToolResolver
     }
 
     /// <summary>Resolves all four pipeline tool roles in one call.</summary>
-    public static IReadOnlyList<ToolStatus> ResolveAll(ToolOverrides overrides, string? renderCliUserPath = null)
+    public static IReadOnlyList<ToolStatus> ResolveAll(ToolPaths overrides, string? renderCliUserPath = null)
     {
         return
         [

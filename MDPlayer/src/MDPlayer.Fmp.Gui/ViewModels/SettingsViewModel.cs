@@ -31,10 +31,6 @@ public sealed class SettingsViewModel
 
     public void SynchronizePlan(VisualizationPlanResult? plan, VisualizationInputInfo? input)
     {
-        Basic.SynchronizePlan(plan);
         Content.SynchronizePlan(plan, input);
     }
-
-    public void SynchronizeAnalysisStatus(VisualizationSessionCapabilities? capabilities)
-        => Content.SynchronizeAnalysisStatus(capabilities);
 }

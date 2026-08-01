@@ -58,8 +58,7 @@ public sealed class ToolStatusViewModel : ObservableObject
         try
         {
             VisualizationRequest? request = _requestProvider();
-            ToolOverrides overrides = request?.Tools ?? new ToolOverrides();
-            string? resolvedLayout = _planProvider()?.ResolvedLayout;
+            ToolPaths overrides = new();
 
             IReadOnlyList<ToolStatus> resolved = VisualizationToolResolver.ResolveAll(overrides, _renderCliUserPath);
 
@@ -73,7 +72,7 @@ public sealed class ToolStatusViewModel : ObservableObject
             if (request is not null)
             {
                 IReadOnlyList<ToolRequirement> requirements =
-                    ToolRequirementResolver.Resolve(request, resolvedLayout);
+                    ToolRequirementResolver.Resolve(request);
                 for (int i = 0; i < statuses.Count; i++)
                 {
                     ToolRequirement? req = requirements.FirstOrDefault(r => r.Role == statuses[i].Role);

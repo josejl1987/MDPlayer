@@ -8,10 +8,10 @@ public sealed class StyleSettingsViewModel : ObservableObject
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
     private bool _isExpanded;
-    private string _selectedEffects = VisualizationEffects.Minimal.ToString();
+    private string _selectedEffects = VisualEffects.Subtle.ToString();
     private string _selectedNoteColor = NoteColorMode.Instrument.ToString();
-    private decimal? _pastSeconds = 0.75m;
-    private decimal? _futureSeconds = 2.25m;
+    private decimal? _pastSeconds = 0.8m;
+    private decimal? _futureSeconds = 3.2m;
     private string _selectedTimeScale = "Balanced";
 
     public StyleSettingsViewModel(MainWindowViewModel owner)
@@ -25,7 +25,7 @@ public sealed class StyleSettingsViewModel : ObservableObject
         set => SetProperty(ref _isExpanded, value);
     }
 
-    public IReadOnlyList<string> EffectsOptions { get; } = Enum.GetNames<VisualizationEffects>();
+    public IReadOnlyList<string> EffectsOptions { get; } = Enum.GetNames<VisualEffects>();
     public IReadOnlyList<string> NoteColorOptions { get; } = Enum.GetNames<NoteColorMode>();
     public IReadOnlyList<string> TimeScaleOptions { get; } = new[] { "Dense", "Balanced", "Wide" };
 
@@ -38,8 +38,11 @@ public sealed class StyleSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _selectedEffects, value) || _suppress)
                 return;
-            if (Enum.TryParse<VisualizationEffects>(value, out var effects))
-                _owner.ApplySetting(nameof(VisualizationRequest.Effects), r => r with { Effects = effects });
+            if (Enum.TryParse<VisualEffects>(value, out var effects))
+                _owner.ApplySetting(nameof(StyleSettings.Effects), r => r with
+                {
+                    Style = r.Style with { Effects = effects },
+                });
         }
     }
 
@@ -51,7 +54,10 @@ public sealed class StyleSettingsViewModel : ObservableObject
             if (!SetProperty(ref _selectedNoteColor, value) || _suppress)
                 return;
             if (Enum.TryParse<NoteColorMode>(value, out var mode))
-                _owner.ApplySetting(nameof(VisualizationRequest.NoteColor), r => r with { NoteColor = mode });
+                _owner.ApplySetting(nameof(StyleSettings.NoteColor), r => r with
+                {
+                    Style = r.Style with { NoteColor = mode },
+                });
         }
     }
 
@@ -62,7 +68,10 @@ public sealed class StyleSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _pastSeconds, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.PastSeconds), r => r with { PastSeconds = (double)(value ?? 0.75m) });
+            _owner.ApplySetting(nameof(ViewSettings.PastSeconds), r => r with
+            {
+                View = r.View with { PastSeconds = (double)(value ?? 0.8m) },
+            });
         }
     }
 
@@ -73,7 +82,10 @@ public sealed class StyleSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _futureSeconds, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.FutureSeconds), r => r with { FutureSeconds = (double)(value ?? 2.25m) });
+            _owner.ApplySetting(nameof(ViewSettings.FutureSeconds), r => r with
+            {
+                View = r.View with { FutureSeconds = (double)(value ?? 3.2m) },
+            });
         }
     }
 
@@ -88,10 +100,12 @@ public sealed class StyleSettingsViewModel : ObservableObject
             {
                 "Dense" => (0.35, 1.5),
                 "Wide" => (1.5, 4.5),
-                _ => (0.75, 2.25),
+                _ => (0.8, 3.2),
             };
-            _owner.ApplySetting(nameof(VisualizationRequest.PastSeconds),
-                r => r with { PastSeconds = past, FutureSeconds = future });
+            _owner.ApplySetting(nameof(ViewSettings.PastSeconds), r => r with
+            {
+                View = r.View with { PastSeconds = past, FutureSeconds = future },
+            });
         }
     }
 
@@ -100,11 +114,12 @@ public sealed class StyleSettingsViewModel : ObservableObject
         _suppress = true;
         try
         {
-            SelectedEffects = request.Effects.ToString();
-            SelectedNoteColor = request.NoteColor.ToString();
-            PastSeconds = (decimal)request.PastSeconds;
-            FutureSeconds = (decimal)request.FutureSeconds;
-            SelectedTimeScale = ClosestTimeScale(request.PastSeconds, request.FutureSeconds);
+            SelectedEffects = request.Style.Effects.ToString();
+            SelectedNoteColor = request.Style.NoteColor.ToString();
+            PastSeconds = (decimal)request.View.PastSeconds;
+            FutureSeconds = (decimal)request.View.FutureSeconds;
+            SelectedTimeScale = ClosestTimeScale(request.View.PastSeconds, request.View.FutureSeconds);
+            SelectedNoteColor = request.Style.NoteColor.ToString();
         }
         finally
         {
@@ -116,7 +131,7 @@ public sealed class StyleSettingsViewModel : ObservableObject
     {
         (double past, double future)[] presets =
         {
-            (0.35, 1.5), (0.75, 2.25), (1.5, 4.5),
+            (0.35, 1.5), (0.8, 3.2), (1.5, 4.5),
         };
         string[] names = { "Dense", "Balanced", "Wide" };
         int best = 0;

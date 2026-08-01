@@ -148,13 +148,12 @@ internal static class VisualizationPlanning
                 Code = ValidationCodes.LayoutTooSmall,
                 Severity = ValidationSeverity.Warning,
                 Message = "The requested resolution is too small for the selected layout and panels.",
-                SettingPath = nameof(request.Width),
+                SettingPath = nameof(request.Output.Width),
                 SuggestedAction = "Increase the output resolution or reduce the number of channels.",
             });
         }
 
-        IReadOnlyList<ToolRequirement> toolRequirements = ToolRequirementResolver.Resolve(
-            request, VisualizationLayoutNames.ToCliName(resolvedMode));
+        IReadOnlyList<ToolRequirement> toolRequirements = ToolRequirementResolver.Resolve(request);
         IReadOnlyList<RepresentativePoint> points = RepresentativePointAnalyzer.Compute(timeline, 0.75);
 
         double duration = timeline.SampleRate > 0
@@ -167,7 +166,7 @@ internal static class VisualizationPlanning
         var plan = new VisualizationPlanResult
         {
             ResolvedLayout = VisualizationLayoutNames.ToCliName(resolvedMode),
-            RequestedLayout = RequestedLayoutName(request.Layout),
+            RequestedLayout = RequestedLayoutName(request.Composition),
             InputPath = Path.GetFullPath(options.Input),
             Tracks = BuildTracks(timeline, options),
             ExcludedTrackIds = options.ExcludeTracks.ToArray(),
@@ -282,7 +281,7 @@ internal static class VisualizationPlanning
             {
                 TrackId = id,
                 DisplayName = voice.DisplayName,
-                DeviceFamily = null,
+                DeviceFamily = voice.DeviceId.Type.ToString(),
                 SemanticType = SemanticTypeName(voice.Presentation),
                 ScopeAvailable = timeline.Devices.Any(device =>
                     device.Id == voice.DeviceId && device.ScopeSupport != ScopeSupport.None),
@@ -336,7 +335,7 @@ internal static class VisualizationPlanning
                 || timeline.NoiseStates.Length > 0
                 || timeline.AggregateHits.Length > 0,
             Scope = scope,
-            Analysis = request.AnalysisEnabled,
+            Analysis = false,
             Waveform = timeline.WaveformChanges.Length > 0,
         };
     }
@@ -350,17 +349,11 @@ internal static class VisualizationPlanning
             || timeline.WaveformChanges.Any(evt => evt.VoiceId == voiceId);
     }
 
-    internal static string RequestedLayoutName(VisualizationLayout layout) => layout switch
+    internal static string RequestedLayoutName(CompositionKind composition) => composition switch
     {
-        VisualizationLayout.UnifiedRoll => "unified",
-        VisualizationLayout.SplitRoll => "split",
-        VisualizationLayout.Scopes => "scope",
-        VisualizationLayout.Hybrid => "hybrid",
-        VisualizationLayout.Diagnostic => "diagnostic",
-        VisualizationLayout.LegacyDiagnostic => "diagnostic-v2",
-        VisualizationLayout.Performance => "performance",
-        VisualizationLayout.ScopeStage => "scope-stage",
-        _ => "auto",
+        CompositionKind.ScopeStage => "scope-stage",
+        CompositionKind.Diagnostic => "diagnostic",
+        _ => "performance",
     };
 
     private static string SemanticTypeName(VoicePresentationKind presentation) => presentation switch

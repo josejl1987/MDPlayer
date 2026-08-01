@@ -2,7 +2,7 @@ using Fmp.Application.Contracts;
 
 namespace Fmp.Gui.ViewModels;
 
-/// <summary>METADATA settings: title, subtitle, credits, font path.</summary>
+/// <summary>PRESENTATION (metadata) settings: title, subtitle, credits, font path.</summary>
 public sealed class MetadataSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
@@ -36,7 +36,10 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _title, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.Title), r => r with { Title = value });
+            _owner.ApplySetting(nameof(PresentationSettings.Title), r => r with
+                {
+                    Presentation = r.Presentation with { Title = value },
+                });
         }
     }
 
@@ -47,7 +50,10 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _subtitle, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.Subtitle), r => r with { Subtitle = value });
+            _owner.ApplySetting(nameof(PresentationSettings.Subtitle), r => r with
+                {
+                    Presentation = r.Presentation with { Subtitle = value },
+                });
         }
     }
 
@@ -58,7 +64,10 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _credits, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.Credits), r => r with { Credits = value });
+            _owner.ApplySetting(nameof(PresentationSettings.Credits), r => r with
+                {
+                    Presentation = r.Presentation with { Credits = value },
+                });
         }
     }
 
@@ -69,7 +78,10 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _fontPath, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.FontPath), r => r with { FontPath = value });
+            _owner.ApplySetting(nameof(PresentationSettings.FontPath), r => r with
+                {
+                    Presentation = r.Presentation with { FontPath = value },
+                });
         }
     }
 
@@ -78,10 +90,10 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         _suppress = true;
         try
         {
-            Title = request.Title;
-            Subtitle = request.Subtitle;
-            Credits = request.Credits;
-            FontPath = request.FontPath;
+            Title = request.Presentation.Title;
+            Subtitle = request.Presentation.Subtitle;
+            Credits = request.Presentation.Credits;
+            FontPath = request.Presentation.FontPath;
         }
         finally
         {
@@ -94,6 +106,9 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         string? path = await _owner.ChooseFontFileAsync();
         if (path is null)
             return;
-        _owner.ApplySetting(nameof(VisualizationRequest.FontPath), r => r with { FontPath = path });
+        _owner.ApplySetting(nameof(PresentationSettings.FontPath), r => r with
+            {
+                Presentation = r.Presentation with { FontPath = path },
+            });
     }
 }

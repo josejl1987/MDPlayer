@@ -333,8 +333,6 @@ public static class PreviewCommand
                 or VisualizationLayoutMode.DiagnosticV2;
         if (hasScopes)
             notes.Add("Scope wall omitted in preview");
-        if (request.AnalysisOverlay != AnalysisOverlayMode.None)
-            notes.Add("Analysis overlay omitted in preview");
         return (notes.Count > 0, notes.ToArray());
     }
 
