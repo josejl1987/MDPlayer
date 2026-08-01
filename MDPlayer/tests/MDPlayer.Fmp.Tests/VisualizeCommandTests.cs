@@ -59,7 +59,6 @@ public sealed class VisualizeCommandTests
                 "--palette", palettePath,
                 "--preview-html", "preview.html",
                 "--diagnostic-pages", "pages",
-                "--renderer", "cpu",
                 "--motion-blur-samples", "3",
             ]);
 
@@ -68,7 +67,6 @@ public sealed class VisualizeCommandTests
             Assert.Equal(VisualizationChannelFilter.All, options.Channels);
             Assert.Equal(VisualizationScopePosition.Left, options.ScopePosition);
             Assert.Equal(0.25, options.ScopeRatio);
-            Assert.Equal(VisualizationRendererMode.Cpu, options.Renderer);
             Assert.Equal(3, options.MotionBlurSamples);
             Assert.Equal("preview.html", options.PreviewHtmlPath);
             Assert.Equal(1, options.Palette.CanvasBackground.R);

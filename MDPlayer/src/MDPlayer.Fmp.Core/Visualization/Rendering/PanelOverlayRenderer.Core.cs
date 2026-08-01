@@ -35,11 +35,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         public AnalysisOverlayScene AnalysisOverlay { get; set; } = AnalysisOverlayScene.Empty;
         public VisualizationPalette Palette { get; set; } = VisualizationPalette.Default;
         public int MotionBlurSamples { get; set; } = 1;
-        /// <summary>
-        /// Semantic raster backend. CPU is the default for direct renderer
-        /// callers; the CLI resolves auto before constructing this renderer.
-        /// </summary>
-        public VisualizationRendererMode Renderer { get; set; } = VisualizationRendererMode.Cpu;
 
         /// <summary>
         /// Presentation fade-in for the title bars and musical grid. The CLI
@@ -194,10 +189,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly string _totalClockString;
     private readonly string[] _loopLabelByFrame;
     private readonly VisualizationTimeGridLine[] _timeGrid;
-    private readonly VisualizationOpenClRenderer _openClRenderer = null;
-    private readonly int[] _gpuPrimitiveData = null;
-    private readonly byte[] _gpuFrame = null;
-    private readonly object _gpuFrameGate = new();
     private readonly object _motionBlurGate = new();
 
     public PanelOverlayRenderer(VisualizationTimeline timeline, Options options = null)
@@ -308,22 +299,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             UnicodeStaticTextRenderer.TryDraw(
                 _staticFrame, Width, Height, _layout, _presentation, _options.FontPath, trackLabels);
         }
-
-        if (_options.Renderer == VisualizationRendererMode.Gpu)
-        {
-            int primitiveCapacity = ComputeGpuPrimitiveCapacity();
-            if (!VisualizationOpenClRenderer.TryCreate(
-                    Width,
-                    Height,
-                    primitiveCapacity,
-                    out _openClRenderer,
-                    out string reason))
-            {
-                throw new InvalidOperationException($"GPU semantic renderer unavailable: {reason}");
-            }
-            _gpuPrimitiveData = new int[checked(primitiveCapacity * 9)];
-            _gpuFrame = new byte[FrameByteCount];
-        }
     }
 
     public int Width => _layout.Width;
@@ -358,13 +333,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     public void Dispose()
     {
-        _openClRenderer?.Dispose();
         GC.SuppressFinalize(this);
-    }
-
-    ~PanelOverlayRenderer()
-    {
-        _openClRenderer?.Dispose();
     }
 
     /// <summary>
@@ -412,12 +381,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 throw new ArgumentException(
                     $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
                 nameof(scopeGrid));
-        }
-
-        if (_openClRenderer != null)
-        {
-            RenderGpuFrame(frameIndex, scopeGrid, destination);
-            return;
         }
 
         _staticFrame.AsSpan().CopyTo(destination);
@@ -470,12 +433,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         if (_options.MotionBlurSamples > 1)
         {
             RenderMotionBlurFrame(frameIndex, scopeGrid, destination);
-            return;
-        }
-
-        if (_openClRenderer != null)
-        {
-            RenderGpuFrame(frameIndex, scopeGrid, destination);
             return;
         }
 

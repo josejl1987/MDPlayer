@@ -66,11 +66,9 @@ internal static class VisualizationRunner
                     VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                     VideoCrf = options.FinalQuality ? "18" : "20",
                     Encoder = options.Encoder,
-                    Renderer = options.Renderer,
                 });
             if (!singlePass.IsAvailable)
                 return Fail("ffmpeg not found (install FFmpeg or pass --ffmpeg PATH)", 4);
-            options.Renderer = singlePass.EffectiveRenderer;
             EncoderProbeResult nvencProbe = options.Encoder == VideoEncoder.Nvenc
                 ? new FfmpegVideoEncoderProbe(singlePass.FfmpegPath,
                 TimeSpan.FromMinutes(options.ExternalToolTimeoutMinutes)).Probe(VideoEncoder.Nvenc)
@@ -380,7 +378,6 @@ internal static class VisualizationRunner
                 NoteColor = options.NoteColor,
                 Palette = options.Palette,
                 MotionBlurSamples = options.MotionBlurSamples,
-                Renderer = options.Renderer,
                 LayoutMode = layoutMode,
                 IntroSeconds = 0.75,
                 OutroSeconds = Math.Min(0.45, options.Tail),
@@ -424,7 +421,6 @@ internal static class VisualizationRunner
                         VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                         VideoCrf = options.FinalQuality ? "18" : "20",
                         Encoder = VideoEncoder.LibX264,
-                        Renderer = options.Renderer,
                     });
                     Process retryProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
                     singlePass.Compose(retryProcess, masterAudioPath, workspace.VideoPath, panelRenderer);

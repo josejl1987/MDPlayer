@@ -58,7 +58,6 @@ internal sealed class SinglePassComposer
         public string VideoCrf { get; set; } = "18";
         /// <summary>Encoder for the final encode.</summary>
         public VideoEncoder Encoder { get; set; } = VideoEncoder.Auto;
-        public VisualizationRendererMode Renderer { get; set; } = VisualizationRendererMode.Auto;
         /// <summary>Bounded producer/consumer queue capacity, constrained to 2..4.</summary>
         public int QueueCapacity { get; set; } = 3;
     }
@@ -84,22 +83,11 @@ internal sealed class SinglePassComposer
                 ? VideoEncoder.Nvenc
                 : VideoEncoder.LibX264;
         }
-        if (_options.Renderer == VisualizationRendererMode.Cpu)
-            return;
-
-        VisualizationGpuProbe gpu = VisualizationGpuSupport.Probe();
-        if (_options.Renderer == VisualizationRendererMode.Gpu && !gpu.Supported)
-            throw new InvalidOperationException($"GPU renderer unavailable: {gpu.Reason}");
-        if (_options.Renderer == VisualizationRendererMode.Auto)
-            _options.Renderer = gpu.Supported
-                ? VisualizationRendererMode.Gpu
-                : VisualizationRendererMode.Cpu;
     }
 
     public bool IsAvailable => _ffmpegPath != null;
     public string FfmpegPath => _ffmpegPath ?? "ffmpeg";
     public VideoEncoder EffectiveEncoder => _options.Encoder;
-    public VisualizationRendererMode EffectiveRenderer => _options.Renderer;
 
     public bool SupportsEncoder(VideoEncoder encoder)
         => ProbeEncoder(encoder).Supported;

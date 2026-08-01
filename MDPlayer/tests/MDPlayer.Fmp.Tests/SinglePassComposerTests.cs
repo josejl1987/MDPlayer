@@ -179,35 +179,6 @@ public sealed class SinglePassComposerTests
     }
 
     [Fact]
-    public void BuildArguments_GpuModeKeepsTheRawInputAfterSemanticGpuRaster()
-    {
-        IReadOnlyList<string> args = SinglePassComposer.BuildArguments(
-            "master.wav",
-            "final.mp4",
-            1280,
-            720,
-            60,
-            1,
-            new SinglePassComposer.Options
-            {
-                Renderer = VisualizationRendererMode.Gpu,
-            });
-
-        Assert.DoesNotContain("-vf", args);
-        Assert.Contains("0:v:0", args);
-    }
-
-    [Fact]
-    public void GpuProbeReportsTheActualOpenClCapability()
-    {
-        VisualizationGpuProbe probe = VisualizationGpuSupport.Probe();
-
-        Assert.NotEmpty(probe.Reason);
-        if (probe.Supported)
-            Assert.Contains("OpenCL", probe.Reason, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
     public void AutoEncoder_UsesTheDetectedRuntimeCapability()
     {
         var composer = new SinglePassComposer("/usr/bin/ffmpeg", new SinglePassComposer.Options

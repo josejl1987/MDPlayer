@@ -70,7 +70,6 @@ internal sealed class VisualizeOptions : RenderSettings
     public VisualizationPalette Palette { get; set; } = VisualizationPalette.Default;
     public string PreviewHtmlPath { get; set; }
     public string DiagnosticPagesPath { get; set; }
-    public VisualizationRendererMode Renderer { get; set; } = VisualizationRendererMode.Auto;
     public int MotionBlurSamples { get; set; } = 1;
     public AnalysisDetail AnalysisDetail { get; set; } = AnalysisDetail.Standard;
     public bool AnalysisForce { get; set; }
@@ -512,7 +511,6 @@ internal static class VisualizeOptionsParser
                     case "--palette": options.PalettePath = reader.RequireValue(name); break;
                     case "--preview-html": options.PreviewHtmlPath = reader.RequireValue(name); break;
                     case "--diagnostic-pages": options.DiagnosticPagesPath = reader.RequireValue(name); break;
-                    case "--renderer": options.Renderer = ParseRenderer(reader.RequireValue(name)); break;
                     case "--motion-blur-samples": options.MotionBlurSamples = reader.ReadInt(name); break;
                     case "--encoder": options.Encoder = ParseEncoder(reader.RequireValue(name)); break;
                     case "--effects": options.Effects = ParseEffects(reader.RequireValue(name)); options.EffectsExplicit = true; break;
@@ -621,14 +619,6 @@ internal static class VisualizeOptionsParser
         "auto" => VisualizationLayoutMode.Auto,
         "diagnostic" => VisualizationLayoutMode.Diagnostic,
         _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto or diagnostic)"),
-    };
-
-    private static VisualizationRendererMode ParseRenderer(string raw) => raw?.Trim().ToLowerInvariant() switch
-    {
-        "auto" => VisualizationRendererMode.Auto,
-        "cpu" or "software" => VisualizationRendererMode.Cpu,
-        "gpu" or "hardware" => VisualizationRendererMode.Gpu,
-        _ => throw new ArgumentException("unknown renderer (expected auto, cpu, or gpu)"),
     };
 
     private static void ApplyLayoutTemplate(VisualizeOptions options)

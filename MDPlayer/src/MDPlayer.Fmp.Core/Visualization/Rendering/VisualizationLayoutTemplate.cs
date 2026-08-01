@@ -2,13 +2,6 @@ using System.Text.Json;
 
 namespace Fmp.Core.Visualization.Rendering;
 
-internal enum VisualizationRendererMode
-{
-    Auto,
-    Cpu,
-    Gpu,
-}
-
 /// <summary>Portable JSON composition template for repeatable publishing.</summary>
 internal sealed record VisualizationLayoutTemplate(
     string Layout,

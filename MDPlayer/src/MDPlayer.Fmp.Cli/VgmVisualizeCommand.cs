@@ -309,13 +309,6 @@ internal static class VgmVisualizeCommand
 
             if (!options.StemsOnly)
             {
-                if (options.Renderer == VisualizationRendererMode.Auto)
-                {
-                    VisualizationGpuProbe gpu = VisualizationGpuSupport.Probe();
-                    options.Renderer = gpu.Supported
-                        ? VisualizationRendererMode.Gpu
-                        : VisualizationRendererMode.Cpu;
-                }
                 var panelRenderer = new PanelOverlayRenderer(
                     timeline,
                     new PanelOverlayRenderer.Options
@@ -346,7 +339,6 @@ internal static class VgmVisualizeCommand
                         NoteColor = options.NoteColor,
                         Palette = options.Palette,
                         MotionBlurSamples = options.MotionBlurSamples,
-                        Renderer = options.Renderer,
                         LayoutMode = layoutMode,
                         AnalysisOverlay = analysisOutput is null
                             || options.AnalysisOverlay == "none"
@@ -364,7 +356,6 @@ internal static class VgmVisualizeCommand
                         VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                         VideoCrf = options.FinalQuality ? "18" : "20",
                         Encoder = options.Encoder,
-                        Renderer = options.Renderer,
                     });
                 if (!composer.IsAvailable)
                 {
@@ -372,7 +363,6 @@ internal static class VgmVisualizeCommand
                     Console.Error.WriteLine("error: ffmpeg not found (install FFmpeg or pass --ffmpeg PATH)");
                     return 4;
                 }
-                options.Renderer = composer.EffectiveRenderer;
                 EncoderProbeResult nvencProbe = options.Encoder == VideoEncoder.Nvenc
                     ? new FfmpegVideoEncoderProbe(composer.FfmpegPath,
                         TimeSpan.FromMinutes(options.ExternalToolTimeoutMinutes)).Probe(VideoEncoder.Nvenc)
@@ -465,7 +455,6 @@ internal static class VgmVisualizeCommand
                         VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                         VideoCrf = options.FinalQuality ? "18" : "20",
                         Encoder = VideoEncoder.LibX264,
-                        Renderer = options.Renderer,
                     });
                     if (!useCorrscope)
                         composer.ComposeMasterOnly(audioPath, videoPath, panelRenderer, includeWaveform: false);

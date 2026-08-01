@@ -34,6 +34,7 @@ internal sealed record VisualizationCommandResult
     public int InstrumentCount { get; init; }
 
     public string Encoder { get; init; }
+    /// <summary>Semantic raster backend; always "Cpu" (the GPU experiment was removed).</summary>
     public string Renderer { get; init; }
     public EncoderFallbackResult? EncoderFallback { get; init; }
     public long OutputSizeBytes { get; init; }
@@ -201,7 +202,7 @@ internal static class VisualizationResultBuilder
             NoteCount = timeline?.Notes.Count ?? 0,
             InstrumentCount = timeline?.Instruments.Count ?? 0,
             Encoder = encoder,
-            Renderer = options.Renderer.ToString(),
+            Renderer = "Cpu",
             EncoderFallback = encoderFallback,
             OutputSizeBytes = outputSizeBytes,
             TrackDurationSeconds = trackDurationSeconds,
