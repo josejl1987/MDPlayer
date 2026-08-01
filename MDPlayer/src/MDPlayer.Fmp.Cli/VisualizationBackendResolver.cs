@@ -119,6 +119,12 @@ internal static class VisualizationBackendResolver
             if (!string.IsNullOrWhiteSpace(directory))
                 paths.Add(directory);
         }
+
+        // FMP.COM is bundled next to the CLI executable (see MDPlayer.Fmp.Cli.csproj);
+        // make it resolvable without --fmp-com / --assets-dir.
+        string appDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrWhiteSpace(appDir) && !paths.Contains(appDir, StringComparer.Ordinal))
+            paths.Add(appDir);
         paths.Add(input.DirectoryName ?? ".");
 
         StringComparer comparer = OperatingSystem.IsWindows()
