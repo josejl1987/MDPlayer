@@ -101,6 +101,23 @@ public static class DesktopProcessService
         }
     }
 
+    /// <summary>Opens a file or directory with the desktop's default handler.</summary>
+    public static void OpenPath(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // Best effort; the UI remains usable when no handler is installed.
+        }
+    }
+
     /// <summary>
     /// Resolves the mdplayer-render executable: MDPLAYER_RENDER_PATH env →
     /// user settings path → application directory → PATH.

@@ -250,6 +250,77 @@ public sealed class GenericVisualizationArchitectureTests
     }
 
     [Fact]
+    public void UnifiedLayout_MergesPitchedSampleVoicesIntoOnePanel()
+    {
+        var builder = new TimelineBuilder(44_100);
+        builder.AddDevice(VisualizationDeviceCatalog.SnesDsp());
+        for (int i = 0; i < 8; i++)
+        {
+            VoiceDescriptor voice = VisualizationDeviceCatalog.SnesDspVoices()[i];
+            builder.AddVoice(voice);
+            builder.AddNote(
+                voice.Id,
+                100 + i * 10,
+                900,
+                60 + i,
+                440 * Math.Pow(2, i / 12.0),
+                $"spc:voice{i}",
+                VisualizationNoteMode.Pcm,
+                false,
+                Array.Empty<PitchChange>());
+        }
+        VisualizationTimeline timeline = builder.Build(1_000, "test", new TrackMetadata("spc", "Example", "spc"));
+
+        VisualizationTopology unified = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationLayoutMode.UnifiedRoll, VisualizationChannelFilter.Active);
+
+        Assert.Single(unified.Panels);
+        Assert.Equal(PanelPresentationSchema.PitchedLane, unified.Panels[0].Schema);
+        Assert.Equal(8, unified.Panels[0].VoiceIds.Count);
+        Assert.Contains(unified.Panels[0].VoiceIds, id => id.Contains("pcmvoice", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void UnifiedLayout_KeepsNonPitchedSampleLaneOutOfTheRoll()
+    {
+        var builder = new TimelineBuilder(44_100);
+        builder.AddDevice(new DeviceDescriptor(
+            new DeviceId(ChipType.SnesDsp, 0),
+            "S-DSP",
+            0,
+            DeviceCapabilities.Notes));
+        IReadOnlyList<VoiceDescriptor> voices = VisualizationDeviceCatalog.SnesDspVoices();
+        for (int i = 0; i < 8; i++)
+        {
+            VoiceDescriptor voice = i == 0
+                ? voices[i] with { SupportsPitch = false }
+                : voices[i];
+            builder.AddVoice(voice);
+            builder.AddNote(
+                voice.Id,
+                100 + i * 10,
+                900,
+                60,
+                261.63,
+                $"spc:voice{i}",
+                VisualizationNoteMode.Pcm,
+                false,
+                Array.Empty<PitchChange>());
+        }
+        VisualizationTimeline timeline = builder.Build(1_000, "test", new TrackMetadata("spc", "Example", "spc"));
+
+        VisualizationTopology unified = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationLayoutMode.UnifiedRoll, VisualizationChannelFilter.Active);
+
+        // The pitched seven merge into the roll; the non-pitched sample lane
+        // stays a separate event panel instead of corrupting the shared roll.
+        Assert.True(unified.Panels.Count >= 2);
+        Assert.Contains(unified.Panels, panel => panel.Schema == PanelPresentationSchema.PitchedLane
+            && panel.VoiceIds.Count == 7);
+        Assert.Contains(unified.Panels, panel => panel.Schema == PanelPresentationSchema.SampleLane);
+    }
+
+    [Fact]
     public void ScopePlanner_OnlyReturnsStrategiesWithExecutors()
     {
         DeviceDescriptor[] vgmDevices =

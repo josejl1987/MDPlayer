@@ -18,7 +18,7 @@ public sealed class ToolStatusViewModel : ObservableObject
     private readonly Func<VisualizationPlanResult?> _planProvider;
     private readonly string? _renderCliUserPath;
     private bool _isRefreshing;
-    private string _summary = "tools: unknown";
+    private string _summary = "Checking tools…";
 
     public ToolStatusViewModel(
         Func<VisualizationRequest?> requestProvider,
@@ -29,9 +29,12 @@ public sealed class ToolStatusViewModel : ObservableObject
         _planProvider = planProvider;
         _renderCliUserPath = renderCliUserPath;
         RecheckCommand = new AsyncRelayCommand(() => RefreshAsync(CancellationToken.None));
+        ShowDetailsCommand = new RelayCommand(() => DetailsRequested?.Invoke());
     }
 
     public AsyncRelayCommand RecheckCommand { get; }
+    public RelayCommand ShowDetailsCommand { get; }
+    public event Action? DetailsRequested;
 
     public ObservableCollection<ToolStatus> Statuses { get; } = new();
 

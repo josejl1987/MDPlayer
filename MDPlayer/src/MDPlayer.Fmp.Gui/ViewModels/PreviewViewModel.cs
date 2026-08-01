@@ -128,7 +128,8 @@ public sealed class PreviewViewModel : ObservableObject
         {
             using var stream = new MemoryStream(result.PngBytes);
             var bitmap = new Bitmap(stream);
-            CurrentImage = bitmap;
+            StopMotion();
+            ReplaceCurrentImage(bitmap);
             HasError = result.Warning is not null;
             ErrorText = result.Warning?.Message ?? "";
             Fidelity = result.Fidelity;
@@ -153,7 +154,6 @@ public sealed class PreviewViewModel : ObservableObject
     public void PlayMotion(IReadOnlyList<string> framePaths, int fps, double startSeconds, double durationSeconds)
     {
         StopMotion();
-        _motionFrames.Clear();
         foreach (string path in framePaths)
         {
             try
@@ -177,7 +177,7 @@ public sealed class PreviewViewModel : ObservableObject
         _motionDuration = Math.Max(0.001, durationSeconds);
         _motionIndex = 0;
 
-        CurrentImage = _motionFrames[0];
+        ReplaceCurrentImage(_motionFrames[0]);
         Fidelity = PreviewFidelity.Motion;
         FidelityText = "Motion preview";
         HasError = false;
@@ -191,9 +191,50 @@ public sealed class PreviewViewModel : ObservableObject
     public void StopMotion()
     {
         _motionTimer.Stop();
+
+        bool currentIsMotionFrame = _currentImage is not null && _motionFrames.Contains(_currentImage);
+        if (currentIsMotionFrame)
+            ReplaceCurrentImage(null, disposePrevious: false);
+
+        foreach (Bitmap frame in _motionFrames)
+            frame.Dispose();
         _motionFrames.Clear();
         _motionIndex = 0;
         IsPlaying = false;
+    }
+
+    /// <summary>Releases the current still and all motion frames.</summary>
+    public void Dispose()
+    {
+        StopMotion();
+        ReplaceCurrentImage(null);
+        _motionTimer.Tick -= OnMotionTick;
+    }
+
+    /// <summary>Clears the stage when the input/session changes.</summary>
+    public void Clear()
+    {
+        StopMotion();
+        ReplaceCurrentImage(null);
+        HasError = false;
+        ErrorText = "";
+        HasApproximations = false;
+        ApproximationText = "";
+        IsStale = false;
+        IsLoading = false;
+        Fidelity = PreviewFidelity.Layout;
+        FidelityText = "No preview";
+    }
+
+    private void ReplaceCurrentImage(Bitmap? next, bool disposePrevious = true)
+    {
+        Bitmap? previous = _currentImage;
+        if (ReferenceEquals(previous, next))
+            return;
+
+        CurrentImage = next;
+        if (disposePrevious && previous is not null && !_motionFrames.Contains(previous))
+            previous.Dispose();
     }
 
     public void SetLoading(bool loading) => IsLoading = loading;
@@ -219,7 +260,7 @@ public sealed class PreviewViewModel : ObservableObject
         if (_motionFrames.Count == 0)
             return;
         _motionIndex = (_motionIndex + 1) % _motionFrames.Count;
-        CurrentImage = _motionFrames[_motionIndex];
+        ReplaceCurrentImage(_motionFrames[_motionIndex], disposePrevious: false);
 
         double time = _motionStart + ((_motionIndex / (double)_motionFps) % _motionDuration);
         MotionFrameChanged?.Invoke(time);

@@ -37,7 +37,7 @@ public sealed class VgmVisualizeFlagTests
         (VisualizeOptions options, string stderr) = ParseCapture(["track.vgm", "--layout", "mosaic"]);
 
         Assert.Null(options);
-        Assert.Contains("auto, unified, split, scope, hybrid", stderr, StringComparison.Ordinal);
+        Assert.Contains("auto, performance, scope-stage, diagnostic", stderr, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -617,6 +617,11 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
 
+        // ScopeStage reserves a compact synchronized activity strip below the
+        // mosaic. It shares the window and playhead of the scopes above.
+        if (_layout.IsScopeStage)
+            DrawScopeStageStrip(destination, currentSample);
+
         DrawPresentationTransition(destination, currentSample);
     }
 
@@ -971,43 +976,91 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         // compositions have no dynamic per-panel headers or scope rows, so
         // restoring only their timeline regions avoids copying static pixels
         // on every frame.
+        var rects = new List<OverlayRect>(2 + _panels.Length * 4);
+        rects.Add(_layout.TopBarRect);
+        rects.Add(_layout.BottomBarRect);
         if (_layout.IsSharedComposition)
         {
-            var sharedRects = new OverlayRect[3 + _panels.Length * 3];
-            sharedRects[0] = _layout.TopBarRect;
-            sharedRects[1] = _layout.BottomBarRect;
-            sharedRects[2] = _layout.GetScopeRect(0);
-            int sharedIndex = 3;
+            rects.Add(_layout.GetScopeRect(0));
             for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
             {
-                sharedRects[sharedIndex++] = _layout.GetHeaderRect(panelIndex);
-                sharedRects[sharedIndex++] = _layout.GetTimelineRect(panelIndex);
-                OverlayRect panelRect = _layout.GetPanelRect(panelIndex);
-                sharedRects[sharedIndex++] = new OverlayRect(
-                    panelRect.X, panelRect.Y, panelRect.Width, 1);
+                rects.Add(_layout.GetHeaderRect(panelIndex));
+                rects.Add(_layout.GetTimelineRect(panelIndex));
             }
-            return sharedRects;
         }
-
-        var rects = new OverlayRect[2 + _panels.Length * 4];
-        rects[0] = _layout.TopBarRect;
-        rects[1] = _layout.BottomBarRect;
-
-        int index = 2;
-        foreach (PanelData panel in _panels)
+        else
         {
-            OverlayRect header = _layout.GetHeaderRect(panel.Index);
-            // Dynamic state is normally confined to the right side of the
-            // header, but restoring the complete fixed-height header also
-            // protects the static label gutter from accidental edge pixels
-            // emitted by a clipped transient at a panel boundary.
-            rects[index++] = header;
-            rects[index++] = _layout.GetTimelineRect(panel.Index);
-            rects[index++] = _layout.GetScopeRect(panel.Index);
-            OverlayRect panelRect = _layout.GetPanelRect(panel.Index);
-            rects[index++] = new OverlayRect(panelRect.X, panelRect.Y, panelRect.Width, 1);
+            for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+            {
+                rects.Add(_layout.GetHeaderRect(panelIndex));
+                rects.Add(_layout.GetTimelineRect(panelIndex));
+                rects.Add(_layout.GetScopeRect(panelIndex));
+            }
         }
-        return rects;
+
+        // The ScopeStage activity strip is dynamic content; restore it every
+        // frame so a sequential session cannot retain a previous frame.
+        if (_layout.IsScopeStage)
+            rects.Add(_layout.ScopeStageStripRect);
+
+        // Restore runs before every dynamic draw, so copying a superset of a
+        // region is always safe. Merge vertically adjacent rects that share
+        // the same X/Width into one copy and drop rects fully contained by
+        // another (the header covers the one-pixel panel seam). This cuts the
+        // number of CopyRect calls per frame without copying extra pixels.
+        var merged = new List<OverlayRect>(rects.Count);
+        foreach (OverlayRect rect in rects)
+        {
+            bool covered = false;
+            for (int i = 0; i < merged.Count; i++)
+            {
+                OverlayRect existing = merged[i];
+                if (existing.X == rect.X && existing.Width == rect.Width
+                    && existing.Y <= rect.Y && existing.Bottom >= rect.Bottom)
+                {
+                    covered = true;
+                    break;
+                }
+                if (rect.X == existing.X && rect.Width == existing.Width
+                    && rect.Y <= existing.Y && rect.Bottom >= existing.Bottom)
+                {
+                    merged[i] = rect;
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered)
+                continue;
+            merged.Add(rect);
+        }
+
+        bool mergedAny = true;
+        while (mergedAny)
+        {
+            mergedAny = false;
+            for (int i = 0; i < merged.Count; i++)
+            {
+                OverlayRect a = merged[i];
+                for (int j = i + 1; j < merged.Count; j++)
+                {
+                    OverlayRect b = merged[j];
+                    if (a.X != b.X || a.Width != b.Width)
+                        continue;
+                    if (a.Bottom == b.Y || b.Bottom == a.Y)
+                    {
+                        int top = Math.Min(a.Y, b.Y);
+                        int bottom = Math.Max(a.Bottom, b.Bottom);
+                        merged[i] = new OverlayRect(a.X, top, a.Width, bottom - top);
+                        merged.RemoveAt(j);
+                        mergedAny = true;
+                        break;
+                    }
+                }
+                if (mergedAny)
+                    break;
+            }
+        }
+        return merged.ToArray();
     }
 
     private void CopyRect(byte[] source, Span<byte> destination, OverlayRect rect)
@@ -1019,6 +1072,22 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         int rowBytes = (right - left) * 4;
         if (rowBytes <= 0 || bottom <= top)
             return;
+        // Restore runs before every dynamic draw, so copying a superset of a
+        // region is always safe. An in-bounds rect's rows are contiguous in
+        // memory only when the rect spans the full frame width; for narrower
+        // rects a stride gap separates rows. Rather than issue one CopyTo per
+        // row (the dominant cost when dozens of rects are restored every
+        // frame), copy the full-width slab that covers the rect's rows: it is
+        // one contiguous CopyTo, and the extra pixels are static chrome that
+        // the subsequent dynamic draws repaint anyway.
+        if (rect.Y >= 0 && rect.Bottom <= Height)
+        {
+            int offset = (rect.Y * Width) * 4;
+            int byteCount = (rect.Bottom - rect.Y) * Width * 4;
+            source.AsSpan(offset, byteCount)
+                .CopyTo(destination.Slice(offset, byteCount));
+            return;
+        }
         for (int y = top; y < bottom; y++)
         {
             source.AsSpan((y * Width + left) * 4, rowBytes)

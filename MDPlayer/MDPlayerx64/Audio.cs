@@ -1649,6 +1649,74 @@ namespace MDPlayer
         }
 
         private static System.Threading.Thread trd = null;
+
+        // Rebuild a chip type config with the given taste defaults when it is missing or too small.
+        // The existing value is only replaced when the guard fails, so already-initialized configs are untouched.
+        private static void InitRealChip(RSoundChip[] dst, int i, Setting.ChipType2 config, int ind = 0)
+        {
+            dst[i] = realChip.GetRealChip(config, ind);
+            dst[i]?.Init();
+        }
+
+        private static void EnsureChipConfig(Func<Setting.ChipType2[]> getConfig, Action<Setting.ChipType2[]> setConfig, int infos, int emuSlots, int realSlots)
+        {
+            var cur = getConfig();
+            if (cur != null && cur.Length >= 2) return;
+
+            var ct = new Setting.ChipType2[] { new(), new() };
+            for (var i = 0; i < 2; i++)
+            {
+                ct[i].realChipInfo = NewRealChipInfos(infos);
+                ct[i].UseEmu = new bool[emuSlots];
+                ct[i].UseEmu[0] = true;
+                ct[i].UseReal = new bool[realSlots];
+            }
+            setConfig(ct);
+        }
+
+        private static Setting.ChipType2.RealChipInfo[] NewRealChipInfos(int count)
+        {
+            var infos = new Setting.ChipType2.RealChipInfo[count];
+            for (var i = 0; i < count; i++) infos[i] = new();
+            return infos;
+        }
+
+        private static void EnsureYM2151()
+        {
+            var cur = Audio.Setting.YM2151Type;
+            if (cur != null && cur.Length >= 2 && cur[0].realChipInfo != null && cur[0].realChipInfo.Length >= 2) return;
+
+            var ct = new Setting.ChipType2[] { new(), new() };
+            for (var i = 0; i < 2; i++)
+            {
+                ct[i].realChipInfo = NewRealChipInfos(2);
+                ct[i].UseEmu = new bool[3];
+                ct[i].UseEmu[0] = true;
+                ct[i].UseReal = new bool[2];
+                if (cur != null && cur.Length > i && cur[i] != null)
+                    ct[i].exchgPAN = cur[i].exchgPAN;
+            }
+            Audio.Setting.YM2151Type = ct;
+        }
+
+        private static void EnsureYM2610()
+        {
+            var cur = Audio.Setting.YM2610Type;
+            if (cur != null && cur.Length >= 2
+                && cur[0].UseReal != null && cur[0].UseReal.Length >= 3
+                && cur[1].UseReal != null && cur[1].UseReal.Length >= 3) return;
+
+            var ct = new Setting.ChipType2[] { new(), new() };
+            for (var i = 0; i < 2; i++)
+            {
+                ct[i].realChipInfo = NewRealChipInfos(3);
+                ct[i].UseEmu = new bool[1];
+                ct[i].UseEmu[0] = true;
+                ct[i].UseReal = new bool[3];
+            }
+            Audio.Setting.YM2610Type = ct;
+        }
+
         public static void Init(Setting setting)
         {
             log.ForcedWrite("Audio:Init:Begin");
@@ -1676,238 +1744,28 @@ namespace MDPlayer
 
             log.ForcedWrite("Audio:Init:STEP 03");
 
-            if (Audio.Setting.AY8910Type == null || Audio.Setting.AY8910Type.Length < 2)
-            {
-                Audio.Setting.AY8910Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.AY8910Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.AY8910Type[i].UseEmu = new bool[1];
-                    Audio.Setting.AY8910Type[i].UseEmu[0] = true;
-                    Audio.Setting.AY8910Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.K051649Type == null || Audio.Setting.K051649Type.Length < 2)
-            {
-                Audio.Setting.K051649Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.K051649Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.K051649Type[i].UseEmu = new bool[1];
-                    Audio.Setting.K051649Type[i].UseEmu[0] = true;
-                    Audio.Setting.K051649Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.C140Type == null || Audio.Setting.C140Type.Length < 2)
-            {
-                Audio.Setting.C140Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.C140Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.C140Type[i].UseEmu = new bool[1];
-                    Audio.Setting.C140Type[i].UseEmu[0] = true;
-                    Audio.Setting.C140Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.ES5503Type == null || Audio.Setting.ES5503Type.Length < 2)
-            {
-                Audio.Setting.ES5503Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.ES5503Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.ES5503Type[i].UseEmu = new bool[1];
-                    Audio.Setting.ES5503Type[i].UseEmu[0] = true;
-                    Audio.Setting.ES5503Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.HuC6280Type == null || Audio.Setting.HuC6280Type.Length < 2)
-            {
-                Audio.Setting.HuC6280Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.HuC6280Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.HuC6280Type[i].UseEmu = new bool[1];
-                    Audio.Setting.HuC6280Type[i].UseEmu[0] = true;
-                    Audio.Setting.HuC6280Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.SEGAPCMType == null || Audio.Setting.SEGAPCMType.Length < 2)
-            {
-                Audio.Setting.SEGAPCMType = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.SEGAPCMType[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.SEGAPCMType[i].UseEmu = new bool[1];
-                    Audio.Setting.SEGAPCMType[i].UseEmu[0] = true;
-                    Audio.Setting.SEGAPCMType[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.SN76489Type == null || Audio.Setting.SN76489Type.Length < 2)
-            {
-                Audio.Setting.SN76489Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.SN76489Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.SN76489Type[i].UseEmu = new bool[2];
-                    Audio.Setting.SN76489Type[i].UseEmu[0] = true;
-                    Audio.Setting.SN76489Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.Y8950Type == null || Audio.Setting.Y8950Type.Length < 2)
-            {
-                Audio.Setting.Y8950Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.Y8950Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.Y8950Type[i].UseEmu = new bool[1];
-                    Audio.Setting.Y8950Type[i].UseEmu[0] = true;
-                    Audio.Setting.Y8950Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YM2151Type == null || Audio.Setting.YM2151Type.Length < 2 
-                || (Audio.Setting.YM2151Type[0].realChipInfo == null && Audio.Setting.YM2151Type[0].realChipInfo.Length < 2))
-            {
-                Setting.ChipType2[] ct = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    ct[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo(), new Setting.ChipType2.RealChipInfo() };
-                    ct[i].UseEmu = new bool[3];
-                    ct[i].UseEmu[0] = true;
-                    ct[i].UseReal = new bool[2];
-                    if (Audio.Setting.YM2151Type != null && Audio.Setting.YM2151Type.Length > i && Audio.Setting.YM2151Type[i] != null)
-                        ct[i].exchgPAN = Audio.Setting.YM2151Type[i].exchgPAN;
-                }
-                Audio.Setting.YM2151Type = ct;
-            }
-            if (Audio.Setting.YM2203Type == null || Audio.Setting.YM2203Type.Length < 2)
-            {
-                Audio.Setting.YM2203Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM2203Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM2203Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM2203Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM2203Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YM2413Type == null || Audio.Setting.YM2413Type.Length < 2)
-            {
-                Audio.Setting.YM2413Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM2413Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM2413Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM2413Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM2413Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YM2608Type == null || Audio.Setting.YM2608Type.Length < 2)
-            {
-                Audio.Setting.YM2608Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM2608Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM2608Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM2608Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM2608Type[i].UseReal = new bool[1];
-                }
-            }
+            EnsureChipConfig(() => Audio.Setting.AY8910Type, v => Audio.Setting.AY8910Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.K051649Type, v => Audio.Setting.K051649Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.C140Type, v => Audio.Setting.C140Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.ES5503Type, v => Audio.Setting.ES5503Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.HuC6280Type, v => Audio.Setting.HuC6280Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.SEGAPCMType, v => Audio.Setting.SEGAPCMType = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.SN76489Type, v => Audio.Setting.SN76489Type = v, 1, 2, 1);
+            EnsureChipConfig(() => Audio.Setting.Y8950Type, v => Audio.Setting.Y8950Type = v, 1, 1, 1);
+            EnsureYM2151();
+            EnsureChipConfig(() => Audio.Setting.YM2203Type, v => Audio.Setting.YM2203Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YM2413Type, v => Audio.Setting.YM2413Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YM2608Type, v => Audio.Setting.YM2608Type = v, 1, 1, 1);
 
-            if (Audio.Setting.YM2610Type == null
-                || Audio.Setting.YM2610Type.Length < 2
-                || Audio.Setting.YM2610Type[0].UseReal == null
-                || Audio.Setting.YM2610Type[0].UseReal.Length < 3
-                || Audio.Setting.YM2610Type[1].UseReal == null
-                || Audio.Setting.YM2610Type[1].UseReal.Length < 3
-                )
-            {
-                Audio.Setting.YM2610Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM2610Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo(), new Setting.ChipType2.RealChipInfo(), new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM2610Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM2610Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM2610Type[i].UseReal = new bool[3];
-                }
-            }
+            EnsureYM2610();
 
-            if (Audio.Setting.YM2612Type == null || Audio.Setting.YM2612Type.Length < 2)
-            {
-                Audio.Setting.YM2612Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM2612Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM2612Type[i].UseEmu = new bool[3];
-                    Audio.Setting.YM2612Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM2612Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YM3526Type == null || Audio.Setting.YM3526Type.Length < 2)
-            {
-                Audio.Setting.YM3526Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM3526Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM3526Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM3526Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM3526Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YM3812Type == null || Audio.Setting.YM3812Type.Length < 2)
-            {
-                Audio.Setting.YM3812Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YM3812Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YM3812Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YM3812Type[i].UseEmu[0] = true;
-                    Audio.Setting.YM3812Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YMF262Type == null || Audio.Setting.YMF262Type.Length < 2)
-            {
-                Audio.Setting.YMF262Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YMF262Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YMF262Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YMF262Type[i].UseEmu[0] = true;
-                    Audio.Setting.YMF262Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YMF271Type == null || Audio.Setting.YMF271Type.Length < 2)
-            {
-                Audio.Setting.YMF271Type = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YMF271Type[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YMF271Type[i].UseEmu = new bool[1];
-                    Audio.Setting.YMF271Type[i].UseEmu[0] = true;
-                    Audio.Setting.YMF271Type[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YMF278BType == null || Audio.Setting.YMF278BType.Length < 2)
-            {
-                Audio.Setting.YMF278BType = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YMF278BType[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YMF278BType[i].UseEmu = new bool[1];
-                    Audio.Setting.YMF278BType[i].UseEmu[0] = true;
-                    Audio.Setting.YMF278BType[i].UseReal = new bool[1];
-                }
-            }
-            if (Audio.Setting.YMZ280BType == null || Audio.Setting.YMZ280BType.Length < 2)
-            {
-                Audio.Setting.YMZ280BType = new Setting.ChipType2[] { new Setting.ChipType2(), new Setting.ChipType2() };
-                for (int i = 0; i < 2; i++)
-                {
-                    Audio.Setting.YMZ280BType[i].realChipInfo = new Setting.ChipType2.RealChipInfo[] { new Setting.ChipType2.RealChipInfo() };
-                    Audio.Setting.YMZ280BType[i].UseEmu = new bool[1];
-                    Audio.Setting.YMZ280BType[i].UseEmu[0] = true;
-                    Audio.Setting.YMZ280BType[i].UseReal = new bool[1];
-                }
-            }
+            EnsureChipConfig(() => Audio.Setting.YM2612Type, v => Audio.Setting.YM2612Type = v, 1, 3, 1);
+            EnsureChipConfig(() => Audio.Setting.YM3526Type, v => Audio.Setting.YM3526Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YM3812Type, v => Audio.Setting.YM3812Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YMF262Type, v => Audio.Setting.YMF262Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YMF271Type, v => Audio.Setting.YMF271Type = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YMF278BType, v => Audio.Setting.YMF278BType = v, 1, 1, 1);
+            EnsureChipConfig(() => Audio.Setting.YMZ280BType, v => Audio.Setting.YMZ280BType = v, 1, 1, 1);
 
             if (mds == null)
                 mds = new MDSound.MDSound((UInt32)setting.outputDevice.SampleRate, samplingBuffer, null);
@@ -1968,40 +1826,23 @@ namespace MDPlayer
             {
                 for (int i = 0; i < 2; i++)
                 {
-                    scYM2612[i] = realChip.GetRealChip(Audio.Setting.YM2612Type[i]);
-                    scYM2612[i]?.Init();
-                    scSN76489[i] = realChip.GetRealChip(Audio.Setting.SN76489Type[i]);
-                    scSN76489[i]?.Init();
-                    scYM2608[i] = realChip.GetRealChip(Audio.Setting.YM2608Type[i]);
-                    scYM2608[i]?.Init();
-                    scYM2151[i] = realChip.GetRealChip(Audio.Setting.YM2151Type[i], 3);
-                    scYM2151[i]?.Init();
-                    scYM2151_4M[i] = realChip.GetRealChip(Audio.Setting.YM2151Type[i], 4);
-                    scYM2151_4M[i]?.Init();
-                    scYM2203[i] = realChip.GetRealChip(Audio.Setting.YM2203Type[i]);
-                    scYM2203[i]?.Init();
-                    scAY8910[i] = realChip.GetRealChip(Audio.Setting.AY8910Type[i]);
-                    scAY8910[i]?.Init();
-                    scK051649[i] = realChip.GetRealChip(Audio.Setting.K051649Type[i]);
-                    scK051649[i]?.Init();
-                    scYM2413[i] = realChip.GetRealChip(Audio.Setting.YM2413Type[i]);
-                    scYM2413[i]?.Init();
-                    scYM3526[i] = realChip.GetRealChip(Audio.Setting.YM3526Type[i]);
-                    scYM3526[i]?.Init();
-                    scYM3812[i] = realChip.GetRealChip(Audio.Setting.YM3812Type[i]);
-                    scYM3812[i]?.Init();
-                    scYMF262[i] = realChip.GetRealChip(Audio.Setting.YMF262Type[i]);
-                    scYMF262[i]?.Init();
-                    scYM2610[i] = realChip.GetRealChip(Audio.Setting.YM2610Type[i]);
-                    scYM2610[i]?.Init();
-                    scYM2610EA[i] = realChip.GetRealChip(Audio.Setting.YM2610Type[i], 1);
-                    scYM2610EA[i]?.Init();
-                    scYM2610EB[i] = realChip.GetRealChip(Audio.Setting.YM2610Type[i], 2);
-                    scYM2610EB[i]?.Init();
-                    scSEGAPCM[i] = realChip.GetRealChip(Audio.Setting.SEGAPCMType[i]);
-                    scSEGAPCM[i]?.Init();
-                    scC140[i] = realChip.GetRealChip(Audio.Setting.C140Type[i]);
-                    scC140[i]?.Init();
+                    InitRealChip(scYM2612, i, Audio.Setting.YM2612Type[i]);
+                    InitRealChip(scSN76489, i, Audio.Setting.SN76489Type[i]);
+                    InitRealChip(scYM2608, i, Audio.Setting.YM2608Type[i]);
+                    InitRealChip(scYM2151, i, Audio.Setting.YM2151Type[i], 3);
+                    InitRealChip(scYM2151_4M, i, Audio.Setting.YM2151Type[i], 4);
+                    InitRealChip(scYM2203, i, Audio.Setting.YM2203Type[i]);
+                    InitRealChip(scAY8910, i, Audio.Setting.AY8910Type[i]);
+                    InitRealChip(scK051649, i, Audio.Setting.K051649Type[i]);
+                    InitRealChip(scYM2413, i, Audio.Setting.YM2413Type[i]);
+                    InitRealChip(scYM3526, i, Audio.Setting.YM3526Type[i]);
+                    InitRealChip(scYM3812, i, Audio.Setting.YM3812Type[i]);
+                    InitRealChip(scYMF262, i, Audio.Setting.YMF262Type[i]);
+                    InitRealChip(scYM2610, i, Audio.Setting.YM2610Type[i]);
+                    InitRealChip(scYM2610EA, i, Audio.Setting.YM2610Type[i], 1);
+                    InitRealChip(scYM2610EB, i, Audio.Setting.YM2610Type[i], 2);
+                    InitRealChip(scSEGAPCM, i, Audio.Setting.SEGAPCMType[i]);
+                    InitRealChip(scC140, i, Audio.Setting.C140Type[i]);
                 }
 
             }

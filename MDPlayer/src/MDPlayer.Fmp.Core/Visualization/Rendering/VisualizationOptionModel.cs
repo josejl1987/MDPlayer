@@ -149,22 +149,34 @@ internal static class VisualizationOptionParsing
 
 internal static class VisualizationLayoutModeResolver
 {
+    /// <summary>
+    /// The three canonical publishing compositions. Auto resolves to one of
+    /// these; every other mode is a legacy alias or an explicit technical
+    /// request that renders as-is.
+    /// </summary>
+    public static readonly VisualizationLayoutMode[] CanonicalCompositions =
+    [
+        VisualizationLayoutMode.Performance,
+        VisualizationLayoutMode.ScopeStage,
+        VisualizationLayoutMode.Diagnostic,
+    ];
+
     public static VisualizationLayoutMode Resolve(
         VisualizationTimeline timeline,
         VisualizationLayoutMode requested)
     {
         ArgumentNullException.ThrowIfNull(timeline);
         if (requested is (VisualizationLayoutMode.UnifiedRoll
-            or VisualizationLayoutMode.Hybrid)
+            or VisualizationLayoutMode.Hybrid
+            or VisualizationLayoutMode.Performance)
             && timeline.Voices.Any(voice => voice.SupportsPitch
                 && !voice.IsNoise
                 && !voice.IsPercussion
                 && !IsAbsolutePitchSystem(voice.PitchSystem)))
         {
-            // An explicit shared composition still cannot invent an absolute
-            // coordinate for a relative-only voice. Split is the actionable
-            // safe fallback and is reported as the selected layout in the
-            // prepared plan.
+            // A shared composition cannot invent an absolute coordinate for a
+            // relative-only voice. Split is the actionable safe fallback and
+            // is reported as the selected layout in the prepared plan.
             return VisualizationLayoutMode.SplitRoll;
         }
 
@@ -179,19 +191,6 @@ internal static class VisualizationLayoutModeResolver
             && !voice.IsNoise
             && !voice.IsPercussion
             && noteChannels.Contains(voice.Id.ToString()));
-        int activeVoiceCount = timeline.Voices.Count(voice => noteChannels.Contains(voice.Id.ToString()));
-        int nonPitched = Math.Max(0, activeVoiceCount - pitched);
-        double nonPitchedRatio = activeVoiceCount == 0
-            ? 0
-            : nonPitched / (double)activeVoiceCount;
-        int semantic = noteChannels.Count
-            + timeline.Rhythm.Where(value => value.SamplePosition >= timeline.StartSample
-                && value.SamplePosition <= timeline.EndSample)
-                .Count()
-            + timeline.SamplePlayback.Where(value => value.EndSample > value.StartSample).Count()
-            + timeline.NoiseStates.Where(value => value.EndSample > value.StartSample).Count()
-            + timeline.AggregateHits.Length
-            + (VisualizationTimelineCompatibility.HasLegacyRenderableContent(timeline) ? 1 : 0);
         bool hasScope = timeline.WaveformChanges.Length > 0
             || timeline.Devices.Any(device => device.ScopeSupport != ScopeSupport.None);
 
@@ -203,24 +202,17 @@ internal static class VisualizationLayoutModeResolver
             .Select(voice => voice.PitchSystem)
             .All(IsAbsolutePitchSystem);
 
-        if (pitched >= 2 && nonPitchedRatio <= 0.35 && pitchModelsCompatible)
-            return VisualizationLayoutMode.UnifiedRoll;
+        // Canonical Auto policy. Auto chooses among exactly three publishing
+        // compositions and is deterministic for a given captured timeline:
+        //   * compatible pitched voices present -> Performance (unified roll)
+        //   * only scope content reliable       -> ScopeStage (scope wall)
+        //   * otherwise                          -> Diagnostic (grid)
+        if (pitched >= 1 && pitchModelsCompatible)
+            return VisualizationLayoutMode.Performance;
 
-        // Relative-only and otherwise incompatible active pitch models must
-        // keep independent cameras. They are never allowed into a shared
-        // absolute roll, even when waveform stems are also available.
-        if (pitched >= 2 && !pitchModelsCompatible)
-            return VisualizationLayoutMode.SplitRoll;
-        // A prepared capture with both semantic events and usable waveform
-        // stems gets one shared hybrid composition. This keeps the decision
-        // stable for the whole video and avoids silently dropping available
-        // scope content from an audience-facing render.
-        if (semantic > 0 && hasScope)
-            return VisualizationLayoutMode.Hybrid;
-        if (pitched > 0)
-            return VisualizationLayoutMode.SplitRoll;
-        if (hasScope || semantic > 0)
-            return VisualizationLayoutMode.Scope;
+        if (hasScope)
+            return VisualizationLayoutMode.ScopeStage;
+
         return VisualizationLayoutMode.Diagnostic;
     }
 
@@ -255,6 +247,28 @@ internal static class VisualizationLayoutNames
         VisualizationLayoutMode.UnifiedRoll => "unified",
         VisualizationLayoutMode.SplitRoll => "split",
         VisualizationLayoutMode.DiagnosticV2 => "diagnostic-v2",
+        VisualizationLayoutMode.Performance => "performance",
+        VisualizationLayoutMode.ScopeStage => "scope-stage",
         _ => mode.ToString().ToLowerInvariant(),
     };
+
+    /// <summary>
+    /// The canonical composition family of a resolved mode. Legacy modes map
+    /// onto their publishing equivalent so plans, HTML previews and the GUI
+    /// all speak the three-composition vocabulary.
+    /// </summary>
+    public static VisualizationLayoutMode CanonicalFamily(VisualizationLayoutMode mode) => mode switch
+    {
+        VisualizationLayoutMode.Performance
+            or VisualizationLayoutMode.UnifiedRoll
+            or VisualizationLayoutMode.Hybrid
+            or VisualizationLayoutMode.SplitRoll
+            or VisualizationLayoutMode.Focus => VisualizationLayoutMode.Performance,
+        VisualizationLayoutMode.ScopeStage
+            or VisualizationLayoutMode.Scope => VisualizationLayoutMode.ScopeStage,
+        _ => VisualizationLayoutMode.Diagnostic,
+    };
+
+    public static string ToCompositionName(VisualizationLayoutMode mode)
+        => ToCliName(CanonicalFamily(mode));
 }

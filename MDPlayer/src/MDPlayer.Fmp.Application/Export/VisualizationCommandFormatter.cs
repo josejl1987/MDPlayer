@@ -175,6 +175,8 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         VisualizationLayout.Hybrid => "hybrid",
         VisualizationLayout.Diagnostic => "diagnostic",
         VisualizationLayout.LegacyDiagnostic => "diagnostic-v2",
+        VisualizationLayout.Performance => "performance",
+        VisualizationLayout.ScopeStage => "scope-stage",
         _ => "auto",
     };
 

@@ -108,7 +108,30 @@ public sealed class VisualizationV3ContractTests
                 FillScope(scope, frame);
                 session.RenderNext(frame, scope, destination);
                 if (expected.TryGetValue(frame, out byte[] expectedHash))
-                    Assert.Equal(expectedHash, SHA256.HashData(destination));
+                {
+                    byte[] actual = SHA256.HashData(destination);
+                    if (!expectedHash.AsSpan().SequenceEqual(actual))
+                    {
+                        int diff = -1;
+                        for (int k = 0; k < destination.Length; k++)
+                        {
+                            if (direct[k] != destination[k]) { diff = k; break; }
+                        }
+                        int px = diff / 4;
+                        int pxX = px % renderer.Width;
+                        int pxY = px / renderer.Width;
+                        Console.WriteLine($"CASE mode={mode} pos={position} frame={frame} firstDiff={diff} pixel=({pxX},{pxY})");
+                        var field = typeof(PanelOverlayRenderer).GetField("_dynamicRestoreRects",
+                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                        var rects = (OverlayRect[])field!.GetValue(renderer)!;
+                        foreach (var r in rects)
+                        {
+                            if (pxX >= r.X && pxX < r.Right && pxY >= r.Y && pxY < r.Bottom)
+                                Console.WriteLine($"  contains: X={r.X} Y={r.Y} W={r.Width} H={r.Height}");
+                        }
+                    }
+                    Assert.Equal(expectedHash, actual);
+                }
             }
         }
     }
@@ -394,13 +417,14 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void AutoPrefersHybridWhenSemanticEventsAndScopeCapabilityExist()
+    public void AutoPrefersPerformanceWhenPitchedVoicesExist()
     {
         VisualizationTimeline timeline = new()
         {
             SampleRate = 1_000,
             EndSample = 2_000,
             Devices = [VisualizationDeviceCatalog.Ym2608()],
+            Voices = VisualizationDeviceCatalog.Ym2608Voices(),
             Notes =
             [
                 new NoteEvent(
@@ -410,7 +434,7 @@ public sealed class VisualizationV3ContractTests
         };
 
         Assert.Equal(
-            VisualizationLayoutMode.Hybrid,
+            VisualizationLayoutMode.Performance,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
     }
 
@@ -427,7 +451,7 @@ public sealed class VisualizationV3ContractTests
         };
 
         Assert.Equal(
-            VisualizationLayoutMode.Scope,
+            VisualizationLayoutMode.ScopeStage,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             timeline,
@@ -440,7 +464,7 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void AutoSelectsSplitForRelativePitchVoices()
+    public void AutoFallsBackToScopeStageForIncompatiblePitchModels()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
         VoiceDescriptor first = VisualizationDeviceCatalog.Ym2608Voices()[0] with
@@ -464,8 +488,43 @@ public sealed class VisualizationV3ContractTests
             ],
         };
 
+        // A unified roll cannot invent an absolute coordinate for the
+        // relative-only voice; with usable scope stems Auto prefers the
+        // ScopeStage wall, whose waveforms never depend on pitch models.
         Assert.Equal(
-            VisualizationLayoutMode.SplitRoll,
+            VisualizationLayoutMode.ScopeStage,
+            VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
+    }
+
+    [Fact]
+    public void AutoFallsBackToDiagnosticWhenNothingIsReliable()
+    {
+        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
+        VoiceDescriptor first = VisualizationDeviceCatalog.Ym2608Voices()[0] with
+        {
+            PitchSystem = PitchCoordinateSystem.RelativeSemitone,
+        };
+        VoiceDescriptor second = VisualizationDeviceCatalog.Ym2608Voices()[1] with
+        {
+            PitchSystem = PitchCoordinateSystem.RelativeSemitone,
+        };
+        VisualizationTimeline timeline = new()
+        {
+            SampleRate = 1_000,
+            EndSample = 2_000,
+            // No waveform/scope source and no rhythm/sample/noise semantics:
+            // only the per-panel Diagnostic grid can represent the capture.
+            Devices = [],
+            Voices = [first, second],
+            Notes =
+            [
+                new NoteEvent(first.Id.ToString(), 0, 1_000, 440, 60, "a", VisualizationNoteMode.Fm, false, []),
+                new NoteEvent(second.Id.ToString(), 0, 1_000, 494, 71, "b", VisualizationNoteMode.Fm, false, []),
+            ],
+        };
+
+        Assert.Equal(
+            VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
     }
 

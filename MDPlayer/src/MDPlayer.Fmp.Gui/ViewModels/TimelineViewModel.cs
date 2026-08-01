@@ -26,12 +26,12 @@ public sealed class TimelineViewModel : ObservableObject
         _settleTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _settleTimer.Tick += OnSettleTick;
 
-        PreviousPointCommand = new RelayCommand(GoPreviousPoint, () => RepresentativePoints.Count > 0);
-        NextPointCommand = new RelayCommand(GoNextPoint, () => RepresentativePoints.Count > 0);
-        SeekRelativeCommand = new RelayCommand(SeekRelative);
-        SeekStartCommand = new RelayCommand(() => Seek(0));
-        SeekEndCommand = new RelayCommand(() => Seek(_durationSeconds));
-        TogglePlayCommand = new RelayCommand(() => PlayPauseRequested?.Invoke());
+        PreviousPointCommand = new RelayCommand(GoPreviousPoint, () => HasTimeline && RepresentativePoints.Count > 0);
+        NextPointCommand = new RelayCommand(GoNextPoint, () => HasTimeline && RepresentativePoints.Count > 0);
+        SeekRelativeCommand = new RelayCommand(SeekRelative, _ => HasTimeline);
+        SeekStartCommand = new RelayCommand(() => Seek(0), () => HasTimeline);
+        SeekEndCommand = new RelayCommand(() => Seek(_durationSeconds), () => HasTimeline);
+        TogglePlayCommand = new RelayCommand(() => PlayPauseRequested?.Invoke(), () => HasTimeline);
     }
 
     /// <summary>(timeSeconds, isFinal) — throttled scrub events.</summary>
@@ -67,9 +67,15 @@ public sealed class TimelineViewModel : ObservableObject
         set
         {
             if (SetProperty(ref _durationSeconds, value))
+            {
                 OnPropertyChanged(nameof(TimeText));
+                OnPropertyChanged(nameof(HasTimeline));
+                RaiseTimelineCommandStates();
+            }
         }
     }
+
+    public bool HasTimeline => DurationSeconds > 0;
 
     /// <summary>Two-way bound to the scrub slider.</summary>
     public double ScrubPosition
@@ -108,7 +114,10 @@ public sealed class TimelineViewModel : ObservableObject
         private set
         {
             if (SetProperty(ref _isPlaying, value))
+            {
                 OnPropertyChanged(nameof(PlayPauseGlyph));
+                RaiseTimelineCommandStates();
+            }
         }
     }
 
@@ -148,18 +157,29 @@ public sealed class TimelineViewModel : ObservableObject
 
     public void SetPlaying(bool playing) => IsPlaying = playing;
 
+    public void Dispose()
+    {
+        _settleTimer.Stop();
+        SetPlaying(false);
+    }
+
     public void SynchronizePlan(VisualizationPlanResult? plan)
     {
         RepresentativePoints.Clear();
-        if (plan is not null)
+        if (plan is not null && plan.EstimatedDurationSeconds is double duration)
         {
             foreach (RepresentativePoint point in plan.RepresentativePoints)
                 RepresentativePoints.Add(point);
-            if (plan.EstimatedDurationSeconds is double duration)
-                DurationSeconds = duration;
+            DurationSeconds = duration;
+        }
+        else
+        {
+            DurationSeconds = 0;
+            SetPosition(0, notify: false);
         }
         PreviousPointCommand.RaiseCanExecuteChanged();
         NextPointCommand.RaiseCanExecuteChanged();
+        RaiseTimelineCommandStates();
     }
 
     private void OnSettleTick(object? sender, EventArgs e)
@@ -180,6 +200,16 @@ public sealed class TimelineViewModel : ObservableObject
     }
 
     private void Seek(double timeSeconds) => SetPosition(timeSeconds, notify: true);
+
+    private void RaiseTimelineCommandStates()
+    {
+        PreviousPointCommand.RaiseCanExecuteChanged();
+        NextPointCommand.RaiseCanExecuteChanged();
+        SeekRelativeCommand.RaiseCanExecuteChanged();
+        SeekStartCommand.RaiseCanExecuteChanged();
+        SeekEndCommand.RaiseCanExecuteChanged();
+        TogglePlayCommand.RaiseCanExecuteChanged();
+    }
 
     private void GoPreviousPoint()
     {

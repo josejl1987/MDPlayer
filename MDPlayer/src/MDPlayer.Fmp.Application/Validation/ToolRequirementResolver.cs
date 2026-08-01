@@ -34,14 +34,19 @@ public static class ToolRequirementResolver
             });
         }
 
-        // Scope content requires Corrscope (external scope renderer).
+        // Scope content requires Corrscope (external scope renderer). Scope
+        // Stage and Diagnostic make scopes the primary content; Performance
+        // treats the scope strip as an optional enhancement.
         bool needsScopes = request.Layout switch
         {
             VisualizationLayout.Scopes
                 or VisualizationLayout.Hybrid
                 or VisualizationLayout.Diagnostic
-                or VisualizationLayout.LegacyDiagnostic => true,
-            VisualizationLayout.Auto => resolvedLayout is "scopes" or "hybrid" or "diagnostic" or "diagnostic-v2",
+                or VisualizationLayout.LegacyDiagnostic
+                or VisualizationLayout.ScopeStage => true,
+            VisualizationLayout.Performance => false,
+            VisualizationLayout.Auto => resolvedLayout is "scopes" or "hybrid" or "diagnostic" or "diagnostic-v2"
+                or "scope-stage",
             _ => false,
         };
         if (needsScopes)
@@ -54,14 +59,14 @@ public static class ToolRequirementResolver
                 Reason = "This layout renders synchronized scope stems through Corrscope.",
             });
         }
-        else if (request.Layout == VisualizationLayout.Auto && resolvedLayout is null)
+        else if (request.Layout is (VisualizationLayout.Auto or VisualizationLayout.Performance) && resolvedLayout is null)
         {
             requirements.Add(new ToolRequirement
             {
                 Role = ToolRoles.Corrscope,
                 Kind = ToolRequirementKind.Optional,
-                Feature = "scope wall",
-                Reason = "Auto layout may resolve to a scope composition; Corrscope is needed only then.",
+                Feature = "scope strip",
+                Reason = "Scopes are an optional enhancement for this layout; Corrscope is needed only when they are enabled.",
             });
         }
 

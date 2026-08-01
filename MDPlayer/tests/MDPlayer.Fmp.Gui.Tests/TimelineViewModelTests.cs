@@ -32,6 +32,33 @@ public class TimelineViewModelTests
         TimelineViewModel viewModel = CreateWithPoints();
         Assert.Equal(4, viewModel.RepresentativePoints.Count);
         Assert.Equal(100, viewModel.DurationSeconds);
+        Assert.True(viewModel.HasTimeline);
+    }
+
+    [Fact]
+    public void EmptyTimeline_DisablesTransportCommands()
+    {
+        var viewModel = new TimelineViewModel();
+
+        Assert.False(viewModel.HasTimeline);
+        Assert.False(viewModel.TogglePlayCommand.CanExecute(null));
+        Assert.False(viewModel.SeekRelativeCommand.CanExecute("1"));
+        Assert.False(viewModel.SeekStartCommand.CanExecute(null));
+        Assert.False(viewModel.SeekEndCommand.CanExecute(null));
+        Assert.False(viewModel.PreviousPointCommand.CanExecute(null));
+        Assert.False(viewModel.NextPointCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void ClearingPlan_ClearsDurationAndDisablesTransport()
+    {
+        TimelineViewModel viewModel = CreateWithPoints();
+
+        viewModel.SynchronizePlan(null);
+
+        Assert.Equal(0, viewModel.DurationSeconds);
+        Assert.False(viewModel.HasTimeline);
+        Assert.False(viewModel.TogglePlayCommand.CanExecute(null));
     }
 
     [Fact]

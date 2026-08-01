@@ -23,6 +23,11 @@ internal static class ChipPanelHeaderBuilder
         if (separator < 0
             || !int.TryParse(voiceId[(separator + 1)..], out int voiceIndex))
             return false;
+        // Some rips emit events for a pseudo-voice outside the 8-voice S-DSP
+        // range (e.g. a key-off broadcast). Those panels cannot carry a
+        // per-voice chip header; fall back to the generic label.
+        if (voiceIndex < 0 || voiceIndex >= SnesDspPresentation.VoiceCount)
+            return false;
 
         int source = 0;
         sbyte volumeLeft = 127;

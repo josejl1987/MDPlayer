@@ -272,7 +272,7 @@ internal static class VgmVisualizeCommand
                             : layout.ColumnCount,
                         IncludeMasterAsChannel = !hasRealStems,
                         IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                        HideLabels = layoutMode != VisualizationLayoutMode.Scope,
+                        HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
                         ResDivisor = 1.0,
                         Antialiasing = options.FinalQuality,
                     });

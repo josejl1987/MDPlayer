@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using Avalonia.Threading;
 using Fmp.Application.Contracts;
 using Fmp.Application.Export;
@@ -22,6 +23,13 @@ public enum GuiState
     Error,
 }
 
+public enum CloseDecision
+{
+    Save,
+    Discard,
+    Cancel,
+}
+
 /// <summary>
 /// The orchestrator: owns the immutable request snapshot, the preview session,
 /// the plan and all child view models. Every long-running operation takes a
@@ -40,6 +48,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly CancellationTokenSource _lifeCts = new();
 
     private VisualizationRequest? _request;
+    private VisualizationInputInfo? _input;
     private IVisualizationPreviewSession? _session;
     private VisualizationPlanResult? _plan;
     private int _requestRevision;
@@ -58,6 +67,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly SemaphoreSlim _previewGate = new(1, 1);
     private CancellationTokenSource _previewCts = new();
     private CancellationTokenSource _exportCts = new();
+    private Task? _shutdownTask;
 
     public MainWindowViewModel(
         GuiSettingsStore settings,
@@ -83,11 +93,17 @@ public sealed class MainWindowViewModel : ObservableObject
         Diagnostics = new DiagnosticsViewModel(clipboard);
         Export = new ExportProgressViewModel(clipboard, Diagnostics);
         Settings = new SettingsViewModel(this);
+        RefreshRecentFiles();
 
         _autosaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
         _autosaveTimer.Tick += (_, _) => Autosave();
         _previewDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _previewDebounce.Tick += OnPreviewDebounceTick;
+        Timeline.PropertyChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasTimeline));
+            RefreshCommands();
+        };
 
         WireCommands();
         WireEvents();
@@ -118,14 +134,20 @@ public sealed class MainWindowViewModel : ObservableObject
     public RelayCommand RenderStillCommand { get; private set; } = null!;
     public RelayCommand CancelPreviewCommand { get; private set; } = null!;
     public RelayCommand FocusCommandPanelCommand { get; private set; } = null!;
+    public RelayCommand RenderLayoutPreviewCommand { get; private set; } = null!;
+    public RelayCommand StartMotionPreviewCommand { get; private set; } = null!;
+    public AsyncRelayCommand ChooseOutputPathCommand { get; private set; } = null!;
+    public RelayCommand OpenOutputFolderCommand { get; private set; } = null!;
+    public RelayCommand OpenOutputCommand { get; private set; } = null!;
+    public AsyncRelayCommand CopyOutputPathCommand { get; private set; } = null!;
 
     // ---- Window-driven hooks ----
 
     /// <summary>The window shows a recovery prompt; true = restore.</summary>
     public Func<VisualizationProject, Task<bool>>? RecoveryPrompt { get; set; }
 
-    /// <summary>The window confirms discarding unsaved changes; true = discard.</summary>
-    public Func<Task<bool>>? DiscardConfirm { get; set; }
+    /// <summary>The window asks how to handle unsaved changes before closing.</summary>
+    public Func<Task<CloseDecision>>? CloseConfirm { get; set; }
 
     /// <summary>Raised so the window can focus the command panel (Ctrl+K).</summary>
     public event Action? CommandPanelFocusRequested;
@@ -159,6 +181,56 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public bool IsDirty => _isDirty;
 
+    public bool HasInput => _input is not null;
+    public bool HasRequest => _request is not null;
+    public bool HasTimeline => Timeline.HasTimeline;
+    public bool IsBusy => _state is GuiState.Inspecting
+        or GuiState.PreparingPreview
+        or GuiState.Previewing
+        or GuiState.ExportPreflight
+        or GuiState.Exporting;
+    public bool CanEditProject => HasRequest && !IsBusy;
+    public bool CanSaveProject => HasRequest && !IsBusy;
+    public bool CanPreview => HasRequest && _session is not null && HasTimeline && !IsBusy;
+    public bool CanRender => _state is GuiState.Ready or GuiState.Completed or GuiState.Error
+        && HasRequest
+        && !HasFatalValidationIssues
+        && !HasOutputConflict;
+
+    public string InputTitle => _input?.Title ?? _input?.DisplayName ?? "No input open";
+
+    public string InputSummary
+    {
+        get
+        {
+            if (_input is null)
+                return "Drop a supported music file here to begin.";
+
+            string duration = (_input.EstimatedDuration ?? _input.DeclaredDuration) is TimeSpan value
+                ? FormatDuration(value)
+                : "duration unknown";
+            return $"{_input.Format} · {duration} · {_input.Tracks.Count} tracks";
+        }
+    }
+
+    public string OutputPath => _request?.OutputPath ?? "";
+    public bool HasOutputConflict => !string.IsNullOrWhiteSpace(OutputPath)
+        && File.Exists(OutputPath)
+        && !(_request?.Overwrite ?? false);
+    public bool CanOpenOutput => !string.IsNullOrWhiteSpace(OutputPath) && File.Exists(OutputPath);
+    public long? OutputAvailableBytes => GetAvailableBytes(OutputPath);
+    public bool HasLowDiskSpace => OutputAvailableBytes is long bytes && bytes < 1_000_000_000;
+    public string OutputStatusText => string.IsNullOrWhiteSpace(OutputPath)
+        ? "Choose an output video before rendering."
+        : HasOutputConflict
+            ? "Output already exists. Enable overwrite to render here."
+            : HasLowDiskSpace
+                ? $"Low free space: {FormatBytes(OutputAvailableBytes!.Value)} available."
+                : $"Output path is ready · {FormatBytes(OutputAvailableBytes)} free.";
+
+    public ObservableCollection<RecentFileItemViewModel> RecentFiles { get; } = new();
+    public bool HasRecentFiles => RecentFiles.Count > 0;
+
     public bool HasFatalValidationIssues
     {
         get => _hasFatalValidationIssues;
@@ -177,6 +249,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         try
         {
+            _ = Tools.RefreshAsync(_lifeCts.Token);
             if (_settings.Settings.ReducedMotion)
                 Preview.SetReducedMotion(true);
 
@@ -224,6 +297,8 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             await DisposeSessionAsync();
             _session = await _previewFactory.OpenAsync(fullPath, _lifeCts.Token);
+            _input = _session.Input;
+            OnPropertyChanged(nameof(HasInput), nameof(InputTitle), nameof(InputSummary));
             AddRecentFile(fullPath);
             SetRequest(BuildInitialRequest(fullPath), markDirty: true);
             await UpdatePlanCoreAsync(_request!, _lifeCts.Token);
@@ -250,8 +325,7 @@ public sealed class MainWindowViewModel : ObservableObject
             await OpenRequestAsync(project.Request, project.LastPreviewTimeSeconds, Path.GetFullPath(path));
             _isDirty = false;
             OnPropertyChanged(nameof(IsDirty), nameof(ProjectTitle));
-            if (File.Exists(project.Request.InputPath))
-                AddRecentFile(project.Request.InputPath);
+            AddRecentFile(Path.GetFullPath(path));
             _autosaveTimer.Stop();
             VisualizationProjectStore.ClearRecovery(RecoveryDirectory);
         }
@@ -262,17 +336,17 @@ public sealed class MainWindowViewModel : ObservableObject
     }
 
     /// <summary>Saves the project; opens a dialog when no path is given.</summary>
-    public async Task SaveProjectAsync(string? path = null)
+    public async Task<bool> SaveProjectAsync(string? path = null)
     {
         if (_request is null)
-            return;
+            return false;
         try
         {
             path ??= _projectPath;
             if (path is null)
                 path = await _dialogs.SaveFileAsync();
             if (path is null)
-                return;
+                return false;
 
             var project = new VisualizationProject
             {
@@ -289,10 +363,12 @@ public sealed class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(IsDirty), nameof(ProjectTitle));
             Diagnostics.AddLine("Project saved: " + path);
             RefreshCommands();
+            return true;
         }
         catch (Exception ex)
         {
             SetErrorState("Failed to save project: " + ex.Message);
+            return false;
         }
     }
 
@@ -331,10 +407,11 @@ public sealed class MainWindowViewModel : ObservableObject
     /// <summary>Preflight-validates and launches the export pipeline.</summary>
     public async Task StartRenderAsync()
     {
-        if (_request is null)
+        if (!CanRender)
             return;
 
-        IReadOnlyList<ValidationIssue> issues = VisualizationRequestValidator.Validate(_request);
+        VisualizationRequest request = _request!;
+        IReadOnlyList<ValidationIssue> issues = VisualizationRequestValidator.Validate(request);
         if (!VisualizationRequestValidator.IsValid(issues))
         {
             SetState(GuiState.Error, "Fix the validation errors before rendering.");
@@ -349,7 +426,7 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             var progress = new Progress<ExportProgressEvent>(Export.OnEvent);
-            string workspace = await _exportProcess.StartAsync(_request, progress, _exportCts.Token);
+            string workspace = await _exportProcess.StartAsync(request, progress, _exportCts.Token);
             Export.SetWorkspace(workspace);
             bool failed = Export.HasFailed;
             SetState(failed ? GuiState.Error : GuiState.Completed);
@@ -398,6 +475,35 @@ public sealed class MainWindowViewModel : ObservableObject
         return await _dialogs.ChooseFontFileAsync();
     }
 
+    public async Task ChooseOutputPathAsync()
+    {
+        if (!CanEditProject)
+            return;
+        string? path = await _dialogs.SaveOutputFileAsync(OutputPath);
+        if (!string.IsNullOrWhiteSpace(path))
+            ApplySetting(nameof(VisualizationRequest.OutputPath), r => r with { OutputPath = path });
+    }
+
+    public void OpenOutputFolder()
+    {
+        string? directory = Path.GetDirectoryName(OutputPath);
+        if (string.IsNullOrWhiteSpace(directory))
+            return;
+        DesktopProcessService.OpenPath(directory);
+    }
+
+    public void OpenOutput()
+    {
+        if (CanOpenOutput)
+            DesktopProcessService.OpenPath(OutputPath);
+    }
+
+    public async Task CopyOutputPathAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(OutputPath))
+            await _clipboard.SetTextAsync(OutputPath);
+    }
+
     /// <summary>Reopens the session for the current request's input path.</summary>
     public async Task RelinkInputAsync(string path)
     {
@@ -406,8 +512,15 @@ public sealed class MainWindowViewModel : ObservableObject
         await OpenRequestAsync(_request with { InputPath = path }, Timeline.PositionSeconds, _projectPath);
     }
 
-    /// <summary>Disposes timers/session on window close.</summary>
-    public void Shutdown()
+    /// <summary>Disposes timers/session on window close. Safe to call repeatedly.</summary>
+    public Task ShutdownAsync()
+    {
+        return _shutdownTask ??= ShutdownCoreAsync();
+    }
+
+    public void Shutdown() => _ = ShutdownAsync();
+
+    private async Task ShutdownCoreAsync()
     {
         _lifeCts.Cancel();
         _autosaveTimer.Stop();
@@ -415,7 +528,9 @@ public sealed class MainWindowViewModel : ObservableObject
         _previewCts.Cancel();
         _exportCts.Cancel();
         VisualizationProjectStore.ClearRecovery(RecoveryDirectory);
-        _ = DisposeSessionAsync();
+        await DisposeSessionAsync();
+        Timeline.Dispose();
+        Preview.Dispose();
     }
 
     // ---- Setup ----
@@ -424,17 +539,25 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         OpenInputCommand = new AsyncRelayCommand(OpenInputDialogAsync);
         OpenProjectCommand = new AsyncRelayCommand(OpenProjectDialogAsync);
-        SaveProjectCommand = new AsyncRelayCommand(() => SaveProjectAsync(null));
-        SaveProjectAsCommand = new AsyncRelayCommand(SaveProjectAsAsync);
+        SaveProjectCommand = new AsyncRelayCommand(async () => { await SaveProjectAsync(null); }, () => CanSaveProject);
+        SaveProjectAsCommand = new AsyncRelayCommand(SaveProjectAsAsync, () => CanSaveProject);
         RenderCommand = new RelayCommand(() => _ = StartRenderAsync(),
-            () => _state == GuiState.Ready && _request is not null && !HasFatalValidationIssues);
+            () => CanRender);
         CopyCommandCommand = new AsyncRelayCommand(() => _clipboard.SetTextAsync(Command.DisplayText));
         CopyRequestJsonCommand = new AsyncRelayCommand(CopyRequestJsonAsync);
         RecheckToolsCommand = new AsyncRelayCommand(() => Tools.RefreshAsync(_lifeCts.Token));
-        RefreshPreviewCommand = new AsyncRelayCommand(() => RefreshPreviewAsync(InvalidationCategory.PresentationOnly, force: true));
+        RefreshPreviewCommand = new AsyncRelayCommand(() => RefreshPreviewAsync(InvalidationCategory.PresentationOnly, force: true), () => CanPreview);
         CancelExportCommand = new RelayCommand(CancelExportAsync);
         RenderStillCommand = new RelayCommand(() => _ = RenderPreviewFrameAsync(Timeline.PositionSeconds, PreviewFidelity.AccurateStill),
-            () => _state == GuiState.Ready && _session is not null);
+            () => CanPreview);
+        RenderLayoutPreviewCommand = new RelayCommand(() => _ = RenderPreviewFrameAsync(Timeline.PositionSeconds, PreviewFidelity.Layout),
+            () => CanPreview);
+        StartMotionPreviewCommand = new RelayCommand(() => _ = StartMotionPreviewAsync(),
+            () => CanPreview && !Preview.IsPlaying);
+        ChooseOutputPathCommand = new AsyncRelayCommand(ChooseOutputPathAsync, () => CanEditProject);
+        OpenOutputFolderCommand = new RelayCommand(OpenOutputFolder, () => HasRequest);
+        OpenOutputCommand = new RelayCommand(OpenOutput, () => CanOpenOutput);
+        CopyOutputPathCommand = new AsyncRelayCommand(CopyOutputPathAsync, () => HasRequest);
         CancelPreviewCommand = new RelayCommand(CancelPreview);
         FocusCommandPanelCommand = new RelayCommand(() => CommandPanelFocusRequested?.Invoke());
     }
@@ -506,7 +629,9 @@ public sealed class MainWindowViewModel : ObservableObject
             Settings.Synchronize(request);
             ValidateCurrent();
             _ = UpdateCommandAsync();
-            OnPropertyChanged(nameof(IsDirty), nameof(ProjectTitle));
+            OnPropertyChanged(nameof(IsDirty), nameof(ProjectTitle), nameof(HasRequest), nameof(OutputPath),
+                nameof(HasOutputConflict), nameof(OutputStatusText), nameof(CanOpenOutput),
+                nameof(OutputAvailableBytes), nameof(HasLowDiskSpace));
         }
         finally
         {
@@ -528,6 +653,8 @@ public sealed class MainWindowViewModel : ObservableObject
         SetState(GuiState.Inspecting);
         await DisposeSessionAsync();
         _session = await _previewFactory.OpenAsync(request.InputPath, _lifeCts.Token);
+        _input = _session.Input;
+        OnPropertyChanged(nameof(HasInput), nameof(InputTitle), nameof(InputSummary));
         SetState(GuiState.PreparingPreview);
         SetRequest(request, markDirty: false);
         await UpdatePlanCoreAsync(_request!, _lifeCts.Token);
@@ -587,10 +714,13 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
+        bool gateAcquired = false;
         try
         {
             await _previewGate.WaitAsync(_lifeCts.Token);
+            gateAcquired = true;
             _previewCts.Cancel();
+            _previewCts.Dispose();
             _previewCts = new CancellationTokenSource();
             CancellationToken ct = _previewCts.Token;
             int revision = _requestRevision;
@@ -621,7 +751,8 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         finally
         {
-            _previewGate.Release();
+            if (gateAcquired)
+                _previewGate.Release();
         }
     }
 
@@ -634,10 +765,13 @@ public sealed class MainWindowViewModel : ObservableObject
             Preview.SetReducedMotion(true);
             return;
         }
+        bool gateAcquired = false;
         try
         {
             await _previewGate.WaitAsync(_lifeCts.Token);
+            gateAcquired = true;
             _previewCts.Cancel();
+            _previewCts.Dispose();
             _previewCts = new CancellationTokenSource();
             CancellationToken ct = _previewCts.Token;
             int revision = _requestRevision;
@@ -653,7 +787,8 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         finally
         {
-            _previewGate.Release();
+            if (gateAcquired)
+                _previewGate.Release();
         }
     }
 
@@ -815,17 +950,30 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void RefreshCommands()
     {
+        OnPropertyChanged(nameof(IsBusy), nameof(CanEditProject), nameof(CanSaveProject), nameof(CanPreview),
+            nameof(CanRender), nameof(HasOutputConflict), nameof(OutputStatusText), nameof(CanOpenOutput),
+            nameof(OutputAvailableBytes), nameof(HasLowDiskSpace));
         RenderCommand.RaiseCanExecuteChanged();
         RenderStillCommand.RaiseCanExecuteChanged();
+        RenderLayoutPreviewCommand.RaiseCanExecuteChanged();
+        StartMotionPreviewCommand.RaiseCanExecuteChanged();
         OpenInputCommand.RaiseCanExecuteChanged();
         OpenProjectCommand.RaiseCanExecuteChanged();
         SaveProjectCommand.RaiseCanExecuteChanged();
         SaveProjectAsCommand.RaiseCanExecuteChanged();
         RefreshPreviewCommand.RaiseCanExecuteChanged();
+        ChooseOutputPathCommand.RaiseCanExecuteChanged();
+        OpenOutputFolderCommand.RaiseCanExecuteChanged();
+        OpenOutputCommand.RaiseCanExecuteChanged();
+        CopyOutputPathCommand.RaiseCanExecuteChanged();
     }
 
     private async Task DisposeSessionAsync()
     {
+        _previewCts.Cancel();
+        await _previewGate.WaitAsync();
+        _previewGate.Release();
+        Preview.Clear();
         if (_session is not null)
         {
             IVisualizationPreviewSession session = _session;
@@ -839,6 +987,8 @@ public sealed class MainWindowViewModel : ObservableObject
                 // Best effort.
             }
         }
+        _input = null;
+        OnPropertyChanged(nameof(HasInput), nameof(InputTitle), nameof(InputSummary));
         _plan = null;
         Timeline.SynchronizePlan(null);
     }
@@ -864,5 +1014,60 @@ public sealed class MainWindowViewModel : ObservableObject
             if (settings.RecentFiles.Count > 10)
                 settings.RecentFiles.RemoveAt(10);
         });
+        RefreshRecentFiles();
+    }
+
+    private async Task OpenRecentAsync(string path)
+    {
+        if (path.EndsWith(".mdpviz.json", StringComparison.OrdinalIgnoreCase))
+            await OpenProjectAsync(path);
+        else
+            await OpenInputAsync(path);
+    }
+
+    private void RefreshRecentFiles()
+    {
+        RecentFiles.Clear();
+        foreach (string path in _settings.Settings.RecentFiles.Take(10))
+            RecentFiles.Add(new RecentFileItemViewModel(path, OpenRecentAsync));
+        OnPropertyChanged(nameof(HasRecentFiles));
+    }
+
+    private static long? GetAvailableBytes(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        try
+        {
+            string directory = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+            string root = Path.GetPathRoot(directory) ?? directory;
+            var drive = new DriveInfo(root);
+            return drive.IsReady ? drive.AvailableFreeSpace : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string FormatBytes(long? bytes)
+    {
+        if (bytes is not long value)
+            return "unknown";
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double amount = value;
+        int unit = 0;
+        while (amount >= 1024 && unit < units.Length - 1)
+        {
+            amount /= 1024;
+            unit++;
+        }
+        return $"{amount:0.#} {units[unit]}";
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        int totalSeconds = Math.Max(0, (int)duration.TotalSeconds);
+        return $"{totalSeconds / 60:00}:{totalSeconds % 60:00}";
     }
 }

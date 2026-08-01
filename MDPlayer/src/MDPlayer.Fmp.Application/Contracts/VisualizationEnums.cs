@@ -18,6 +18,9 @@ public enum VisualizationPreset
 /// <summary>
 /// Layout family requested by the user. <see cref="Auto"/> resolves to a
 /// concrete layout from the captured timeline; every other value is explicit.
+/// <see cref="Performance"/>, <see cref="ScopeStage"/> and <see cref="Diagnostic"/>
+/// are the three canonical publishing compositions; the remaining values are
+/// legacy aliases retained for back-compatibility.
 /// </summary>
 public enum VisualizationLayout
 {
@@ -28,6 +31,8 @@ public enum VisualizationLayout
     Hybrid,
     Diagnostic,
     LegacyDiagnostic,
+    Performance,
+    ScopeStage,
 }
 
 /// <summary>

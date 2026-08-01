@@ -220,6 +220,8 @@ internal sealed class VisualizeOptions : RenderSettings
         Fmp.Application.Contracts.VisualizationLayout.Hybrid => VisualizationLayoutMode.Hybrid,
         Fmp.Application.Contracts.VisualizationLayout.Diagnostic => VisualizationLayoutMode.Diagnostic,
         Fmp.Application.Contracts.VisualizationLayout.LegacyDiagnostic => VisualizationLayoutMode.DiagnosticV2,
+        Fmp.Application.Contracts.VisualizationLayout.Performance => VisualizationLayoutMode.Performance,
+        Fmp.Application.Contracts.VisualizationLayout.ScopeStage => VisualizationLayoutMode.ScopeStage,
         _ => VisualizationLayoutMode.Auto,
     };
 
@@ -701,6 +703,8 @@ internal static class VisualizeOptionsParser
     private static VisualizationLayoutMode ParseLayout(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
         "auto" => VisualizationLayoutMode.Auto,
+        "performance" => VisualizationLayoutMode.Performance,
+        "scope-stage" or "scopestage" => VisualizationLayoutMode.ScopeStage,
         "diagnostic" => VisualizationLayoutMode.Diagnostic,
         "diagnostic-v2" => VisualizationLayoutMode.DiagnosticV2,
         "focus" => VisualizationLayoutMode.Focus,
@@ -708,7 +712,7 @@ internal static class VisualizeOptionsParser
         "split-roll" or "split" => VisualizationLayoutMode.SplitRoll,
         "unified-roll" or "unified" => VisualizationLayoutMode.UnifiedRoll,
         "hybrid" => VisualizationLayoutMode.Hybrid,
-        _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto, unified, split, scope, hybrid, diagnostic, diagnostic-v2, or deprecated focus)"),
+        _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto, performance, scope-stage, diagnostic, or a legacy name: unified, split, scope, hybrid, diagnostic-v2, focus)"),
     };
 
     private static VisualizationRendererMode ParseRenderer(string raw) => raw?.Trim().ToLowerInvariant() switch

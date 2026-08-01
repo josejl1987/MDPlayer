@@ -1024,6 +1024,7 @@ internal sealed class VgmAudioRenderer : IDisposable
     private readonly int _channelFilter;
     private int _hucSelectedChannel;
     private int _sn76489LatchedChannel;
+    private int _ym2151SelectedChannel;
 
     public VgmAudioRenderer(
         IReadOnlyList<DeviceDescriptor> devices,
@@ -1571,6 +1572,9 @@ internal sealed class VgmAudioRenderer : IDisposable
                 case ChipType.Ym2608:
                     WriteFilteredYm2608(write);
                     break;
+                case ChipType.Ym2151:
+                    WriteFilteredYm2151(write);
+                    break;
             }
             return;
         }
@@ -1722,6 +1726,46 @@ internal sealed class VgmAudioRenderer : IDisposable
 
         if (_sn76489LatchedChannel == _channelFilter)
             _mds.WriteSN76489((byte)write.Device.Instance, (byte)data);
+    }
+
+    private void WriteFilteredYm2151(in TimedChipWrite write)
+    {
+        int address = write.Address & 0xFF;
+        int data = write.Data & 0xFF;
+
+        // OPM register 0x08 is the key-on/off trigger: low 3 bits select the
+        // targeted channel, the upper nibble carries the operator mask. Route
+        // every key write to the isolated channel only.
+        if (address == 0x08)
+        {
+            int channel = data & 0x07;
+            if (channel == _channelFilter)
+                _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+            return;
+        }
+
+        // Per-channel pitch: 0x28-0x2F carry the key code, 0x30-0x37 the key
+        // fraction. Forward just the isolated channel's pitch so a sibling
+        // cannot overwrite it.
+        if (address is >= 0x28 and <= 0x37)
+        {
+            int channel = address - 0x28;
+            if (channel == _channelFilter)
+                _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+            return;
+        }
+
+        // OPM operator parameters live in a flat bank at 0x40-0xFF. Each
+        // operator occupies an 8-slot stride: op = address >> 3, and every
+        // channel owns 4 operators, so channel = op >> 2. Forward only the
+        // operators that belong to the isolated channel; writes for siblings
+        // never reach this stem.
+        if (address >= 0x40)
+        {
+            int channel = (address >> 3) >> 2;
+            if (channel == _channelFilter)
+                _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+        }
     }
 
     private void WriteFilteredYm2608(in TimedChipWrite write)

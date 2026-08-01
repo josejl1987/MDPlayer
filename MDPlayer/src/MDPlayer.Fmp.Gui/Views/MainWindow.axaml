@@ -31,38 +31,45 @@
     <KeyBinding Gesture="Ctrl+K" Command="{Binding FocusCommandPanelCommand}"/>
   </Window.KeyBindings>
 
-  <DockPanel>
+  <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
 
     <!-- ── Top toolbar ─────────────────────────────────────────────── -->
-    <Border DockPanel.Dock="Top" Padding="8,6" Background="{DynamicResource SystemChromeLowColor}">
-      <DockPanel>
-        <StackPanel Orientation="Horizontal" Spacing="6">
-          <Button Content="Open Input" Command="{Binding OpenInputCommand}"/>
+    <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemChromeLowColor}">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6">
+          <Button x:Name="OpenInputButton" Content="Open Input" Command="{Binding OpenInputCommand}"/>
           <Button Content="Open Project" Command="{Binding OpenProjectCommand}"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+          <TextBlock Text="{Binding InputTitle}" FontWeight="SemiBold"/>
+          <TextBlock Text="{Binding InputSummary}" FontSize="11"
+                     Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
           <Button Content="Save" Command="{Binding SaveProjectCommand}"/>
           <Button Content="Save As" Command="{Binding SaveProjectAsCommand}"/>
+          <TextBlock Text="{Binding ProjectTitle}" VerticalAlignment="Center" FontSize="11"
+                     Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+          <Button x:Name="RenderButton" Content="Render" Command="{Binding RenderCommand}" Classes="accent"
+                  MinWidth="110" HorizontalContentAlignment="Center"/>
         </StackPanel>
-        <Button DockPanel.Dock="Right" Content="Render" Command="{Binding RenderCommand}"
-                Classes="accent" Margin="0,0,8,0" VerticalAlignment="Center"/>
-        <TextBlock DockPanel.Dock="Right" Text="{Binding ProjectTitle}" VerticalAlignment="Center"
-                   Margin="0,0,8,0" FontWeight="SemiBold"
-                   Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
-      </DockPanel>
+      </Grid>
     </Border>
 
     <!-- ── Bottom status bar ───────────────────────────────────────── -->
-    <Border DockPanel.Dock="Bottom" Padding="8,4" Background="{DynamicResource SystemChromeLowColor}">
-      <DockPanel>
-        <TextBlock DockPanel.Dock="Left" Text="{Binding StatusText}" VerticalAlignment="Center"/>
-        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8">
+    <Border Grid.Row="4" Padding="12,5" Background="{DynamicResource SystemChromeLowColor}">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <TextBlock Grid.Column="0" Text="{Binding StatusText}" VerticalAlignment="Center"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
           <Button Content="Recheck Tools" Command="{Binding RecheckToolsCommand}"/>
+          <Button Content="Tool details" Command="{Binding Tools.ShowDetailsCommand}"/>
           <TextBlock Text="{Binding Tools.Summary}" VerticalAlignment="Center" FontSize="11"/>
         </StackPanel>
-      </DockPanel>
+      </Grid>
     </Border>
 
     <!-- ── Export strip (progress / completion / failure) ──────────── -->
-    <Border DockPanel.Dock="Bottom" IsVisible="{Binding Export.IsActive}" Padding="8,6"
+    <Border Grid.Row="1" IsVisible="{Binding Export.IsActive}" Padding="12,6"
             Background="{DynamicResource SystemChromeLowColor}">
       <StackPanel Spacing="6">
         <StackPanel Orientation="Horizontal" Spacing="12">
@@ -76,6 +83,12 @@
 
         <TextBlock IsVisible="{Binding Export.HasCompleted}" Text="{Binding Export.CompletionSummary}"
                    FontSize="11" TextWrapping="Wrap"/>
+        <StackPanel IsVisible="{Binding Export.HasCompleted}" Orientation="Horizontal" Spacing="8">
+          <Button Content="Open video" Command="{Binding OpenOutputCommand}"/>
+          <Button Content="Open output folder" Command="{Binding OpenOutputFolderCommand}"/>
+          <Button Content="Copy output path" Command="{Binding CopyOutputPathCommand}"/>
+          <Button Content="Render again" Command="{Binding RenderCommand}"/>
+        </StackPanel>
         <StackPanel IsVisible="{Binding Export.HasFailed}" Orientation="Horizontal" Spacing="8">
           <TextBlock Text="{Binding Export.FailureSummary}" FontSize="11" Foreground="#FFFFB0B0" TextWrapping="Wrap" MaxWidth="480"/>
           <Button Content="Retry" Command="{Binding Export.RetryCommand}"/>
@@ -85,7 +98,8 @@
     </Border>
 
     <!-- ── Diagnostics log panel ───────────────────────────────────── -->
-    <Border DockPanel.Dock="Bottom" Padding="8,0">
+    <Grid Grid.Row="2" RowDefinitions="Auto,Auto">
+    <Border Grid.Row="0" Padding="12,0">
       <Expander Header="Diagnostics" IsExpanded="{Binding Diagnostics.IsExpanded}">
         <DockPanel>
           <Button DockPanel.Dock="Right" Content="Copy Diagnostics" Command="{Binding Diagnostics.CopyDiagnosticsCommand}"
@@ -102,7 +116,7 @@
     </Border>
 
     <!-- ── Command panel ───────────────────────────────────────────── -->
-    <Border DockPanel.Dock="Bottom" Padding="8,0">
+    <Border Grid.Row="1" Padding="12,0">
       <Expander Header="Command" IsExpanded="{Binding Command.IsExpanded}">
         <StackPanel Spacing="6">
           <TextBox x:Name="CommandText" Text="{Binding Command.DisplayText, Mode=OneWay}" IsReadOnly="True"
@@ -116,9 +130,10 @@
         </StackPanel>
       </Expander>
     </Border>
+    </Grid>
 
     <!-- ── Main area: settings | splitter | preview+transport ──────── -->
-    <Grid>
+    <Grid Grid.Row="3">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="320" MinWidth="280" MaxWidth="440"/>
         <ColumnDefinition Width="6"/>
@@ -126,7 +141,7 @@
       </Grid.ColumnDefinitions>
 
       <!-- Left: settings -->
-      <Grid Grid.Column="0">
+      <Grid x:Name="InspectorPanel" Grid.Column="0" IsEnabled="{Binding CanEditProject}">
         <ScrollViewer>
           <StackPanel Margin="8">
 
@@ -134,12 +149,50 @@
             <Expander Header="BASIC" IsExpanded="{Binding Settings.Basic.IsExpanded}">
               <StackPanel Spacing="8" Margin="0,8,0,0">
                 <StackPanel Spacing="4">
+                  <TextBlock Text="Output video"/>
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                    <TextBox Grid.Column="0" Text="{Binding OutputPath}" IsReadOnly="True"
+                             ToolTip.Tip="{Binding OutputPath}"/>
+                    <Button Grid.Column="1" Content="Browse…" Command="{Binding ChooseOutputPathCommand}"/>
+                  </Grid>
+                  <TextBlock Text="{Binding OutputStatusText}" FontSize="11" TextWrapping="Wrap"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                  <CheckBox Content="Overwrite existing output" IsChecked="{Binding Settings.Advanced.Overwrite}"/>
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Open folder" Command="{Binding OpenOutputFolderCommand}"/>
+                    <Button Content="Copy path" Command="{Binding CopyOutputPathCommand}"/>
+                  </StackPanel>
+                </StackPanel>
+                <StackPanel Spacing="4">
                   <TextBlock Text="Preset"/>
                   <ComboBox ItemsSource="{Binding Settings.Basic.PresetOptions}" SelectedItem="{Binding Settings.Basic.SelectedPreset}"/>
                   <TextBlock Text="{Binding Settings.Basic.PresetStatus}" FontSize="11" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
                 </StackPanel>
                 <StackPanel Spacing="4">
-                  <TextBlock Text="Layout"/>
+                  <TextBlock Text="Composition"/>
+                  <ItemsControl ItemsSource="{Binding Settings.Basic.CompositionCards}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" Spacing="6"/>
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Button Command="{Binding SelectCommand}" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" MinWidth="150" Padding="10,8"
+                                Background="{Binding SelectedBackground}"
+                                BorderBrush="{Binding SelectedBorderBrush}" BorderThickness="1.5">
+                          <StackPanel Spacing="2">
+                            <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding Tagline}" FontSize="10" TextWrapping="Wrap"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                          </StackPanel>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                   <ComboBox ItemsSource="{Binding Settings.Basic.LayoutOptions}" SelectedItem="{Binding Settings.Basic.SelectedLayout}"/>
                   <TextBlock Text="{Binding Settings.Basic.LayoutExplanation}" FontSize="11" TextWrapping="Wrap"
                              Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
@@ -326,40 +379,71 @@
 
       <!-- Center: preview + transport -->
       <Grid Grid.Column="2">
-        <DockPanel>
+        <Grid RowDefinitions="*,Auto">
 
-          <Border DockPanel.Dock="Bottom" Padding="8,4">
-            <Grid ColumnDefinitions="Auto,Auto,120,*,Auto,120" VerticalAlignment="Center">
-              <Button Grid.Column="0" Content="◀" Command="{Binding Timeline.PreviousPointCommand}"
-                      ToolTip.Tip="Previous representative point" Margin="0,0,4,0"/>
-              <Button Grid.Column="1" Content="{Binding Timeline.PlayPauseGlyph}" Command="{Binding Timeline.TogglePlayCommand}"
-                      Width="44" Margin="0,0,4,0"/>
-              <TextBlock Grid.Column="2" Text="{Binding Timeline.TimeText}" TextAlignment="Center" VerticalAlignment="Center"/>
-              <Slider Grid.Column="3" Minimum="0" Maximum="{Binding Timeline.DurationSeconds}"
-                      Value="{Binding Timeline.ScrubPosition}" Margin="8,0"/>
-              <Button Grid.Column="4" Content="▶" Command="{Binding Timeline.NextPointCommand}"
-                      ToolTip.Tip="Next representative point" Margin="4,0,0,0"/>
-              <TextBlock Grid.Column="5" Text="{Binding Preview.FidelityText}" TextAlignment="Center"
-                         VerticalAlignment="Center" FontSize="11"
-                         Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
-            </Grid>
+          <Border x:Name="TimelineTransport" Grid.Row="1" Padding="8,4" IsEnabled="{Binding HasTimeline}">
+            <StackPanel Spacing="4">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="Preview:" VerticalAlignment="Center" FontSize="11"
+                           Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                <Button Content="Layout" Command="{Binding RenderLayoutPreviewCommand}"/>
+                <Button Content="Accurate still" Command="{Binding RenderStillCommand}"/>
+                <Button Content="Motion" Command="{Binding StartMotionPreviewCommand}"/>
+              </StackPanel>
+              <Grid ColumnDefinitions="Auto,Auto,120,*,Auto,120" VerticalAlignment="Center">
+                <Button Grid.Column="0" Content="◀" Command="{Binding Timeline.PreviousPointCommand}"
+                        ToolTip.Tip="Previous representative point" Margin="0,0,4,0"/>
+                <Button Grid.Column="1" Content="{Binding Timeline.PlayPauseGlyph}" Command="{Binding Timeline.TogglePlayCommand}"
+                        Width="44" Margin="0,0,4,0"/>
+                <TextBlock Grid.Column="2" Text="{Binding Timeline.TimeText}" TextAlignment="Center" VerticalAlignment="Center"/>
+                <Slider Grid.Column="3" Minimum="0" Maximum="{Binding Timeline.DurationSeconds}"
+                        Value="{Binding Timeline.ScrubPosition}" Margin="8,0"/>
+                <Button Grid.Column="4" Content="▶" Command="{Binding Timeline.NextPointCommand}"
+                        ToolTip.Tip="Next representative point" Margin="4,0,0,0"/>
+                <TextBlock Grid.Column="5" Text="{Binding Preview.FidelityText}" IsVisible="{Binding Preview.HasImage}"
+                           TextAlignment="Center"
+                           VerticalAlignment="Center" FontSize="11"
+                           Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+              </Grid>
+            </StackPanel>
           </Border>
 
-          <Border Background="Black" CornerRadius="4" Margin="8" ClipToBounds="True">
+          <Border Grid.Row="0" Background="Black" CornerRadius="8" Margin="8" ClipToBounds="True">
             <Panel>
               <Image Source="{Binding Preview.CurrentImage}" Stretch="Uniform"/>
 
-              <TextBlock Text="Open an input file to preview the visualization."
-                         IsVisible="{Binding !Preview.HasImage}"
-                         HorizontalAlignment="Center" VerticalAlignment="Center"
-                         Foreground="#80FFFFFF"/>
+              <StackPanel x:Name="EmptyState" IsVisible="{Binding !Preview.HasImage}" HorizontalAlignment="Center"
+                          VerticalAlignment="Center" Spacing="10">
+                <TextBlock Text="Drop music here" HorizontalAlignment="Center"
+                           FontSize="24" FontWeight="SemiBold" Foreground="White"/>
+                <Button Content="Open input" Command="{Binding OpenInputCommand}"
+                        Classes="accent" HorizontalAlignment="Center" MinWidth="130"/>
+                <TextBlock Text="VGM · VGZ · SPC · MIDI · S98 · FMP"
+                           HorizontalAlignment="Center" FontSize="11" Foreground="#B0FFFFFF"/>
+                <StackPanel IsVisible="{Binding HasRecentFiles}" Spacing="4" Margin="0,8,0,0">
+                  <TextBlock Text="Recent" HorizontalAlignment="Center" FontSize="11" Foreground="#B0FFFFFF"/>
+                  <ItemsControl ItemsSource="{Binding RecentFiles}" MaxHeight="120">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:RecentFileItemViewModel">
+                        <Button Command="{Binding OpenCommand}" HorizontalContentAlignment="Left" MinWidth="260">
+                          <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="{Binding DisplayName}"/>
+                            <TextBlock Text="{Binding Kind}" FontSize="10" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                          </StackPanel>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </StackPanel>
 
               <Panel IsVisible="{Binding Preview.IsLoading}" IsHitTestVisible="False">
                 <ProgressBar IsIndeterminate="True" Width="180" Height="6"
                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
               </Panel>
 
-              <StackPanel Panel.ZIndex="1" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8" Spacing="4">
+              <StackPanel Panel.ZIndex="1" IsVisible="{Binding Preview.HasImage}"
+                          HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8" Spacing="4">
                 <Border Background="#80000000" CornerRadius="4" Padding="8,3">
                   <TextBlock Text="{Binding Preview.FidelityText}" Foreground="White" FontSize="11"/>
                 </Border>
@@ -386,9 +470,9 @@
             </Panel>
           </Border>
 
-        </DockPanel>
+        </Grid>
       </Grid>
     </Grid>
 
-  </DockPanel>
+  </Grid>
 </Window>

@@ -54,6 +54,29 @@ public sealed class FileDialogService
         return file?.TryGetLocalPath();
     }
 
+    public async Task<string?> SaveOutputFileAsync(string? currentPath)
+    {
+        if (TopLevel is not { } top)
+            return null;
+
+        string suggestedName = string.IsNullOrWhiteSpace(currentPath)
+            ? "visualization.mp4"
+            : Path.GetFileName(currentPath);
+        IStorageFile? file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Choose output video",
+            SuggestedFileName = string.IsNullOrWhiteSpace(suggestedName) ? "visualization.mp4" : suggestedName,
+            DefaultExtension = "mp4",
+            FileTypeChoices = new[]
+            {
+                new FilePickerFileType("MP4 video") { Patterns = new[] { "*.mp4" } },
+                FilePickerFileTypes.All,
+            },
+        });
+
+        return file?.TryGetLocalPath();
+    }
+
     public async Task<string?> ChooseFontFileAsync()
     {
         if (TopLevel is not { } top)

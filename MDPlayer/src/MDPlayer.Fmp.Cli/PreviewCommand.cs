@@ -327,6 +327,7 @@ public static class PreviewCommand
         var notes = new List<string>();
         bool hasScopes = layout.HasScopes
             || resolvedMode is VisualizationLayoutMode.Scope
+                or VisualizationLayoutMode.ScopeStage
                 or VisualizationLayoutMode.Hybrid
                 or VisualizationLayoutMode.Diagnostic
                 or VisualizationLayoutMode.DiagnosticV2;
@@ -343,7 +344,26 @@ public static class PreviewCommand
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
         using var image = new Image<Rgba32>(width, height);
-        image.CopyPixelDataTo(rgba);
+        // Load the RGBA frame buffer into the image. (CopyPixelDataTo would
+        // copy the empty image into the buffer; the row accessor is the
+        // supported ImageSharp 3.x write path.)
+        image.ProcessPixelRows(accessor =>
+        {
+            for (int y = 0; y < accessor.Height; y++)
+            {
+                Span<Rgba32> row = accessor.GetRowSpan(y);
+                int rowOffset = y * width * 4;
+                for (int x = 0; x < row.Length; x++)
+                {
+                    int offset = rowOffset + x * 4;
+                    row[x] = new Rgba32(
+                        rgba[offset],
+                        rgba[offset + 1],
+                        rgba[offset + 2],
+                        rgba[offset + 3]);
+                }
+            }
+        });
         image.SaveAsPng(path);
     }
 

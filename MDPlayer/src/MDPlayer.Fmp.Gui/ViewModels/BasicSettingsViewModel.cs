@@ -23,6 +23,40 @@ public sealed class BasicSettingsViewModel : ObservableObject
     public BasicSettingsViewModel(MainWindowViewModel owner)
     {
         _owner = owner;
+        CompositionCards =
+        [
+            new CompositionCardViewModel(
+                "Performance",
+                "Large shared roll · best for publishing",
+                VisualizationLayout.Performance,
+                SelectComposition),
+            new CompositionCardViewModel(
+                "Scope Stage",
+                "Large waveforms · best for timbre",
+                VisualizationLayout.ScopeStage,
+                SelectComposition),
+            new CompositionCardViewModel(
+                "Diagnostic",
+                "Full channel grid · best for inspection",
+                VisualizationLayout.Diagnostic,
+                SelectComposition),
+        ];
+    }
+
+    /// <summary>The three intentional publishing compositions, shown as cards.</summary>
+    public IReadOnlyList<CompositionCardViewModel> CompositionCards { get; }
+
+    private void SelectComposition(VisualizationLayout layout)
+    {
+        _owner.ApplySetting(nameof(VisualizationRequest.Layout), r => r with { Layout = layout });
+        LayoutExplanation = LayoutExplanationFor(layout);
+        RefreshCardSelection(layout);
+    }
+
+    private void RefreshCardSelection(VisualizationLayout layout)
+    {
+        foreach (CompositionCardViewModel card in CompositionCards)
+            card.IsSelected = card.Layout == layout;
     }
 
     public bool IsExpanded
@@ -36,7 +70,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
 
     public IReadOnlyList<string> LayoutOptions { get; } = new[]
     {
-        "Auto", "Unified Roll", "Split Roll", "Scopes", "Hybrid", "Diagnostic", "Legacy Diagnostic",
+        "Auto", "Performance", "Scope Stage", "Diagnostic",
     };
 
     public IReadOnlyList<string> ResolutionOptions { get; } = new[]
@@ -71,7 +105,9 @@ public sealed class BasicSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _selectedLayout, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(VisualizationRequest.Layout), r => r with { Layout = ParseLayout(value) });
+            VisualizationLayout layout = ParseLayout(value);
+            _owner.ApplySetting(nameof(VisualizationRequest.Layout), r => r with { Layout = layout });
+            RefreshCardSelection(layout);
         }
     }
 
@@ -160,6 +196,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
 
             SelectedLayout = LayoutDisplay(request.Layout);
             LayoutExplanation = LayoutExplanationFor(request.Layout);
+            RefreshCardSelection(request.Layout);
 
             string resolution = request.Width + "x" + request.Height;
             if (ResolutionOptions.Contains(resolution))
@@ -206,6 +243,8 @@ public sealed class BasicSettingsViewModel : ObservableObject
         "hybrid" => VisualizationLayout.Hybrid,
         "diagnostic" => VisualizationLayout.Diagnostic,
         "diagnostic-v2" => VisualizationLayout.LegacyDiagnostic,
+        "performance" => VisualizationLayout.Performance,
+        "scope-stage" => VisualizationLayout.ScopeStage,
         _ => VisualizationLayout.Auto,
     };
 
@@ -238,46 +277,97 @@ public sealed class BasicSettingsViewModel : ObservableObject
 
     private static VisualizationLayout ParseLayout(string display) => display switch
     {
-        "Unified Roll" => VisualizationLayout.UnifiedRoll,
-        "Split Roll" => VisualizationLayout.SplitRoll,
-        "Scopes" => VisualizationLayout.Scopes,
-        "Hybrid" => VisualizationLayout.Hybrid,
+        "Performance" => VisualizationLayout.Performance,
+        "Scope Stage" => VisualizationLayout.ScopeStage,
         "Diagnostic" => VisualizationLayout.Diagnostic,
-        "Legacy Diagnostic" => VisualizationLayout.LegacyDiagnostic,
         _ => VisualizationLayout.Auto,
     };
 
     private static string LayoutDisplay(VisualizationLayout layout) => layout switch
     {
-        VisualizationLayout.UnifiedRoll => "Unified Roll",
-        VisualizationLayout.SplitRoll => "Split Roll",
-        VisualizationLayout.Scopes => "Scopes",
-        VisualizationLayout.Hybrid => "Hybrid",
+        VisualizationLayout.Performance => "Performance",
+        VisualizationLayout.ScopeStage => "Scope Stage",
         VisualizationLayout.Diagnostic => "Diagnostic",
-        VisualizationLayout.LegacyDiagnostic => "Legacy Diagnostic",
         _ => "Auto",
     };
 
     private static string ResolvedDisplayName(string resolved) => resolved switch
     {
-        "unified" => "Unified Roll",
-        "split" => "Split Roll",
-        "scope" or "scopes" => "Scopes",
-        "hybrid" => "Hybrid",
+        "performance" => "Performance",
+        "scope-stage" => "Scope Stage",
+        "unified" => "Unified Roll (legacy)",
+        "split" => "Split Roll (legacy)",
+        "scope" or "scopes" => "Scope wall (legacy)",
+        "hybrid" => "Hybrid (legacy)",
         "diagnostic" => "Diagnostic",
-        "diagnostic-v2" => "Legacy Diagnostic",
+        "diagnostic-v2" => "Diagnostic (legacy)",
         _ => resolved,
     };
 
     private static string LayoutExplanationFor(VisualizationLayout layout) => layout switch
     {
-        VisualizationLayout.Auto => "Auto picks the layout that best fits this input and its captured timeline.",
-        VisualizationLayout.UnifiedRoll => "One rolling timeline holds every channel.",
-        VisualizationLayout.SplitRoll => "Channels are separated into individual rolling panels.",
-        VisualizationLayout.Scopes => "An oscilloscope wall renders the synchronized stems.",
-        VisualizationLayout.Hybrid => "A rolling timeline plus a scope wall.",
-        VisualizationLayout.Diagnostic => "Diagnostic layout showing channel and rendering internals.",
-        VisualizationLayout.LegacyDiagnostic => "The previous-generation diagnostic layout.",
-        _ => "Auto picks the layout that best fits this input and its captured timeline.",
+        VisualizationLayout.Auto => "Auto picks the composition that best fits this input and its captured timeline.",
+        VisualizationLayout.Performance => "One dominant shared piano roll; percussion, noise and samples become compact lanes. Best for publishing.",
+        VisualizationLayout.ScopeStage => "A large oscilloscope wall with a small synchronized activity strip. Best for timbre.",
+        VisualizationLayout.Diagnostic => "Full per-channel grid with headers, scopes and pitch cameras. Best for inspection.",
+        _ => "Auto picks the composition that best fits this input and its captured timeline.",
     };
+}
+
+/// <summary>
+/// A selectable composition card shown at the top of the BASIC settings.
+/// Clicking a card applies the matching layout and highlights the card.
+/// </summary>
+public sealed class CompositionCardViewModel : ObservableObject
+{
+    private readonly Action<VisualizationLayout> _select;
+    private bool _isSelected;
+
+    public CompositionCardViewModel(
+        string name,
+        string tagline,
+        VisualizationLayout layout,
+        Action<VisualizationLayout> select)
+    {
+        Name = name;
+        Tagline = tagline;
+        Layout = layout;
+        _select = select;
+        SelectCommand = new RelayCommand(() => _select(Layout));
+    }
+
+    public string Name { get; }
+    public string Tagline { get; }
+    public VisualizationLayout Layout { get; }
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value))
+            {
+                OnPropertyChanged(nameof(SelectedBorderBrush));
+                OnPropertyChanged(nameof(SelectedBackground));
+            }
+        }
+    }
+
+    /// <summary>Accent border/background when this card is the active composition.</summary>
+    public Avalonia.Media.IBrush SelectedBorderBrush
+        => IsSelected ? AccentBrush : NormalBrush;
+
+    public Avalonia.Media.IBrush SelectedBackground
+        => IsSelected ? AccentFillBrush : TransparentBrush;
+
+    public RelayCommand SelectCommand { get; }
+
+    private static readonly Avalonia.Media.IBrush AccentBrush = new Avalonia.Media.SolidColorBrush(
+        Avalonia.Media.Color.FromRgb(0x5B, 0x9B, 0xD5));
+    private static readonly Avalonia.Media.IBrush NormalBrush = new Avalonia.Media.SolidColorBrush(
+        Avalonia.Media.Color.FromArgb(90, 0x80, 0x80, 0x80));
+    private static readonly Avalonia.Media.IBrush AccentFillBrush = new Avalonia.Media.SolidColorBrush(
+        Avalonia.Media.Color.FromArgb(36, 0x5B, 0x9B, 0xD5));
+    private static readonly Avalonia.Media.IBrush TransparentBrush = new Avalonia.Media.SolidColorBrush(
+        Avalonia.Media.Color.FromArgb(0, 0, 0, 0));
 }

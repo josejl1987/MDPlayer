@@ -288,7 +288,7 @@ internal static class VisualizationRunner
                     RenderHeight = options.Height,
                     LayoutNCols = layout.ColumnCount,
                     IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                    HideLabels = layoutMode != VisualizationLayoutMode.Scope,
+                    HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
                     FfmpegVideoTemplate = options.CorrscopeVideoTemplate,
                     ResDivisor = options.FinalQuality ? 1.0 : 2.0,
                     Antialiasing = options.FinalQuality,
@@ -320,7 +320,7 @@ internal static class VisualizationRunner
                         ? Math.Max(1, scopeStems.Length)
                         : layout.ColumnCount,
                     IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                    HideLabels = layoutMode != VisualizationLayoutMode.Scope,
+                    HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
                     ResDivisor = 1.0,
                     Antialiasing = options.FinalQuality,
                 });

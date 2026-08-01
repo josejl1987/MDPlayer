@@ -16,12 +16,11 @@ public sealed class GuiSettingsStore
 
     private readonly string _path;
 
-    public GuiSettingsStore()
+    public GuiSettingsStore(string? storagePath = null)
     {
-        string baseDir = Path.Combine(
+        _path = storagePath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MDPlayer", "Visualizer");
-        _path = Path.Combine(baseDir, "settings.json");
+            "MDPlayer", "Visualizer", "settings.json");
         Settings = Load();
     }
 
