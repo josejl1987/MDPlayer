@@ -94,6 +94,30 @@ internal ref struct ArgumentReader
     }
 
     /// <summary>
+    /// Reads an optional value for an option already consumed by TryReadOption:
+    /// the inline "=value" when present, otherwise the next token when it does
+    /// not start with '-' and exists. Returns null when the option was emitted
+    /// bare (e.g. a fully-resolved command with a null/empty field) — the
+    /// caller treats null as "unspecified/empty". Never throws for a bare
+    /// option.
+    /// </summary>
+    public string? OptionalValue(string option)
+    {
+        if (_inlineValue != null)
+        {
+            string v = _inlineValue;
+            _inlineValue = null;
+            return v;
+        }
+        if (!HasMore) return null;
+        string next = _args[_index];
+        if (next.StartsWith("-", StringComparison.Ordinal))
+            return null;
+        _index++;
+        return next;
+    }
+
+    /// <summary>
     /// Reads an int option value (inline or next token) with the invariant
     /// culture. Throws ArgumentException when it is not a valid int.
     /// </summary>

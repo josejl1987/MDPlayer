@@ -26,7 +26,7 @@ public class Program
             switch (command)
             {
                 case "render":
-                    return RenderCommand.Handle(args.Skip(1).ToArray());
+                    return VisualizationRenderCommand.Handle(args.Skip(1).ToArray());
                 case "batch":
                     return BatchCommand.Handle(args.Skip(1).ToArray());
                 case "inspect":

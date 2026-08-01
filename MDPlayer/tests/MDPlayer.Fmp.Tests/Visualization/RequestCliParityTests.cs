@@ -225,6 +225,65 @@ public class RequestCliParityTests
         }
     }
 
+    /// <summary>
+    /// The canonical <c>render</c> command (spec §18): formatting a request
+    /// with the Application formatter and parsing the emitted command with the
+    /// CLI render parser must reproduce the request exactly. This is the full
+    /// round trip the earlier subset test could not cover; every formatter
+    /// option (composition, quality, tracks, past/future, structure,
+    /// signal-strip, effects, note-color, palette, include-inactive, playback,
+    /// presentation) must survive the CLI parse with identical semantics.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Requests))]
+    public void Formatter_EmittedRenderCommand_RoundTripsThroughTheCliParser(string name, VisualizationRequest request)
+    {
+        CanonicalCommand command = new VisualizationCommandFormatter().Format(request, CommandDisplayMode.FullyResolved);
+
+        // arguments = [ "render", INPUT, --option, value, ... ]; drop the
+        // leading verb before the render parser sees them.
+        string[] cliArgs = command.Arguments.Skip(1).ToArray();
+        (VisualizationRequest parsed, _, _) = RenderCommandParser.ParseCore(cliArgs);
+
+        Assert.Equal(request.InputPath, parsed.InputPath);
+        Assert.Equal(FullPath(request.OutputPath), FullPath(parsed.OutputPath));
+        Assert.Equal(request.Composition, parsed.Composition);
+
+        Assert.Equal(request.Output.Quality, parsed.Output.Quality);
+        Assert.Equal(request.Output.Width, parsed.Output.Width);
+        Assert.Equal(request.Output.Height, parsed.Output.Height);
+        Assert.Equal(request.Output.FpsNumerator, parsed.Output.FpsNumerator);
+        Assert.Equal(request.Output.FpsDenominator, parsed.Output.FpsDenominator);
+        Assert.Equal(request.Output.Encoder, parsed.Output.Encoder);
+        Assert.Equal(request.Output.Overwrite, parsed.Output.Overwrite);
+
+        Assert.Equal(request.Tracks.Selection, parsed.Tracks.Selection);
+        Assert.Equal(request.Tracks.IncludedIds, parsed.Tracks.IncludedIds);
+        Assert.Equal(request.Tracks.ExcludedIds, parsed.Tracks.ExcludedIds);
+        Assert.Equal(request.Tracks.IncludeInactiveDiagnosticTracks, parsed.Tracks.IncludeInactiveDiagnosticTracks);
+
+        Assert.Equal(request.View.PastSeconds, parsed.View.PastSeconds);
+        Assert.Equal(request.View.FutureSeconds, parsed.View.FutureSeconds);
+        Assert.Equal(request.View.TimeGrid, parsed.View.TimeGrid);
+        Assert.Equal(request.View.Structure, parsed.View.Structure);
+        Assert.Equal(request.View.PerformanceSignalStrip, parsed.View.PerformanceSignalStrip);
+
+        Assert.Equal(request.Style.Effects, parsed.Style.Effects);
+        Assert.Equal(request.Style.NoteColor, parsed.Style.NoteColor);
+        Assert.Equal(request.Style.Palette, parsed.Style.Palette);
+
+        Assert.Equal(request.Presentation.Title, parsed.Presentation.Title);
+        Assert.Equal(request.Presentation.Subtitle, parsed.Presentation.Subtitle);
+        Assert.Equal(request.Presentation.Credits, parsed.Presentation.Credits);
+        Assert.Equal(request.Presentation.FontPath, parsed.Presentation.FontPath);
+
+        Assert.Equal(request.Playback.LoopCount, parsed.Playback.LoopCount);
+        Assert.Equal(request.Playback.FadeSeconds, parsed.Playback.FadeSeconds);
+        Assert.Equal(request.Playback.TailSeconds, parsed.Playback.TailSeconds);
+        Assert.Equal(request.Playback.MaximumDurationSeconds, parsed.Playback.MaximumDurationSeconds);
+        Assert.Equal(request.Playback.SampleRate, parsed.Playback.SampleRate);
+    }
+
     // ------------------------------------------------------------------
     // Round-trip subset helpers
     // ------------------------------------------------------------------
