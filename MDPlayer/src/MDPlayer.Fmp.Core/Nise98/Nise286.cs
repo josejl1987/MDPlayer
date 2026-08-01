@@ -2599,12 +2599,12 @@ namespace Fmp.Core.Nise98
             mem.PokeW(regs.SS_SP, regs.BX);
         }
 
-        //0x54
         private void PUSH_SP()
         {
             Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "PUSH SP");
+            short SP = regs.SP;
             regs.SP -= 2;
-            mem.PokeW(regs.SS_SP, regs.SP);
+            mem.PokeW(regs.SS_SP, SP);
         }
 
         //0x55

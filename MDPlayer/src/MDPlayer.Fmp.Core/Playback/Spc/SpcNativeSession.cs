@@ -50,6 +50,7 @@ internal sealed class SpcNativeSession : IDisposable
         NoiseChanged = 7,
         PitchModChanged = 8,
         EchoSendChanged = 9,
+        EnvelopeModeChanged = 10,
     }
 
     public enum SpcEnvelopeMode
@@ -82,7 +83,6 @@ internal sealed class SpcNativeSession : IDisposable
         public int EnableVoicePcm;
         public int EnableEchoPcm;
         public int AccurateDsp;
-        public int BlockFrames;
 
         public static OpenOptions Default => new()
         {
@@ -90,7 +90,6 @@ internal sealed class SpcNativeSession : IDisposable
             EnableVoicePcm = 0,
             EnableEchoPcm = 0,
             AccurateDsp = 1,
-            BlockFrames = DefaultBlockFrames,
         };
     }
 

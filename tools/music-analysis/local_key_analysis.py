@@ -35,13 +35,21 @@ def analyze_local_keys(notes, timing, detail="standard"):
         end_sample = _sample_at_beat(beats, end_beat)
         if start_sample is None or end_sample is None or end_sample <= start_sample:
             continue
-        window = [
-            note for note in notes
-            if note.get("theoryPitched", True)
-            and note.get("pitchClass", -1) in range(12)
-            and note["startSample"] < end_sample
-            and note["endSample"] > start_sample
-        ]
+        if hasattr(notes, "notes_in_window"):
+            window = notes.notes_in_window(start_sample, end_sample)
+            window = [
+                note for note in window
+                if note.get("theoryPitched", True)
+                and note.get("pitchClass", -1) in range(12)
+            ]
+        else:
+            window = [
+                note for note in notes
+                if note.get("theoryPitched", True)
+                and note.get("pitchClass", -1) in range(12)
+                and note["startSample"] < end_sample
+                and note["endSample"] > start_sample
+            ]
         if not window:
             continue
         result = analyze_key(None, window, detail)

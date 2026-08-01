@@ -45,7 +45,7 @@ public sealed class OverlaySceneBuilderTests
         Assert.Equal(PreparedPanelKind.Fm3, scene.Panels[2].Kind);
         Assert.Equal(PreparedPanelKind.Ssg, scene.Panels[6].Kind);
         Assert.Equal(PreparedPanelKind.Rhythm, scene.Panels[9].Kind);
-        Assert.Equal(PreparedPanelKind.Placeholder, scene.Panels[10].Kind);
+        Assert.Equal(PreparedPanelKind.PcmVoice, scene.Panels[10].Kind);
     }
 
     [Fact]
@@ -241,6 +241,40 @@ public sealed class OverlaySceneBuilderTests
         var scene = OverlaySceneBuilder.Build(timeline, layout);
         foreach (var note in scene.Panels[0].MainNotes)
             Assert.True(double.IsFinite(note.InitialMidiNote));
+    }
+
+    [Fact]
+    public void Build_DropsInvalidPitchSamplesButKeepsTheNote()
+    {
+        var baseTimeline = VisualizationTimelineFixture.Create();
+        var notes = baseTimeline.Notes.ToList();
+        notes.Add(new NoteEvent(
+            "ym2608.0.fm.1", 3200, 3600, 261.63, 60,
+            "ym2608:aaaaaa1111111111", VisualizationNoteMode.Fm, false,
+            [
+                new PitchChange(3300, 0, double.NaN),
+                new PitchChange(3400, 0, 61),
+                new PitchChange(3700, 0, 62),
+            ]));
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = baseTimeline.SampleRate,
+            StartSample = baseTimeline.StartSample,
+            EndSample = baseTimeline.EndSample,
+            Instruments = baseTimeline.Instruments,
+            Notes = notes.ToArray(),
+            Rhythm = baseTimeline.Rhythm,
+        };
+
+        OverlayScene scene = OverlaySceneBuilder.Build(
+            timeline,
+            new OverlayLayout(960, 540, 0.75, 2.25));
+        PreparedNote note = Assert.Single(
+            scene.Panels[0].MainNotes.Where(value =>
+                value.StartSample == 3200 && value.EndSample == 3600));
+        Assert.Equal(60, note.InitialMidiNote);
+        Assert.Single(note.Pitch);
+        Assert.Equal(3400, note.Pitch[0].SamplePosition);
     }
 
     // --- FPS mapping test (test 29) ---

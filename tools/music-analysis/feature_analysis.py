@@ -63,8 +63,9 @@ def _j_symbolic_features(score):
 
 def analyze_features(notes, score=None, detail="standard"):
     channels = []
-    for channel_id in sorted({n["channelId"] for n in notes}):
-        channel_notes = sorted(
+    grouped = getattr(notes, "by_channel", None)
+    for channel_id in sorted(grouped if grouped is not None else {n["channelId"] for n in notes}):
+        channel_notes = list(grouped[channel_id]) if grouped is not None else sorted(
             [n for n in notes if n["channelId"] == channel_id],
             key=lambda n: (n.get("offset", 0), n.get("id", "")),
         )

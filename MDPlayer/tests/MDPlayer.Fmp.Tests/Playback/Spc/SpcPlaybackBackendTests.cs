@@ -165,9 +165,51 @@ internal static class SpcFixture
 {
     public static byte[] Build(int? sizeOverride = null)
     {
-        byte[] data = new byte[SpcMetadata.MinimumFileSize];
+        const int fileSize = 0x10200;
+        const int ramOffset = 0x100;
+        const int dspOffset = 0x10100;
+
+        byte[] data = new byte[fileSize];
         Encoding.ASCII.GetBytes(SpcMetadata.Signature).CopyTo(data, 0);
-        data[0x23] = 31; data[0x2C] = 0xFF; data[0x2D] = 0xEF;
+        data[0x23] = 0x30; /* format */
+        data[0x24] = 1;    /* version */
+        data[0x25] = 0x00; /* pcl -> PC = 0x0200 */
+        data[0x26] = 0x02; /* pch */
+        data[0x2B] = 0xFF; /* sp */
+
+        /* CPU at 0x0200: key on voice 0 via $F2/$F3, then hang. */
+        int pc = ramOffset + 0x0200;
+        data[pc + 0] = 0x8F; data[pc + 1] = 0x4C; data[pc + 2] = 0xF2;
+        data[pc + 3] = 0x8F; data[pc + 4] = 0x01; data[pc + 5] = 0xF3;
+        data[pc + 6] = 0x2F; data[pc + 7] = 0xFE;
+
+        /* DIR entry for source 0 at 0x0300: start = loop = 0x0400. */
+        int dir = ramOffset + 0x0300;
+        data[dir + 0] = 0x00; data[dir + 1] = 0x04;
+        data[dir + 2] = 0x00; data[dir + 3] = 0x04;
+
+        /* BRR block at 0x0400: end+loop block containing a non-zero sample. */
+        int brr = ramOffset + 0x0400;
+        data[brr] = 0xA3;
+        for (int i = 0; i < 8; i++)
+            data[brr + 1 + i] = 0xF0;
+
+        data[dspOffset + 0x00] = 0x7F; /* voice 0 voll */
+        data[dspOffset + 0x01] = 0x7F; /* voice 0 volr */
+        data[dspOffset + 0x02] = 0x00; /* pitchl */
+        data[dspOffset + 0x03] = 0x10; /* pitchh = 0x1000 (1.0x) */
+        data[dspOffset + 0x04] = 0x00; /* srcn */
+        data[dspOffset + 0x05] = 0xFF; /* adsr0 */
+        data[dspOffset + 0x06] = 0xE0; /* adsr1 */
+        data[dspOffset + 0x0C] = 0x7F; /* mvoll */
+        data[dspOffset + 0x1C] = 0x7F; /* mvolr */
+        data[dspOffset + 0x2C] = 0x00; /* evoll: echo return silent */
+        data[dspOffset + 0x3C] = 0x00; /* evolr: echo return silent */
+        data[dspOffset + 0x4C] = 0x00; /* kon: CPU-driven key-on */
+        data[dspOffset + 0x4D] = 0x00; /* eon: no voice feeds echo */
+        data[dspOffset + 0x5D] = 0x03; /* dir */
+        data[dspOffset + 0x6C] = 0x00; /* flg */
+
         return sizeOverride.HasValue && sizeOverride.Value < data.Length
             ? data.AsSpan(0, sizeOverride.Value).ToArray() : data;
     }

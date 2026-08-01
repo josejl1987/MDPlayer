@@ -9,18 +9,18 @@ namespace Fmp.Core.Visualization;
 /// </summary>
 internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 {
-    private const int RegisterBankSize = 0x100;
-    private const double FmDivider = 6.0;
-    private const double DacLaneMidiNote = 60.0;
+	private const int RegisterBankSize = 0x100;
+	private const double FmDivider = 6.0;
+	private const double DacLaneMidiNote = 60.0;
 
     private readonly byte[] _registers = new byte[RegisterBankSize * 2];
     private readonly MutableNote?[] _fmNotes = new MutableNote?[6];
     private readonly MutableNote?[] _fm3Notes = new MutableNote?[4];
     private readonly int[] _fm3KeyMask = new int[1];
-    private readonly List<byte> _dacBytes = [];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private bool _fm3SpecialMode;
+    private readonly List<byte> _dacBytes = [];
     private bool _dacEnabled;
     private long _dacStartSample;
     private long _dacPreviousSample = -1;

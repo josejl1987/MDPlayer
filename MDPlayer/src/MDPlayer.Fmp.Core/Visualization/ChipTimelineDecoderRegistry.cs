@@ -239,6 +239,13 @@ internal sealed class TimelineDecoderEventSink : IPlaybackEventSink
             ppz8.ObserveBank(asset.AssetId);
     }
 
+    public void OnSampleBank(DeviceId device, int bank, ReadOnlyMemory<byte>[] samples, long samplePosition)
+    {
+        if (_decoders.TryGetValue(device, out IChipTimelineDecoder decoder)
+            && decoder is Ppz8TimelineDecoder ppz8)
+            ppz8.ObserveBank($"ppz8:{bank}:bank", samples);
+    }
+
     public void OnLoopBoundary(in TimedLoopBoundary loop)
     {
         if (loop.SamplePosition < 0 || loop.LoopIndex < 0)
@@ -265,6 +272,33 @@ internal sealed class TimelineDecoderEventSink : IPlaybackEventSink
             }
         }
     }
+
+    /// <summary>Routes per-source BRR root estimates to the SPC timeline decoder (§25.3).</summary>
+    public void OnSpcInstruments(IReadOnlyList<SpcSourceRootInfo> sources)
+    {
+        foreach (KeyValuePair<DeviceId, IChipTimelineDecoder> kv in _decoders)
+        {
+            if (kv.Value is SnesDspTimelineDecoder spc)
+            {
+                spc.SetSourceRoots(sources);
+                return;
+            }
+        }
+    }
+
+    public void OnSpcSamples(IReadOnlyList<SpcSampleEntry> samples)
+    {
+        foreach (KeyValuePair<DeviceId, IChipTimelineDecoder> kv in _decoders)
+        {
+            if (kv.Value is SnesDspTimelineDecoder spc)
+            {
+                spc.SetSamples(samples);
+                return;
+            }
+        }
+    }
+
+    public void OnAggregateHit(in AggregateHitEvent hit) => _timeline.AddAggregateHit(hit);
 
     public VisualizationTimeline Complete(
         long endSample,

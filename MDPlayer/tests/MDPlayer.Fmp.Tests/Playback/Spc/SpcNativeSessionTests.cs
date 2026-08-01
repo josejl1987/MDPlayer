@@ -121,6 +121,8 @@ public sealed class SpcNativeSessionTests
             byte[] wav = File.ReadAllBytes(wavPath);
             int dataSize = BitConverter.ToInt32(wav, 40);
             Assert.Equal(150 * 32_000 * 2 * 2, dataSize);
+            Assert.True(ContainsNonZero(wav, 44, 32_000 * 4),
+                "The synthetic SPC must produce non-silent PCM before the fade.");
             Assert.Equal(0, BitConverter.ToInt16(wav, 44 + dataSize - 2));
             Assert.Equal(0, BitConverter.ToInt16(wav, 44 + dataSize - 4));
         }
@@ -143,8 +145,10 @@ public sealed class SpcNativeSessionTests
 
         Assert.Equal(SpcNativeSession.RamSize, ram.Length);
         Assert.Equal(SpcNativeSession.DspRegisterSize, dsp.Length);
-        Assert.All(ram, b => Assert.Equal(0, b));
-        Assert.All(dsp, b => Assert.Equal(0, b));
+        Assert.Equal(0x8F, ram[0x0200]);
+        Assert.Equal(0x4C, ram[0x0201]);
+        Assert.Equal(0x7F, dsp[0x00]);
+        Assert.Equal(0x7F, dsp[0x01]);
     }
 
     [Fact]
@@ -203,6 +207,18 @@ public sealed class SpcNativeSessionTests
         return new RestoreEnv(NativeLibEnvVar, previous);
     }
 
+
+    private static bool ContainsNonZero(byte[] wav, int offset, int byteCount)
+    {
+        int end = Math.Min(wav.Length, offset + byteCount);
+        for (int i = offset; i < end; i++)
+        {
+            if (wav[i] != 0)
+                return true;
+        }
+
+        return false;
+    }
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }

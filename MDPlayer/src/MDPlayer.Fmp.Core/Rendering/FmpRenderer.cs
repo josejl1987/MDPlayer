@@ -66,6 +66,19 @@ internal class FmpRenderer
         opts ??= new Options();
         var result = new Result();
 
+        if (!double.IsFinite(opts.MaxDurationSeconds ?? 3600.0)
+            || opts.MaxDurationSeconds is <= 0
+            || !double.IsFinite(opts.FadeSeconds) || opts.FadeSeconds < 0
+            || !double.IsFinite(opts.TailSeconds) || opts.TailSeconds < 0
+            || opts.LoopCount <= 0
+            || (opts.TimeoutSeconds.HasValue
+                && (!double.IsFinite(opts.TimeoutSeconds.Value) || opts.TimeoutSeconds.Value <= 0)))
+        {
+            result.StopReason = "invalid_options";
+            result.LastError = "render duration, fade, tail, loop, or timeout option is invalid";
+            return result;
+        }
+
         // Optional trace writer — opened BEFORE Initialize to capture boot events
         RegisterTraceWriter traceWriter = null;
         if (!string.IsNullOrEmpty(opts.TracePath))
@@ -214,8 +227,29 @@ internal class FmpRenderer
                 }
             }
 
-            if (totalSamples >= maxSamples && !termination.IsComplete(totalSamples))
+            // Trace failures and wall-clock timeouts are aborted renders, not
+            // successful capped renders. Leave WavWriter unclosed so its
+            // Dispose path removes the temporary partial file.
+            if (traceWriter?.Failed == true)
+            {
+                result.StopReason = "trace_error";
+                result.LastError = $"Trace write failed: {traceWriter.FirstError?.Message}";
+            }
+            else if (string.IsNullOrEmpty(result.StopReason)
+                && totalSamples >= maxSamples && !termination.IsComplete(totalSamples))
+            {
                 result.StopReason = opts.MaxDurationSeconds.HasValue ? "max_duration" : "safety_limit";
+            }
+            if (result.StopReason is "trace_error" or "timeout")
+            {
+                result.RenderedSamples = totalSamples;
+                result.Success = false;
+                if (string.IsNullOrEmpty(result.LastError))
+                    result.LastError = result.StopReason == "timeout"
+                        ? "render timed out"
+                        : "trace write failed";
+                return result;
+            }
 
             // Finalize WAV
             wav.Close();

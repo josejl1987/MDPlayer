@@ -30,6 +30,11 @@ internal class ScopeRenderer
     {
         public string Name { get; init; }
         public string Label { get; init; }
+        public ScopeSemanticClass SemanticClass { get; init; } = ScopeSemanticClass.Mixed;
+        public int StableOrder { get; init; } = int.MaxValue;
+        public int WindowWidth { get; init; } = 1;
+        public double DefaultAmplification { get; init; } = 1.0;
+        public string DefaultColor { get; init; }
         public string WavPath { get; init; }
         public long RenderedSamples { get; set; }
         public int Channels { get; set; }
@@ -76,7 +81,9 @@ internal class ScopeRenderer
         string outputDir,
         IReadOnlyList<StemPass> stems = null,
         IProgress<ScopeProgress> progress = null,
-        bool skipSilentStems = true)
+        bool skipSilentStems = true,
+        string audioDir = null,
+        string metadataPath = null)
     {
         stems ??= DefaultStems.All;
         var activeStems = stems.Where(s => CanProduceOutput(s.Channels, skipSilentStems)).ToList();
@@ -95,7 +102,7 @@ internal class ScopeRenderer
             SampleRate = _sampleRate
         };
 
-        string audioDir = Path.Combine(outputDir, "audio");
+        audioDir ??= Path.Combine(outputDir, "audio");
         Directory.CreateDirectory(audioDir);
 
         var stemStates = activeStems.Select(stem => new StemState
@@ -105,6 +112,11 @@ internal class ScopeRenderer
             {
                 Name = stem.Name,
                 Label = stem.Label,
+                SemanticClass = stem.SemanticClass,
+                StableOrder = stem.StableOrder,
+                WindowWidth = stem.WindowWidth,
+                DefaultAmplification = stem.DefaultAmplification,
+                DefaultColor = stem.DefaultColor,
                 WavPath = Path.Combine(audioDir, stem.Name + ".wav"),
                 Success = false
             },
@@ -321,7 +333,8 @@ internal class ScopeRenderer
                 ? termination.StopReason
                 : "completed";
 
-        WriteManifest(Path.Combine(outputDir, "metadata.json"), result);
+        metadataPath ??= Path.Combine(outputDir, "metadata.json");
+        WriteManifest(metadataPath, result);
 
         return result;
     }

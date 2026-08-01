@@ -7,6 +7,9 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
     private readonly int[] _volume = new int[6];
     private readonly int[] _left = new int[6];
     private readonly int[] _right = new int[6];
+    private readonly byte[][] _waveRam = new byte[6][];
+    private readonly int[] _waveIndex = new int[6];
+    private readonly string[] _waveformIds = new string[6];
     private readonly MutableNote?[] _notes = new MutableNote?[6];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
@@ -25,6 +28,8 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
         _device = device;
         _timeline = timeline;
         _timeline.AddDevice(device);
+        for (int channel = 0; channel < _waveRam.Length; channel++)
+            _waveRam[channel] = new byte[32];
         foreach (VoiceDescriptor voice in VisualizationDeviceCatalog.Huc6280Voices(device.Id.Instance))
             _timeline.AddVoice(voice);
     }
@@ -55,6 +60,11 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
             case 5:
                 _left[_selectedChannel] = (write.Data >> 4) & 0x0F;
                 _right[_selectedChannel] = write.Data & 0x0F;
+                break;
+            case 6:
+                _waveRam[_selectedChannel][_waveIndex[_selectedChannel]] = (byte)(write.Data & 0x1F);
+                _waveIndex[_selectedChannel] = (_waveIndex[_selectedChannel] + 1) & 31;
+                UpdateWaveform(_selectedChannel, write.SamplePosition);
                 break;
         }
 
@@ -99,6 +109,23 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
             pitch,
             instrument,
             retrigger);
+    }
+
+    private void UpdateWaveform(int channel, long sample)
+    {
+        int[] source = new int[_waveRam[channel].Length];
+        for (int index = 0; index < source.Length; index++)
+            source[index] = _waveRam[channel][index];
+        WaveformDefinition waveform = VisualizationAssetBuilder.CreateIntegerWaveform(
+            "wavetable", source, 0, 31, $"WAVE {channel + 1}");
+        _timeline.AddWaveform(waveform);
+        if (_waveformIds[channel] == waveform.Id)
+            return;
+        _waveformIds[channel] = waveform.Id;
+        _timeline.AddWaveformChange(new WaveformChangeEvent(
+            new VoiceId(_device.Id, VoiceKind.Wavetable, channel).ToString(),
+            sample,
+            waveform.Id));
     }
 
     private Pitch DecodePitch(int channel)

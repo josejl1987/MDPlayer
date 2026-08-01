@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+
 
 SUPPORTED_INTERVALS = (0, 12, -12, 24, -24)
 
@@ -27,11 +29,12 @@ def analyze_relationships(notes, sample_rate, detail="standard"):
         return []
     minimum_duration = max(1, int(round(float(sample_rate) * .060)))
     onset_tolerance = max(1, int(round(float(sample_rate) * .040)))
-    channels = sorted({n["channelId"] for n in notes})
+    grouped = getattr(notes, "by_channel", None)
+    channels = sorted(grouped if grouped is not None else {n["channelId"] for n in notes})
     result = []
     for source_id_index, source_id in enumerate(channels):
         source_notes = sorted(
-            [n for n in notes if n["channelId"] == source_id
+            [n for n in (grouped[source_id] if grouped is not None else notes) if n["channelId"] == source_id
              and n.get("theoryPitched", True)
              and n.get("pitchClass", -1) in range(12)
              and n["endSample"] - n["startSample"] >= minimum_duration],
@@ -39,7 +42,7 @@ def analyze_relationships(notes, sample_rate, detail="standard"):
         )
         for target_id in channels[source_id_index + 1:]:
             target_notes = sorted(
-                [n for n in notes if n["channelId"] == target_id
+                [n for n in (grouped[target_id] if grouped is not None else notes) if n["channelId"] == target_id
                  and n.get("theoryPitched", True)
                  and n.get("pitchClass", -1) in range(12)
                  and n["endSample"] - n["startSample"] >= minimum_duration],
@@ -51,15 +54,22 @@ def analyze_relationships(notes, sample_rate, detail="standard"):
             if source_span < sample_rate:
                 continue
             source_duration = sum(n["endSample"] - n["startSample"] for n in source_notes)
+            onset_index = {}
+            for target_index, target in enumerate(target_notes):
+                onset_index.setdefault(target["startSample"], []).append((target_index, target))
+            onset_keys = sorted(onset_index)
             for interval in SUPPORTED_INTERVALS:
                 used_targets = set()
                 pairs = []
                 for source in source_notes:
                     candidates = [
                         (abs(target["startSample"] - source["startSample"]), target_index, target)
-                        for target_index, target in enumerate(target_notes)
+                        for onset in onset_keys[bisect_left(onset_keys, source["startSample"] - onset_tolerance):
+                                                bisect_right(onset_keys, source["startSample"] + onset_tolerance)]
+                        for target_index, target in onset_index.get(onset, ())
                         if target_index not in used_targets
-                        and _match(source, target, interval, onset_tolerance)
+                        and abs((float(target["pitch"]) - float(source["pitch"])) - interval) <= .35
+                        and max(0, min(source["endSample"], target["endSample"]) - max(source["startSample"], target["startSample"])) > 0
                     ]
                     if not candidates:
                         continue

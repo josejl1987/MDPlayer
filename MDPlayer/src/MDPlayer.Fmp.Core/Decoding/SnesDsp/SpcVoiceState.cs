@@ -23,8 +23,10 @@ internal sealed class SpcActiveNote
     public int SourceNumber { get; set; }
     public string InstrumentId { get; set; } = "";
 
-    /// <summary>Relative pitch at note start, in semitones above the sample's natural rate (§13.3).</summary>
-    public double InitialRelativeSemitones { get; set; }
+    /// <summary>Pitch at note start in semitones relative to the A4 anchor,
+    /// including the source's estimated root offset (§13.3, §25.3). Timeline
+    /// midi = 69 + this value.</summary>
+    public double InitialSemitones { get; set; }
 
     public bool IsRetrigger { get; set; }
 
@@ -42,5 +44,5 @@ internal sealed record SpcVoiceState(
     long? ReleaseStartSample,
     int SourceNumber,
     string InstrumentId,
-    double InitialRelativeSemitones,
+    double InitialSemitones,
     int PitchPointCount);

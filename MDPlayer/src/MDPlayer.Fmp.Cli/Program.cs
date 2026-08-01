@@ -35,6 +35,10 @@ public class Program
                     return VisualizeCommand.Handle(args.Skip(1).ToArray());
                 case "analyze":
                     return AnalyzeCommand.Handle(args.Skip(1).ToArray());
+                case "plan":
+                    return PlanCommand.Handle(args.Skip(1).ToArray());
+                case "preview":
+                    return PreviewCommand.Handle(args.Skip(1).ToArray());
                 default:
                     Console.Error.WriteLine($"error: unknown command '{command}'");
                     PrintUsage();
@@ -51,10 +55,12 @@ public class Program
     private static void PrintUsage()
     {
         Console.WriteLine("Usage:");
-        Console.WriteLine("  mdplayer-render render <input.ovi|opi|ozi|mpi|mvi|mzi> [options]");
-        Console.WriteLine("  mdplayer-render visualize <input.ovi|input.vgm|input.xgm|input.s98|input.mdx|input.mid> [options]");
-        Console.WriteLine("  mdplayer-render inspect <input.ovi|input.vgm|input.xgm|input.s98|input.mdx|input.mid> [--visualization]");
+        Console.WriteLine("  mdplayer-render render <input.ovi|opi|ozi|mpi|mvi|mzi|spc> [options]");
+        Console.WriteLine("  mdplayer-render visualize <input.ovi|input.vgm|input.xgm|input.s98|input.mdx|input.mid|input.spc> [options]");
+        Console.WriteLine("  mdplayer-render inspect <input.ovi|input.vgm|input.xgm|input.s98|input.mdx|input.mid|input.spc> [--visualization]");
         Console.WriteLine("  mdplayer-render analyze <input.ovi> [options]");
+        Console.WriteLine("  mdplayer-render plan --request-json PATH [options]");
+        Console.WriteLine("  mdplayer-render preview --request-json PATH [--time T] [--motion] [options]");
         Console.WriteLine();
         Console.WriteLine("Render options:");
         Console.WriteLine("  -o, --output PATH          Output WAV path");
@@ -88,14 +94,30 @@ public class Program
         Console.WriteLine("  --stems-only               Render stems + corrscope YAML, skip video composition");
         Console.WriteLine("  --spc-stems                Also export SPC per-voice/echo stems next to master.wav");
         Console.WriteLine("  --video PATH               Final MP4 path (default: <output>/visualization.mp4)");
-        Console.WriteLine("  --width PIXELS             Video width (default: 1440)");
-        Console.WriteLine("  --height PIXELS            Video height (default: 720)");
-        Console.WriteLine("  --fps RATE                 Video frame rate (default: 30)");
+        Console.WriteLine("  --width PIXELS             Video width (default: 1280 balanced)");
+        Console.WriteLine("  --height PIXELS            Video height (default: 720 balanced)");
+        Console.WriteLine("  --fps RATE                 Video frame rate (default: 60 balanced)");
         Console.WriteLine("  --final-quality            Use 1080p60, veryfast/crf18, Corrscope AA on");
+        Console.WriteLine("  --preset preview|balanced|final|diagnostic  Publishing preset (default: balanced)");
         Console.WriteLine("  --encoder auto|libx264|nvenc Encoder (default: auto: NVENC when available, otherwise libx264)");
         Console.WriteLine("  --backend auto|fmp|mdplayer  Playback backend preference (default: auto)");
-        Console.WriteLine("  --effects all|none         Active-note flash & ripple (default: all; none is diagnostic)");
-        Console.WriteLine("  --layout diagnostic|focus  Fixed all-channel grid or activity-focused grid (default: diagnostic)");
+        Console.WriteLine("  --effects none|minimal|diagnostic|cinematic  Dynamic effect preset (default: minimal)");
+        Console.WriteLine("  --layout auto|unified|split|scope|hybrid|diagnostic|diagnostic-v2");
+        Console.WriteLine("  --channels active|audible|semantic|all|custom  Track filtering (default: active; custom keeps --include-track/--exclude-track)");
+        Console.WriteLine("  --include-track ID         Keep only the listed tracks (repeatable; master panels always kept)");
+        Console.WriteLine("  --exclude-track ID         Drop the listed tracks (repeatable)");
+        Console.WriteLine("  --past-seconds N --future-seconds N --time-window P:F --time-scale dense|balanced|wide");
+        Console.WriteLine("  --scope-ratio N --scope-position bottom|top|left|right --group-by none|device|family");
+        Console.WriteLine("  --time-grid none|automatic|authoritative|analytical");
+        Console.WriteLine("  --note-color instrument|channel|pitch");
+        Console.WriteLine("  --print-layout            Print the prepared layout plan");
+        Console.WriteLine("  --layout-json PATH        Export the prepared layout plan as JSON");
+        Console.WriteLine("  --layout-template PATH    Apply a reusable JSON composition template");
+        Console.WriteLine("  --palette PATH            Apply a reusable JSON palette");
+        Console.WriteLine("  --preview-html PATH       Write an interactive HTML canvas preview");
+        Console.WriteLine("  --diagnostic-pages DIR    Write paginated SVG diagnostic sheets");
+        Console.WriteLine("  --renderer auto|cpu|gpu   Select software or OpenCL semantic rendering");
+        Console.WriteLine("  --motion-blur-samples N   Deterministic temporal samples (1-8)");
         Console.WriteLine("  --spc-pitch estimate|relative  SPC diagnostic: estimate BRR root vs relative pitch only (default: estimate)");
         Console.WriteLine("  --font PATH                TrueType/OpenType font with CJK coverage");
         Console.WriteLine("  --corrscope PATH           Corrscope executable path");
@@ -110,7 +132,29 @@ public class Program
         Console.WriteLine("  --analysis-detail minimal|standard|full");
         Console.WriteLine("  --analysis-force          Ignore an existing analysis cache");
         Console.WriteLine("  --analysis-timeout-minutes N  Analysis worker timeout (default: 10)");
-        Console.WriteLine("  --analysis-overlay none|minimal|standard");
+        Console.WriteLine("  --analysis-overlay none|minimal|standard|full");
+        Console.WriteLine("  --request-json PATH        Seed every option from a request JSON file (must be the first option)");
+        Console.WriteLine("  --progress jsonl           Emit structured JSON-lines progress on stdout");
+        Console.WriteLine();
+        Console.WriteLine("Plan options:");
+        Console.WriteLine("  --request-json PATH        Request JSON file (required)");
+        Console.WriteLine("  --timeline PATH            Reuse an existing visualization timeline");
+        Console.WriteLine("  --timeline-out PATH        Write the captured/reused timeline to PATH");
+        Console.WriteLine("  --json                     Machine-readable plan JSON on stdout");
+        Console.WriteLine();
+        Console.WriteLine("Preview options:");
+        Console.WriteLine("  --request-json PATH        Request JSON file (required)");
+        Console.WriteLine("  --time SECONDS             Still frame time (default: 0)");
+        Console.WriteLine("  --output PATH              Still output PNG path");
+        Console.WriteLine("  --width N --height N       Preview size overrides (cap 1920)");
+        Console.WriteLine("  --fidelity layout|accurate Still fidelity (default: accurate)");
+        Console.WriteLine("  --timeline PATH            Reuse an existing visualization timeline");
+        Console.WriteLine("  --timeline-out PATH        Write the captured/reused timeline to PATH");
+        Console.WriteLine("  --json                     Machine-readable preview metadata on stdout");
+        Console.WriteLine("  --motion                   Render a motion sequence instead of a still");
+        Console.WriteLine("  --start SECONDS --duration SECONDS --fps N  Motion range (defaults 0 / 3 / 15)");
+        Console.WriteLine("  --max-width N --max-height N               Motion size cap (defaults 960 / 540)");
+        Console.WriteLine("  --output-dir DIR           Motion frame output directory");
         Console.WriteLine();
         Console.WriteLine("Analyze options:");
         Console.WriteLine("  --timeline PATH            Reuse an existing visualization timeline");

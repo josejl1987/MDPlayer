@@ -86,6 +86,38 @@ public sealed class PitchCameraTests
         Assert.Equal(first, third);
     }
 
+    [Fact]
+    public void PreciseViewport_InterpolatesContinuouslyAcrossTargetChanges()
+    {
+        var camera = new PitchCamera(
+            [
+                Note("ch1", 0, 1_000, 60),
+                // Keep the second target outside the initial future window so
+                // the baked critically-damped transition is exercised.
+                Note("ch1", 3_500, 5_000, 72),
+            ],
+            laneHeight: 168,
+            sampleRate: SampleRate,
+            pastSeconds: 0.75,
+            futureSeconds: 2.25,
+            timelineStartSample: 0,
+            timelineEndSample: 5_000,
+            fpsNumerator: 20,
+            fpsDenominator: 1);
+
+        var ranges = Enumerable.Range(0, 101)
+            .Select(index => camera.GetPreciseRange(index * 50L))
+            .ToArray();
+
+        Assert.Contains(ranges, range =>
+            Math.Abs(range.MinMidi - Math.Round(range.MinMidi)) > 1e-6
+            || Math.Abs(range.MaxMidi - Math.Round(range.MaxMidi)) > 1e-6);
+
+        (double MinMidi, double MaxMidi) random = camera.GetPreciseRange(3_700);
+        (double MinMidi, double MaxMidi) sequential = ranges[74];
+        Assert.Equal(sequential, random);
+    }
+
     [Theory]
     [InlineData(84, 16)]
     [InlineData(126, 18)]
@@ -138,14 +170,15 @@ public sealed class PitchCameraTests
     }
 
     [Fact]
-    public void OverflowingPitches_ClampToSpanWithoutOrnamentFlag()
+    public void ImportantSimultaneousPitches_AreNeverClippedByRecommendedSpan()
     {
         // IsClipped now means "deliberately clipped ornament" (§11.3), not generic overflow.
         var camera = new PitchCamera(
             new[] { Note("ch1", 0, 4000, 48), Note("ch1", 0, 4000, 84) },
             laneHeight: 84, SampleRate, 0.75, 2.25, 0, 5000);
         var (min, max) = camera.GetRange(2000);
-        Assert.Equal(24, max - min);
+        Assert.True(min <= 48 && max > 84,
+            $"Important simultaneous pitches are outside [{min}, {max}).");
         Assert.False(camera.IsClipped(2000));
     }
 
@@ -195,11 +228,10 @@ public sealed class PitchCameraTests
     }
 
     [Fact]
-    public void LargeOutlierPitchChange_DoesNotExpandCameraBeyond24()
+    public void ImportantPitchCurve_IsNeverClippedByRecommendedSpan()
     {
-        // A note at midi 60 with a pitch change to midi 100 (40 semitones up)
-        // must not create a 40-semitone viewport. The pitch change is clamped
-        // to anchorMidi ± 6, so the camera stays within the 24-semitone max.
+        // A large bend is important content, not an ornament. The recommended
+        // 24-semitone span must yield to the no-clipping requirement.
         var notes = new[]
         {
             PitchBendNote("ch1", 0, 4000, 60,
@@ -214,9 +246,10 @@ public sealed class PitchCameraTests
             0,
             5000);
 
-        var (min, max) = camera.GetRange(2000);
-        Assert.True(max - min <= 24,
-            $"Camera span {max - min} exceeds the 24-semitone maximum for a 40-semitone outlier.");
+        (double min, double max) = camera.GetPreciseRange(2000);
+        Assert.True(min <= 60 && max >= 100,
+            $"Important bend is outside camera [{min}, {max}].");
+        Assert.False(camera.IsClipped(2000));
     }
 
     [Fact]
@@ -398,6 +431,64 @@ public sealed class PitchCameraTests
         }
         Assert.True(reversals <= 1, $"Max oscillated ({reversals} reversals) — not critically damped.");
         Assert.True(camera.GetRange(4500).Item2 < 80, "Did not contract after hold.");
+    }
+
+    [Fact]
+    public void ContainingRange_NeverExcludesFittingContent()
+    {
+        // §11/§11.4: no span or C-alignment rule may push a note out of the
+        // half-open viewport when the content fits inside the hard maximum span.
+        foreach (int low in new[] { 36, 48, 60, 65, 72 })
+        for (int d = 0; d <= 20; d++)
+        {
+            var camera = Cam(new[] { Note("ch1", 0, 4000, low), Note("ch1", 0, 4000, low + d) }, 5000);
+            var (min, max) = camera.GetRange(2000);
+            Assert.True(min <= low && max > low + d,
+                $"Content [{low},{low + d}] not contained in range [{min},{max}).");
+        }
+    }
+
+    [Fact]
+    public void RestReentry_GlidesDuringSilence()
+    {
+        // §11.5: re-entry after a rest must ease from the displayed default
+        // range, not teleport. Motion mid-silence must stay a damped glide.
+        var notes = new[]
+        {
+            Note("ch1", 0, 400, 60), Note("ch1", 400, 800, 62), Note("ch1", 800, 1200, 64), Note("ch1", 1200, 1600, 67),
+            Note("ch1", 8400, 8800, 76), Note("ch1", 8800, 9200, 78), Note("ch1", 9200, 9600, 81), Note("ch1", 9600, 10000, 83),
+        };
+        var camera = Cam(notes, 11000);
+        var (prevMin, prevMax) = camera.GetRange(2900);
+        for (long s = 2917; s <= 8400; s += 17)
+        {
+            var (min, max) = camera.GetRange(s);
+            Assert.True(Math.Abs(min - prevMin) <= 10 && Math.Abs(max - prevMax) <= 10,
+                $"Camera teleported during silence at {s}: [{prevMin},{prevMax}) -> [{min},{max}).");
+            (prevMin, prevMax) = (min, max);
+        }
+        var (onsetMin, onsetMax) = camera.GetRange(8400);
+        Assert.True(onsetMin <= 76 && onsetMax > 76,
+            $"Phrase note 76 not visible at onset: [{onsetMin},{onsetMax}).");
+    }
+
+    [Fact]
+    public void AnticipatoryExpansion_GlidesInsteadOfSnapping()
+    {
+        // §11.5: expansions driven by lookahead ease toward the new range and
+        // converge before the note sounds, instead of snapping in one frame.
+        var camera = Cam(new[] { Note("ch1", 0, 8000, 60), Note("ch1", 4000, 8000, 80) }, 9000);
+        var (prevMin, prevMax) = camera.GetRange(1200);
+        for (long s = 1217; s <= 4000; s += 17)
+        {
+            var (min, max) = camera.GetRange(s);
+            Assert.True(Math.Abs(min - prevMin) <= 10 && Math.Abs(max - prevMax) <= 10,
+                $"Expansion snapped at {s}: [{prevMin},{prevMax}) -> [{min},{max}).");
+            (prevMin, prevMax) = (min, max);
+        }
+        var (onsetMin, onsetMax) = camera.GetRange(4000);
+        Assert.True(onsetMin <= 80 && onsetMax > 80,
+            $"Note at 80 not visible at onset: [{onsetMin},{onsetMax}).");
     }
 
     [Fact]

@@ -22,8 +22,9 @@ The post-build step copies the library into the managed runtimes layout:
 | Linux   | `build/libmdplayer_spc.so`           | `runtimes/linux-x64/native/libmdplayer_spc.so` |
 | Windows | `build/mdplayer_spc.dll` (WIN32)     | `runtimes/win-x64/native/mdplayer_spc.dll`     |
 
-Both `runtimes/` paths are gitignored; the CLI project packages whichever
-exists (`Condition="Exists(...)"`).
+Built native library files under `runtimes/*/native/` are gitignored while
+their `README.md` files remain tracked; the CLI project packages whichever
+library exists (`Condition="Exists(...)"`).
 
 ### Master-parity test (ctest)
 
@@ -59,18 +60,27 @@ The managed wrapper (`SpcNativeSession`) locates the library in this order:
 
 ## CLI options relevant to SPC
 
-All options below are accepted by the generic visualize command, which is what
-`.spc` inputs route through (`mdplayer-render visualize song.spc ...`):
+SPC inputs are accepted by both the generic render and visualize commands:
+
+```
+mdplayer-render render song.spc --output song.wav --duration 90
+mdplayer-render visualize song.spc --duration 90 --stems-only
+```
+
+The render command writes a 32,000 Hz stereo master WAV. The visualize command
+also writes `timeline.json` and can compose the video overlay.
+
+The following options apply to the generic visualize command:
 
 | Option | Meaning |
 | ------ | ------- |
 | `--duration SECONDS` | Maximum capture duration (safety cap 300 s default; SPC metadata/default fallbacks per §24). |
 | `--fade SECONDS` | Linear master fade after the resolved duration (default 5). |
 | `--spc-pitch estimate\|relative` | **Diagnostic option (§25.3).** `estimate` (default) runs the PR 9 BRR root estimator so instruments carry an estimated musical root; `relative` skips root estimation — instruments keep PitchAccuracy `relative` and EstimatedRootHz stays null. Flows through `PlaybackOptions.SpcPitchMode`; the renderer itself has no `.spc` conditionals. |
+| `--spc-stems` | Include SPC voice and echo taps in the visualization output. |
 | `--stems-only` | Render stems + corrscope YAML, skip video composition. |
 
-`--spc-stems` (voice/echo taps) is tracked by PR 6 and is not yet available on
-this branch.
+`--spc-stems` (voice/echo taps) is available on the visualize command.
 
 Example:
 

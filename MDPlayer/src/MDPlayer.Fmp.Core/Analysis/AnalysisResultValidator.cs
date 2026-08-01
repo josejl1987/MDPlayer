@@ -14,7 +14,7 @@ internal static class AnalysisOutputJson
 internal static class AnalysisResultValidator
 {
     internal const string ExpectedMusic21Version = "10.5.0";
-    internal const string ExpectedWorkerVersion = "1.0.2";
+    internal const string ExpectedWorkerVersion = "1.1.0";
     private static readonly HashSet<string> Certainties = ["observed", "strong", "tentative", "withheld"];
 
     public static IReadOnlyList<string> Validate(AnalysisInput input, AnalysisOutput output)

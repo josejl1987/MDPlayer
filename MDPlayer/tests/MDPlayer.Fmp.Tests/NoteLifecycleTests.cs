@@ -88,7 +88,7 @@ public sealed class NoteLifecycleTests
         byte[] frame = renderer.RenderFrame(94); // sample 4700, window 3950..5750
         OverlayRect lane = Lane(renderer);
 
-        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent(0);
+        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent(Fm1, 0);
         OverlayColor capFillB = InstrumentColorResolver.ResolveInstrumentFill(InstrumentB).Lighten(0.45);
 
         int capX = X(renderer, 94, 4600); // 85
@@ -173,7 +173,7 @@ public sealed class NoteLifecycleTests
         byte[] frame = renderer.RenderFrame(40); // sample 2000 — note A active
         OverlayRect lane = Lane(renderer);
 
-        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent(0);
+        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent(Fm1, 0);
         OverlayColor markerColor = accent.Lighten(0.5);
         int playheadX = renderer.Layout.GetPlayheadX(0);
 

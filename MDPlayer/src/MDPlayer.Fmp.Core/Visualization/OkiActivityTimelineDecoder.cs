@@ -10,6 +10,7 @@ internal sealed class OkiActivityTimelineDecoder : IChipTimelineDecoder
 {
     private readonly ChipType _chipType;
     private readonly bool[] _active;
+    private readonly MutableActivity?[] _current;
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private int? _pendingSample;
@@ -21,6 +22,7 @@ internal sealed class OkiActivityTimelineDecoder : IChipTimelineDecoder
             throw new ArgumentOutOfRangeException(nameof(chipType));
         _chipType = chipType;
         _active = new bool[chipType == ChipType.Okim6295 ? 4 : 1];
+        _current = new MutableActivity?[_active.Length];
     }
 
     public ChipType ChipType => _chipType;
@@ -91,16 +93,45 @@ internal sealed class OkiActivityTimelineDecoder : IChipTimelineDecoder
         if (endSample < 0)
             throw new ArgumentOutOfRangeException(nameof(endSample));
         _completed = true;
+        for (int channel = 0; channel < _current.Length; channel++)
+            Close(channel, endSample);
     }
 
     private void Emit(int channel, string voice, long sample, float strength)
     {
         VoiceId voiceId = new(_device.Id, VoiceKind.Pcm, channel);
+        Close(channel, sample);
+        string sampleId = $"sample:oki:{_chipType.ToString().ToLowerInvariant()}:{voice}";
+        _timeline.AddSample(VisualizationAssetBuilder.CreateSyntheticSample(
+            sampleId, "adpcm", 0, displayName: voice));
         _timeline.AddRhythm(new RhythmEvent(
             voice,
             voiceId.ToString(),
             sample,
             Math.Clamp(strength, 0.05f, 1.0f),
             0.5f));
+        _current[channel] = new MutableActivity(sample, voiceId.ToString(), sampleId, strength);
     }
+
+    private void Close(int channel, long endSample)
+    {
+        MutableActivity? current = _current[channel];
+        if (current == null)
+            return;
+        if (endSample > current.StartSample)
+            _timeline.AddSamplePlayback(new SamplePlaybackEvent(
+                current.VoiceId,
+                current.StartSample,
+                endSample,
+                current.SampleId,
+                null,
+                1.0,
+                Math.Clamp(current.Strength, 0.05f, 1.0f),
+                0,
+                false,
+                false));
+        _current[channel] = null;
+    }
+
+    private sealed record MutableActivity(long StartSample, string VoiceId, string SampleId, float Strength);
 }

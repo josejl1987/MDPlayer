@@ -8,11 +8,9 @@ internal readonly record struct OverlayRect(int X, int Y, int Width, int Height)
 }
 
 /// <summary>
-/// Fixed 3x4 panel geometry shared by the musical overlay and the Corrscope
-/// compositor. The canvas is split into three vertical regions: a top
-/// metadata bar, the 3x4 panel grid, and a bottom credits/progress bar.
-/// Scope rectangles are intentionally transparent in the overlay so the
-/// stable Corrscope layer can remain the sole oscilloscope.
+/// Adaptive panel geometry shared by the musical overlay and the Corrscope
+/// compositor. Layout mode controls whether the composition is a scope wall,
+/// a split piano roll, a unified roll, or the diagnostic hybrid.
 /// </summary>
 internal sealed class OverlayLayout
 {
@@ -34,21 +32,14 @@ internal sealed class OverlayLayout
     public const int Columns = 3;
     public const int Rows = 4;
 
-    public static readonly string[] PanelIds =
-    [
-        "ym2608.0.fm.1", "ym2608.0.fm.2", "ym2608.0.fm.3",
-        "ym2608.0.fm.4", "ym2608.0.fm.5", "ym2608.0.fm.6",
-        "ym2608.0.ssg.1", "ym2608.0.ssg.2", "ym2608.0.ssg.3",
-        "ym2608.0.rhythm", "ym2608.0.adpcm-b", "ppz8.0",
-    ];
+    public static readonly string[] PanelIds = VisualizationTopologyCompatibility.LegacyPanelIds;
 
-    public static readonly string[] PanelLabels =
-    [
-        "FM1", "FM2", "FM3",
-        "FM4", "FM5", "FM6",
-        "SSG1", "SSG2", "SSG3",
-        "RHYTHM", "ADPCM-B", "PPZ8",
-    ];
+    public static readonly string[] PanelLabels = VisualizationTopologyCompatibility.LegacyPanelLabels;
+
+    private readonly bool _sharedComposition;
+    private readonly OverlayRect _sharedSemanticRect;
+    private readonly OverlayRect _sharedScopeRect;
+    private readonly OverlayRect[] _sharedCompactRegions;
 
     public OverlayLayout(int width, int height, double pastSeconds, double futureSeconds)
         : this(width, height, pastSeconds, futureSeconds, panelCount: 12)
@@ -56,16 +47,50 @@ internal sealed class OverlayLayout
     }
 
     public OverlayLayout(int width, int height, double pastSeconds, double futureSeconds, int panelCount)
+        : this(
+            width,
+            height,
+            pastSeconds,
+            futureSeconds,
+            panelCount,
+            VisualizationLayoutMode.Diagnostic,
+            scopeHeightOverride: null,
+            timelineHeightOverride: null,
+            rollZoom: 1.0)
     {
-        if (panelCount is < 1 or > 20)
-            throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 20.");
-        (int columns, int rows) = GridForPanelCount(panelCount);
-        if (width % columns != 0)
-            throw new ArgumentException($"Width must be divisible by {columns}.", nameof(width));
+    }
+
+    public OverlayLayout(
+        int width,
+        int height,
+        double pastSeconds,
+        double futureSeconds,
+        int panelCount,
+        VisualizationLayoutMode mode,
+        int? scopeHeightOverride = null,
+        int? timelineHeightOverride = null,
+        double rollZoom = 1.0,
+        double? scopeRatioOverride = null,
+        VisualizationScopePosition scopePosition = VisualizationScopePosition.Top)
+    {
+        if (panelCount is < 1 or > 64)
+            throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 64.");
+        _sharedComposition = mode is VisualizationLayoutMode.UnifiedRoll or VisualizationLayoutMode.Hybrid;
+        (int columns, int rows) = _sharedComposition
+            ? (1, 1)
+            : GridForPanelCount(panelCount);
+        if (width <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be positive.");
         if (!double.IsFinite(pastSeconds) || pastSeconds <= 0)
             throw new ArgumentOutOfRangeException(nameof(pastSeconds));
         if (!double.IsFinite(futureSeconds) || futureSeconds <= 0)
             throw new ArgumentOutOfRangeException(nameof(futureSeconds));
+        if (!double.IsFinite(rollZoom) || rollZoom <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rollZoom));
+        if (scopeHeightOverride is < 0 || timelineHeightOverride is < 0)
+            throw new ArgumentOutOfRangeException(nameof(scopeHeightOverride));
+        if (scopeRatioOverride is < 0 or > 0.8)
+            throw new ArgumentOutOfRangeException(nameof(scopeRatioOverride));
 
         Width = width;
         Height = height;
@@ -74,6 +99,15 @@ internal sealed class OverlayLayout
         RowCount = rows;
         PastSeconds = pastSeconds;
         FutureSeconds = futureSeconds;
+        Mode = mode;
+        RollZoom = rollZoom;
+        ScopePosition = scopePosition;
+        HasScopes = mode is VisualizationLayoutMode.Diagnostic
+            or VisualizationLayoutMode.DiagnosticV2
+            or VisualizationLayoutMode.Focus
+            or VisualizationLayoutMode.Scope
+            or VisualizationLayoutMode.Hybrid;
+        HasRoll = mode is not VisualizationLayoutMode.Scope;
 
         // Reserve the top and bottom metadata bands. The bands scale
         // proportionally with the canvas height, clamped to sensible minimums,
@@ -116,20 +150,146 @@ internal sealed class OverlayLayout
         if (PanelWidth <= 0)
             throw new ArgumentOutOfRangeException(nameof(width), "Canvas is too narrow for the panel layout.");
 
+        SafeHorizontalMargin = Math.Clamp((int)Math.Round(width * (32.0 / 1920.0)), 16, 32);
+        SafeVerticalMargin = Math.Clamp((int)Math.Round(height * (24.0 / 1080.0)), 12, 24);
+
+        if (_sharedComposition)
+        {
+            PanelHeaderHeight = Math.Clamp(
+                (int)Math.Round(height * (DefaultPanelHeaderHeight / 1080.0)),
+                height >= 720 ? 20 : 12,
+                32);
+            int divider = HasScopes
+                ? Math.Max(1, (int)Math.Round(height * (DefaultDividerHeight / 1080.0)))
+                : 0;
+            int minimumSemanticHeight = height >= 720 ? 220 : 120;
+            bool horizontalScope = HasScopes
+                && (scopePosition is VisualizationScopePosition.Left or VisualizationScopePosition.Right);
+            int requestedScope = HasScopes
+                ? scopeHeightOverride ?? (int)Math.Round(
+                    (horizontalScope ? width : gridHeight) * (scopeRatioOverride ?? 0.32))
+                : 0;
+            int minimumScopeSize = height >= 720 ? 56 : 32;
+            int maximumScopeSize = horizontalScope
+                ? Math.Max(minimumScopeSize, width - 300 - divider)
+                : Math.Max(minimumScopeSize, gridHeight - minimumSemanticHeight - divider);
+            int scopeSize = HasScopes
+                ? Math.Clamp(requestedScope, minimumScopeSize, maximumScopeSize)
+                : 0;
+            DividerHeight = divider;
+
+            int semanticBandHeight = horizontalScope
+                ? gridHeight
+                : gridHeight - scopeSize - DividerHeight;
+            int compactCount = Math.Max(0, panelCount - 1);
+            int compactLaneHeight = compactCount == 0
+                ? 0
+                : Math.Max(12, (int)Math.Round(height * (16.0 / 720.0)));
+            if (compactCount > 0
+                && semanticBandHeight - compactCount * compactLaneHeight < minimumSemanticHeight)
+            {
+                compactLaneHeight = (semanticBandHeight - minimumSemanticHeight) / compactCount;
+                if (compactLaneHeight < 12)
+                    throw new ArgumentOutOfRangeException(
+                        nameof(panelCount),
+                        "Shared layout cannot keep the semantic region and compact event lanes readable; reduce channels or group tracks.");
+            }
+
+            int mainHeight = semanticBandHeight - compactCount * compactLaneHeight;
+            if (mainHeight - PanelHeaderHeight < 16)
+                throw new ArgumentOutOfRangeException(
+                    nameof(height),
+                    "Shared layout cannot provide the minimum readable semantic region at this resolution.");
+
+            bool scopeAtTop = scopePosition == VisualizationScopePosition.Top;
+            bool scopeAtLeft = scopePosition == VisualizationScopePosition.Left;
+            int semanticX = horizontalScope && scopeAtLeft
+                ? scopeSize + DividerHeight
+                : 0;
+            int semanticY = !horizontalScope && scopeAtTop
+                ? GridY + scopeSize + DividerHeight
+                : GridY;
+            int semanticWidth = horizontalScope
+                ? width - scopeSize - DividerHeight
+                : width;
+            int scopeX = horizontalScope && !scopeAtLeft
+                ? semanticWidth + DividerHeight
+                : 0;
+            int scopeY = !horizontalScope && !scopeAtTop
+                ? semanticY + semanticBandHeight + DividerHeight
+                : GridY;
+            ScopeHeight = horizontalScope ? gridHeight : scopeSize;
+            _sharedSemanticRect = new(semanticX, semanticY, semanticWidth, mainHeight);
+            _sharedScopeRect = new(
+                scopeX,
+                scopeY,
+                horizontalScope ? scopeSize : width,
+                horizontalScope ? gridHeight : scopeSize);
+            _sharedCompactRegions = new OverlayRect[compactCount];
+            for (int i = 0; i < compactCount; i++)
+            {
+                _sharedCompactRegions[i] = new OverlayRect(
+                    semanticX,
+                    semanticY + mainHeight + i * compactLaneHeight,
+                    semanticWidth,
+                    compactLaneHeight);
+            }
+
+            PanelWidth = semanticWidth;
+            PanelHeight = mainHeight;
+            TimelineHeight = mainHeight - PanelHeaderHeight;
+            PitchLabelWidth = Math.Max(20, width / 80);
+            PlayheadFraction = pastSeconds / (pastSeconds + futureSeconds);
+            return;
+        }
+
+        _sharedSemanticRect = default;
+        _sharedScopeRect = default;
+        _sharedCompactRegions = Array.Empty<OverlayRect>();
+
         // Panel sub-regions scale with the panel height, anchored to the
         // reference 1080p proportions (header 20, scope 84, divider 2,
         // timeline 138 out of 244).
-        PanelHeaderHeight = Math.Clamp(
-            (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight)),
-            height >= 720 ? 20 : 12,
-            32);
-        ScopeHeight = Math.Clamp(
-            (int)Math.Round(PanelHeight * (DefaultScopeHeight / (double)DefaultPanelHeight)),
-            24, PanelHeight / 2);
-        DividerHeight = Math.Max(1, (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight)));
-        TimelineHeight = PanelHeight - PanelHeaderHeight - ScopeHeight - DividerHeight;
-        if (TimelineHeight < 16)
+        PanelHeaderHeight = mode == VisualizationLayoutMode.Scope
+            ? 0
+            : Math.Clamp(
+                (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight)),
+                height >= 720 ? 20 : 12,
+                32);
+
+        int availableContentHeight = PanelHeight - PanelHeaderHeight;
+        if (mode == VisualizationLayoutMode.Scope)
+        {
+            ScopeHeight = availableContentHeight;
+            DividerHeight = 0;
+            TimelineHeight = 0;
+        }
+        else
+        {
+            int defaultScopeHeight = (int)Math.Round(
+                PanelHeight * (DefaultScopeHeight / (double)DefaultPanelHeight));
+            if (mode == VisualizationLayoutMode.Hybrid && scopeHeightOverride is null)
+            {
+                double ratio = scopeRatioOverride ?? 0.32;
+                defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * ratio));
+            }
+
+            ScopeHeight = scopeHeightOverride ?? (HasScopes
+                ? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2))
+                : 0);
+            DividerHeight = HasScopes ? Math.Max(1,
+                (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight))) : 0;
+            int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
+            TimelineHeight = timelineHeightOverride ?? derivedTimeline;
+        }
+
+        if (ScopeHeight < 0 || TimelineHeight < 0
+            || PanelHeaderHeight + ScopeHeight + DividerHeight + TimelineHeight > PanelHeight)
+            throw new ArgumentOutOfRangeException(nameof(height), "Panel regions exceed the available panel height.");
+        if (HasRoll && TimelineHeight < 16)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the panel timeline area.");
+        if (HasScopes && ScopeHeight < 1)
+            throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the scope area.");
         PitchLabelWidth = Math.Max(20, width / 80);
         PlayheadFraction = pastSeconds / (pastSeconds + futureSeconds);
     }
@@ -149,15 +309,31 @@ internal sealed class OverlayLayout
     public int PanelWidth { get; }
     public int PanelHeight { get; }
     public int PanelHeaderHeight { get; }
+    public int SafeHorizontalMargin { get; }
+    public int SafeVerticalMargin { get; }
     public int ScopeHeight { get; }
     public int DividerHeight { get; }
     public double WindowSeconds => PastSeconds + FutureSeconds;
     public double PlayheadFraction { get; }
-    public int CorrscopeGridHeight => ScopeHeight * RowCount;
+    public int CorrscopeGridHeight => _sharedComposition
+        ? ScopeHeight
+        : ScopeHeight * RowCount;
+    public int CorrscopeGridWidth => _sharedComposition
+        ? _sharedScopeRect.Width
+        : Width;
     public double PastSeconds { get; }
     public double FutureSeconds { get; }
     public int PitchLabelWidth { get; }
     public int TimelineHeight { get; }
+    public VisualizationLayoutMode Mode { get; }
+    public double RollZoom { get; }
+    public VisualizationScopePosition ScopePosition { get; }
+    public bool HasScopes { get; }
+    public bool HasRoll { get; }
+    public bool IsUnifiedRoll => Mode is VisualizationLayoutMode.UnifiedRoll or VisualizationLayoutMode.Hybrid;
+    public bool IsSharedComposition => _sharedComposition;
+    public OverlayRect SharedSemanticRect => _sharedSemanticRect;
+    public OverlayRect SharedScopeRect => _sharedScopeRect;
 
     public OverlayRect TopBarRect => new(0, 0, Width, TopBarHeight);
 
@@ -187,6 +363,8 @@ internal sealed class OverlayLayout
     {
         if (row < 0 || row >= RowCount)
             throw new ArgumentOutOfRangeException(nameof(row));
+        if (_sharedComposition)
+            return _sharedScopeRect.Y;
         return GetScopeRect(Math.Min(row * ColumnCount, PanelCount - 1)).Y;
     }
 
@@ -194,29 +372,66 @@ internal sealed class OverlayLayout
     {
         if (panelIndex < 0 || panelIndex >= PanelCount)
             throw new ArgumentOutOfRangeException(nameof(panelIndex));
+        if (_sharedComposition)
+        {
+            if (panelIndex == 0)
+                return _sharedSemanticRect;
+            return _sharedCompactRegions[panelIndex - 1];
+        }
         int column = panelIndex % ColumnCount;
         int row = panelIndex / ColumnCount;
-        int x = OuterMargin + column * (PanelWidth + ColumnGap);
+        // Distribute a one- or two-pixel remainder across the rightmost
+        // columns instead of rejecting valid publishing resolutions such as
+        // 2560px wide. Corrscope and the overlay still use the same exact
+        // width because both consume these prepared rectangles.
+        int x = OuterMargin + (int)((long)Width * column / ColumnCount);
+        int nextX = OuterMargin + (int)((long)Width * (column + 1) / ColumnCount);
         int y = GridY + OuterMargin + row * (PanelHeight + RowGap);
-        return new OverlayRect(x, y, PanelWidth, PanelHeight);
+        return new OverlayRect(x, y, nextX - x, PanelHeight);
     }
 
     public OverlayRect GetHeaderRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        return new OverlayRect(panel.X, panel.Y, panel.Width, PanelHeaderHeight);
+        int height = Math.Min(PanelHeaderHeight, panel.Height);
+        return new OverlayRect(panel.X, panel.Y, panel.Width, height);
     }
 
     public OverlayRect GetScopeRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        return new OverlayRect(panel.X, panel.Y + PanelHeaderHeight, panel.Width, ScopeHeight);
+        if (_sharedComposition)
+            return _sharedScopeRect;
+        int y = ScopePosition == VisualizationScopePosition.Bottom
+            ? panel.Bottom - ScopeHeight
+            : panel.Y + PanelHeaderHeight;
+        return new OverlayRect(panel.X, y, panel.Width, ScopeHeight);
     }
 
     public OverlayRect GetTimelineRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        int y = panel.Y + PanelHeaderHeight + ScopeHeight + DividerHeight;
+        if (_sharedComposition)
+        {
+            if (panelIndex == 0)
+            {
+                return new OverlayRect(
+                    panel.X,
+                    panel.Y + PanelHeaderHeight,
+                    panel.Width,
+                    Math.Max(0, panel.Height - PanelHeaderHeight));
+            }
+
+            int headerHeight = Math.Min(PanelHeaderHeight, panel.Height);
+            return new OverlayRect(
+                panel.X,
+                panel.Y + headerHeight,
+                panel.Width,
+                Math.Max(0, panel.Height - headerHeight));
+        }
+        int y = ScopePosition == VisualizationScopePosition.Bottom
+            ? panel.Y + PanelHeaderHeight + DividerHeight
+            : panel.Y + PanelHeaderHeight + ScopeHeight + DividerHeight;
         return new OverlayRect(panel.X, y, panel.Width, TimelineHeight);
     }
 
@@ -225,7 +440,7 @@ internal sealed class OverlayLayout
         OverlayRect timeline = GetTimelineRect(panelIndex);
         int ribbonHeight = reserveFm3OperatorRibbons ? Math.Max(16, timeline.Height / 4) : 0;
         int x = timeline.X + PitchLabelWidth;
-        return new OverlayRect(x, timeline.Y, timeline.Width - PitchLabelWidth, timeline.Height - ribbonHeight);
+        return new OverlayRect(x, timeline.Y, Math.Max(0, timeline.Width - PitchLabelWidth), Math.Max(0, timeline.Height - ribbonHeight));
     }
 
     public OverlayRect GetFm3OperatorRect(int panelIndex)
@@ -235,8 +450,8 @@ internal sealed class OverlayLayout
         return new OverlayRect(
             timeline.X + PitchLabelWidth,
             timeline.Bottom - ribbonHeight,
-            timeline.Width - PitchLabelWidth,
-            ribbonHeight);
+            Math.Max(0, timeline.Width - PitchLabelWidth),
+            Math.Min(ribbonHeight, timeline.Height));
     }
 
     public int GetPlayheadX(int panelIndex)
@@ -285,6 +500,10 @@ internal sealed class OverlayLayout
         <= 12 => (3, 4),
         <= 16 => (4, 4),
         <= 20 => (4, 5),
+        <= 25 => (5, 5),
+        <= 36 => (6, 6),
+        <= 49 => (7, 7),
+        <= 64 => (8, 8),
         _ => throw new ArgumentOutOfRangeException(nameof(panelCount)),
     };
 }

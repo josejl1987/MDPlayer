@@ -4,6 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Fmp.Core</RootNamespace>
     <!-- Allow running on machines with only a newer .NET runtime (e.g. .NET 10). -->
     <RollForward>LatestMajor</RollForward>
@@ -13,6 +14,8 @@
     <InternalsVisibleTo Include="fmp-render" />
     <InternalsVisibleTo Include="MDPlayer.Fmp.Benchmarks" />
     <InternalsVisibleTo Include="mdplayer-render" />
+    <InternalsVisibleTo Include="MDPlayer.Fmp.Application" />
+    <InternalsVisibleTo Include="MDPlayer.Fmp.Application.Tests" />
   </ItemGroup>
 
   <ItemGroup>

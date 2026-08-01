@@ -298,6 +298,44 @@ public static class InspectCommand
 
         if (extension is not ".vgm" and not ".vgz")
         {
+            if (extension == ".spc")
+            {
+                var environment = new PlaybackEnvironment(
+                    [input.DirectoryName ?? "."],
+                    OfflineOnly: true,
+                    SampleRate: 44_100);
+                var registry = PlaybackBackendRegistry.CreateDefault(environment);
+                if (registry.TrySelect(input, environment, "mdplayer",
+                        out IPlaybackBackend backend, out PlaybackProbeResult probe)
+                    && backend.Id == "spc")
+                {
+                    var report = new
+                    {
+                        format = probe.Format.ToLowerInvariant(),
+                        backend = backend.Id,
+                        availability = probe.Availability.ToString().ToLowerInvariant(),
+                        portable = probe.Portable,
+                        visualizable = probe.Visualizable,
+                        sampleRate = probe.NativeSampleRate,
+                        warnings = probe.Warnings,
+                    };
+                    if (json)
+                        Console.WriteLine(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+                    else
+                    {
+                        Console.WriteLine($"Format: {report.format.ToUpperInvariant()}");
+                        Console.WriteLine($"Backend: {report.backend}");
+                        Console.WriteLine($"Availability: {report.availability}");
+                        Console.WriteLine($"Portable: {(report.portable ? "yes" : "no")}");
+                        Console.WriteLine($"Visualizable: {(report.visualizable ? "yes" : "no")}");
+                        Console.WriteLine($"Sample rate: {report.sampleRate} Hz");
+                        foreach (string warning in report.warnings)
+                            Console.WriteLine($"Warning: {warning}");
+                    }
+                    return 0;
+                }
+            }
+
             var unsupported = new
             {
                 format = extension.TrimStart('.'),

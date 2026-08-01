@@ -21,21 +21,21 @@ public class CorrscopeConfigWriterTests
 
         result.Stems.Add(new ScopeRenderer.StemResult
         {
-            Name = "master", Label = "Master",
+            Name = "master", Label = "Master", StableOrder = 0,
             WavPath = "/out/audio/master.wav",
             RenderedSamples = 441000, Channels = 2, Success = true
         });
 
         result.Stems.Add(new ScopeRenderer.StemResult
         {
-            Name = "ym2608-fm1", Label = "YM2608 FM1",
+            Name = "ym2608-fm1", Label = "FM1", StableOrder = 10,
             WavPath = "/out/audio/ym2608-fm1.wav",
             RenderedSamples = 441000, Channels = 1, Success = true
         });
 
         result.Stems.Add(new ScopeRenderer.StemResult
         {
-            Name = "ym2608-fm2", Label = "YM2608 FM2",
+            Name = "ym2608-fm2", Label = "FM2", StableOrder = 11,
             WavPath = "/out/audio/ym2608-fm2.wav",
             RenderedSamples = 441000, Channels = 1, Success = true
         });
@@ -43,7 +43,9 @@ public class CorrscopeConfigWriterTests
         // Rhythm (needs per-channel trigger override)
         result.Stems.Add(new ScopeRenderer.StemResult
         {
-            Name = "ym2608-rhythm", Label = "YM2608 Rhythm",
+            Name = "ym2608-rhythm", Label = "RHYTHM", StableOrder = 30,
+            SemanticClass = ScopeSemanticClass.Percussive,
+            WindowWidth = 2,
             WavPath = "/out/audio/ym2608-rhythm.wav",
             RenderedSamples = 441000, Channels = 1, Success = true
         });
@@ -51,7 +53,7 @@ public class CorrscopeConfigWriterTests
         // A failed stem (should be skipped)
         result.Stems.Add(new ScopeRenderer.StemResult
         {
-            Name = "ym2608-ssg1", Label = "YM2608 SSG1",
+            Name = "ym2608-ssg1", Label = "SSG1", StableOrder = 20,
             WavPath = "/out/audio/ym2608-ssg1.wav",
             RenderedSamples = 0, Channels = 1, Success = false
         });
@@ -174,6 +176,48 @@ public class CorrscopeConfigWriterTests
             Assert.Contains("edge_strength: 2.5", yaml);
             Assert.Contains("responsiveness: 1", yaml);
             Assert.Contains("reset_below: 0", yaml);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Write_UsesSemanticClassForTriggerSelection()
+    {
+        string dir = Directory.CreateTempSubdirectory("fmp-corrscope-semantic-").FullName;
+        try
+        {
+            var result = new ScopeRenderer.ScopeResult
+            {
+                OutputDir = dir,
+                SampleRate = 44100,
+                MasterSamples = 44100,
+                Success = true,
+            };
+            result.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = "master", Label = "Master", Success = true,
+            });
+            result.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = "renamed-impact-track",
+                Label = "Impact",
+                SemanticClass = ScopeSemanticClass.Percussive,
+                Success = true,
+            });
+
+            string yamlPath = Path.Combine(dir, "semantic.yaml");
+            CorrscopeConfigWriter.Write(
+                yamlPath,
+                dir,
+                result,
+                overrides: new CorrscopeOverrides { IncludeSilentChannels = true });
+
+            string section = GetChannelSection(File.ReadAllText(yamlPath), "renamed-impact-track");
+            Assert.Contains("edge_strength: 2.5", section);
+            Assert.Contains("buffer_strength: 0", section);
         }
         finally
         {
@@ -371,6 +415,11 @@ public class CorrscopeConfigWriterTests
                 {
                     Name = pass.Name,
                     Label = pass.Label,
+                    SemanticClass = pass.SemanticClass,
+                    StableOrder = pass.StableOrder,
+                    WindowWidth = pass.WindowWidth,
+                    DefaultAmplification = pass.DefaultAmplification,
+                    DefaultColor = pass.DefaultColor,
                     WavPath = Path.Combine(dir, "audio", pass.Name + ".wav"),
                     RenderedSamples = 44100,
                     Channels = pass.Name == "master" ? 2 : 1,
@@ -428,6 +477,11 @@ public class CorrscopeConfigWriterTests
                 {
                     Name = pass.Name,
                     Label = pass.Label,
+                    SemanticClass = pass.SemanticClass,
+                    StableOrder = pass.StableOrder,
+                    WindowWidth = pass.WindowWidth,
+                    DefaultAmplification = pass.DefaultAmplification,
+                    DefaultColor = pass.DefaultColor,
                     WavPath = Path.Combine(dir, "audio", pass.Name + ".wav"),
                     RenderedSamples = 44100,
                     Channels = pass.Name == "master" ? 2 : 1,

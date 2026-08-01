@@ -347,6 +347,7 @@ internal sealed class S98CaptureSession : IPlaybackCaptureSession
     private readonly PlaybackOptions _options;
     private readonly IPlaybackEventSink _events;
     private bool _stopped;
+    private readonly short[] _renderBuffer = new short[2048];
 
     public S98CaptureSession(S98Document document, PlaybackOptions options, IPlaybackEventSink events)
     {
@@ -417,7 +418,7 @@ internal sealed class S98CaptureSession : IPlaybackCaptureSession
                     long target = sourceSample + offset;
                     if (target >= baseEnd)
                         break;
-                    RenderUntil(audio, writer, ref rendered, target, fadeStart, baseEnd);
+                    RenderUntil(audio, writer, _renderBuffer, ref rendered, target, fadeStart, baseEnd);
                     var write = new TimedChipWrite(target, source.Device, source.Port, source.Address, source.Data);
                     _events.OnChipWrite(write);
                     audio.Write(write);
@@ -425,7 +426,7 @@ internal sealed class S98CaptureSession : IPlaybackCaptureSession
                 }
             }
 
-            RenderUntil(audio, writer, ref rendered, end, fadeStart, baseEnd);
+            RenderUntil(audio, writer, _renderBuffer, ref rendered, end, fadeStart, baseEnd);
             SamplePosition = rendered;
             IsComplete = true;
         }
@@ -441,6 +442,7 @@ internal sealed class S98CaptureSession : IPlaybackCaptureSession
     private static void RenderUntil(
         S98AudioRenderer audio,
         WavWriter writer,
+        short[] buffer,
         ref long rendered,
         long target,
         long fadeStart,
@@ -451,7 +453,8 @@ internal sealed class S98CaptureSession : IPlaybackCaptureSession
         while (rendered < target)
         {
             int count = (int)Math.Min(1024, target - rendered);
-            short[] pcm = audio.Render(count, rendered, fadeStart, baseEnd);
+            Span<short> pcm = buffer.AsSpan(0, count * 2);
+            audio.Render(count, pcm, rendered, fadeStart, baseEnd);
             writer?.Write(pcm);
             rendered += count;
         }
@@ -486,20 +489,26 @@ internal sealed class S98AudioRenderer : IDisposable
             _registerAudio?.Write(write);
     }
 
-    public short[] Render(int samples, long startSample, long fadeStart, long baseEnd)
+    public void Render(int samples, Span<short> output, long startSample, long fadeStart, long baseEnd)
     {
-        short[] register = _registerAudio?.Render(samples) ?? new short[samples * 2];
-        if (_opna == null)
-            return ApplyFade(register, startSample, fadeStart, baseEnd);
-
-        int[][] outputs = [new int[samples], new int[samples]];
-        _opna.Render(outputs, samples);
-        for (int index = 0; index < samples; index++)
+        int count = checked(samples * 2);
+        if (output.Length < count)
+            throw new ArgumentException("Output buffer is too small.", nameof(output));
+        if (_registerAudio != null)
+            _registerAudio.Render(samples, output);
+        else
+            output[..count].Clear();
+        if (_opna != null)
         {
-            register[index * 2] = (short)Math.Clamp(register[index * 2] + outputs[0][index], short.MinValue, short.MaxValue);
-            register[index * 2 + 1] = (short)Math.Clamp(register[index * 2 + 1] + outputs[1][index], short.MinValue, short.MaxValue);
+            int[][] outputs = [new int[samples], new int[samples]];
+            _opna.Render(outputs, samples);
+            for (int index = 0; index < samples; index++)
+            {
+                output[index * 2] = (short)Math.Clamp(output[index * 2] + outputs[0][index], short.MinValue, short.MaxValue);
+                output[index * 2 + 1] = (short)Math.Clamp(output[index * 2 + 1] + outputs[1][index], short.MinValue, short.MaxValue);
+            }
         }
-        return ApplyFade(register, startSample, fadeStart, baseEnd);
+        ApplyFade(output[..count], startSample, fadeStart, baseEnd);
     }
 
     public void Dispose()
@@ -508,7 +517,7 @@ internal sealed class S98AudioRenderer : IDisposable
         _opna?.Dispose();
     }
 
-    private static short[] ApplyFade(short[] pcm, long startSample, long fadeStart, long baseEnd)
+    private static void ApplyFade(Span<short> pcm, long startSample, long fadeStart, long baseEnd)
     {
         for (int index = 0; index < pcm.Length / 2; index++)
         {
@@ -521,7 +530,6 @@ internal sealed class S98AudioRenderer : IDisposable
             pcm[index * 2] = (short)Math.Clamp(pcm[index * 2] * gain, short.MinValue, short.MaxValue);
             pcm[index * 2 + 1] = (short)Math.Clamp(pcm[index * 2 + 1] * gain, short.MinValue, short.MaxValue);
         }
-        return pcm;
     }
 }
 

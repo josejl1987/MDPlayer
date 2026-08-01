@@ -65,17 +65,14 @@ internal class FmpRuntime
                 msgWrite: OnMsgWrite,
                 opnaWrite: OnOpnaWrite,
                 fileTemp: _fileTemp,
-                ongen: Nise98.Nise98.enmOngenBoardType.SpeakBoard
+                ongen: Nise98.Nise98.enmOngenBoardType.SpeakBoard,
+                fileSystem: _fileSystem
             );
 
-            // Set up DOS file system
-            if (_fileSystem != null)
-            {
-                // Hook IFmpFileSystem into NiseDos
-                var dos = _nise98.GetDos();
-                // The IFmpFileSystem was already passed to NiseDos constructor
-                // via Nise98's fileTemp+IFmpFileSystem integration
-            }
+            // Keep the explicit assignment for callers that replace the DOS
+            // object during initialization; normal construction already wires
+            // the resolver through Nise98.Init.
+            _nise98.GetDos().FileSystem = _fileSystem;
 
             // Boot FMP.COM
             string fmpComPath = _assets.FmpComPath;

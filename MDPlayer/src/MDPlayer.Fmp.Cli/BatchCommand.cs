@@ -35,17 +35,40 @@ public static class BatchCommand
         }
 
         // Source directory order, de-duplicated
+        StringComparer pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
         files = files
-            .GroupBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(f => f.FullName, pathComparer)
             .Select(g => g.First())
-            .OrderBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(f => f.FullName, pathComparer)
             .ToList();
 
         if (files.Count == 0)
         { Console.Error.WriteLine("error: no matching files found"); return 3; }
 
         // Prepare output directory
-        string outputDir = opts.OutputDir ?? Path.Combine(inputDir.FullName, "output");
+        string outputDir = Path.GetFullPath(
+            opts.OutputDir ?? Path.Combine(inputDir.FullName, "output"));
+
+        var plans = files
+            .Select(input => new BatchPlan(input, GetOutputPath(input, inputDir, outputDir, opts.Recursive)))
+            .ToArray();
+        var collisions = plans
+            .GroupBy(plan => Path.GetFullPath(plan.OutputPath), pathComparer)
+            .Where(group => group.Count() > 1)
+            .ToArray();
+        if (collisions.Length > 0)
+        {
+            Console.Error.WriteLine("error: output path collision(s):");
+            foreach (var collision in collisions)
+            {
+                Console.Error.WriteLine($"  {Path.GetRelativePath(outputDir, collision.Key)}");
+                foreach (BatchPlan plan in collision)
+                    Console.Error.WriteLine($"    {DisplayInput(plan.Input, inputDir, opts.Recursive)}");
+            }
+            return 9;
+        }
         Directory.CreateDirectory(outputDir);
 
         // Include the input directory in the track search paths (shared TrackPreparation
@@ -61,64 +84,67 @@ public static class BatchCommand
         var results = new List<BatchResult>();
         int succeeded = 0, failed = 0, skipped = 0;
 
-        foreach (var input in files)
+        foreach (BatchPlan plan in plans)
         {
-            // Output path uses the source basename — deterministic and stable.
-            string wavFile = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(input.Name) + ".wav");
+            FileInfo input = plan.Input;
+            string wavFile = plan.OutputPath;
+            string inputLabel = DisplayInput(input, inputDir, opts.Recursive);
+            string outputLabel = Path.GetRelativePath(outputDir, wavFile);
 
             // Check skip/overwrite
             if (File.Exists(wavFile))
             {
                 if (opts.SkipExisting)
                 {
-                    results.Add(new BatchResult(input.Name, Path.GetFileName(wavFile), Success: true, Error: null)
+                    results.Add(new BatchResult(inputLabel, outputLabel, Success: true, Error: null)
                     {
                         Skipped = true,
                     });
                     skipped++;
                     if (!opts.Json && !opts.Quiet)
-                        Console.Error.WriteLine($"skip: {input.Name}");
+                        Console.Error.WriteLine($"skip: {inputLabel}");
                     continue;
                 }
                 if (!opts.Overwrite)
                 {
                     results.Add(new BatchResult(
-                        input.Name,
-                        Path.GetFileName(wavFile),
+                        inputLabel,
+                        outputLabel,
                         Success: false,
                         Error: "output exists (use --overwrite or --skip-existing)"));
                     failed++;
                     if (!opts.Json && !opts.Quiet)
-                        Console.Error.WriteLine($"error: {input.Name} — output exists (use --overwrite or --skip-existing)");
+                        Console.Error.WriteLine($"error: {inputLabel} — output exists (use --overwrite or --skip-existing)");
                     continue;
                 }
             }
 
             if (!opts.Quiet)
-                Console.Error.WriteLine($"render: {input.Name}");
+                Console.Error.WriteLine($"render: {inputLabel}");
 
             PreparedTrack track;
             try { track = TrackPreparation.Prepare(input.FullName, opts); }
             catch (TrackPreparationException ex)
             {
-                results.Add(new BatchResult(input.Name, null, Success: false, Error: ex.Message));
+                results.Add(new BatchResult(inputLabel, null, Success: false, Error: ex.Message));
                 failed++;
                 if (!opts.Json && !opts.Quiet)
-                    Console.Error.WriteLine($"  fail: {ex.Message}");
+                    Console.Error.WriteLine($"  fail: {inputLabel}: {ex.Message}");
                 continue;
             }
 
+            Directory.CreateDirectory(Path.GetDirectoryName(wavFile) ?? outputDir);
             var outcome = new TrackRenderer().Render(track, wavFile, opts);
             if (outcome.Success)
             {
-                results.Add(new BatchResult(input.Name, Path.GetFileName(wavFile), Success: true, Error: null));
+                results.Add(new BatchResult(inputLabel, outputLabel, Success: true, Error: null));
                 succeeded++;
                 if (!opts.Quiet)
                     Console.Error.WriteLine($"  ok: {wavFile}");
             }
             else
             {
-                results.Add(new BatchResult(input.Name, null, Success: false, Error: outcome.LastError));
+                results.Add(new BatchResult(inputLabel, null, Success: false, Error: outcome.LastError));
                 failed++;
                 if (!opts.Quiet)
                     Console.Error.WriteLine($"  fail: {outcome.LastError}");
@@ -182,6 +208,7 @@ public static class BatchCommand
                     opts.InputDir = positional;
                 }
             }
+            opts.ValidateCommon();
             return opts;
         }
         catch (ArgumentException ex)
@@ -190,6 +217,25 @@ public static class BatchCommand
             return null;
         }
     }
+
+    private static string GetOutputPath(
+        FileInfo input, DirectoryInfo inputRoot, string outputDir, bool recursive)
+    {
+        string relative = recursive
+            ? Path.GetRelativePath(inputRoot.FullName, input.FullName)
+            : input.Name;
+        string relativeWithoutExtension = Path.Combine(
+            Path.GetDirectoryName(relative) ?? "",
+            Path.GetFileNameWithoutExtension(relative) + ".wav");
+        return Path.GetFullPath(Path.Combine(outputDir, relativeWithoutExtension));
+    }
+
+    private static string DisplayInput(FileInfo input, DirectoryInfo inputRoot, bool recursive) =>
+        recursive
+            ? Path.GetRelativePath(inputRoot.FullName, input.FullName)
+            : input.Name;
+
+    private sealed record BatchPlan(FileInfo Input, string OutputPath);
 
     private class BatchOptions : RenderSettings
     {

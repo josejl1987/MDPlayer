@@ -12,6 +12,7 @@ internal sealed class OverlayScene
 {
     public required OverlayLayout Layout { get; init; }
     public required VisualizationTopology Topology { get; init; }
+    public required VisualizationSemanticScene Semantic { get; init; }
     public required PreparedPanel[] Panels { get; init; }
     public required VisualizationMetadata Metadata { get; init; }
     public required int SampleRate { get; init; }

@@ -24,9 +24,15 @@ Run the dedicated environment with:
 ```
 
 The cache consists of `input.json`, `analysis.json`, and
-`cache-metadata.json`. A valid cache is checked before Python is resolved.
+`cache-metadata.json` (metadata schema v2). A valid cache is checked before
+Python is resolved.
 Partial files are temporary and are atomically renamed only after validation.
 
 The checked-in evaluation annotations are synthetic and public-domain-safe.
 Put user-local material under `evaluation/local/`; it is intentionally not a
 Git fixture.
+
+The worker compatibility version is `1.1.0` while analysis output remains
+schema version 1. `--probe --json` prints the worker and dependency metadata
+as a single JSON object. `--analysis-profile` emits newline-delimited,
+monotonic stage timing records on stderr; it does not affect analysis output.

@@ -25,18 +25,46 @@ def _union_length(intervals):
     return total
 
 
-def _harmonic_signatures(notes, pitch_class, start, end):
+def _pitch_classes_at_onsets(notes, onsets=None):
+    """Sweep note start/end events once and return active pitch classes by onset."""
+    requested = set(onsets) if onsets is not None else None
+    events = {}
+    for note in notes:
+        start = int(note["startSample"])
+        end = int(note["endSample"])
+        if end <= start:
+            continue
+        pitch_class = int(note["pitchClass"])
+        events.setdefault(start, []).append((1, pitch_class))
+        events.setdefault(end, []).append((0, pitch_class))
+    active = {}
+    counts = {}
+    result = {}
+    for sample in sorted(set(events) | (requested or set())):
+        for kind, pitch_class in sorted(events.get(sample, ()), key=lambda item: item[0]):
+            if kind == 0:
+                counts[pitch_class] = counts.get(pitch_class, 1) - 1
+                if counts[pitch_class] <= 0:
+                    counts.pop(pitch_class, None)
+            else:
+                counts[pitch_class] = counts.get(pitch_class, 0) + 1
+        if requested is None or sample in requested:
+            result[sample] = set(counts)
+    return result
+
+
+def _harmonic_signatures(notes, pitch_class, start, end, active_by_onset=None):
     onsets = sorted({n["startSample"] for n in notes if start <= n["startSample"] < end})
     signatures = []
     for onset in onsets:
-        active = {
+        active = set(active_by_onset.get(onset, ())) if active_by_onset is not None else {
             int(n["pitchClass"])
             for n in notes
             if n.get("theoryPitched", True)
             and n.get("pitchClass", -1) in range(12)
             and n["startSample"] <= onset < n["endSample"]
-            and int(n["pitchClass"]) != pitch_class
         }
+        active.discard(pitch_class)
         if active and (not signatures or active != signatures[-1]):
             signatures.append(active)
     return signatures
@@ -45,9 +73,11 @@ def _harmonic_signatures(notes, pitch_class, start, end):
 def analyze_pedal_tones(notes, sample_rate):
     result = []
     all_pitched = _pitched(notes)
-    for channel_id in sorted({n["channelId"] for n in notes}):
+    active_by_onset = _pitch_classes_at_onsets(all_pitched)
+    grouped = getattr(notes, "by_channel", None)
+    for channel_id in sorted(grouped if grouped is not None else {n["channelId"] for n in notes}):
         sequence = sorted(
-            _pitched([n for n in notes if n["channelId"] == channel_id]),
+            _pitched(grouped[channel_id] if grouped is not None else [n for n in notes if n["channelId"] == channel_id]),
             key=lambda n: (n["startSample"], n.get("id", "")),
         )
         if len(sequence) < 2:
@@ -66,7 +96,7 @@ def analyze_pedal_tones(notes, sample_rate):
             long_notes = [n for n in members if n["endSample"] - n["startSample"] >= 2 * sample_rate]
             if coverage < .40 or (len(members) < 2 and not long_notes):
                 continue
-            signatures = _harmonic_signatures(all_pitched, pitch_class, start, end)
+            signatures = _harmonic_signatures(all_pitched, pitch_class, start, end, active_by_onset)
             if len(signatures) < 3:
                 continue
             score = min(.95, .55 + .25 * coverage + .05 * min(3, len(signatures) - 1))
@@ -232,13 +262,11 @@ def analyze_boundaries(notes, sample_rate, loops=None):
     # A large change in the set of active pitch classes is neutral evidence;
     # it is never named as intro, verse, chorus, bridge, or cadence.
     starts = sorted({int(note["startSample"]) for note in notes})
+    pitched = _pitched(notes)
+    active_by_onset = _pitch_classes_at_onsets(pitched, starts)
     for previous, current in zip(starts, starts[1:]):
-        before = {int(n["pitchClass"]) for n in notes if n.get("theoryPitched", True)
-                  and n.get("pitchClass", -1) in range(12)
-                  and n["startSample"] <= previous < n["endSample"]}
-        after = {int(n["pitchClass"]) for n in notes if n.get("theoryPitched", True)
-                 and n.get("pitchClass", -1) in range(12)
-                 and n["startSample"] <= current < n["endSample"]}
+        before = active_by_onset.get(previous, set())
+        after = active_by_onset.get(current, set())
         union = before | after
         if union and (len(before) >= 2 or len(after) >= 2) and len(before ^ after) / len(union) >= .75:
             result.append({

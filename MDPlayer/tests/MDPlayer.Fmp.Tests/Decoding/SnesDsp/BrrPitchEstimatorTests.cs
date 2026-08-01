@@ -13,7 +13,7 @@ public class BrrPitchEstimatorTests
     public void BrrSineLoop_EstimateWithinCents_HighConfidence()
     {
         const double freq = 400.0; // period = 80 samples exactly
-        byte[] blocks = TestBrrEncoder.EncodeSineBlocks(TestBrrEncoder.GenerateSine(freq, SampleRate, 20000, 288));
+        byte[] blocks = TestBrrEncoder.EncodeSineBlocks(TestBrrEncoder.GenerateSine(freq, SampleRate, 12000, 288));
         var sample = new BrrSample(0x1000, (ushort)(0x1000 + 3 * BrrSampleReader.BlockSize), blocks, true, true, "h");
         PitchEstimate est = BrrPitchEstimator.Estimate(sample);
         Assert.True(est.Confidence >= 0.85, $"conf {est.Confidence:F3}");
@@ -59,25 +59,28 @@ public class BrrPitchEstimatorTests
         for (int i = 1; i < blocks.Length; i++)
             blocks[i] = 0x77;
         short[] pcm = BrrDecoder.Decode(new BrrSample(0x1000, 0x1000, blocks, false, true, "h"));
-        Assert.All(pcm, s => Assert.Equal(28672, s));
+        // S-DSP range 0 decodes nibble >> 1 (Spc_Dsp.cpp shifts table): 7 >> 1 = 3.
+        Assert.All(pcm, s => Assert.Equal(3, s));
     }
     [Fact]
     public void Decode_Filter1_PredictsExactly()
     {
         var blocks = new byte[BrrSampleReader.BlockSize];
-        blocks[0] = 0x04; // range 0, filter 1
+        blocks[0] = 0x64; // range 6, filter 1
         blocks[1] = 0x10; // first nibble 1, the rest 0
         short[] pcm = BrrDecoder.Decode(new BrrSample(0x1000, 0x1000, blocks, false, true, "h"));
-        Assert.Equal(4096, pcm[0]);
-        Assert.Equal(2304, pcm[1]);
-        Assert.Equal(-752, pcm[2]);
-        Assert.Equal(-1575, pcm[3]);
+        // Range 6 decodes nibble << 5; filter 1 then feeds back s += p1/2 - p1/32
+        // on the decoder's internal *2 history (Spc_Dsp.cpp filter 1).
+        Assert.Equal(32, pcm[0]);
+        Assert.Equal(30, pcm[1]);
+        Assert.Equal(28, pcm[2]);
+        Assert.Equal(26, pcm[3]);
     }
     [Fact]
     public void Builder_EstimateRoot_CachesAndNeverLabelsExact()
     {
         var builder = new SpcInstrumentBuilder(enablePitchEstimation: true);
-        byte[] blocks = TestBrrEncoder.EncodeSineBlocks(TestBrrEncoder.GenerateSine(400, SampleRate, 20000, 288));
+        byte[] blocks = TestBrrEncoder.EncodeSineBlocks(TestBrrEncoder.GenerateSine(400, SampleRate, 12000, 288));
         var sample = new BrrSample(0x1000, (ushort)(0x1000 + 3 * BrrSampleReader.BlockSize), blocks, true, true, "s");
         (double? hz, double conf, string acc) = builder.EstimateRoot(sample);
         Assert.Equal(builder.EstimateRoot(sample).Hz, hz); // cached -> identical
@@ -93,7 +96,10 @@ public class BrrPitchEstimatorTests
         new(0x1000, 0x1000, TestBrrEncoder.EncodeSineBlocks(TestBrrEncoder.GenerateNoise(4096, 99)), true, true, "n");
 }
 
-/// <summary>Tiny deterministic BRR encoder for tests: filter 0, fixed range, end+loop flags.</summary>
+/// <summary>Tiny deterministic BRR encoder for tests: filter 0, fixed range, end+loop flags.
+/// Range uses true S-DSP semantics (Spc_Dsp.cpp shifts table): range r decodes a nibble as
+/// nibble << (r-1) for r >= 1 (range 0 decodes nibble >> 1 and is never emitted here), so the
+/// encoder picks the smallest range whose 7 << (r-1) coverage reaches the peak amplitude.</summary>
 internal static class TestBrrEncoder
 {
     public static short[] GenerateSine(double frequency, int sampleRate, double amplitude, int length)
@@ -118,10 +124,10 @@ internal static class TestBrrEncoder
         int maxAbs = 1;
         foreach (short s in pcm)
             maxAbs = Math.Max(maxAbs, Math.Abs(s));
-        int range = 0;
-        for (int r = 0; r <= 12; r++)
-            if ((7 << (12 - r)) >= maxAbs) range = r;
-        int step = 1 << (12 - range);
+        int range = 12;
+        for (int r = 1; r <= 12; r++)
+            if ((7 << (r - 1)) >= maxAbs) { range = r; break; }
+        int step = 1 << (range - 1);
         var output = new byte[blocks * BrrSampleReader.BlockSize];
         for (int b = 0; b < blocks; b++)
         {

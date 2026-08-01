@@ -40,6 +40,20 @@ internal static class InstrumentColorResolver
         return HslToRgb(ChannelHues[panelIndex], 0.72, 0.68);
     }
 
+    /// <summary>
+    /// Resolves a channel accent from its stable semantic identity. Layout
+    /// order is deliberately not an input, so filtering or grouping cannot
+    /// recolor a voice halfway through a migration.
+    /// </summary>
+    public static OverlayColor ResolveChannelAccent(string stableChannelId)
+    {
+        ulong hash = StableHash64(stableChannelId ?? "");
+        return HslToRgb(hash % 360, 0.72, 0.68);
+    }
+
+    public static OverlayColor ResolveChannelAccent(string stableChannelId, int stableOrder)
+        => ResolveChannelAccent(stableChannelId);
+
     private static readonly double[] PitchClassHues =
     [
         20, 50, 80, 120, 160, 190, 220, 260, 290, 320, 350, 10,
@@ -62,11 +76,32 @@ internal static class InstrumentColorResolver
         return HslToRgb(ChannelHues[panelIndex], 0.60, Math.Clamp(lightness, 0.40, 0.66));
     }
 
+    public static OverlayColor ResolveChannelFill(string stableChannelId, double midiNote)
+    {
+        ulong hash = StableHash64(stableChannelId ?? "");
+        double hue = hash % 360;
+        int octave = Math.Clamp((int)Math.Round(midiNote) / 12 - 1, 0, 9);
+        double lightness = 0.48 + (octave - 4) * 0.025;
+        return HslToRgb(hue, 0.60, Math.Clamp(lightness, 0.40, 0.66));
+    }
+
     public static OverlayColor ResolveFill(NoteColorMode mode, string instrumentId, int panelIndex, double midiNote)
         => mode switch
         {
             NoteColorMode.Pitch => ResolvePitchClassFill(midiNote),
             NoteColorMode.Channel => ResolveChannelFill(panelIndex, midiNote),
+            _ => ResolveInstrumentFill(instrumentId),
+        };
+
+    public static OverlayColor ResolveFill(
+        NoteColorMode mode,
+        string instrumentId,
+        string stableChannelId,
+        double midiNote)
+        => mode switch
+        {
+            NoteColorMode.Pitch => ResolvePitchClassFill(midiNote),
+            NoteColorMode.Channel => ResolveChannelFill(stableChannelId, midiNote),
             _ => ResolveInstrumentFill(instrumentId),
         };
 

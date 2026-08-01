@@ -13,6 +13,17 @@ internal enum PreparedPanelKind
     Ssg,
     /// <summary>Rhythm/percussion lane (panel 9).</summary>
     Rhythm,
-    /// <summary>ADPCM or placeholder panel (panels 10,11).</summary>
+    /// <summary>Wavetable voice: pitched ribbon plus a cyclic waveform viewport.</summary>
+    Wavetable,
+    /// <summary>PCM sample voice: sample identity, envelope, playback cursor and
+    /// loop region.</summary>
+    PcmVoice,
+    /// <summary>Dedicated noise voice: activity and spectral position without a
+    /// chromatic pitch lane.</summary>
+    Noise,
+    /// <summary>Grouped event-driven voice rendered as a stable pad grid.</summary>
+    Aggregate,
+    /// <summary>True fallback: reserved voices, voices without decoder data, or a
+    /// presentation kind no built-in renderer understands.</summary>
     Placeholder,
 }

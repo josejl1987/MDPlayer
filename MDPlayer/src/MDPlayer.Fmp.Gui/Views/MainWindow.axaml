@@ -1,0 +1,394 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Fmp.Gui.ViewModels"
+        xmlns:sys="using:System"
+        x:Class="Fmp.Gui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="MDPlayer Visualizer"
+        Width="1280" Height="820"
+        MinWidth="1024" MinHeight="700">
+
+  <Window.KeyBindings>
+    <KeyBinding Gesture="Ctrl+O" Command="{Binding OpenInputCommand}"/>
+    <KeyBinding Gesture="Ctrl+Shift+O" Command="{Binding OpenProjectCommand}"/>
+    <KeyBinding Gesture="Ctrl+S" Command="{Binding SaveProjectCommand}"/>
+    <KeyBinding Gesture="Ctrl+Shift+S" Command="{Binding SaveProjectAsCommand}"/>
+    <KeyBinding Gesture="Ctrl+R" Command="{Binding RenderCommand}"/>
+    <KeyBinding Gesture="Ctrl+Shift+R" Command="{Binding RenderStillCommand}"/>
+    <KeyBinding Gesture="Space" Command="{Binding Timeline.TogglePlayCommand}"/>
+    <KeyBinding Gesture="Left" Command="{Binding Timeline.SeekRelativeCommand}" CommandParameter="-1"/>
+    <KeyBinding Gesture="Right" Command="{Binding Timeline.SeekRelativeCommand}" CommandParameter="1"/>
+    <KeyBinding Gesture="Shift+Left" Command="{Binding Timeline.SeekRelativeCommand}" CommandParameter="-10"/>
+    <KeyBinding Gesture="Shift+Right" Command="{Binding Timeline.SeekRelativeCommand}" CommandParameter="10"/>
+    <KeyBinding Gesture="Ctrl+Left" Command="{Binding Timeline.PreviousPointCommand}"/>
+    <KeyBinding Gesture="Ctrl+Right" Command="{Binding Timeline.NextPointCommand}"/>
+    <KeyBinding Gesture="Home" Command="{Binding Timeline.SeekStartCommand}"/>
+    <KeyBinding Gesture="End" Command="{Binding Timeline.SeekEndCommand}"/>
+    <KeyBinding Gesture="Escape" Command="{Binding CancelPreviewCommand}"/>
+    <KeyBinding Gesture="F5" Command="{Binding RefreshPreviewCommand}"/>
+    <KeyBinding Gesture="F9" Command="{Binding RecheckToolsCommand}"/>
+    <KeyBinding Gesture="Ctrl+Shift+C" Command="{Binding CopyCommandCommand}"/>
+    <KeyBinding Gesture="Ctrl+K" Command="{Binding FocusCommandPanelCommand}"/>
+  </Window.KeyBindings>
+
+  <DockPanel>
+
+    <!-- ── Top toolbar ─────────────────────────────────────────────── -->
+    <Border DockPanel.Dock="Top" Padding="8,6" Background="{DynamicResource SystemChromeLowColor}">
+      <DockPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Button Content="Open Input" Command="{Binding OpenInputCommand}"/>
+          <Button Content="Open Project" Command="{Binding OpenProjectCommand}"/>
+          <Button Content="Save" Command="{Binding SaveProjectCommand}"/>
+          <Button Content="Save As" Command="{Binding SaveProjectAsCommand}"/>
+        </StackPanel>
+        <Button DockPanel.Dock="Right" Content="Render" Command="{Binding RenderCommand}"
+                Classes="accent" Margin="0,0,8,0" VerticalAlignment="Center"/>
+        <TextBlock DockPanel.Dock="Right" Text="{Binding ProjectTitle}" VerticalAlignment="Center"
+                   Margin="0,0,8,0" FontWeight="SemiBold"
+                   Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+      </DockPanel>
+    </Border>
+
+    <!-- ── Bottom status bar ───────────────────────────────────────── -->
+    <Border DockPanel.Dock="Bottom" Padding="8,4" Background="{DynamicResource SystemChromeLowColor}">
+      <DockPanel>
+        <TextBlock DockPanel.Dock="Left" Text="{Binding StatusText}" VerticalAlignment="Center"/>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8">
+          <Button Content="Recheck Tools" Command="{Binding RecheckToolsCommand}"/>
+          <TextBlock Text="{Binding Tools.Summary}" VerticalAlignment="Center" FontSize="11"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- ── Export strip (progress / completion / failure) ──────────── -->
+    <Border DockPanel.Dock="Bottom" IsVisible="{Binding Export.IsActive}" Padding="8,6"
+            Background="{DynamicResource SystemChromeLowColor}">
+      <StackPanel Spacing="6">
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <TextBlock Text="{Binding Export.StageAndProgressText}" VerticalAlignment="Center"
+                     TextWrapping="Wrap" MaxWidth="420"/>
+          <ProgressBar Value="{Binding Export.StageProgress, Mode=OneWay}" IsIndeterminate="{Binding Export.IsIndeterminate, Mode=OneWay}"
+                       Minimum="0" Maximum="1" Width="180" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding Export.MetricsText}" VerticalAlignment="Center" FontSize="11"/>
+          <Button Content="Cancel" Command="{Binding CancelExportCommand}" IsVisible="{Binding Export.IsRunning}"/>
+        </StackPanel>
+
+        <TextBlock IsVisible="{Binding Export.HasCompleted}" Text="{Binding Export.CompletionSummary}"
+                   FontSize="11" TextWrapping="Wrap"/>
+        <StackPanel IsVisible="{Binding Export.HasFailed}" Orientation="Horizontal" Spacing="8">
+          <TextBlock Text="{Binding Export.FailureSummary}" FontSize="11" Foreground="#FFFFB0B0" TextWrapping="Wrap" MaxWidth="480"/>
+          <Button Content="Retry" Command="{Binding Export.RetryCommand}"/>
+          <Button Content="Open Terminal" Command="{Binding Export.OpenTerminalCommand}"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- ── Diagnostics log panel ───────────────────────────────────── -->
+    <Border DockPanel.Dock="Bottom" Padding="8,0">
+      <Expander Header="Diagnostics" IsExpanded="{Binding Diagnostics.IsExpanded}">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="Copy Diagnostics" Command="{Binding Diagnostics.CopyDiagnosticsCommand}"
+                  Margin="8,0,0,4"/>
+          <ItemsControl ItemsSource="{Binding Diagnostics.Log}" MaxHeight="140">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="sys:String">
+                <TextBlock Text="{Binding}" FontFamily="Consolas, monospace" FontSize="11" TextWrapping="Wrap"/>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </DockPanel>
+      </Expander>
+    </Border>
+
+    <!-- ── Command panel ───────────────────────────────────────────── -->
+    <Border DockPanel.Dock="Bottom" Padding="8,0">
+      <Expander Header="Command" IsExpanded="{Binding Command.IsExpanded}">
+        <StackPanel Spacing="6">
+          <TextBox x:Name="CommandText" Text="{Binding Command.DisplayText, Mode=OneWay}" IsReadOnly="True"
+                   FontFamily="Consolas, monospace" TextWrapping="Wrap" MinHeight="48" MaxHeight="120"/>
+          <TextBlock Text="{Binding Command.IssuesSummary}" FontSize="11" TextWrapping="Wrap"/>
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Content="Copy Command" Command="{Binding CopyCommandCommand}"/>
+            <Button Content="Copy JSON" Command="{Binding CopyRequestJsonCommand}"/>
+            <Button Content="{Binding Command.ShowResolvedText}" Command="{Binding Command.ShowResolvedCommand}"/>
+          </StackPanel>
+        </StackPanel>
+      </Expander>
+    </Border>
+
+    <!-- ── Main area: settings | splitter | preview+transport ──────── -->
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="320" MinWidth="280" MaxWidth="440"/>
+        <ColumnDefinition Width="6"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- Left: settings -->
+      <Grid Grid.Column="0">
+        <ScrollViewer>
+          <StackPanel Margin="8">
+
+            <!-- BASIC -->
+            <Expander Header="BASIC" IsExpanded="{Binding Settings.Basic.IsExpanded}">
+              <StackPanel Spacing="8" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Preset"/>
+                  <ComboBox ItemsSource="{Binding Settings.Basic.PresetOptions}" SelectedItem="{Binding Settings.Basic.SelectedPreset}"/>
+                  <TextBlock Text="{Binding Settings.Basic.PresetStatus}" FontSize="11" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Layout"/>
+                  <ComboBox ItemsSource="{Binding Settings.Basic.LayoutOptions}" SelectedItem="{Binding Settings.Basic.SelectedLayout}"/>
+                  <TextBlock Text="{Binding Settings.Basic.LayoutExplanation}" FontSize="11" TextWrapping="Wrap"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                  <TextBlock Text="{Binding Settings.Basic.ResolvedLayoutText}" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Resolution"/>
+                  <ComboBox ItemsSource="{Binding Settings.Basic.ResolutionOptions}" SelectedItem="{Binding Settings.Basic.SelectedResolution}"/>
+                  <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding Settings.Basic.IsCustomResolution}">
+                    <NumericUpDown Value="{Binding Settings.Basic.CustomWidth}" Minimum="480" Maximum="7680" Increment="160" HorizontalAlignment="Stretch"/>
+                    <TextBlock Text="×" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding Settings.Basic.CustomHeight}" Minimum="270" Maximum="4320" Increment="90" HorizontalAlignment="Stretch"/>
+                  </StackPanel>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Frame rate"/>
+                  <ComboBox ItemsSource="{Binding Settings.Basic.FpsOptions}" SelectedItem="{Binding Settings.Basic.SelectedFps}"/>
+                </StackPanel>
+              </StackPanel>
+            </Expander>
+
+            <!-- CONTENT -->
+            <Expander Header="CONTENT" IsExpanded="{Binding Settings.Content.IsExpanded}">
+              <StackPanel Spacing="8" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Channel mode"/>
+                  <ComboBox ItemsSource="{Binding Settings.Content.ChannelModeOptions}" SelectedItem="{Binding Settings.Content.SelectedChannelMode}"/>
+                </StackPanel>
+
+                <StackPanel IsVisible="{Binding Settings.Content.IsCustomChannels}" Spacing="4">
+                  <TextBlock Text="Tracks"/>
+                  <ItemsControl ItemsSource="{Binding Settings.Content.Tracks}" MaxHeight="200">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:TrackItemViewModel">
+                        <Grid ColumnDefinitions="Auto,Auto,*" Margin="0,2">
+                          <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected}" VerticalAlignment="Center"/>
+                          <Ellipse Grid.Column="1" Width="10" Height="10" Margin="6,0,6,0" VerticalAlignment="Center"
+                                   Fill="{Binding ColorBrush}"/>
+                          <StackPanel Grid.Column="2">
+                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                              <TextBlock Text="{Binding DeviceFamily}" FontSize="10" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                              <TextBlock Text="{Binding SemanticType}" FontSize="10" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                              <TextBlock Text="scope" FontSize="10" IsVisible="{Binding ScopeAvailable}" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                              <TextBlock Text="activity" FontSize="10" IsVisible="{Binding ActivityDetected}" Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                              <TextBlock Text="incomplete" FontSize="10" IsVisible="{Binding DataIncomplete}" Foreground="#FFFFB000"/>
+                            </StackPanel>
+                          </StackPanel>
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Grouping"/>
+                  <ComboBox ItemsSource="{Binding Settings.Content.GroupingOptions}" SelectedItem="{Binding Settings.Content.SelectedGrouping}"/>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Scopes"/>
+                  <StackPanel IsEnabled="{Binding Settings.Content.IsScopePanelEnabled}" Spacing="4">
+                    <NumericUpDown Value="{Binding Settings.Content.ScopeRatio}" Minimum="0" Maximum="0.8" Increment="0.05" FormatString="0.00"/>
+                    <ComboBox ItemsSource="{Binding Settings.Content.ScopePositionOptions}" SelectedItem="{Binding Settings.Content.SelectedScopePosition}"/>
+                  </StackPanel>
+                  <TextBlock Text="{Binding Settings.Content.ScopeDisabledReason}" FontSize="11" TextWrapping="Wrap"
+                             IsVisible="{Binding !Settings.Content.IsScopePanelEnabled}"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Analysis"/>
+                  <CheckBox Content="Enable analysis" IsChecked="{Binding Settings.Content.AnalysisEnabled}"/>
+                  <ComboBox ItemsSource="{Binding Settings.Content.AnalysisDetailOptions}" SelectedItem="{Binding Settings.Content.SelectedAnalysisDetail}"/>
+                  <ComboBox ItemsSource="{Binding Settings.Content.AnalysisOverlayOptions}" SelectedItem="{Binding Settings.Content.SelectedAnalysisOverlay}"/>
+                  <TextBlock Text="{Binding Settings.Content.AnalysisStatusText}" FontSize="11"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+              </StackPanel>
+            </Expander>
+
+            <!-- STYLE -->
+            <Expander Header="STYLE" IsExpanded="{Binding Settings.Style.IsExpanded}">
+              <StackPanel Spacing="8" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Effects"/>
+                  <ComboBox ItemsSource="{Binding Settings.Style.EffectsOptions}" SelectedItem="{Binding Settings.Style.SelectedEffects}"/>
+                  <TextBlock Text="{Binding Settings.Style.EffectsNote}" FontSize="11" TextWrapping="Wrap"
+                             Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Note color"/>
+                  <ComboBox ItemsSource="{Binding Settings.Style.NoteColorOptions}" SelectedItem="{Binding Settings.Style.SelectedNoteColor}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Time window"/>
+                  <Grid ColumnDefinitions="Auto,8,*" RowDefinitions="Auto,4,Auto,4,Auto" ColumnSpacing="0">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Past" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="0" Grid.Column="2" Value="{Binding Settings.Style.PastSeconds}"
+                                   Minimum="0.1" Maximum="15" Increment="0.1" FormatString="0.0"/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Future" VerticalAlignment="Center"/>
+                    <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding Settings.Style.FutureSeconds}"
+                                   Minimum="0.1" Maximum="15" Increment="0.1" FormatString="0.0"/>
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Scale" VerticalAlignment="Center"/>
+                    <ComboBox Grid.Row="4" Grid.Column="2" ItemsSource="{Binding Settings.Style.TimeScaleOptions}"
+                              SelectedItem="{Binding Settings.Style.SelectedTimeScale}"/>
+                  </Grid>
+                </StackPanel>
+              </StackPanel>
+            </Expander>
+
+            <!-- METADATA -->
+            <Expander Header="METADATA" IsExpanded="{Binding Settings.Metadata.IsExpanded}">
+              <StackPanel Spacing="8" Margin="0,8,0,0">
+                <TextBox Watermark="Title" Text="{Binding Settings.Metadata.Title}"/>
+                <TextBox Watermark="Subtitle" Text="{Binding Settings.Metadata.Subtitle}"/>
+                <TextBox Watermark="Credits" Text="{Binding Settings.Metadata.Credits}"/>
+                <Button Content="Restore detected metadata" Command="{Binding Settings.Metadata.RestoreDetectedCommand}" HorizontalAlignment="Left"/>
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox Grid.Column="0" Watermark="Font path" Text="{Binding Settings.Metadata.FontPath}"/>
+                  <Button Grid.Column="1" Content="Browse…" Command="{Binding Settings.Metadata.BrowseFontCommand}"/>
+                </Grid>
+              </StackPanel>
+            </Expander>
+
+            <!-- ADVANCED -->
+            <Expander Header="ADVANCED" IsExpanded="{Binding Settings.Advanced.IsExpanded}">
+              <StackPanel Spacing="8" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Loops"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.LoopCount}" Minimum="1" Maximum="99" Increment="1" FormatString="0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Fade seconds"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.FadeSeconds}" Minimum="0" Maximum="60" Increment="0.5" FormatString="0.0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Tail seconds"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.TailSeconds}" Minimum="0" Maximum="60" Increment="0.1" FormatString="0.0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Maximum duration (seconds)"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.MaximumDurationSeconds}" Minimum="1" Maximum="86400" Increment="10" FormatString="0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Sample rate"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.SampleRate}" Minimum="8000" Maximum="192000" Increment="1000" FormatString="0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="SSG gain (dB)"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.SsgGainDb}" Minimum="-12" Maximum="12" Increment="0.5" FormatString="0.0"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Encoder"/>
+                  <ComboBox ItemsSource="{Binding Settings.Advanced.EncoderOptions}" SelectedItem="{Binding Settings.Advanced.SelectedEncoder}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Backend"/>
+                  <ComboBox ItemsSource="{Binding Settings.Advanced.BackendOptions}" SelectedItem="{Binding Settings.Advanced.SelectedBackend}"/>
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Scope mode"/>
+                  <ComboBox ItemsSource="{Binding Settings.Advanced.ScopeModeOptions}" SelectedItem="{Binding Settings.Advanced.SelectedScopeMode}"/>
+                </StackPanel>
+                <CheckBox Content="Overwrite existing outputs" IsChecked="{Binding Settings.Advanced.Overwrite}"/>
+                <TextBox Watermark="Corrscope path" Text="{Binding Settings.Advanced.CorrscopePath}"/>
+                <TextBox Watermark="FFmpeg path" Text="{Binding Settings.Advanced.FfmpegPath}"/>
+                <TextBox Watermark="Analysis Python" Text="{Binding Settings.Advanced.AnalysisPython}"/>
+                <CheckBox Content="Force analysis re-run" IsChecked="{Binding Settings.Advanced.AnalysisForce}"/>
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Tool timeout (minutes)"/>
+                  <NumericUpDown Value="{Binding Settings.Advanced.ToolTimeoutMinutes}" Minimum="1" Maximum="600" Increment="5" FormatString="0"/>
+                </StackPanel>
+              </StackPanel>
+            </Expander>
+
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+
+      <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch"
+                    Background="{DynamicResource SystemChromeLowColor}"/>
+
+      <!-- Center: preview + transport -->
+      <Grid Grid.Column="2">
+        <DockPanel>
+
+          <Border DockPanel.Dock="Bottom" Padding="8,4">
+            <Grid ColumnDefinitions="Auto,Auto,120,*,Auto,120" VerticalAlignment="Center">
+              <Button Grid.Column="0" Content="◀" Command="{Binding Timeline.PreviousPointCommand}"
+                      ToolTip.Tip="Previous representative point" Margin="0,0,4,0"/>
+              <Button Grid.Column="1" Content="{Binding Timeline.PlayPauseGlyph}" Command="{Binding Timeline.TogglePlayCommand}"
+                      Width="44" Margin="0,0,4,0"/>
+              <TextBlock Grid.Column="2" Text="{Binding Timeline.TimeText}" TextAlignment="Center" VerticalAlignment="Center"/>
+              <Slider Grid.Column="3" Minimum="0" Maximum="{Binding Timeline.DurationSeconds}"
+                      Value="{Binding Timeline.ScrubPosition}" Margin="8,0"/>
+              <Button Grid.Column="4" Content="▶" Command="{Binding Timeline.NextPointCommand}"
+                      ToolTip.Tip="Next representative point" Margin="4,0,0,0"/>
+              <TextBlock Grid.Column="5" Text="{Binding Preview.FidelityText}" TextAlignment="Center"
+                         VerticalAlignment="Center" FontSize="11"
+                         Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+            </Grid>
+          </Border>
+
+          <Border Background="Black" CornerRadius="4" Margin="8" ClipToBounds="True">
+            <Panel>
+              <Image Source="{Binding Preview.CurrentImage}" Stretch="Uniform"/>
+
+              <TextBlock Text="Open an input file to preview the visualization."
+                         IsVisible="{Binding !Preview.HasImage}"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         Foreground="#80FFFFFF"/>
+
+              <Panel IsVisible="{Binding Preview.IsLoading}" IsHitTestVisible="False">
+                <ProgressBar IsIndeterminate="True" Width="180" Height="6"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Panel>
+
+              <StackPanel Panel.ZIndex="1" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8" Spacing="4">
+                <Border Background="#80000000" CornerRadius="4" Padding="8,3">
+                  <TextBlock Text="{Binding Preview.FidelityText}" Foreground="White" FontSize="11"/>
+                </Border>
+                <Border IsVisible="{Binding Preview.HasApproximations}" Background="#806B2F00" CornerRadius="4" Padding="8,3">
+                  <TextBlock Text="{Binding Preview.ApproximationText}" Foreground="White" FontSize="11"
+                             TextWrapping="Wrap" MaxWidth="340"/>
+                </Border>
+                <Border IsVisible="{Binding Preview.IsStale}" Background="#80300000" CornerRadius="4" Padding="8,3">
+                  <TextBlock Text="Preview is stale — press F5 to refresh." Foreground="White" FontSize="11"/>
+                </Border>
+                <Border IsVisible="{Binding Preview.IsReducedMotion}" Background="#80300000" CornerRadius="4" Padding="8,3">
+                  <TextBlock Text="{Binding Preview.ReducedMotionHint}" Foreground="White" FontSize="11" TextWrapping="Wrap" MaxWidth="340"/>
+                </Border>
+              </StackPanel>
+
+              <Border IsVisible="{Binding Preview.HasError}" Background="#80B00020" CornerRadius="4" Padding="8,4"
+                      HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding Preview.ErrorText}" Foreground="White" FontSize="11"
+                             TextWrapping="Wrap" MaxWidth="360"/>
+                  <Button Content="Retry" Command="{Binding Preview.RetryCommand}" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Border>
+            </Panel>
+          </Border>
+
+        </DockPanel>
+      </Grid>
+    </Grid>
+
+  </DockPanel>
+</Window>

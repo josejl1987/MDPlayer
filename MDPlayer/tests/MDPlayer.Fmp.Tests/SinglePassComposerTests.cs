@@ -74,6 +74,63 @@ public sealed class SinglePassComposerTests
     }
 
     [Fact]
+    public void ComposeMasterOnly_ReportsFrameAndPipelineMetrics()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"single-pass-master-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string audioPath = Path.Combine(root, "master.wav");
+        string videoPath = Path.Combine(root, "visualization.mp4");
+        try
+        {
+            var timeline = new VisualizationTimeline
+            {
+                SampleRate = 1_000,
+                StartSample = 0,
+                EndSample = 1_000,
+            };
+            var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
+            {
+                Width = 480,
+                Height = 360,
+                FpsNumerator = 5,
+                FpsDenominator = 1,
+                Presentation = new VisualizationPresentation("MASTER", "", ""),
+            });
+
+            using (var wav = new WavWriter(audioPath, 1_000, 2))
+            {
+                wav.Write(new short[2_000]);
+                wav.Close();
+            }
+
+            var composer = new SinglePassComposer("/usr/bin/ffmpeg", new SinglePassComposer.Options
+            {
+                TimeoutMinutes = 1,
+                VideoPreset = "ultrafast",
+                VideoCrf = "20",
+            });
+
+            composer.ComposeMasterOnly(audioPath, videoPath, renderer, includeWaveform: false);
+
+            Assert.True(File.Exists(videoPath));
+            Assert.True(new FileInfo(videoPath).Length > 0);
+            Assert.Empty(Directory.GetFiles(root, "*.partial.mp4"));
+
+            SinglePassComposer.ComposeMetrics metrics = composer.LastMetrics;
+            Assert.Equal(renderer.TotalFrames, metrics.FrameCount);
+            Assert.InRange(metrics.MaxQueueDepth, 1, 3);
+            Assert.True(metrics.WallTimeSeconds > 0);
+            Assert.True(metrics.OverlayCpuSeconds >= 0);
+            Assert.True(metrics.FfmpegWriteWaitSeconds >= 0);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void BuildArguments_EncodesSingleRawStreamAndMasterAudio()
     {
         IReadOnlyList<string> args = SinglePassComposer.BuildArguments(
@@ -119,6 +176,35 @@ public sealed class SinglePassComposerTests
 
         Assert.Contains("veryfast", args);
         Assert.Contains("18", args);
+    }
+
+    [Fact]
+    public void BuildArguments_GpuModeKeepsTheRawInputAfterSemanticGpuRaster()
+    {
+        IReadOnlyList<string> args = SinglePassComposer.BuildArguments(
+            "master.wav",
+            "final.mp4",
+            1280,
+            720,
+            60,
+            1,
+            new SinglePassComposer.Options
+            {
+                Renderer = VisualizationRendererMode.Gpu,
+            });
+
+        Assert.DoesNotContain("-vf", args);
+        Assert.Contains("0:v:0", args);
+    }
+
+    [Fact]
+    public void GpuProbeReportsTheActualOpenClCapability()
+    {
+        VisualizationGpuProbe probe = VisualizationGpuSupport.Probe();
+
+        Assert.NotEmpty(probe.Reason);
+        if (probe.Supported)
+            Assert.Contains("OpenCL", probe.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

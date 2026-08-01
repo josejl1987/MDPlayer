@@ -1,4 +1,5 @@
 using System.IO;
+using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Visualization.Rendering;
 
@@ -16,24 +17,8 @@ internal static class ChannelEnergyAnalyzer
 
     /// <summary>
     /// Maps stem names (from <see cref="ScopeRenderer.StemResult.Name"/>) to
-    /// the fixed panel IDs used by <see cref="OverlayLayout.PanelIds"/>.
+    /// the compatibility panel IDs used by the legacy stem pipeline.
     /// </summary>
-    private static readonly Dictionary<string, string> StemToPanel = new(14, StringComparer.Ordinal)
-    {
-        ["ym2608-fm1"] = "ym2608.0.fm.1",
-        ["ym2608-fm2"] = "ym2608.0.fm.2",
-        ["ym2608-fm3"] = "ym2608.0.fm.3",
-        ["ym2608-fm4"] = "ym2608.0.fm.4",
-        ["ym2608-fm5"] = "ym2608.0.fm.5",
-        ["ym2608-fm6"] = "ym2608.0.fm.6",
-        ["ym2608-ssg1"] = "ym2608.0.ssg.1",
-        ["ym2608-ssg2"] = "ym2608.0.ssg.2",
-        ["ym2608-ssg3"] = "ym2608.0.ssg.3",
-        ["ym2608-rhythm"] = "ym2608.0.rhythm",
-        ["ym2608-adpcm"] = "ym2608.0.adpcm-b",
-        ["ppz8-01"] = "ppz8.0",
-    };
-
     /// <summary>
     /// Analyzes all stem WAV files from a scope render result, producing
     /// per-channel energy envelopes with one entry per output frame.
@@ -59,7 +44,7 @@ internal static class ChannelEnergyAnalyzer
 
         foreach (var (name, wavPath) in stems)
         {
-            if (!StemToPanel.TryGetValue(name, out string channelId))
+            if (!VisualizationTopologyCompatibility.TryGetStemPanel(name, out string channelId))
                 continue;
             if (!File.Exists(wavPath))
                 continue;
@@ -136,7 +121,11 @@ internal static class ChannelEnergyAnalyzer
                 globalSample++;
                 if (globalSample >= frameEnd)
                 {
-                    // Finalize the current frame.
+                    // Finalize the current frame, but guard against the final
+                    // sample landing exactly on a boundary past the last frame.
+                    if (currentFrame >= totalFrames)
+                        break;
+
                     framePeak[currentFrame] = Math.Clamp(frameMaxAbs / 32767f, 0f, 1f);
                     float rms = frameCount > 0
                         ? MathF.Sqrt((float)(frameSumSq / frameCount)) / 32767f

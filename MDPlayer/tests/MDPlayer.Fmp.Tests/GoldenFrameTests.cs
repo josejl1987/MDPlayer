@@ -194,7 +194,7 @@ public sealed class GoldenFrameTests
 
     // --- Scenario 7: CJK title and credits ---
 
-    [Fact]
+    [SkippableFact]
     public void Golden_CjkTitleAndCredits()
     {
         var timeline = new VisualizationTimeline
@@ -206,16 +206,30 @@ public sealed class GoldenFrameTests
             Notes = [Note("ym2608.0.fm.1", SampleRate, SampleRate * 5, 60)],
             Rhythm = Array.Empty<RhythmEvent>(),
         };
+        var presentation = new VisualizationPresentation(
+            Title: "東方幻想郷 ～ Lotus Land Story",
+            Subtitle: "テストサウンドトラック",
+            Credits: "© テスト作曲家 2024");
+        try
+        {
+            // CJK goldens are byte-exact when a font is installed, but remain
+            // intentionally skippable because font versions change rasterization.
+            Skip.IfNot(
+                UnicodeStaticTextRenderer.CanRender(presentation, null),
+                "No CJK-capable font is available.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Skip.If(true, $"No usable CJK-capable font is available: {ex.Message}");
+        }
+
         var renderer = new PanelOverlayRenderer(timeline, new PanelOverlayRenderer.Options
         {
             Width = 960,
             Height = 540,
             FpsNumerator = 30,
             FpsDenominator = 1,
-            Presentation = new VisualizationPresentation(
-                Title: "東方幻想郷 ～ Lotus Land Story",
-                Subtitle: "テストサウンドトラック",
-                Credits: "© テスト作曲家 2024"),
+            Presentation = presentation,
         });
         byte[] frame = RenderFrame(renderer, 10);
         string hash = HashFrame(frame);
@@ -326,15 +340,15 @@ public sealed class GoldenFrameTests
     /// </summary>
     private static string GetGoldenHash(string scenario) => scenario switch
     {
-        "FM_BEND_VIBRATO" => "6EC42C474751444F",
-        "FM3_OPERATOR" => "843CE38B66277D70",
-        "SSG_MODES" => "EA24F17DFC2B22B9",
-        "RHYTHM_IMPACTS" => "49108546FA326BE4",
-        "DENSE_MIXED" => "FF15FA36D6C6134A",
-        "EMPTY_SILENT" => "4AEB022B77C8C470",
-        "CJK_TITLE" => "47D254511E95F842",
-        "PPZ8" => "8ABE873A650D6BB5",
-        "ADPCM" => "1D2990AB108FD23F",
+        "FM_BEND_VIBRATO" => "9B180B3B68F4ADA7",
+        "FM3_OPERATOR" => "056DBFDFBB70E287",
+        "SSG_MODES" => "429252CE8C0C3837",
+        "RHYTHM_IMPACTS" => "0CFF4422986C42CA",
+        "DENSE_MIXED" => "E86801DAB4AD96FF",
+        "EMPTY_SILENT" => "ED4786A69DC4BE77",
+        "CJK_TITLE" => "C263BDFB94293997",
+        "PPZ8" => "1021F914440F77B0",
+        "ADPCM" => "685C654BB45780E6",
         _ => "UNKNOWN",
     };
 }

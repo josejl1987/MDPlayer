@@ -70,11 +70,12 @@ to `runtimes/linux-x64/native/libmdplayer_spc.so` (non-Windows) or
 wrapper probes via `AppContext.BaseDirectory`, with an `MDPLAYER_SPC_NATIVE`
 environment-variable override that works on both platforms.
 
-PR 3/PR 6/PR 8 build step: before compiling, CMake copies `upstream/` into
+PR 3/PR 6/PR 8/PR 11 build step: before compiling, CMake copies `upstream/` into
 `build/upstream_patched/` and applies `patches/0001-voice-capture.patch`
 there (`patch -p1 -d build/upstream_patched -i patches/0001-voice-capture.patch`),
-then `patches/0002-voice-echo-capture.patch` and
-`patches/0003-effective-pitch.patch` the same way, then compiles the upstream
+then `patches/0002-voice-echo-capture.patch`,
+`patches/0003-effective-pitch.patch`, `patches/0004-event-capture.patch`, and
+`patches/0005-event-capture-run.patch` the same way, then compiles the upstream
 `.cpp` files and the wrapper against that copy. The vendored `upstream/` tree
 on disk is never modified. Requires the standard `patch` utility (checked at
 configure time).
@@ -130,7 +131,7 @@ SPC path on the same `.spc` file:
 
 ```
 Spc_Emu e; e.set_sample_rate( 32000 ); e.load_mem( data, size );
-e.start_track( 0 ); e.play( frames, out );   // frames = stereo frames
+e.start_track( 0 ); e.play( frames * 2, out ); // GME count is scalar int16 samples
 ```
 
 Byte-for-byte PCM equality is required. The managed layer (MDPlayer) applies
@@ -142,13 +143,13 @@ the same input must produce identical WAV files.
 PR 3 adds a second, native parity test (`tests/parity_test.cpp`, registered
 with CTest as `mdplayer_spc_parity`): it renders the same synthetic SPC once
 through a plain `Spc_Emu` (no observer) and once through the C ABI with the PR
-3 voice observer and per-block event capture active, and asserts the masters
+3 voice observer and in-block event capture active, and asserts the masters
 are byte-identical. This is the CRITICAL requirement of spec §5.3.
 
 ## PR 3 local modifications
 
 PR 3 needs to observe the S-DSP voice state for `mdp_spc_get_voice_state` and
-per-block capture events. Upstream exposes only `Spc_Dsp::read(addr)` (the raw
+capture events. Upstream exposes only `Spc_Dsp::read(addr)` (the raw
 register byte); the per-voice *emulated* state (`voice_t`: envelope mode/level,
 BRR cursor, KON delay) is private. Instead of hand-editing the vendored files,
 PR 3 applies a build-time patch (`patches/0001-voice-capture.patch`) to a copy
@@ -214,9 +215,8 @@ before each render block and clears them afterwards; the ABI wires them through
 `mdp_spc_audio_buffers.voice[i]` / `.echo` when the open options'
 `enable_voice_pcm` / `enable_echo_pcm` are set.
 
-Update procedure: if the upstream pin changes, re-apply both patches by hand to
-the new tree (or regenerate with `diff -u`) and re-run `mdplayer_spc_parity`
-and `mdplayer_spc_tap`.
+Update procedure: if the upstream pin changes, re-apply the local patches by
+hand to the new tree (or regenerate with `diff -u`) and re-run the native CTests.
 
 ## PR 8 local modifications
 
@@ -246,8 +246,27 @@ gains an appended `effective_pitch` field (ABI-compatible) and PITCH_CHANGED
 uses effective values (`param0` = new effective pitch, `param1` = previous).
 `MDP_SPC_API_VERSION` is bumped to 3.
 
-Update procedure: if the upstream pin changes, re-apply both patches by hand to
-the new tree (or regenerate with `diff -u`) and re-run both CTests.
+Update procedure: if the upstream pin changes, re-apply the local patches by
+hand to the new tree (or regenerate with `diff -u`) and re-run the native CTests.
+
+## PR 11 in-block event capture
+
+The original boundary comparator could only observe one state per 1,024-frame
+render block and timestamp every transition at the block start. PR 11 applies
+`patches/0004-event-capture.patch` and `patches/0005-event-capture-run.patch`
+after PR 8. The callback runs inside `Spc_Dsp::run()` and reports KON,
+release, voice-end, source, volume, noise, PMON, EON, envelope, and effective
+pitch transitions with an in-block sample offset. The C ABI converts that
+offset to `block_start + offset`; `VOICE_END` is emitted only when the envelope
+reaches zero or sample termination forces it there. Release remains audible,
+and effective pitch is sampled every eight DSP output samples so an in-block
+pitch excursion can produce both its change and return events.
+
+Initial source/volume/noise/PMON/EON/envelope state is emitted once per DSP
+session at sample zero so a visualization does not depend on a register write
+after capture begins. The callback writes only non-emulation instrumentation
+state and caller-owned event/tap buffers; the native parity and event-capture
+CTest guard master-audio identity and adversarial transition semantics.
 
 ## PR 2 scope notes (deviations recorded honestly)
 
@@ -255,12 +274,13 @@ the new tree (or regenerate with `diff -u`) and re-run both CTests.
   initial snapshot state (RAM at file offset 0x100, DSP registers at
   0x10100). Syncing the post-render emulated state is deferred beyond PR 3
   (voice/state work in PR 3 covers observation only, not RAM sync).
-- PR 3 implements `mdp_spc_get_voice_state` and per-block capture events
+- PR 3/PR 11 implement `mdp_spc_get_voice_state` and in-block capture events
   (KEY_ON, RELEASE_START, VOICE_END, SOURCE/PITCH/VOLUME/NOISE/PITCH_MOD/
-  ECHO_SEND_CHANGED) — the PR 2 stubs are gone.
+  ECHO_SEND_CHANGED/ENVELOPE_CHANGED) — the PR 2 stubs are gone.
 - PR 3 keeps the PR 2 ABI layout: new voice-state fields and the
-  `event_overflow` render-result field are appended, `MDP_SPC_API_VERSION`
-  bumped to 2.
+  `event_overflow` render-result field are appended; PR 8 appends
+  `effective_pitch` and bumps `MDP_SPC_API_VERSION` to 3. PR 11 adds an event
+  constant without changing the existing struct layout.
 - PR 2 needs master audio only; voice/echo PCM buffers were accepted but may
   be NULL. PR 6 implements them: when the open options enable_voice_pcm /
   enable_echo_pcm are set, the S-DSP fills them per render block (spec §8.2/§8.4).

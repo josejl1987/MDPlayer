@@ -239,6 +239,14 @@ _Pvt_Extensions
 MDPlayer/MDPlayer/lib/MDSoundCopy.bat
 output
 lib
+# Keep only DLLs referenced by MDPlayerx64 and FMP projects (negate the global 'lib' rule above)
+!MDPlayer/lib/
+MDPlayer/lib/*.dll
+!MDPlayer/lib/MDSound.dll
+!MDPlayer/lib/musicDriverInterface.dll
+!MDPlayer/lib/NiseC86ctl.dll
+!MDPlayer/lib/RealChipCtlWrap64.dll
+!MDPlayer/lib/Z80dotNet.dll
 plugin
 /MDPlayer/MDPlayer_InstKit/mdplayer
 
@@ -255,6 +263,10 @@ MDPlayer/e2e-test.metadata.json
 
 # FMP renderer: build outputs are covered by the repository-wide bin/obj
 # patterns above.
+
+# FMP native runtime binaries are generated locally; keep runtime READMEs tracked.
+MDPlayer/runtimes/*/native/libmdplayer_spc.so
+MDPlayer/runtimes/*/native/mdplayer_spc.dll
 
 # Root render outputs (XM20* wav/json files)
 XA20*.wav

@@ -1,5 +1,7 @@
 namespace Fmp.Cli;
 
+using Fmp.Core.Visualization;
+
 internal enum AnalysisDetail { Minimal, Standard, Full }
 
 internal sealed class AnalyzeOptions : RenderSettings
@@ -12,6 +14,13 @@ internal sealed class AnalyzeOptions : RenderSettings
     public AnalysisDetail Detail { get; set; } = AnalysisDetail.Standard;
     public bool Force { get; set; }
     public int TimeoutMinutes { get; set; } = 10;
+    /// <summary>Optional in-memory capture supplied by visualization callers.</summary>
+    public VisualizationTimeline CapturedTimeline { get; set; }
+    public bool CaptureCache { get; set; } = true;
+    public Dictionary<string, string> CaptureDependencies { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Where human-readable progress lines are written (default stdout).</summary>
+    public TextWriter Output { get; set; } = Console.Out;
 }
 
 internal static class AnalyzeOptionsParser

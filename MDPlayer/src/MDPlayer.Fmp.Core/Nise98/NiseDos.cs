@@ -31,6 +31,9 @@ namespace Fmp.Core.Nise98
             public int ptr = 0;
             public int size = 0;
             public string path = "";
+            public string requestedPath = "";
+            public string resolvedPath = "";
+            public byte[] resolvedBytes;
             public int handle = 0;
             public int mode = 0;
             public List<byte> lstBuf=new List<byte>();
@@ -416,16 +419,18 @@ namespace Fmp.Core.Nise98
                     filename = enc.GetStringFromSjisArray(msg.ToArray());
                     Log.WriteLine(musicDriverInterface.LogLevel.DEBUG, filename);
 
-                    if (CheckFileExist(filename,out string fndFilename))
+                    if (CheckFileExist(filename, out string fndFilename, out byte[] resolvedBytes))
                     {
                         regs.CF = false;
                         fs = new filestatus();
                         files.Add(fs);
-                        fs.name = Path.GetFileName(fndFilename);
+                        fs.name = Path.GetFileName(filename);
                         fs.ptr = 0;
-                        fs.path = Path.GetDirectoryName(fndFilename);
+                        fs.path = Path.GetDirectoryName(filename) ?? "";
+                        fs.requestedPath = filename;
+                        fs.resolvedPath = fndFilename;
+                        fs.resolvedBytes = resolvedBytes;
                         fs.handle = fileHandler++;
-                        SetPath(fs.path);
                         regs.AX = (short)fs.handle;//file handle
                         MakeDummyMCB();
                     }
@@ -473,12 +478,19 @@ namespace Fmp.Core.Nise98
                         break;
                     }
 
-                    byte[] buf = ReadAllByte(fnd);
+                    byte[] buf = ReadAllByte(fnd) ?? Array.Empty<byte>();
                     fnd.size = buf.Length;
-                    int size = Math.Min((ushort)regs.CX, buf.Length - fnd.ptr);
-                    byte[] rbuf = new byte[size];
-                    Array.Copy(buf, fnd.ptr, rbuf, 0, size);
-                    LoadImage(rbuf, regs.DS_DX);
+                    int size = 0;
+                    if (fnd.ptr >= 0 && fnd.ptr < buf.Length)
+                    {
+                        size = Math.Min((ushort)regs.CX, buf.Length - fnd.ptr);
+                        if (size > 0)
+                        {
+                            byte[] rbuf = new byte[size];
+                            Array.Copy(buf, fnd.ptr, rbuf, 0, size);
+                            LoadImage(rbuf, regs.DS_DX);
+                        }
+                    }
                     fnd.ptr += size;
 
                     //return
@@ -537,16 +549,35 @@ namespace Fmp.Core.Nise98
                     if (fnd == null)
                     {
                         regs.CF = true;
+                        regs.AX = 6;
                         break;
                     }
 
-                    int d = (regs.CX << 4) + regs.DX;
-                    if (regs.AL == 0) fnd.ptr = d;
-                    else if (regs.AL == 1) fnd.ptr += d;
-                    else if (regs.AL == 2) fnd.ptr = fnd.size - 1+d;
-                    regs.CF= false;
-                    regs.DX = (short)((fnd.ptr >> 4) & 0xf000);
-                    regs.AX = (short)(fnd.ptr & 0xffff);
+                    byte[] seekBuffer = ReadAllByte(fnd) ?? Array.Empty<byte>();
+                    fnd.size = seekBuffer.Length;
+
+                    long d = ((long)(ushort)regs.CX << 16) | (ushort)regs.DX;
+                    if ((d & 0x8000_0000L) != 0)
+                        d -= 0x1_0000_0000L;
+                    long origin = regs.AL switch
+                    {
+                        0 => 0L,
+                        1 => fnd.ptr,
+                        2 => fnd.size,
+                        _ => long.MinValue,
+                    };
+                    long next = origin == long.MinValue ? long.MinValue : origin + d;
+                    if (next < 0 || next > int.MaxValue)
+                    {
+                        regs.CF = true;
+                        regs.AX = 1;
+                        break;
+                    }
+
+                    fnd.ptr = (int)next;
+                    regs.CF = false;
+                    regs.DX = (short)((next >> 16) & 0xffff);
+                    regs.AX = (short)(next & 0xffff);
                     break;
                 case 0x43:
                     Log.WriteLine(musicDriverInterface.LogLevel.DEBUG, "<NiseDos>  Get/Set File Attributes");
@@ -658,12 +689,20 @@ namespace Fmp.Core.Nise98
         {
             try
             {
+                if (fs.resolvedBytes != null)
+                    return fs.resolvedBytes;
+
+                if (!string.IsNullOrEmpty(fs.resolvedPath) && File.Exists(fs.resolvedPath))
+                    return File.ReadAllBytes(fs.resolvedPath);
+
                 string fn = Path.Combine(fs.path, fs.name);
 
                 // Try IFmpFileSystem first for DOS-compatible lookup
-                if (_fileSystem != null)
+                string requested = string.IsNullOrEmpty(fs.requestedPath)
+                    ? fn : fs.requestedPath;
+                if (_fileSystem != null && IsRelativeDosPath(requested))
                 {
-                    var dosPath = new DosPath(fn.Replace('/', '\\'));
+                    var dosPath = new DosPath(requested.Replace('/', '\\'));
                     if (_fileSystem.TryReadFile(dosPath, out var mem, out _))
                         return mem.ToArray();
                 }
@@ -678,15 +717,17 @@ namespace Fmp.Core.Nise98
             return ReadAllByteFromArcFile(fs.name);
         }
 
-        private bool CheckFileExist(string filename,out string fndFilename)
+        private bool CheckFileExist(string filename, out string fndFilename, out byte[] resolvedBytes)
         {
+            resolvedBytes = null;
             // Try IFmpFileSystem first for DOS-compatible lookup
-            if (_fileSystem != null)
+            if (_fileSystem != null && IsRelativeDosPath(filename))
             {
                 var dosPath = new DosPath(filename.Replace('/', '\\'));
-                if (_fileSystem.TryReadFile(dosPath, out var _, out var source))
+                if (_fileSystem.TryReadFile(dosPath, out var data, out var source))
                 {
                     fndFilename = source.ResolvedPath;
+                    resolvedBytes = data.ToArray();
                     return true;
                 }
             }
@@ -773,18 +814,20 @@ namespace Fmp.Core.Nise98
 
         public byte[] LoadData(string fn)
         {
-            fn = Path.Combine(filePath, fn);
+            string requestedPath = fn;
 
             // Try IFmpFileSystem first for DOS-compatible lookup
-            if (_fileSystem != null)
+            if (_fileSystem != null && IsRelativeDosPath(requestedPath))
             {
-                var dosPath = new DosPath(fn.Replace('/', '\\'));
+                var dosPath = new DosPath(requestedPath.Replace('/', '\\'));
                 if (_fileSystem.TryReadFile(dosPath, out var mem, out var src))
                 {
                     log.Write(LogLevel.Information, "read data via IFmpFileSystem: {0}", src.ResolvedPath);
                     return mem.ToArray();
                 }
             }
+
+            fn = Path.Combine(filePath, requestedPath);
 
             if (fileTemp.ExistTemp(fn))
                 return fileTemp.ReadTemp(fn);
@@ -822,6 +865,15 @@ namespace Fmp.Core.Nise98
             }
             return null;
 
+        }
+
+        private static bool IsRelativeDosPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            string normalized = path.Replace('/', '\\');
+            return !Path.IsPathRooted(path)
+                && !normalized.StartsWith("\\", StringComparison.Ordinal)
+                && !normalized.Contains(':');
         }
 
         public void SetArcFile(string playingArcFileName)

@@ -130,7 +130,7 @@ int render_reference(const std::vector<unsigned char>& spc, short* out, int fram
             emu.mute_voices(0);
         }
         for (int pos = 0; !err && pos < frames; pos += MDP_SPC_DEFAULT_BLOCK_FRAMES)
-            err = emu.play(MDP_SPC_DEFAULT_BLOCK_FRAMES, out + (long)pos * 2);
+            err = emu.play(MDP_SPC_DEFAULT_BLOCK_FRAMES * 2, out + (long)pos * 2);
         return err ? 1 : 0;
     }
     catch (...)
@@ -163,10 +163,22 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
     const int blocks = frames / block;
     int rc = MDP_SPC_OK;
     int seen = 0;
+    int key_on_seen = 0;
+    bool key_on_inside_block = false;
     mdp_spc_audio_buffers audio;
     memset(&audio, 0, sizeof(audio));
     audio.master_stereo = out;
     mdp_spc_render_result result;
+    const short sentinel = (short)0x5A5A;
+    mdp_spc_render_result invalid_result;
+    if (mdp_spc_render(session, MDP_SPC_DEFAULT_BLOCK_FRAMES + 1,
+                      &audio, events, event_capacity, &invalid_result)
+        != MDP_SPC_ERR_INVALID_ARGUMENT)
+    {
+        fprintf(stderr, "PARITY FAIL: odd frame request was not rejected\n");
+        mdp_spc_close(session);
+        return 1;
+    }
 
     for (int i = 0; i < blocks && rc == MDP_SPC_OK; i++)
     {
@@ -174,7 +186,41 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
         rc = mdp_spc_render(session, block, &audio, events, event_capacity, &result);
         if (rc != MDP_SPC_OK)
             break;
+        if (result.frames_rendered != block)
+        {
+            fprintf(stderr, "PARITY FAIL: expected %d frames, got %d\n",
+                    block, result.frames_rendered);
+            rc = MDP_SPC_ERR_INTERNAL;
+            break;
+        }
+        for (int sample = 0; sample < result.frames_rendered * 2; sample++)
+        {
+            if (audio.master_stereo[sample] == sentinel)
+            {
+                fprintf(stderr, "PARITY FAIL: sentinel remains in rendered "
+                                "master block %d at sample %d\n", i, sample);
+                rc = MDP_SPC_ERR_INTERNAL;
+                break;
+            }
+        }
         seen += result.events_written;
+        for (int e = 0; e < result.events_written; e++)
+        {
+            const mdp_spc_event& event = events[e];
+            if (event.type != MDP_SPC_EVENT_KEY_ON)
+                continue;
+            key_on_seen++;
+            if (event.frame < (int64_t)i * block ||
+                event.frame >= (int64_t)(i + 1) * block)
+            {
+                fprintf(stderr, "PARITY FAIL: KEY_ON frame %lld escaped block %d\n",
+                        (long long)event.frame, i);
+                rc = MDP_SPC_ERR_INTERNAL;
+                break;
+            }
+            if (event.frame != (int64_t)i * block)
+                key_on_inside_block = true;
+        }
 
         /* Exercise the PR 3 voice observer for all 8 channels after every block. */
         mdp_spc_voice_state vs;
@@ -186,6 +232,13 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
                 break;
             }
         }
+    }
+
+    if (rc == MDP_SPC_OK && (key_on_seen < 2 || !key_on_inside_block))
+    {
+        fprintf(stderr, "PARITY FAIL: expected in-block KEY_ON offsets, got %d\n",
+                key_on_seen);
+        rc = MDP_SPC_ERR_INTERNAL;
     }
 
     mdp_spc_close(session);
@@ -201,13 +254,62 @@ int main()
     const int frames = 4 * MDP_SPC_DEFAULT_BLOCK_FRAMES; /* 4096 frames */
 
     std::vector<short> reference((size_t)frames * 2);
-    std::vector<short> instrumented((size_t)frames * 2);
+    std::vector<short> instrumented((size_t)frames * 2, (short)0x5A5A);
     std::vector<mdp_spc_event> events(256);
 
     if (render_reference(spc, reference.data(), frames) != 0)
     {
         fprintf(stderr, "PARITY FAIL: reference render failed\n");
         return 1;
+    }
+
+    /* Regression guard: a non-NULL events buffer with per-call capacity 0
+     * must produce zero event writes. A pinned 0-length managed array still
+     * yields a valid pointer, so substituting any default capacity here
+     * writes past the caller's buffer (heap corruption in the .NET host). */
+    {
+        mdp_spc_session* guard = NULL;
+        char error[256];
+        mdp_spc_open_options opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.event_capacity = 64; /* session default must NOT be used */
+        if (mdp_spc_open(spc.data(), spc.size(), &opts, &guard,
+                         error, sizeof(error)) != MDP_SPC_OK)
+        {
+            fprintf(stderr, "PARITY FAIL: guard session open failed\n");
+            return 1;
+        }
+        short guard_audio[MDP_SPC_DEFAULT_BLOCK_FRAMES * 2];
+        mdp_spc_audio_buffers audio;
+        memset(&audio, 0, sizeof(audio));
+        audio.master_stereo = guard_audio;
+        mdp_spc_render_result result;
+        mdp_spc_event dummy;
+        int guard_events = 0;
+        for (int i = 0; i < 2; i++) /* two blocks so has_prev is set */
+        {
+            if (mdp_spc_render(guard, MDP_SPC_DEFAULT_BLOCK_FRAMES, &audio,
+                               &dummy, 0, &result) != MDP_SPC_OK)
+            {
+                fprintf(stderr, "PARITY FAIL: guard render failed\n");
+                mdp_spc_close(guard);
+                return 1;
+            }
+            if (result.event_overflow != 0)
+            {
+                fprintf(stderr, "PARITY FAIL: capacity-0 render reported overflow\n");
+                mdp_spc_close(guard);
+                return 1;
+            }
+            guard_events += result.events_written;
+        }
+        mdp_spc_close(guard);
+        if (guard_events != 0)
+        {
+            fprintf(stderr, "PARITY FAIL: capacity-0 render wrote %d events\n",
+                    guard_events);
+            return 1;
+        }
     }
 
     int events_seen = 0;
@@ -224,13 +326,35 @@ int main()
                 events_seen);
         return 1;
     }
-
     if (memcmp(reference.data(), instrumented.data(),
                (size_t)frames * 2 * sizeof(short)) != 0)
     {
         fprintf(stderr, "PARITY FAIL: instrumented master differs from "
                         "uninstrumented master\n");
         return 1;
+    }
+
+    /* Regression guard for the stereo-count contract: Music_Emu::play takes
+     * interleaved int16 samples, while mdp_spc_render takes stereo frames.
+     * Each half of every ABI block must therefore contain rendered audio; a
+     * mistaken frames-vs-samples call leaves the second half untouched. */
+    for (int block = 0; block < frames; block += MDP_SPC_DEFAULT_BLOCK_FRAMES)
+    {
+        int non_silent = 0;
+        int start = block + MDP_SPC_DEFAULT_BLOCK_FRAMES / 2;
+        int end = block + MDP_SPC_DEFAULT_BLOCK_FRAMES;
+        for (int frame = start; frame < end; frame++)
+        {
+            if (reference[(size_t)frame * 2] != 0
+                || reference[(size_t)frame * 2 + 1] != 0)
+                non_silent++;
+        }
+        if (non_silent < MDP_SPC_DEFAULT_BLOCK_FRAMES / 4)
+        {
+            fprintf(stderr, "PARITY FAIL: second half of block %d is unexpectedly silent\n",
+                    block / MDP_SPC_DEFAULT_BLOCK_FRAMES);
+            return 1;
+        }
     }
 
     printf("PARITY OK: %d frames rendered, %d capture events, master "

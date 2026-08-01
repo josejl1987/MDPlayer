@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -23,6 +24,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\MDPlayer.Fmp.Core\MDPlayer.Fmp.Core.csproj" />
     <ProjectReference Include="..\..\src\MDPlayer.Fmp.Cli\MDPlayer.Fmp.Cli.csproj" />
+    <ProjectReference Include="..\..\src\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
+    <ProjectReference Include="..\..\src\MDPlayer.Fmp.Gui\MDPlayer.Fmp.Gui.csproj" />
     <Reference Include="MDSound">
       <HintPath>..\..\lib\MDSound.dll</HintPath>
     </Reference>

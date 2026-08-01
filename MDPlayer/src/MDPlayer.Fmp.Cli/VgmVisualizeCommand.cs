@@ -1,9 +1,15 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Fmp.Application.Contracts;
+using Fmp.Core.Analysis;
 using Fmp.Core.Rendering;
 using Fmp.Core.Rendering.Corrscope;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
+// The CLI uses the Core enum types for the render pipeline; the Application
+// contracts import colliding names. Pin the Core types explicitly.
+using VisualizationPreset = Fmp.Core.Visualization.Rendering.VisualizationPreset;
+using VideoEncoder = Fmp.Core.Visualization.Rendering.VideoEncoder;
 
 namespace Fmp.Cli;
 
@@ -14,73 +20,35 @@ namespace Fmp.Cli;
 /// </summary>
 internal static class VgmVisualizeCommand
 {
-    public static int Handle(string[] args)
+    // Source-compatible parser seam retained for callers and tests that use
+    // the generic command directly. The shared parser is now the single CLI
+    // option implementation used by both backend paths.
+    internal static VisualizeOptions Parse(string[] args)
+        => VisualizeOptionsParser.ParseStrict(args);
+
+    internal static int Handle(
+        VisualizeOptions options,
+        VisualizationBackendResolution resolution)
     {
-        Options options;
-        try { options = Parse(args); }
-        catch (ArgumentException ex)
-        {
-            Console.Error.WriteLine($"error: {ex.Message}");
-            return 2;
-        }
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(resolution);
 
-        if (string.IsNullOrWhiteSpace(options.Input))
-        {
-            Console.Error.WriteLine("error: no input file specified");
-            return 2;
-        }
+        FileInfo input = resolution.Input;
+        IPlaybackBackend backend = resolution.Backend;
+        PlaybackProbeResult probe = resolution.Probe;
 
-        var input = new FileInfo(options.Input);
-        if (!input.Exists)
-        {
-            Console.Error.WriteLine($"error: input not found: {input.FullName}");
-            return 3;
-        }
-
-        var environment = new PlaybackEnvironment(
-            [input.DirectoryName ?? "."],
-            true,
-            options.SampleRate);
-        var registry = PlaybackBackendRegistry.CreateDefault(environment);
-        if (!registry.TrySelect(
-                input,
-                environment,
-                options.Backend,
-                out IPlaybackBackend backend,
-                out PlaybackProbeResult probe))
+        VisualizationWorkspace workspace = VisualizationWorkspace.Create(options, input);
+        if (!options.Overwrite && workspace.HasConflict(!options.StemsOnly))
         {
             Console.Error.WriteLine(
-                $"error: no playback backend accepted {input.Name}: {string.Join("; ", probe.Warnings)}");
-            return 3;
-        }
-        if (!probe.Visualizable)
-        {
-            Console.Error.WriteLine(
-                "error: MDPlayer can play this track, but none of its active devices expose supported note data");
-            return 10;
-        }
-
-        string outputDir = options.OutputDir;
-        if (string.IsNullOrWhiteSpace(outputDir))
-        {
-            string baseName = Path.GetFileNameWithoutExtension(input.Name);
-            outputDir = Path.Combine(input.DirectoryName ?? ".", baseName + ".visualization");
-        }
-        Directory.CreateDirectory(outputDir);
-        string timelinePath = Path.Combine(outputDir, "timeline.json");
-        string audioPath = Path.Combine(outputDir, "audio", "master.wav");
-        string videoPath = options.VideoPath
-            ?? Path.Combine(outputDir, "visualization.mp4");
-        string scopeDir = Path.Combine(outputDir, "scope");
-        if (!options.Overwrite
-            && (File.Exists(timelinePath)
-                || File.Exists(audioPath)
-                || (!options.StemsOnly && File.Exists(videoPath))))
-        {
-            Console.Error.WriteLine("error: output exists (use --overwrite)");
+                $"error: output exists: {workspace.FirstConflict(!options.StemsOnly)} (use --overwrite)");
             return 9;
         }
-        Directory.CreateDirectory(scopeDir);
+        workspace.EnsureDirectories();
+        string timelinePath = workspace.TimelinePath;
+        string audioPath = workspace.MasterAudioPath;
+        string videoPath = workspace.VideoPath;
+        string scopeDir = workspace.ScopeDir;
 
         int timelineSampleRate = probe.NativeSampleRate > 0
             ? probe.NativeSampleRate
@@ -91,8 +59,14 @@ internal static class VgmVisualizeCommand
         double stemRenderSeconds = 0;
         double compositionSeconds = 0;
         SinglePassComposer composer = null;
+        VideoEncoder requestedEncoder = options.Encoder;
+        var encoderFallback = new VisualizationSupport.EncoderFallbackState();
+        ProgressJsonlWriter? progress = ProgressJsonlWriter.CreateIfRequested(options);
         try
         {
+            progress?.Started();
+            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
+
             Stopwatch captureWatch = Stopwatch.StartNew();
             using IPlaybackCaptureSession session = backend.Open(
                 input,
@@ -104,11 +78,14 @@ internal static class VgmVisualizeCommand
                     audioPath,
                     options.SampleRate,
                     options.SpcStems,
-                    options.SpcPitchMode),
+                    options.SpcPitchMode,
+                    options.SsgGainDb),
                 eventSink);
             session.Run();
             captureWatch.Stop();
             captureSeconds = captureWatch.Elapsed.TotalSeconds;
+            progress?.StageCompleted(
+                ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), captureSeconds);
 
             VisualizationTimeline timeline = eventSink.Complete(
                 session.SamplePosition,
@@ -118,108 +95,229 @@ internal static class VgmVisualizeCommand
                                 Path.GetFileNameWithoutExtension(input.Name),
                                 backend.Id,
                                 input.Name));
-            VisualizationJsonWriter.Write(timelinePath, timeline);
-            StemPlan scopePlan = ScopePlanner.Plan(
-                timeline.Devices,
-                timeline.Voices,
-                options.ScopeMode);
-            if (!options.StemsOnly && !scopePlan.Supported)
+            if (!VisualizationContentAvailability.HasRenderableContent(timeline))
             {
                 Console.Error.WriteLine(
-                    $"error: requested scope mode '{options.ScopeMode}' is unavailable: {scopePlan.Reason}");
-                return 4;
+                    "error: visualization capture contains neither semantic events nor waveform activity");
+                return 10;
+            }
+            VisualizationJsonWriter.Write(timelinePath, timeline);
+
+            AnalysisOutput analysisOutput = null;
+            if (options.Analysis)
+            {
+                progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.RunningAnalysis));
+                AnalysisExecutionResult analysis = AnalysisRunner.Execute(new AnalyzeOptions
+                {
+                    CapturedTimeline = timeline,
+                    AnalysisPython = options.AnalysisPython,
+                    AnalysisOutput = options.AnalysisOutput ?? Path.Combine(workspace.OutputDir, "analysis"),
+                    AnalysisCache = options.AnalysisCache,
+                    Detail = options.AnalysisDetail,
+                    Force = options.AnalysisForce,
+                    TimeoutMinutes = options.AnalysisTimeoutMinutes,
+                });
+                if (analysis.ExitCode != 0)
+                {
+                    progress?.Failed(
+                        $"analysis failed (exit {analysis.ExitCode})",
+                        ValidationCodes.AnalysisFailed, analysis.ExitCode);
+                    return analysis.ExitCode;
+                }
+                analysisOutput = analysis.Output;
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.RunningAnalysis), null);
             }
 
-            VisualizationTopology topology = VisualizationTopologyBuilder.Build(timeline);
+            VisualizationLayoutMode layoutMode = VisualizationLayoutModeResolver.Resolve(
+                timeline, options.LayoutMode);
+            VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+                timeline, layoutMode, options.Channels, options.GroupBy);
             OverlayLayout layout = new(
                 options.Width,
                 options.Height,
-                0.75,
-                2.25,
-                topology.Panels.Count);
+                options.PastSeconds,
+                options.FutureSeconds,
+                topology.Panels.Count,
+                layoutMode,
+                options.ScopeHeight,
+                options.TimelineHeight,
+                options.RollZoom,
+                options.ScopeRatio,
+                options.ScopePosition);
+            VisualizationLayoutValidator.Validate(layout, topology);
+            if (!string.IsNullOrWhiteSpace(options.PreviewHtmlPath))
+            {
+                VisualizationPreviewWriter.Write(
+                    options.PreviewHtmlPath,
+                    timeline,
+                    VisualizationLayoutPlan.Create(
+                        timeline,
+                        topology,
+                        layout,
+                        options.LayoutMode,
+                        options.Channels,
+                        options.GroupBy,
+                        options.TimeGrid,
+                        options.ScopePosition,
+                        options.ScopeRatio,
+                        options.Fps,
+                        options.FpsDenominator,
+                        options.Encoder.ToString(),
+                        options.Analysis ? "requested" : "none"));
+            }
+            if (!string.IsNullOrWhiteSpace(options.DiagnosticPagesPath))
+            {
+                VisualizationTopology diagnosticTopology = VisualizationTopologyBuilder.Build(
+                    timeline,
+                    VisualizationLayoutMode.Diagnostic,
+                    VisualizationChannelFilter.All,
+                    options.GroupBy);
+                OverlayLayout diagnosticLayout = new(
+                    options.Width,
+                    options.Height,
+                    options.PastSeconds,
+                    options.FutureSeconds,
+                    diagnosticTopology.Panels.Count,
+                    VisualizationLayoutMode.Diagnostic,
+                    options.ScopeHeight,
+                    options.TimelineHeight,
+                    options.RollZoom,
+                    options.ScopeRatio,
+                    options.ScopePosition);
+                VisualizationLayoutValidator.Validate(diagnosticLayout, diagnosticTopology);
+                VisualizationDiagnosticPagesWriter.Write(
+                    options.DiagnosticPagesPath,
+                    timeline,
+                    VisualizationLayoutPlan.Create(
+                        timeline,
+                        diagnosticTopology,
+                        diagnosticLayout,
+                        VisualizationLayoutMode.Diagnostic,
+                        VisualizationChannelFilter.All,
+                        options.GroupBy,
+                        options.TimeGrid,
+                        options.ScopePosition,
+                        options.ScopeRatio,
+                        options.Fps,
+                        options.FpsDenominator,
+                        options.Encoder.ToString(),
+                        options.Analysis ? "requested" : "none"));
+            }
+            VisualizationPlanOutput.Emit(
+                timeline,
+                topology,
+                layout,
+                options.LayoutMode,
+                options.Channels,
+                options.GroupBy,
+                options.TimeGrid,
+                options.ScopePosition,
+                options.ScopeRatio,
+                options.Fps,
+                options.FpsDenominator,
+                options.Encoder.ToString(),
+                options.Analysis ? "requested" : "none",
+                options.PrintLayout,
+                options.LayoutJson);
+            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.RenderingChannelStems));
             Stopwatch stemWatch = Stopwatch.StartNew();
-            ScopeRenderer.ScopeResult scopeResult = backend.Id == "vgm"
-                ? VgmScopeRenderer.Render(
-                    input.FullName,
-                    scopeDir,
-                    audioPath,
-                    options.SampleRate,
-                    options.Loops,
-                    options.Fade,
-                    options.Tail,
-                    options.MaxDuration)
-                : null;
+            GenericScopeArtifacts scopeArtifacts;
+            try
+            {
+                scopeArtifacts = VisualizationScopeCoordinator.Render(
+                    backend.Id,
+                    input,
+                    workspace,
+                    options,
+                    timeline.Devices,
+                    timeline.Voices,
+                    session.SamplePosition);
+            }
+            catch (VisualizationScopeException ex)
+            {
+                Console.Error.WriteLine($"error: {ex.Message}");
+                return ex.ExitCode;
+            }
             stemWatch.Stop();
             stemRenderSeconds = stemWatch.Elapsed.TotalSeconds;
-            bool hasRealStems = scopeResult?.Success == true
-                && scopeResult.Stems.Any(stem => stem.Name != "master" && stem.Success);
-            if (!hasRealStems)
+            progress?.StageCompleted(
+                ProgressJsonlWriter.StageName(ExportStage.RenderingChannelStems), stemRenderSeconds);
+
+            StemPlan scopePlan = scopeArtifacts.Plan;
+            ScopeRenderer.ScopeResult scopeResult = scopeArtifacts.Result;
+            bool hasRealStems = scopeArtifacts.HasIsolatedStems;
+            string yamlPath = workspace.CorrscopeConfigPath;
+            bool useCorrscope = scopeArtifacts.Enabled && (options.StemsOnly || layout.HasScopes);
+            if (!hasRealStems && scopeArtifacts.Enabled)
+                scopeResult = ExpandMasterToPanels(input, workspace, options, scopeResult, layout.PanelCount);
+            if (useCorrscope)
             {
-                scopeResult = new ScopeRenderer.ScopeResult
-                {
-                    Success = true,
-                    InputPath = input.FullName,
-                    OutputDir = scopeDir,
-                    MasterSamples = session.SamplePosition,
-                    SampleRate = options.SampleRate,
-                    CompletionReason = "master_fallback",
-                };
-                for (int panel = 0; panel < layout.PanelCount; panel++)
-                {
-                    scopeResult.Stems.Add(new ScopeRenderer.StemResult
+                CorrscopeConfigWriter.Write(yamlPath, scopeDir, scopeResult,
+                    audioDir: "../audio",
+                    overrides: new CorrscopeOverrides
                     {
-                        Name = "master",
-                        Label = "Master",
-                        WavPath = audioPath,
-                        RenderedSamples = session.SamplePosition,
-                        Channels = 2,
-                        Success = true,
+                        Fps = options.Fps,
+                        TriggerMs = 20,
+                        RenderMs = 12,
+                        EdgeStrength = 0.35,
+                        BufferStrength = 1.0,
+                        Responsiveness = 0.25,
+                        BufferFalloff = 0.35,
+                        ResetBelow = 0.2,
+                        RenderWidth = layout.CorrscopeGridWidth,
+                        RenderHeight = Math.Max(1, layout.CorrscopeGridHeight),
+                        LayoutNCols = layout.IsSharedComposition
+                            ? Math.Max(1, scopeResult.Stems.Count)
+                            : layout.ColumnCount,
+                        IncludeMasterAsChannel = !hasRealStems,
+                        IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
+                        HideLabels = layoutMode != VisualizationLayoutMode.Scope,
+                        ResDivisor = 1.0,
+                        Antialiasing = options.FinalQuality,
                     });
-                }
             }
-
-            if (scopeResult.Stems.Count == 0)
-            {
-                Console.Error.WriteLine("error: no Corrscope stems were produced");
-                return 7;
-            }
-
-            string yamlPath = Path.Combine(scopeDir, "corrscope-grid.yaml");
-            CorrscopeConfigWriter.Write(yamlPath, scopeDir, scopeResult,
-                audioDir: "../audio",
-                overrides: new CorrscopeOverrides
-                {
-                    Fps = options.Fps,
-                    TriggerMs = 20,
-                    RenderMs = 12,
-                    EdgeStrength = 0.35,
-                    BufferStrength = 1.0,
-                    Responsiveness = 0.25,
-                    BufferFalloff = 0.35,
-                    ResetBelow = 0.2,
-                    RenderWidth = options.Width,
-                    RenderHeight = layout.CorrscopeGridHeight,
-                    LayoutNCols = layout.ColumnCount,
-                    IncludeMasterAsChannel = !hasRealStems,
-                    IncludeSilentChannels = true,
-                    HideLabels = true,
-                    ResDivisor = 1.0,
-                    Antialiasing = options.FinalQuality,
-                });
 
             if (options.StemsOnly)
             {
+                VisualizationPlanOutput.Emit(
+                    timeline,
+                    topology,
+                    layout,
+                    options.LayoutMode,
+                    options.Channels,
+                    options.GroupBy,
+                    options.TimeGrid,
+                    options.ScopePosition,
+                    options.ScopeRatio,
+                    options.Fps,
+                    options.FpsDenominator,
+                    "not-rendered",
+                    options.Analysis ? "requested" : "none",
+                    options.PrintLayout,
+                    options.LayoutJson);
                 if (!options.Quiet)
                     Console.Error.WriteLine($"stems: {scopeDir}");
+                progress?.OutputCreated(scopeDir);
+                progress?.Completed(scopeDir, totalWatch.Elapsed.TotalSeconds);
                 return 0;
             }
 
-            var corrRunner = new CorrscopeRunner(
-                options.ExternalToolTimeoutMinutes,
-                options.CorrscopePath);
+            CorrscopeRunner corrRunner = useCorrscope
+                ? new CorrscopeRunner(
+                    options.ExternalToolTimeoutMinutes,
+                    options.CorrscopePath)
+                : null;
 
             if (!options.StemsOnly)
             {
+                if (options.Renderer == VisualizationRendererMode.Auto)
+                {
+                    VisualizationGpuProbe gpu = VisualizationGpuSupport.Probe();
+                    options.Renderer = gpu.Supported
+                        ? VisualizationRendererMode.Gpu
+                        : VisualizationRendererMode.Cpu;
+                }
                 var panelRenderer = new PanelOverlayRenderer(
                     timeline,
                     new PanelOverlayRenderer.Options
@@ -228,8 +326,16 @@ internal static class VgmVisualizeCommand
                         Height = options.Height,
                         FpsNumerator = options.Fps,
                         FpsDenominator = options.FpsDenominator,
-                        PastSeconds = 0.75,
-                        FutureSeconds = 2.25,
+                        PastSeconds = options.PastSeconds,
+                        FutureSeconds = options.FutureSeconds,
+                        RollZoom = options.RollZoom,
+                        ScopeHeight = options.ScopeHeight,
+                        TimelineHeight = options.TimelineHeight,
+                        ScopeRatio = options.ScopeRatio,
+                        ScopePosition = options.ScopePosition,
+                        Channels = options.Channels,
+                        GroupBy = options.GroupBy,
+                        TimeGrid = options.TimeGrid,
                         Presentation = new VisualizationPresentation(
                             string.IsNullOrWhiteSpace(options.Title)
                                 ? Path.GetFileNameWithoutExtension(input.Name)
@@ -237,8 +343,21 @@ internal static class VgmVisualizeCommand
                             options.Subtitle ?? "",
                             options.Credits ?? ""),
                         FontPath = options.FontPath,
+                        PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic
+                            && layoutMode != VisualizationLayoutMode.DiagnosticV2,
                         Effects = options.Effects,
                         NoteColor = options.NoteColor,
+                        Palette = options.Palette,
+                        MotionBlurSamples = options.MotionBlurSamples,
+                        Renderer = options.Renderer,
+                        LayoutMode = layoutMode,
+                        AnalysisOverlay = analysisOutput is null
+                            || options.AnalysisOverlay == "none"
+                            ? AnalysisOverlayScene.Empty
+                            : AnalysisOverlaySceneBuilder.Build(
+                                analysisOutput,
+                                timeline,
+                                allowTentative: options.AnalysisOverlay is "standard" or "full"),
                     });
                 composer = new SinglePassComposer(
                     options.FfmpegPath,
@@ -248,99 +367,145 @@ internal static class VgmVisualizeCommand
                         VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                         VideoCrf = options.FinalQuality ? "18" : "20",
                         Encoder = options.Encoder,
+                        Renderer = options.Renderer,
                     });
                 if (!composer.IsAvailable)
                 {
+                    progress?.Failed("ffmpeg not found", ValidationCodes.FfmpegNotFound, 4);
                     Console.Error.WriteLine("error: ffmpeg not found (install FFmpeg or pass --ffmpeg PATH)");
                     return 4;
                 }
-                if (options.Encoder == VideoEncoder.Nvenc && !composer.SupportsEncoder(VideoEncoder.Nvenc))
+                options.Renderer = composer.EffectiveRenderer;
+                EncoderProbeResult nvencProbe = options.Encoder == VideoEncoder.Nvenc
+                    ? new FfmpegVideoEncoderProbe(composer.FfmpegPath,
+                        TimeSpan.FromMinutes(options.ExternalToolTimeoutMinutes)).Probe(VideoEncoder.Nvenc)
+                    : null;
+                if (nvencProbe is { Supported: false })
                 {
-                    Console.Error.WriteLine("error: --encoder nvenc requested but FFmpeg does not expose h264_nvenc");
+                    progress?.Failed(
+                        $"--encoder nvenc failed: {nvencProbe.Diagnostics}",
+                        ValidationCodes.EncoderUnavailable, 4);
+                    Console.Error.WriteLine($"error: --encoder nvenc failed ({nvencProbe.FailureClassification}): {nvencProbe.Diagnostics}");
                     return 4;
                 }
                 options.Encoder = composer.EffectiveEncoder;
+                progress?.EncoderSelected(options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264");
 
+                // Emit the plan only after the effective encoder is known.
+                // Generic VGM paths resolve the encoder later than capture and
+                // scope planning; reporting the requested auto value would
+                // make --print-layout lie about the actual output.
+                VisualizationPlanOutput.Emit(
+                    timeline,
+                    topology,
+                    layout,
+                    options.LayoutMode,
+                    options.Channels,
+                    options.GroupBy,
+                    options.TimeGrid,
+                    options.ScopePosition,
+                    options.ScopeRatio,
+                    options.Fps,
+                    options.FpsDenominator,
+                    options.Encoder.ToString(),
+                    options.Analysis ? "requested" : "none",
+                    options.PrintLayout,
+                    options.LayoutJson);
+
+                progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.ComposingFrames));
                 Stopwatch compositionWatch = Stopwatch.StartNew();
-                if (!corrRunner.IsAvailable)
+                try
                 {
-                    Console.Error.WriteLine(
-                        "warning: corr not found; using the internal master waveform " +
-                        "(install Corrscope or pass --corrscope PATH)");
-                    composer.ComposeMasterOnly(audioPath, videoPath, panelRenderer, includeWaveform: true);
-                }
-                else
-                {
-                    string bridgePath = Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py");
-                    if (!File.Exists(bridgePath))
+                    if (!useCorrscope)
                     {
-                        Console.Error.WriteLine($"error: bridge script not found: {bridgePath}");
-                        return 7;
+                        composer.ComposeMasterOnly(
+                            audioPath,
+                            videoPath,
+                            panelRenderer,
+                            includeWaveform: false);
                     }
+                    else if (!corrRunner.IsAvailable)
+                    {
+                        if (scopePlan.Support == ScopeSupport.Channel && options.ScopeModeExplicit)
+                        {
+                            progress?.Failed(
+                                "channel scopes require Corrscope",
+                                ValidationCodes.CorrscopeNotFound, 4);
+                            Console.Error.WriteLine(
+                                "error: channel scopes require Corrscope " +
+                                "(install Corrscope or pass --corrscope PATH)");
+                            return 4;
+                        }
+                        Console.Error.WriteLine(
+                            "warning: corr not found; using the internal master waveform " +
+                            "(install Corrscope or pass --corrscope PATH)");
+                        composer.ComposeMasterOnly(audioPath, videoPath, panelRenderer, includeWaveform: true);
+                    }
+                    else
+                    {
+                        string bridgePath = Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py");
+                        if (!File.Exists(bridgePath))
+                        {
+                            progress?.Failed(
+                                $"bridge script not found: {bridgePath}",
+                                ValidationCodes.CaptureFailed, 7);
+                            Console.Error.WriteLine($"error: bridge script not found: {bridgePath}");
+                            return 7;
+                        }
                         string pythonPath = CorrscopeRunner.ResolvePythonPath(corrRunner.CorrPath);
-                    Process corrProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
-                    composer.Compose(corrProcess, audioPath, videoPath, panelRenderer);
+                        Process corrProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
+                        composer.Compose(corrProcess, audioPath, videoPath, panelRenderer);
+                    }
+                }
+                catch (Exception ex) when (encoderFallback.ShouldRetry(requestedEncoder, ex))
+                {
+                    progress?.Warning("NVENC runtime failure; retrying with libx264");
+                    Console.Error.WriteLine("warning: NVENC runtime failure; retrying with libx264");
+                    options.Encoder = VideoEncoder.LibX264;
+                    composer = new SinglePassComposer(options.FfmpegPath, new SinglePassComposer.Options
+                    {
+                        TimeoutMinutes = options.ExternalToolTimeoutMinutes,
+                        VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
+                        VideoCrf = options.FinalQuality ? "18" : "20",
+                        Encoder = VideoEncoder.LibX264,
+                        Renderer = options.Renderer,
+                    });
+                    if (!useCorrscope)
+                        composer.ComposeMasterOnly(audioPath, videoPath, panelRenderer, includeWaveform: false);
+                    else if (!corrRunner.IsAvailable)
+                        composer.ComposeMasterOnly(audioPath, videoPath, panelRenderer, includeWaveform: true);
+                    else
+                    {
+                        string pythonPath = CorrscopeRunner.ResolvePythonPath(corrRunner.CorrPath);
+                        Process retryProcess = corrRunner.StartRawFrames(
+                            pythonPath, Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py"), yamlPath);
+                        composer.Compose(retryProcess, audioPath, videoPath, panelRenderer);
+                    }
                 }
                 compositionWatch.Stop();
                 compositionSeconds = compositionWatch.Elapsed.TotalSeconds;
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.ComposingFrames), compositionSeconds);
             }
 
-            if (!options.Quiet)
-            {
-                Console.WriteLine($"Timeline written to: {timelinePath}");
-                Console.WriteLine($"Master WAV written to: {audioPath}");
-                if (!options.StemsOnly)
-                    Console.WriteLine(
-                        $"Visualization video written to: {videoPath} " +
-                        $"(scope: corrscope {(hasRealStems ? "channels" : "master")}, strategy: {scopePlan.Strategy})");
-                Console.WriteLine($"Devices: {timeline.Devices.Count}  Notes: {timeline.Notes.Count}");
-                foreach (string warning in timeline.Warnings)
-                    Console.Error.WriteLine($"warning: {warning}");
-            }
-
-            if (options.Json)
-            {
-                totalWatch.Stop();
-                double trackDurationSeconds = scopeResult.SampleRate > 0
-                    ? scopeResult.MasterSamples / (double)scopeResult.SampleRate : 0;
-                double effectiveFps = compositionSeconds > 0
-                    ? Math.Ceiling(scopeResult.MasterSamples * options.Fps /
-                        (double)scopeResult.SampleRate) / compositionSeconds : 0;
-                Console.WriteLine(JsonSerializer.Serialize(new
-                {
-                    success = true,
-                    backend = backend.Id,
-                    availability = probe.Availability.ToString().ToLowerInvariant(),
-                    portable = probe.Portable,
-                    timeline = timelinePath,
-                    audio = audioPath,
-                    video = options.StemsOnly ? null : videoPath,
-                    sampleRate = timeline.SampleRate,
-                    samples = timeline.EndSample,
-                    devices = timeline.Devices.Count,
-                    notes = timeline.Notes.Count,
-                    encoder = options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264",
-                    outputSizeBytes = !options.StemsOnly && File.Exists(videoPath)
-                        ? new FileInfo(videoPath).Length : 0,
-                    trackDurationSeconds,
-                    effectiveOutputFps = effectiveFps,
-                    realTimeFactor = trackDurationSeconds > 0 && compositionSeconds > 0
-                        ? trackDurationSeconds / compositionSeconds : 0,
-                    stages = new
-                    {
-                        timelineCaptureSeconds = captureSeconds,
-                        stemExportSeconds = stemRenderSeconds,
-                        energyAnalysisSeconds = 0,
-                        scopeOverlayEncodeSeconds = compositionSeconds,
-                        overallSeconds = totalWatch.Elapsed.TotalSeconds,
-                        corrscopeWaitSeconds = composer?.LastMetrics.CorrscopeWaitSeconds ?? 0,
-                        overlayCpuSeconds = composer?.LastMetrics.OverlayCpuSeconds ?? 0,
-                        ffmpegWriteWaitSeconds = composer?.LastMetrics.FfmpegWriteWaitSeconds ?? 0,
-                    },
-                    scope = scopePlan,
-                    warnings = timeline.Warnings,
-                }, new JsonSerializerOptions { WriteIndented = true }));
-            }
+            totalWatch.Stop();
+            progress?.OutputCreated(videoPath);
+            VisualizationResultWriter.Write(
+                VisualizationResultBuilder.BuildGeneric(
+                    options, workspace, timeline, scopeResult,
+                    backend: backend.Id,
+                    availability: probe.Availability.ToString().ToLowerInvariant(),
+                    portable: probe.Portable,
+                    encoder: options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264",
+                    encoderFallback: encoderFallback.Retried
+                        ? new EncoderFallbackResult("composition", encoderFallback.Reason, encoderFallback.Diagnostics, Retried: true)
+                        : null,
+                    captureSeconds, stemRenderSeconds, compositionSeconds,
+                    backendResolutionSeconds: captureSeconds, totalWatch.Elapsed.TotalSeconds,
+                    composeMetrics: composer?.LastMetrics, warnings: timeline.Warnings),
+                humanReadable: true, json: options.Json, quiet: options.Quiet,
+                output: ProgressJsonlWriter.HumanOutput(progress));
+            progress?.Completed(videoPath, totalWatch.Elapsed.TotalSeconds);
             return 0;
         }
         catch (OperationCanceledException)
@@ -350,168 +515,45 @@ internal static class VgmVisualizeCommand
         }
         catch (Exception ex)
         {
+            progress?.Failed(ex.Message, ValidationCodes.CaptureFailed, 7);
             Console.Error.WriteLine($"error: visualization capture failed: {ex.Message}");
             return 7;
         }
     }
 
-    internal static Options Parse(string[] args)
+    /// <summary>
+    /// Master-fallback grid filling: when no isolated stems exist, publish one
+    /// master channel per panel so every Corrscope grid cell carries the master
+    /// waveform and the overlay scope cells stay aligned.
+    /// </summary>
+    private static ScopeRenderer.ScopeResult ExpandMasterToPanels(
+        FileInfo input,
+        VisualizationWorkspace workspace,
+        VisualizeOptions options,
+        ScopeRenderer.ScopeResult scopeResult,
+        int panelCount)
     {
-        var options = new Options();
-        var reader = new ArgumentReader(args);
-        while (reader.HasMore)
+        var result = new ScopeRenderer.ScopeResult
         {
-            if (reader.TryReadOption(out string name, out string value))
-            {
-                if (RenderOptionsParser.TryParse(ref reader, name, options))
-                    continue;
-                switch (name)
-                {
-                    case "-o":
-                    case "--output": options.OutputDir = reader.RequireValue(name); break;
-                    case "--overwrite": options.Overwrite = true; break;
-                    case "--quiet": options.Quiet = true; break;
-                    case "--json": options.Json = true; break;
-                    case "--stems-only": options.StemsOnly = true; break;
-                    case "--spc-stems": options.SpcStems = true; break;
-                    case "--video": options.VideoPath = reader.RequireValue(name); break;
-                    case "--corrscope": options.CorrscopePath = reader.RequireValue(name); break;
-                    case "--ffmpeg": options.FfmpegPath = reader.RequireValue(name); break;
-                    case "--width": options.Width = reader.ReadInt(name); options.WidthExplicit = true; break;
-                    case "--height": options.Height = reader.ReadInt(name); options.HeightExplicit = true; break;
-                    case "--fps": options.Fps = reader.ReadInt(name); options.FpsExplicit = true; break;
-                    case "--fps-denominator": options.FpsDenominator = reader.ReadInt(name); break;
-                    case "--tool-timeout-minutes": options.ExternalToolTimeoutMinutes = reader.ReadInt(name); break;
-                    case "--title": options.Title = reader.RequireValue(name); break;
-                    case "--subtitle": options.Subtitle = reader.RequireValue(name); break;
-                    case "--credits": options.Credits = reader.RequireValue(name); break;
-                    case "--font": options.FontPath = reader.RequireValue(name); break;
-                    case "--duration": options.MaxDuration = reader.ReadDouble(name); break;
-                    case "--spc-pitch":
-                        string pitch = reader.RequireValue(name).Trim().ToLowerInvariant();
-                        options.SpcPitchMode = pitch switch
-                        {
-                            "estimate" => SpcPitchMode.Estimate,
-                            "relative" => SpcPitchMode.Relative,
-                            _ => throw new ArgumentException(
-                                $"unknown spc pitch mode '{pitch}' (expected estimate or relative)"),
-                        };
-                        break;
-                    case "--final-quality":
-                        options.FinalQuality = true;
-                        if (!options.WidthExplicit) options.Width = 1920;
-                        if (!options.HeightExplicit) options.Height = 1080;
-                        if (!options.FpsExplicit) options.Fps = 60;
-                        break;
-                    case "--encoder":
-                        options.Encoder = ParseEncoder(reader.RequireValue(name));
-                        break;
-                    case "--effects":
-                        options.Effects = ParseEffects(reader.RequireValue(name));
-                        break;
-                    case "--note-color":
-                        options.NoteColor = ParseNoteColor(reader.RequireValue(name));
-                        break;
-                    case "--backend":
-                        string backend = reader.RequireValue(name).ToLowerInvariant();
-                        if (backend is not ("auto" or "fmp" or "mdplayer"))
-                            throw new ArgumentException($"unknown backend '{backend}'");
-                        options.Backend = backend;
-                        break;
-                    case "--scopes":
-                        string scopes = reader.RequireValue(name).ToLowerInvariant();
-                        if (scopes is not ("auto" or "master" or "device" or "channel" or "off"))
-                            throw new ArgumentException($"unknown scope mode '{scopes}'");
-                        options.ScopeMode = scopes;
-                        break;
-                    default: throw new ArgumentException($"unknown option {name}");
-                }
-            }
-            else
-            {
-                string positional = reader.Next();
-                if (positional == "--") continue;
-                if (options.Input != null)
-                    throw new ArgumentException($"unexpected argument {positional}");
-                options.Input = positional;
-            }
-        }
-        if (options.SampleRate <= 0 || options.Loops <= 0
-            || options.Fade < 0 || options.Tail < 0 || options.MaxDuration <= 0
-            || options.Width < 480 || options.Height < 270
-            || options.Fps <= 0 || options.FpsDenominator <= 0
-            || options.ExternalToolTimeoutMinutes <= 0)
-        {
-            throw new ArgumentException("invalid visualization numeric option");
-        }
-        return options;
-    }
-
-    private static VideoEncoder ParseEncoder(string raw) =>
-        raw?.Trim().ToLowerInvariant() switch
-        {
-            "auto" => VideoEncoder.Auto,
-            "libx264" or "x264" or "software" or "cpu" => VideoEncoder.LibX264,
-            "nvenc" or "h264_nvenc" or "gpu" or "hardware" => VideoEncoder.Nvenc,
-            _ => throw new ArgumentException($"unknown encoder '{raw}' (expected libx264 or nvenc)"),
+            Success = true,
+            InputPath = scopeResult.InputPath,
+            OutputDir = workspace.ScopeDir,
+            MasterSamples = scopeResult.MasterSamples,
+            SampleRate = scopeResult.SampleRate,
+            CompletionReason = scopeResult.CompletionReason,
         };
-
-    private static EffectsMode ParseEffects(string raw) => raw?.Trim().ToLowerInvariant() switch
-    {
-        "all" => EffectsMode.All,
-        "none" => EffectsMode.None,
-        _ => throw new ArgumentException($"unknown effects mode '{raw}' (expected all or none)"),
-    };
-
-    private static NoteColorMode ParseNoteColor(string raw) => raw?.Trim().ToLowerInvariant() switch
-    {
-        "instrument" => NoteColorMode.Instrument,
-        "pitch" => NoteColorMode.Pitch,
-        "channel" => NoteColorMode.Channel,
-        _ => throw new ArgumentException($"unknown note-color mode '{raw}' (expected instrument, pitch, or channel)"),
-    };
-
-    internal sealed class Options : RenderSettings
-    {
-        public string Input { get; set; }
-        public string OutputDir { get; set; }
-        public bool Overwrite { get; set; }
-        public bool Quiet { get; set; }
-        public bool Json { get; set; }
-        public bool StemsOnly { get; set; }
-
-        /// <summary>
-        /// PR 6: also export SPC per-voice mono stems (voice-01.wav .. voice-08.wav)
-        /// and the stereo echo stem (echo.wav) next to master.wav. Only applies
-        /// when the selected backend is the SPC backend.
-        /// </summary>
-        public bool SpcStems { get; set; }
-        public string VideoPath { get; set; }
-        public string CorrscopePath { get; set; }
-        public string FfmpegPath { get; set; }
-        public int Width { get; set; } = 1440;
-        public int Height { get; set; } = 720;
-        public int Fps { get; set; } = 30;
-        public int FpsDenominator { get; set; } = 1;
-        public int ExternalToolTimeoutMinutes { get; set; } = 60;
-        public string Title { get; set; }
-        public string Subtitle { get; set; }
-        public string Credits { get; set; }
-        public string FontPath { get; set; }
-        public bool FinalQuality { get; set; }
-        public VideoEncoder Encoder { get; set; } = VideoEncoder.Auto;
-        public EffectsMode Effects { get; set; } = EffectsMode.All;
-        public NoteColorMode NoteColor { get; set; } = NoteColorMode.Instrument;
-        public string ScopeMode { get; set; } = "auto";
-        public string Backend { get; set; } = "auto";
-        /// <summary>
-        /// SPC diagnostic option (§25.3): Estimate (default) runs the BRR root
-        /// estimator; Relative skips it so instruments keep only relative S-DSP
-        /// pitch. Ignored by non-SPC backends; flows through PlaybackOptions.
-        /// </summary>
-        public SpcPitchMode SpcPitchMode { get; set; } = SpcPitchMode.Estimate;
-        public bool WidthExplicit { get; set; }
-        public bool HeightExplicit { get; set; }
-        public bool FpsExplicit { get; set; }
+        for (int panel = 0; panel < panelCount; panel++)
+        {
+            result.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = "master",
+                Label = "Master",
+                WavPath = workspace.MasterAudioPath,
+                RenderedSamples = scopeResult.MasterSamples,
+                Channels = 2,
+                Success = true,
+            });
+        }
+        return result;
     }
 }

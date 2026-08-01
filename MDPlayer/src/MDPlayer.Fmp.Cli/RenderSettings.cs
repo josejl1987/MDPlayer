@@ -7,6 +7,7 @@ namespace Fmp.Cli;
 internal class RenderSettings
 {
     public string FmpCom { get; set; }
+    public bool FmpComExplicit { get; set; }
     public string AssetsDir { get; set; }
     public List<string> SearchPaths { get; } = [];
     public int SampleRate { get; set; } = 44_100;
@@ -22,6 +23,7 @@ internal class RenderSettings
     /// [-60, +12]. See <see cref="Fmp.Core.Audio.Mdsound.MdsoundFmpChipSink.ToMdsoundVolume"/>.
     /// </summary>
     public double SsgGainDb { get; set; }
+    public bool SsgGainExplicit { get; set; }
 
     /// <summary>Optional explicit duration override (render command only).</summary>
     public double? Duration { get; set; }
@@ -31,6 +33,24 @@ internal class RenderSettings
 
     /// <summary>Optional register-trace output path (render command only).</summary>
     public string TracePath { get; set; }
+
+    public void ValidateCommon()
+    {
+        if (SampleRate <= 0)
+            throw new ArgumentException("--sample-rate must be positive");
+        if (Loops <= 0)
+            throw new ArgumentException("--loops must be positive");
+        if (!double.IsFinite(Fade) || Fade < 0)
+            throw new ArgumentException("--fade must be finite and non-negative");
+        if (!double.IsFinite(Tail) || Tail < 0)
+            throw new ArgumentException("--tail must be finite and non-negative");
+        if (!double.IsFinite(MaxDuration) || MaxDuration <= 0)
+            throw new ArgumentException("--max-duration must be finite and positive");
+        if (Duration.HasValue && (!double.IsFinite(Duration.Value) || Duration.Value <= 0))
+            throw new ArgumentException("--duration must be finite and positive");
+        if (Timeout.HasValue && (!double.IsFinite(Timeout.Value) || Timeout.Value <= 0))
+            throw new ArgumentException("--timeout must be finite and positive");
+    }
 }
 
 /// <summary>
@@ -45,7 +65,10 @@ internal static class RenderOptionsParser
     {
         switch (name)
         {
-            case "--fmp-com": settings.FmpCom = reader.RequireValue(name); return true;
+            case "--fmp-com":
+                settings.FmpCom = reader.RequireValue(name);
+                settings.FmpComExplicit = true;
+                return true;
             case "--assets-dir": settings.AssetsDir = reader.RequireValue(name); return true;
             case "-I":
             case "--search-path": settings.SearchPaths.Add(reader.RequireValue(name)); return true;
@@ -56,6 +79,7 @@ internal static class RenderOptionsParser
             case "--max-duration": settings.MaxDuration = reader.ReadDouble(name); return true;
             case "--ssg-gain-db":
                 settings.SsgGainDb = reader.ReadDouble(name);
+                settings.SsgGainExplicit = true;
                 if (settings.SsgGainDb is < -60 or > 12)
                     throw new ArgumentException("--ssg-gain-db must be between -60 and +12");
                 return true;

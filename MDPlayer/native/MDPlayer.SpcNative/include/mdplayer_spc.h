@@ -52,13 +52,12 @@ enum
     MDP_SPC_ERR_SESSION_CLOSED = -6
 };
 
-/* Per-block capture events (PR 3, spec §9.1). After every render block each
- * voice's effective state is compared with the previous block and transition
- * events are appended to the caller's buffer. No per-sample callbacks.
- * Events are ordered by channel (0..7), then by the order below. */
+/* In-block capture events (PR 3, spec §9.1). Events are appended in DSP
+ * execution order and carry an absolute sample position in mdp_spc_event.
+ * The pitch tap is sampled at a controlled cadence rather than once per block. */
 enum
 {
-    MDP_SPC_EVENT_KEY_ON            = 1, /* inactive -> active            param0 = source_number        */
+    MDP_SPC_EVENT_KEY_ON            = 1, /* inactive -> active            param0 = source_number, param1 = effective_pitch */
     MDP_SPC_EVENT_RELEASE_START     = 2, /* envelope mode -> release      param0 = envelope_level      */
     MDP_SPC_EVENT_VOICE_END         = 3, /* active -> inactive            param0 = envelope_level      */
     MDP_SPC_EVENT_SOURCE_CHANGED    = 4, /* param0 = new source_number, param1 = old source_number      */
@@ -66,7 +65,8 @@ enum
     MDP_SPC_EVENT_VOLUME_CHANGED    = 6, /* param0 = volume_l, param1 = volume_r                       */
     MDP_SPC_EVENT_NOISE_CHANGED     = 7, /* param0 = noise_enabled                                    */
     MDP_SPC_EVENT_PITCH_MOD_CHANGED = 8, /* param0 = pitch_mod_enabled                                */
-    MDP_SPC_EVENT_ECHO_SEND_CHANGED = 9  /* param0 = echo_send_enabled                                */
+    MDP_SPC_EVENT_ECHO_SEND_CHANGED = 9, /* param0 = echo_send_enabled                                */
+    MDP_SPC_EVENT_ENVELOPE_CHANGED  = 10 /* param0 = envelope mode, param1 = envelope level        */
 };
 
 /* Envelope modes reported in mdp_spc_voice_state.envelope_mode (values match
@@ -82,7 +82,7 @@ enum
 
 typedef struct mdp_spc_open_options
 {
-    int event_capacity;   /* capture-event capacity per render block (0 = default 64; PR 3+) */
+    int event_capacity;   /* reserved, currently ignored: the per-call event_capacity is the only bound on the events buffer (the ABI has no buffer-length field, so a default cannot be applied safely) */
     int enable_voice_pcm; /* 1 = also fill per-voice PCM buffers (PR 6) */
     int enable_echo_pcm;  /* 1 = also fill echo-buffer PCM (PR 6) */
     int accurate_dsp;     /* 1 = accurate DSP mode (Snes_Spc is always accurate) */
@@ -95,9 +95,9 @@ typedef struct mdp_spc_audio_buffers
     int16_t* echo;                          /* echo-return PCM, stereo, frames * 2 samples (PR 6) */
 } mdp_spc_audio_buffers;
 
-/* Capture event (PR 3). frame = the sample-frame position (32 kHz) of the
- * block start in which the transition was first detected (per-block
- * granularity, spec §9.1). */
+/* Capture event (PR 3/PR 11). frame is the absolute 32 kHz sample-frame
+ * position of the in-DSP transition, including its offset within the render
+ * block. */
 typedef struct mdp_spc_event
 {
     int64_t frame;    /* sample-frame position (32 kHz) */
@@ -156,8 +156,10 @@ int mdp_spc_open(
     char* error, size_t error_size);     /* optional diagnostics buffer */
 
 /*
- * Renders up to requested_frames stereo frames (256..4096, default block
- * 1024) at 32,000 Hz into audio_buffers.master_stereo. events may be NULL.
+ * Renders up to requested_frames stereo frames (256..4096, must be even,
+ * default block 1024) at 32,000 Hz into audio_buffers.master_stereo.
+ * events may be NULL, and event_capacity may be 0 (no events written). The
+ * per-call event_capacity is the sole bound on writes to the events buffer.
  *
  * PR 3: after each rendered block the voice observer reads the S-DSP state
  * (read-only, see spc_capture.h) — it never writes to the emulator, so the

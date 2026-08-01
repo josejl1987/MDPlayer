@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using Fmp.Core.Metadata;
 using Fmp.Core.Visualization;
 
@@ -24,14 +25,16 @@ internal static class OverlaySceneBuilder
         OverlayLayout layout,
         VisualizationMetadata metadata = null,
         double samplesPerFrame = 0,
-        NoteColorMode noteColorMode = NoteColorMode.Instrument)
+        NoteColorMode noteColorMode = NoteColorMode.Instrument,
+        VisualizationPalette palette = null)
         => Build(
             timeline,
             layout,
             VisualizationTopologyBuilder.Build(timeline),
             metadata,
             samplesPerFrame,
-            noteColorMode);
+            noteColorMode,
+            palette);
 
     public static OverlayScene Build(
         VisualizationTimeline timeline,
@@ -39,43 +42,73 @@ internal static class OverlaySceneBuilder
         VisualizationTopology topology,
         VisualizationMetadata metadata = null,
         double samplesPerFrame = 0,
-        NoteColorMode noteColorMode = NoteColorMode.Instrument)
+        NoteColorMode noteColorMode = NoteColorMode.Instrument,
+        VisualizationPalette palette = null)
     {
         ArgumentNullException.ThrowIfNull(timeline);
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(topology);
+        palette ??= VisualizationPalette.Default;
+
+        timeline = VisualizationTimelineCompatibility.Upgrade(timeline);
 
         var instrumentById = timeline.Instruments.ToDictionary(x => x.Id, StringComparer.Ordinal);
+        var waveformById = timeline.Waveforms.ToDictionary(value => value.Id, StringComparer.Ordinal);
+        var sampleById = timeline.Samples.ToDictionary(value => value.Id, StringComparer.Ordinal);
+        VisualizationTrackDescriptor[] descriptors = topology.Panels
+            .Select(panel => CreateTrackDescriptor(panel, timeline))
+            .ToArray();
+        VisualizationSemanticScene semantic = VisualizationSemanticSceneBuilder.Build(
+            timeline,
+            descriptors);
+        long[] compositionOnsets = BuildCompositionOnsets(timeline);
         var panels = new PreparedPanel[topology.Panels.Count];
         for (int index = 0; index < panels.Length; index++)
         {
             VisualizationPanel topologyPanel = topology.Panels[index];
             string id = topologyPanel.Id;
             var kind = topologyPanel.Kind;
+            VisualizationTrackDescriptor track = descriptors[index];
             double pitchTolerance = PitchToleranceSemitones(layout, index, kind);
+            IEnumerable<NoteEvent> sourceNotes = timeline.Notes
+                .Where(n => topologyPanel.VoiceIds.Contains(n.ChannelId, StringComparer.Ordinal));
+            if (track.PitchSystem is not PitchCoordinateSystem.None
+                and not PitchCoordinateSystem.AbsoluteMidi)
+                sourceNotes = sourceNotes.Select(note => ConvertPitchCoordinates(note, track));
 
-            var mainNotes = (kind is PreparedPanelKind.Pitched or PreparedPanelKind.Fm3 or PreparedPanelKind.Ssg)
+            var mainNotes = (kind is PreparedPanelKind.Pitched or PreparedPanelKind.Fm3 or PreparedPanelKind.Ssg
+                    or PreparedPanelKind.Wavetable or PreparedPanelKind.PcmVoice or PreparedPanelKind.Noise)
                 ? ToPreparedNotes(
-                    timeline.Notes.Where(n => topologyPanel.VoiceIds.Contains(n.ChannelId, StringComparer.Ordinal)),
+                    sourceNotes,
                     pitchTolerance,
                     samplesPerFrame,
                     timeline.SampleRate,
+                    compositionOnsets,
                     index,
                     noteColorMode,
-                    instrumentById)
+                    instrumentById,
+                    palette)
                 : Array.Empty<PreparedNote>();
 
             var operatorNotes = kind == PreparedPanelKind.Fm3
                 ? Enumerable.Range(0, 4).Select(op =>
                     ToPreparedNotes(
-                        timeline.Notes.Where(n => topologyPanel.OperatorVoiceIds.Contains(n.ChannelId, StringComparer.Ordinal)
-                            && n.ChannelId.EndsWith($".{op + 1}", StringComparison.Ordinal)),
+                        ConvertPitchCoordinatesIfNeeded(
+                            topologyPanel.OperatorVoiceIds.Count > op
+                                ? timeline.Notes.Where(n => string.Equals(
+                                    n.ChannelId,
+                                    topologyPanel.OperatorVoiceIds[op],
+                                    StringComparison.Ordinal))
+                                : Enumerable.Empty<NoteEvent>(),
+                            track),
                         pitchTolerance,
                         samplesPerFrame,
                         timeline.SampleRate,
+                        compositionOnsets,
                         index,
                         noteColorMode,
-                        instrumentById)
+                        instrumentById,
+                        palette)
                 ).ToArray()
                 : Array.Empty<PreparedNote[]>();
 
@@ -86,8 +119,7 @@ internal static class OverlaySceneBuilder
             var rhythm = kind == PreparedPanelKind.Rhythm
                 ? timeline.Rhythm
                     .Where(e => topologyPanel.VoiceIds.Any(id =>
-                        string.Equals(e.ChannelId, id, StringComparison.Ordinal)
-                        || e.ChannelId.StartsWith(id + ".", StringComparison.Ordinal)))
+                        VisualizationTimelineCompatibility.RhythmBelongsToVoice(timeline, e, id)))
                     .OrderBy(e => e.SamplePosition)
                     .ThenBy(e => e.Voice, StringComparer.Ordinal)
                     .Select(e => new PreparedRhythmEvent
@@ -100,35 +132,109 @@ internal static class OverlaySceneBuilder
                     .ToArray()
                 : Array.Empty<PreparedRhythmEvent>();
 
-            Ppz8Event[] ppz8 = string.Equals(id, "ppz8.0", StringComparison.Ordinal)
-                ? timeline.Ppz8
-                    .Where(value => value.EndSample > value.StartSample)
-                    .OrderBy(value => value.StartSample)
-                    .ThenBy(value => value.Channel)
-                    .ToArray()
-                : Array.Empty<Ppz8Event>();
+            string[] voiceIds = topologyPanel.VoiceIds.Concat(topologyPanel.OperatorVoiceIds).ToArray();
+            HashSet<string> voiceIdSet = voiceIds.ToHashSet(StringComparer.Ordinal);
+            WaveformChangeEvent[] waveformChanges = timeline.WaveformChanges
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.SamplePosition >= timeline.StartSample
+                    && value.SamplePosition <= timeline.EndSample)
+                .OrderBy(value => value.SamplePosition)
+                .ThenBy(value => value.WaveformId, StringComparer.Ordinal)
+                .ToArray();
+            WaveformDefinition[] waveforms = waveformChanges
+                .Where(value => waveformById.ContainsKey(value.WaveformId))
+                .Select(value => waveformById[value.WaveformId])
+                .DistinctBy(value => value.Id, StringComparer.Ordinal)
+                .OrderBy(value => value.Id, StringComparer.Ordinal)
+                .ToArray();
 
-            AdpcmBEvent[] adpcmB = id.EndsWith(".adpcm-b", StringComparison.Ordinal)
-                ? timeline.AdpcmB
-                    .Where(value => value.EndSample > value.StartSample)
-                    .OrderBy(value => value.StartSample)
-                    .ToArray()
-                : Array.Empty<AdpcmBEvent>();
+            SamplePlaybackEvent[] samplePlayback = timeline.SamplePlayback
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.EndSample > timeline.StartSample
+                    && value.StartSample < timeline.EndSample
+                    && value.EndSample > value.StartSample)
+                .OrderBy(value => value.StartSample)
+                .ThenBy(value => value.SampleId, StringComparer.Ordinal)
+                .ToArray();
+            SpcVoiceStateEvent[] spcVoiceStates = timeline.SpcVoiceStates
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.SamplePosition >= timeline.StartSample
+                    && value.SamplePosition <= timeline.EndSample)
+                .OrderBy(value => value.SamplePosition)
+                .ThenBy(value => value.State, StringComparer.Ordinal)
+                .ToArray();
+            SampleDefinition[] samples = samplePlayback
+                .Where(value => sampleById.ContainsKey(value.SampleId))
+                .Select(value => sampleById[value.SampleId])
+                .DistinctBy(value => value.Id, StringComparer.Ordinal)
+                .OrderBy(value => value.Id, StringComparer.Ordinal)
+                .ToArray();
+
+            NoiseStateEvent[] noise = timeline.NoiseStates
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.EndSample > timeline.StartSample
+                    && value.StartSample < timeline.EndSample
+                    && value.EndSample > value.StartSample)
+                .OrderBy(value => value.StartSample)
+                .ToArray();
+            string[] noiseLabels = noise.Select(FormatNoiseLabel).ToArray();
+            AggregateHitEvent[] aggregateHits = timeline.AggregateHits
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.SamplePosition >= timeline.StartSample
+                    && value.SamplePosition <= timeline.EndSample
+                    && (topologyPanel.AggregateSubVoiceIds.Count == 0
+                        || topologyPanel.AggregateSubVoiceIds.Contains(value.SubVoiceId, StringComparer.Ordinal)))
+                .OrderBy(value => value.SamplePosition)
+                .ThenBy(value => value.SubVoiceId, StringComparer.Ordinal)
+                .ToArray();
+            string[] aggregateSubVoices = (topologyPanel.AggregateSubVoiceIds.Count > 0
+                    ? topologyPanel.AggregateSubVoiceIds
+                    : aggregateHits.Select(value => value.SubVoiceId))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .Take(16)
+                .ToArray();
+            var aggregateLabels = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (string subVoice in aggregateSubVoices)
+            {
+                if (topologyPanel.AggregateSubVoiceLabels.TryGetValue(subVoice, out string label)
+                    && !string.IsNullOrWhiteSpace(label))
+                {
+                    aggregateLabels[subVoice] = label;
+                    continue;
+                }
+
+                aggregateLabels[subVoice] = aggregateHits
+                    .Where(value => value.SubVoiceId == subVoice)
+                    .Select(value => value.Label)
+                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? subVoice;
+            }
 
             // Compute pitch range from visible notes.
             var (minMidi, maxMidi) = ComputePitchRange(mainNotes);
+            if (track.Kind == VisualizationTrackKind.Sample && mainNotes.Length > 0)
+            {
+                // Sample tracks remain event lanes when pitch is unknown, but
+                // a decoder-provided finite MIDI note is a valid absolute
+                // coordinate and may use the pitched sample presentation.
+                track = track with { PitchSystem = PitchCoordinateSystem.AbsoluteMidi };
+            }
 
             bool hasTrackEvents = kind switch
             {
                 PreparedPanelKind.Fm3 =>
                     mainNotes.Length > 0 ||
                     Array.Exists(operatorNotes, notes => notes.Length > 0),
-                PreparedPanelKind.Pitched or PreparedPanelKind.Ssg =>
+                PreparedPanelKind.Pitched or PreparedPanelKind.Ssg
+                    or PreparedPanelKind.Wavetable =>
                     mainNotes.Length > 0,
                 PreparedPanelKind.Rhythm =>
                     rhythm.Length > 0,
-                PreparedPanelKind.Placeholder =>
-                    ppz8.Length > 0 || adpcmB.Length > 0,
+                PreparedPanelKind.PcmVoice =>
+                    samplePlayback.Length > 0 || mainNotes.Length > 0,
+                PreparedPanelKind.Noise => noise.Length > 0 || mainNotes.Length > 0,
+                PreparedPanelKind.Aggregate => aggregateHits.Length > 0,
+                PreparedPanelKind.Placeholder => false,
                 _ => false,
             };
 
@@ -138,16 +244,39 @@ internal static class OverlaySceneBuilder
                 Id = id,
                 Label = topologyPanel.Label,
                 Kind = kind,
+                Content = topologyPanel.Content,
+                Schema = topologyPanel.Schema == PanelPresentationSchema.Unknown
+                    ? VisualizationTopologyBuilder.SchemaFor(kind)
+                    : topologyPanel.Schema,
+                Track = track,
+                Rows = topologyPanel.Rows.ToArray(),
                 MainNotes = mainNotes,
+                UsesSsgModes = mainNotes.Any(note => note.Mode is
+                    VisualizationNoteMode.SsgTone
+                    or VisualizationNoteMode.SsgToneNoise
+                    or VisualizationNoteMode.SsgNoise
+                    or VisualizationNoteMode.SsgEnvelopeTone
+                    or VisualizationNoteMode.SsgEnvelopeToneNoise
+                    or VisualizationNoteMode.SsgEnvelopeNoise),
                 InstrumentChanges = mainNotes.Where(note => note.HasInstrumentChange).ToArray(),
                 OperatorNotes = operatorNotes,
                 CameraNotes = cameraNotes,
                 Rhythm = rhythm,
-                Ppz8 = ppz8,
-                AdpcmB = adpcmB,
+                Waveforms = waveforms,
+                WaveformsById = waveformById.ToFrozenDictionary(StringComparer.Ordinal),
+                WaveformChanges = waveformChanges,
+                Samples = samples,
+                SamplesById = sampleById.ToFrozenDictionary(StringComparer.Ordinal),
+                SamplePlayback = samplePlayback,
+                SpcVoiceStates = spcVoiceStates,
+                Noise = noise,
+                NoiseLabels = noiseLabels,
+                AggregateHits = aggregateHits,
+                AggregateSubVoices = aggregateSubVoices,
+                AggregateLabels = aggregateLabels.ToFrozenDictionary(StringComparer.Ordinal),
                 MinMidi = minMidi,
                 MaxMidi = maxMidi,
-                Accent = InstrumentColorResolver.ResolveChannelAccent(index),
+                Accent = InstrumentColorResolver.ResolveChannelAccent(topologyPanel.Id),
                 HasTrackEvents = hasTrackEvents,
             };
         }
@@ -156,12 +285,235 @@ internal static class OverlaySceneBuilder
         {
             Layout = layout,
             Topology = topology,
+            Semantic = semantic,
             Panels = panels,
             Metadata = metadata ?? new VisualizationMetadata(),
             SampleRate = timeline.SampleRate,
             StartSample = timeline.StartSample,
             EndSample = timeline.EndSample,
         };
+    }
+
+    private static VisualizationTrackDescriptor CreateTrackDescriptor(
+        VisualizationPanel panel,
+        VisualizationTimeline timeline)
+    {
+        PanelPresentationSchema schema = panel.Schema == PanelPresentationSchema.Unknown
+            ? VisualizationTopologyBuilder.SchemaFor(panel.Kind)
+            : panel.Schema;
+        VisualizationTrackKind kind = schema switch
+        {
+            PanelPresentationSchema.PitchedLane => VisualizationTrackKind.Pitched,
+            PanelPresentationSchema.FmOperatorGroup => VisualizationTrackKind.FmOperatorGroup,
+            PanelPresentationSchema.NoiseLane => VisualizationTrackKind.Noise,
+            PanelPresentationSchema.PercussionRows => VisualizationTrackKind.Percussion,
+            PanelPresentationSchema.SampleLane => VisualizationTrackKind.Sample,
+            PanelPresentationSchema.WaveTableLane => VisualizationTrackKind.WaveTable,
+            PanelPresentationSchema.AggregateActivity => VisualizationTrackKind.AggregateActivity,
+            _ => VisualizationTrackKind.Unsupported,
+        };
+
+        PitchCoordinateSystem pitchSystem = kind is VisualizationTrackKind.Pitched
+            or VisualizationTrackKind.FmOperatorGroup
+            or VisualizationTrackKind.WaveTable
+            ? ResolvePitchSystem(panel, timeline)
+            : PitchCoordinateSystem.None;
+        VisualizationRowKind rowKind = kind switch
+        {
+            VisualizationTrackKind.Percussion => VisualizationRowKind.Trigger,
+            VisualizationTrackKind.Noise => VisualizationRowKind.Noise,
+            VisualizationTrackKind.Sample => VisualizationRowKind.Sample,
+            _ => VisualizationRowKind.Note,
+        };
+
+        bool supportsScope = timeline.Devices.Count == 0
+            || panel.VoiceIds.Any(voiceId => timeline.Voices
+                .Where(voice => string.Equals(voice.Id.ToString(), voiceId, StringComparison.Ordinal))
+                .Join(
+                    timeline.Devices,
+                    voice => voice.DeviceId,
+                    device => device.Id,
+                    (_, device) => device.ScopeSupport)
+                .Any(scope => scope != ScopeSupport.None));
+
+        VoiceDescriptor primaryVoice = timeline.Voices.FirstOrDefault(voice =>
+            panel.VoiceIds.Contains(voice.Id.ToString(), StringComparer.Ordinal));
+        string[] sourceIds = panel.VoiceIds.Concat(panel.OperatorVoiceIds).ToArray();
+        long activeSamples = timeline.Notes
+            .Where(note => sourceIds.Contains(note.ChannelId, StringComparer.Ordinal))
+            .Where(note => note.EndSample > note.StartSample)
+            .Sum(note => note.EndSample - note.StartSample);
+        int eventCount = timeline.Notes.Count(note =>
+            sourceIds.Contains(note.ChannelId, StringComparer.Ordinal));
+        double duration = Math.Max(1, timeline.EndSample - timeline.StartSample);
+        double activeDuration = Math.Clamp(activeSamples / duration, 0, 1);
+        double eventDensity = Math.Clamp(eventCount / 24.0, 0, 1);
+        double leadConfidence = primaryVoice?.LeadRoleConfidence is double explicitConfidence
+            ? Math.Clamp(explicitConfidence, 0, 1)
+            : Math.Clamp(
+                0.55 * activeDuration
+                + 0.25 * eventDensity
+                + (kind is VisualizationTrackKind.Pitched or VisualizationTrackKind.FmOperatorGroup ? 0.20 : 0),
+                0,
+                1);
+        double salience = 1.0
+            + 0.30 * activeDuration
+            + 0.20 * eventDensity
+            + 0.20 * (kind is VisualizationTrackKind.Pitched or VisualizationTrackKind.FmOperatorGroup ? 1 : 0)
+            + 0.15 * leadConfidence
+            + 0.15 * (supportsScope ? 0.5 : 0);
+
+        return new VisualizationTrackDescriptor
+        {
+            Id = panel.Id,
+            DisplayName = panel.Label,
+            Kind = kind,
+            GroupId = panel.Content.ToString(),
+            DeviceId = timeline.Voices
+                .FirstOrDefault(voice => panel.VoiceIds.Contains(
+                    voice.Id.ToString(), StringComparer.Ordinal))?.DeviceId.ToString()
+                ?? string.Empty,
+            StableOrder = panel.Order,
+            Priority = kind == VisualizationTrackKind.Pitched ? 0 : 1,
+            LeadRoleConfidence = leadConfidence,
+            SalienceScore = salience,
+            PitchSystem = pitchSystem,
+            PitchAnchorMidi = timeline.Voices
+                .Where(voice => panel.VoiceIds.Contains(
+                    voice.Id.ToString(), StringComparer.Ordinal)
+                    || panel.OperatorVoiceIds.Contains(
+                        voice.Id.ToString(), StringComparer.Ordinal))
+                .Select(voice => voice.RelativePitchAnchorMidi)
+                .FirstOrDefault(value => value is double),
+            SupportsScope = supportsScope,
+            SupportsEnergy = supportsScope,
+            IsPercussion = kind == VisualizationTrackKind.Percussion,
+            IsOptional = kind is VisualizationTrackKind.Noise
+                or VisualizationTrackKind.Sample
+                or VisualizationTrackKind.AggregateActivity,
+            Rows = panel.Rows
+                .Select((row, index) => new VisualizationRowDescriptor(
+                    row.Id,
+                    row.Label,
+                    row.StableOrder == 0 && index > 0 ? index : row.StableOrder,
+                    row.Kind == VisualizationRowKind.Other ? rowKind : row.Kind))
+                .ToArray(),
+            SourceVoiceIds = panel.VoiceIds.Concat(panel.OperatorVoiceIds).ToArray(),
+            ScopeStemIds = panel.VoiceIds.ToArray(),
+        };
+    }
+
+    private static NoteEvent ConvertPitchCoordinates(
+        NoteEvent note,
+        VisualizationTrackDescriptor track)
+    {
+        double initialValue = track.PitchSystem == PitchCoordinateSystem.FrequencyHz
+            ? double.IsFinite(note.InitialFrequencyHz)
+                ? note.InitialFrequencyHz
+                : note.InitialMidiNote
+            : note.InitialMidiNote;
+        bool initialValid = PitchCoordinateConverter.TryConvertToMidi(
+            track.PitchSystem,
+            initialValue,
+            track.PitchAnchorMidi,
+            out double initialMidi);
+
+        PitchChange[] points = (note.Pitch ?? Array.Empty<PitchChange>())
+            .Select(point =>
+            {
+                double sourceValue = track.PitchSystem == PitchCoordinateSystem.FrequencyHz
+                    ? double.IsFinite(point.FrequencyHz)
+                        ? point.FrequencyHz
+                        : point.MidiNote
+                    : point.MidiNote;
+                return PitchCoordinateConverter.TryConvertToMidi(
+                    track.PitchSystem,
+                    sourceValue,
+                    track.PitchAnchorMidi,
+                    out double midi)
+                    ? new PitchChange(point.SamplePosition, point.FrequencyHz, midi)
+                    : null;
+            })
+            .Where(point => point is not null)
+            .Cast<PitchChange>()
+            .ToArray();
+
+        return note with
+        {
+            InitialMidiNote = initialValid ? initialMidi : double.NaN,
+            Pitch = points,
+        };
+    }
+
+    private static IEnumerable<NoteEvent> ConvertPitchCoordinatesIfNeeded(
+        IEnumerable<NoteEvent> notes,
+        VisualizationTrackDescriptor track)
+        => track.PitchSystem is not PitchCoordinateSystem.None
+            and not PitchCoordinateSystem.AbsoluteMidi
+            ? notes.Select(note => ConvertPitchCoordinates(note, track))
+            : notes;
+
+    private static PitchCoordinateSystem ResolvePitchSystem(
+        VisualizationPanel panel,
+        VisualizationTimeline timeline)
+    {
+        PitchCoordinateSystem[] systems = timeline.Voices
+            .Where(voice => panel.VoiceIds.Contains(
+                voice.Id.ToString(), StringComparer.Ordinal)
+                || panel.OperatorVoiceIds.Contains(
+                    voice.Id.ToString(), StringComparer.Ordinal))
+            .Where(voice => voice.SupportsPitch)
+            .Select(voice => voice.PitchSystem)
+            .Distinct()
+            .ToArray();
+
+        if (systems.Length == 0)
+            return PitchCoordinateSystem.AbsoluteMidi;
+        if (systems.Length == 1)
+            return systems[0];
+
+        // Normalized timeline note values are MIDI. Mixed absolute systems can
+        // therefore share that normalized coordinate; relative systems remain
+        // explicit so the planner can keep them out of an absolute roll.
+        return systems.All(system => system is PitchCoordinateSystem.AbsoluteMidi
+            or PitchCoordinateSystem.AbsoluteSemitone
+            or PitchCoordinateSystem.FrequencyHz)
+            ? PitchCoordinateSystem.AbsoluteMidi
+            : PitchCoordinateSystem.None;
+    }
+
+    private static string FormatNoiseLabel(NoiseStateEvent value)
+    {
+        string descriptor = value.CentreFrequencyHz is > 0 and double frequency
+            ? $"{frequency:0.#} Hz"
+            : value.Mode.ToString().ToUpperInvariant();
+        return $"{descriptor}  LVL {Math.Clamp(value.Level, 0, 1):0.00}";
+    }
+
+    /// <summary>
+    /// Creates the immutable onset index used by all tracks for density
+    /// classification. Density is a composition property, not a property of
+    /// one small panel, so simultaneous events on different tracks suppress
+    /// ornamental effects consistently.
+    /// </summary>
+    private static long[] BuildCompositionOnsets(VisualizationTimeline timeline)
+    {
+        var onsets = new List<long>(timeline.Notes.Count
+            + timeline.Rhythm.Count
+            + timeline.SamplePlayback.Length
+            + timeline.NoiseStates.Length
+            + timeline.AggregateHits.Length);
+        onsets.AddRange(timeline.Notes.Where(IsNoteValid).Select(note => note.StartSample));
+        onsets.AddRange(timeline.Rhythm.Select(value => value.SamplePosition));
+        onsets.AddRange(timeline.SamplePlayback
+            .Where(value => value.EndSample > value.StartSample)
+            .Select(value => value.StartSample));
+        onsets.AddRange(timeline.NoiseStates
+            .Where(value => value.EndSample > value.StartSample)
+            .Select(value => value.StartSample));
+        onsets.AddRange(timeline.AggregateHits.Select(value => value.SamplePosition));
+        onsets.Sort();
+        return onsets.ToArray();
     }
 
     /// <summary>
@@ -174,9 +526,11 @@ internal static class OverlaySceneBuilder
         double pitchToleranceSemitones,
         double samplesPerFrame,
         int sampleRate,
+        IReadOnlyList<long> compositionOnsets,
         int panelIndex,
         NoteColorMode noteColorMode,
-        IReadOnlyDictionary<string, InstrumentDefinition> instruments)
+        IReadOnlyDictionary<string, InstrumentDefinition> instruments,
+        VisualizationPalette palette)
     {
         NoteEvent[] ordered = source
             .Where(IsNoteValid)
@@ -185,7 +539,7 @@ internal static class OverlaySceneBuilder
             .ToArray();
 
         var prepared = new PreparedNote[ordered.Length];
-        bool[] dense = ComputeDenseOnsets(ordered, sampleRate);
+        bool[] dense = ComputeDenseOnsets(ordered, sampleRate, compositionOnsets);
         for (int index = 0; index < ordered.Length; index++)
         {
             // §13.2: detect instrument changes by comparing consecutive notes'
@@ -204,7 +558,8 @@ internal static class OverlaySceneBuilder
                 changeSample,
                 panelIndex,
                 noteColorMode,
-                instruments);
+                instruments,
+                palette);
         }
         return prepared;
     }
@@ -213,34 +568,40 @@ internal static class OverlaySceneBuilder
     /// Marks notes whose onset falls inside a 100 ms window containing more
     /// than 8 onsets (§9.3). A dense onset suppresses the ripple alpha and the
     /// active-flash size enlargement but never the onset caps. Uses a
-    /// two-pointer sweep over the sorted onset array: note <c>i</c> is dense
-    /// when more than 8 notes (including <c>i</c>) start within
-    /// <c>[onset_i, onset_i + 100ms)</c>.
+    /// two-pointer sweep over the sorted composition onset array: a track note
+    /// is dense when more than 8 semantic onsets start within
+    /// <c>[onset, onset + 100ms)</c> across the visible composition.
     /// </summary>
-    private static bool[] ComputeDenseOnsets(NoteEvent[] ordered, int sampleRate)
+    private static bool[] ComputeDenseOnsets(
+        NoteEvent[] ordered,
+        int sampleRate,
+        IReadOnlyList<long> compositionOnsets)
     {
         int n = ordered.Length;
         var dense = new bool[n];
-        if (n == 0 || sampleRate <= 0)
+        if (n == 0 || sampleRate <= 0 || compositionOnsets.Count == 0)
             return dense;
 
         long windowSamples = (long)Math.Round(0.1 * sampleRate); // 100 ms
         int threshold = 8; // more than 8 onsets → dense
+        var denseSamples = new HashSet<long>();
         int right = 0;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < compositionOnsets.Count; i++)
         {
             if (right < i)
                 right = i;
-            long windowEnd = ordered[i].StartSample + windowSamples;
-            while (right < n && ordered[right].StartSample < windowEnd)
+            long windowEnd = compositionOnsets[i] + windowSamples;
+            while (right < compositionOnsets.Count && compositionOnsets[right] < windowEnd)
                 right++;
             int count = right - i;
             if (count > threshold)
             {
                 for (int j = i; j < right; j++)
-                    dense[j] = true;
+                    denseSamples.Add(compositionOnsets[j]);
             }
         }
+        for (int i = 0; i < n; i++)
+            dense[i] = denseSamples.Contains(ordered[i].StartSample);
         return dense;
     }
 
@@ -276,10 +637,14 @@ internal static class OverlaySceneBuilder
         long instrumentChangeSample = 0,
         int panelIndex = 0,
         NoteColorMode noteColorMode = NoteColorMode.Instrument,
-        IReadOnlyDictionary<string, InstrumentDefinition> instruments = null)
+        IReadOnlyDictionary<string, InstrumentDefinition> instruments = null,
+        VisualizationPalette palette = null)
     {
-        var fill = InstrumentColorResolver.ResolveFill(
-            noteColorMode, note.InstrumentId, panelIndex, note.InitialMidiNote);
+        var fill = (palette ?? VisualizationPalette.Default).ResolveNote(
+            noteColorMode,
+            note.InstrumentId,
+            note.ChannelId,
+            note.InitialMidiNote);
         var activeFill = fill.Lighten(0.3);
 
         return new PreparedNote
@@ -367,9 +732,9 @@ internal static class OverlaySceneBuilder
         var valid = new List<PreparedPitchPoint>(Math.Min(note.Pitch.Count, 64));
         foreach (PitchChange p in note.Pitch)
         {
-            if (!double.IsFinite(p.MidiNote) || p.MidiNote < 0)
-                continue;
-            if (!double.IsFinite(p.SamplePosition))
+            if (!double.IsFinite(p.MidiNote) || p.MidiNote < 0
+                || p.SamplePosition < note.StartSample
+                || p.SamplePosition > note.EndSample)
                 continue;
             valid.Add(new PreparedPitchPoint(p.SamplePosition, p.MidiNote));
         }
@@ -500,16 +865,12 @@ internal static class OverlaySceneBuilder
     {
         if (note.EndSample <= note.StartSample)
             return false;
-        if (!double.IsFinite(note.InitialMidiNote))
+        if (!double.IsFinite(note.InitialMidiNote)
+            && (!double.IsFinite(note.InitialFrequencyHz) || note.InitialFrequencyHz <= 0))
             return false;
-        // Reject pitch points outside note bounds or with non-finite values.
-        foreach (var p in note.Pitch)
-        {
-            if (!double.IsFinite(p.MidiNote))
-                return false;
-            if (p.SamplePosition < note.StartSample || p.SamplePosition > note.EndSample)
-                return false;
-        }
+        // Invalid pitch samples are discarded during contour preparation; the
+        // note remains usable at its finite initial pitch. This preserves a
+        // valid semantic event when one decoder sample is corrupt.
         return true;
     }
 

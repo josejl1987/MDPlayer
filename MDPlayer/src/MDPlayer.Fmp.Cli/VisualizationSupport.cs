@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fmp.Core.Audio;
 using Fmp.Core.Metadata;
 using Fmp.Core.Rendering;
 using Fmp.Core.Rendering.Corrscope;
@@ -9,6 +10,31 @@ namespace Fmp.Cli;
 
 internal static class VisualizationSupport
 {
+    internal sealed class EncoderFallbackState
+    {
+        public string Phase { get; set; } = "none";
+        public string Reason { get; set; }
+        public string Diagnostics { get; set; }
+        public bool Retried { get; set; }
+
+        public bool ShouldRetry(VideoEncoder requested, Exception error)
+        {
+            if (requested != VideoEncoder.Auto || Retried || error is OperationCanceledException)
+                return false;
+            string text = error.ToString();
+            bool classified = text.Contains("nvenc", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("encoder", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("pipe", StringComparison.OrdinalIgnoreCase);
+            if (!classified) return false;
+            Phase = "runtime-fallback";
+            Reason = "nvenc-runtime-initialization-or-encode-failure";
+            Diagnostics = error.Message;
+            Retried = true;
+            return true;
+        }
+    }
+
     public static VisualizationPresentation ResolvePresentation(VisualizeOptions options, FileInfo input)
     {
         string title = options.Title;
@@ -94,7 +120,8 @@ internal static class VisualizationSupport
         double preparationSeconds = 0,
         double compositionSeconds = 0,
         double totalSeconds = 0,
-        SinglePassComposer.ComposeMetrics composeMetrics = null)
+        SinglePassComposer.ComposeMetrics composeMetrics = null,
+        EncoderFallbackState encoderFallback = null)
     {
         if (!options.Quiet)
         {
@@ -108,6 +135,8 @@ internal static class VisualizationSupport
                     $"  Preparation: {preparationSeconds:F1}s  Audio capture: {captureSeconds:F1}s  " +
                     $"Stem export: {stemRenderSeconds:F1}s  Energy: {energySeconds:F1}s  " +
                     $"Scope+overlay+encode: {compositionSeconds:F1}s  Total: {totalSeconds:F1}s");
+            if (encoderFallback?.Retried == true)
+                Console.Error.WriteLine($"encoder fallback: {encoderFallback.Reason} ({encoderFallback.Diagnostics})");
         }
 
         if (!options.Json)
@@ -130,6 +159,9 @@ internal static class VisualizationSupport
             rhythmEvents = capture.Timeline.Rhythm.Count,
             instruments = capture.Timeline.Instruments.Count,
             encoder = options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264",
+            encoderFallbackPhase = encoderFallback?.Phase ?? "none",
+            encoderFallbackReason = encoderFallback?.Reason,
+            encoderFallbackDiagnostics = encoderFallback?.Diagnostics,
             outputSizeBytes,
             trackDurationSeconds,
             effectiveOutputFps = effectiveFps,
@@ -145,6 +177,12 @@ internal static class VisualizationSupport
                 corrscopeWaitSeconds = composeMetrics?.CorrscopeWaitSeconds ?? 0,
                 overlayCpuSeconds = composeMetrics?.OverlayCpuSeconds ?? 0,
                 ffmpegWriteWaitSeconds = composeMetrics?.FfmpegWriteWaitSeconds ?? 0,
+                maxQueueDepth = composeMetrics?.MaxQueueDepth ?? 0,
+                queueCapacity = composeMetrics?.QueueCapacity ?? 3,
+                starvationCount = composeMetrics?.StarvationCount ?? 0,
+                blockingSeconds = composeMetrics?.BlockingSeconds ?? 0,
+                pipelineWallTimeSeconds = composeMetrics?.WallTimeSeconds ?? 0,
+                frameCount = composeMetrics?.FrameCount ?? 0,
             },
         }, new JsonSerializerOptions { WriteIndented = true }));
     }

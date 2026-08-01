@@ -143,10 +143,14 @@ internal enum VoicePresentationKind
     Fm,
     Fm3,
     Psg,
+    Ssg = Psg,
     Noise,
     Percussion,
+    Rhythm = Percussion,
     Pcm,
+    PcmVoice = Pcm,
     Midi,
+    Wavetable,
     Aggregate,
 }
 
@@ -176,12 +180,36 @@ internal sealed record VoiceDescriptor(
     int Order,
     bool IsPercussion,
     bool IsNoise,
-    bool SupportsPitch)
+    bool SupportsPitch,
+    IReadOnlyList<VisualizationRowDescriptor> Rows = null)
 {
     public DeviceId DeviceId => Id.Device;
     public VoiceKind Kind => Id.Kind;
     public int Index => Id.Index;
     public string Label => DisplayName;
+
+    /// <summary>
+    /// Coordinate system supplied by the decoder or presentation adapter.
+    /// Normal pitched voices are normalized to absolute MIDI by default; a
+    /// relative-only voice must opt in explicitly so it cannot accidentally be
+    /// merged into an absolute unified roll.
+    /// </summary>
+    public PitchCoordinateSystem PitchSystem { get; init; }
+        = SupportsPitch
+            ? PitchCoordinateSystem.AbsoluteMidi
+            : PitchCoordinateSystem.None;
+
+    /// <summary>
+    /// Optional anchor for relative pitch systems. It is kept on the semantic
+    /// descriptor rather than inferred by rendering code.
+    /// </summary>
+    public double? RelativePitchAnchorMidi { get; init; }
+
+    /// <summary>
+    /// Optional decoder confidence for a lead-role hint. When absent, the
+    /// presentation builder derives a bounded salience score from activity.
+    /// </summary>
+    public double? LeadRoleConfidence { get; init; }
 }
 
 internal sealed record TrackMetadata(
@@ -285,6 +313,9 @@ internal interface IPlaybackEventSink
     void OnSampleAsset(in TimedSampleAssetEvent asset);
     void OnLoopBoundary(in TimedLoopBoundary loop);
 
+    /// <summary>Optional decoded sample-bank snapshot for generic asset extraction.</summary>
+    void OnSampleBank(DeviceId device, int bank, ReadOnlyMemory<byte>[] samples, long samplePosition) { }
+
     /// <summary>
     /// SPC-only semantic event stream (§9.2): the native S-DSP core emits
     /// effective transitions (KEY_ON, RELEASE, PITCH, SOURCE, ...) that the
@@ -292,7 +323,31 @@ internal interface IPlaybackEventSink
     /// so non-SPC sinks and adapters are unaffected.
     /// </summary>
     void OnSpcEvent(in SpcSemanticEvent @event) { }
+
+    /// <summary>
+    /// SPC-only instrument/root snapshot (§25.3): per-source BRR root estimates
+    /// resolved at open time, consumed by <see cref="SnesDspTimelineDecoder"/>
+    /// to place notes at their sounding pitch. Default no-op.
+    /// </summary>
+    void OnSpcInstruments(IReadOnlyList<SpcSourceRootInfo> sources) { }
+
+    /// <summary>SPC-only decoded BRR assets for generic PCM visualization.</summary>
+    void OnSpcSamples(IReadOnlyList<SpcSampleEntry> samples) { }
+
+    /// <summary>Optional grouped hit event for aggregate presentations.</summary>
+    void OnAggregateHit(in AggregateHitEvent hit) { }
 }
+
+/// <summary>
+/// Per-source BRR root estimate (§25.3). A null <see cref="EstimatedRootHz"/>
+/// means the sample is unpitched or was not estimated; consumers then fall
+/// back to the A4-relative anchor.
+/// </summary>
+internal sealed record SpcSourceRootInfo(
+    int SourceNumber,
+    double? EstimatedRootHz,
+    double Confidence,
+    string Accuracy);
 
 internal interface IChipTimelineDecoder
 {
@@ -367,7 +422,8 @@ internal sealed record PlaybackOptions(
     string OutputAudioPath = null,
     int SampleRate = 44_100,
     bool WriteSpcStems = false,
-    SpcPitchMode SpcPitchMode = SpcPitchMode.Estimate);
+    SpcPitchMode SpcPitchMode = SpcPitchMode.Estimate,
+    double SsgGainDb = 0);
 
 /// <summary>
 /// Backend boundary. Implementations know formats, drivers and asset lookup;

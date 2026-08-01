@@ -12,11 +12,6 @@ namespace Fmp.Core.Rendering;
 /// </summary>
 internal sealed class FmpPlaybackBackend : IPlaybackBackend
 {
-    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".opi", ".ovi", ".ozi", ".mpi", ".mvi", ".mzi",
-    };
-
     private readonly FmpRuntimeAssets _assets;
     private readonly IFmpFileSystem _fileSystem;
 
@@ -32,7 +27,7 @@ internal sealed class FmpPlaybackBackend : IPlaybackBackend
     {
         ArgumentNullException.ThrowIfNull(input);
         string extension = input.Extension.ToLowerInvariant();
-        if (!SupportedExtensions.Contains(extension))
+        if (!FmpFormat.IsSupportedExtension(extension))
         {
             return new PlaybackProbeResult(
                 false,
@@ -79,7 +74,7 @@ internal sealed class FmpPlaybackBackend : IPlaybackBackend
         ArgumentNullException.ThrowIfNull(eventSink);
         if (!input.Exists)
             throw new FileNotFoundException("FMP input not found.", input.FullName);
-        if (!SupportedExtensions.Contains(input.Extension))
+        if (!FmpFormat.IsSupportedExtension(input.Extension))
             throw new VgmPlaybackException($"unsupported FMP extension: {input.Extension}");
 
         return new FmpCaptureSession(
@@ -134,7 +129,7 @@ internal sealed class FmpCaptureSession : IPlaybackCaptureSession
     {
         foreach (DeviceDescriptor device in Devices)
             _events.OnDevice(device);
-        using var audio = new MdsoundFmpChipSink(Timing.SampleRate);
+        using var audio = new MdsoundFmpChipSink(Timing.SampleRate, ssgGainDb: _options.SsgGainDb);
         var sink = new FmpPlaybackEventSinkAdapter(_events, audio);
         var runtime = new FmpRuntime(sink, _assets, _fileSystem);
         WavWriter writer = null;

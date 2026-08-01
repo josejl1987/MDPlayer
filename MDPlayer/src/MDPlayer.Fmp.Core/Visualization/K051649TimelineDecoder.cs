@@ -5,6 +5,8 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
 {
     private readonly int[] _frequency = new int[5];
     private readonly int[] _volume = new int[5];
+    private readonly byte[][] _waveRam = new byte[5][];
+    private readonly string[] _waveformIds = new string[5];
     private readonly MutableNote?[] _notes = new MutableNote?[5];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
@@ -24,6 +26,8 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
         _device = device;
         _timeline = timeline;
         _timeline.AddDevice(device);
+        for (int channel = 0; channel < _waveRam.Length; channel++)
+            _waveRam[channel] = new byte[32];
         foreach (VoiceDescriptor voice in VisualizationDeviceCatalog.K051649Voices(device.Id.Instance))
             _timeline.AddVoice(voice);
     }
@@ -44,6 +48,14 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
         }
 
         int channel = Math.Clamp(_selectedRegister & 0x07, 0, 4);
+        if ((write.Address >> 1) == 0)
+        {
+            channel = Math.Clamp(_selectedRegister / 0x20, 0, 4);
+            int index = _selectedRegister & 0x1F;
+            _waveRam[channel][index] = (byte)write.Data;
+            UpdateWaveform(channel, write.SamplePosition);
+            return;
+        }
         switch (write.Address >> 1)
         {
             case 1:
@@ -104,6 +116,23 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
             pitch,
             instrument,
             retrigger);
+    }
+
+    private void UpdateWaveform(int channel, long sample)
+    {
+        int[] source = new int[_waveRam[channel].Length];
+        for (int index = 0; index < source.Length; index++)
+            source[index] = (sbyte)_waveRam[channel][index];
+        WaveformDefinition waveform = VisualizationAssetBuilder.CreateIntegerWaveform(
+            "wavetable", source, -128, 127, $"WAVE {channel + 1}");
+        _timeline.AddWaveform(waveform);
+        if (_waveformIds[channel] == waveform.Id)
+            return;
+        _waveformIds[channel] = waveform.Id;
+        _timeline.AddWaveformChange(new WaveformChangeEvent(
+            new VoiceId(_device.Id, VoiceKind.Wavetable, channel).ToString(),
+            sample,
+            waveform.Id));
     }
 
     private Pitch DecodePitch(int channel)

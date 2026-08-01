@@ -808,6 +808,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
     private readonly PlaybackOptions _options;
     private readonly IPlaybackEventSink _events;
     private bool _stopped;
+    private readonly short[] _renderBuffer = new short[2048];
 
     public VgmCaptureSession(VgmDocument document, PlaybackOptions options, IPlaybackEventSink events)
     {
@@ -884,7 +885,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                 long target = ScaleSample(write.SourceSample);
                 if (target >= baseEnd)
                     break;
-                RenderUntil(audio, writer, ref rendered, target, fadeStart, baseEnd);
+                RenderUntil(audio, writer, _renderBuffer, ref rendered, target, fadeStart, baseEnd);
                 var normalized = new TimedChipWrite(
                     target,
                     write.Device,
@@ -896,7 +897,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                 SamplePosition = target;
             }
 
-            RenderUntil(audio, writer, ref rendered, end, fadeStart, baseEnd);
+            RenderUntil(audio, writer, _renderBuffer, ref rendered, end, fadeStart, baseEnd);
             SamplePosition = rendered;
             IsComplete = true;
         }
@@ -948,6 +949,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
     private static void RenderUntil(
         VgmAudioRenderer audio,
         WavWriter writer,
+        short[] buffer,
         ref long rendered,
         long target,
         long fadeStart,
@@ -959,14 +961,15 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
         while (rendered < target)
         {
             remaining = (int)Math.Min(1024, target - rendered);
-            short[] pcm = audio.Render(remaining);
+            Span<short> pcm = buffer.AsSpan(0, remaining * 2);
+            audio.Render(remaining, pcm);
             ApplyFade(pcm, rendered, fadeStart, baseEnd);
             writer?.Write(pcm);
             rendered += remaining;
         }
     }
 
-    private static void ApplyFade(short[] pcm, long startSample, long fadeStart, long baseEnd)
+    private static void ApplyFade(Span<short> pcm, long startSample, long fadeStart, long baseEnd)
     {
         for (int index = 0; index < pcm.Length / 2; index++)
         {
@@ -1015,7 +1018,7 @@ internal sealed class VgmAudioRenderer : IDisposable
     private readonly Dictionary<int, MDSound.Ootake_PSG> _huc6280 = [];
     private readonly Dictionary<int, MDSound.K051649> _k051649 = [];
     private readonly MdsoundFmpChipSink _opna;
-    private readonly short[] _buffer = new short[2048];
+    private short[] _buffer = new short[2048];
     private readonly int _sampleRate;
     private readonly ChipType? _channelFilterType;
     private readonly int _channelFilter;
@@ -1565,6 +1568,9 @@ internal sealed class VgmAudioRenderer : IDisposable
                 case ChipType.Sn76489:
                     WriteFilteredSn76489(write);
                     break;
+                case ChipType.Ym2608:
+                    WriteFilteredYm2608(write);
+                    break;
             }
             return;
         }
@@ -1718,6 +1724,91 @@ internal sealed class VgmAudioRenderer : IDisposable
             _mds.WriteSN76489((byte)write.Device.Instance, (byte)data);
     }
 
+    private void WriteFilteredYm2608(in TimedChipWrite write)
+    {
+        int address = write.Address & 0xFF;
+        int fmChannel = Ym2608FmChannel(write.Port, address, write.Data);
+        int ssgChannel = Ym2608SsgChannel(write.Port, address);
+        bool rhythm = IsYm2608RhythmRegister(write.Port, address);
+        bool adpcm = IsYm2608AdpcmRegister(write.Port, address);
+
+        if (_channelFilter is >= 0 and < 6)
+        {
+            if (fmChannel >= 0)
+            {
+                if (fmChannel == _channelFilter)
+                    _opna?.WriteYm2608(write.Device.Instance, write.Port, write.Address, write.Data, write.SamplePosition);
+                return;
+            }
+
+            // Do not leak SSG, rhythm, or ADPCM-B register writes into FM
+            // stems. Timer/mode writes are harmless and shared.
+            if (ssgChannel >= 0 || rhythm || adpcm)
+                return;
+            if (IsYm2608SharedRegister(write.Port, address))
+                _opna?.WriteYm2608(write.Device.Instance, write.Port, write.Address, write.Data, write.SamplePosition);
+            return;
+        }
+
+        if (_channelFilter is >= 6 and < 9)
+        {
+            if (fmChannel >= 0 || rhythm || adpcm)
+                return;
+            if (ssgChannel == _channelFilter || IsYm2608SsgSharedRegister(write.Port, address))
+                _opna?.WriteYm2608(write.Device.Instance, write.Port, write.Address, write.Data, write.SamplePosition);
+            return;
+        }
+
+        if (_channelFilter == 9)
+        {
+            if (rhythm)
+                _opna?.WriteYm2608(write.Device.Instance, write.Port, write.Address, write.Data, write.SamplePosition);
+            return;
+        }
+
+        if (_channelFilter == 10)
+        {
+            if (adpcm)
+                _opna?.WriteYm2608(write.Device.Instance, write.Port, write.Address, write.Data, write.SamplePosition);
+        }
+    }
+
+    private static int Ym2608FmChannel(int port, int address, int data)
+    {
+        if (address == 0x28)
+        {
+            int local = data & 0x03;
+            return (data & 0x04) != 0 ? local + 3 : local;
+        }
+
+        if (address is >= 0x30 and <= 0xB6)
+            return (port & 1) * 3 + (address & 0x03);
+        return -1;
+    }
+
+    private static int Ym2608SsgChannel(int port, int address)
+    {
+        if (port != 0)
+            return -1;
+        if (address is >= 0x00 and <= 0x05)
+            return 6 + address;
+        if (address is >= 0x08 and <= 0x0A)
+            return 6 + address - 0x08;
+        return -1;
+    }
+
+    private static bool IsYm2608RhythmRegister(int port, int address)
+        => port == 0 && address is >= 0x10 and <= 0x18;
+
+    private static bool IsYm2608AdpcmRegister(int port, int address)
+        => port == 1 && address is >= 0x00 and <= 0x0F;
+
+    private static bool IsYm2608SsgSharedRegister(int port, int address)
+        => port == 0 && address is 0x07 or 0x0B or 0x0C or 0x0D;
+
+    private static bool IsYm2608SharedRegister(int port, int address)
+        => port == 0 && address is 0x22 or >= 0x24 and <= 0x27;
+
     private static int Ym2612Channel(int port, int address, int data)
     {
         if (address == 0x28)
@@ -1825,13 +1916,18 @@ internal sealed class VgmAudioRenderer : IDisposable
             _mds.WriteYM2610_SetAdpcmB((byte)asset.Device.Instance, bank);
     }
 
-    public short[] Render(int samples)
+    public void Render(int samples, Span<short> output)
     {
         if (samples <= 0)
-            return Array.Empty<short>();
+            return;
         int count = checked(samples * 2);
-        short[] output = count <= _buffer.Length ? _buffer : new short[count];
-        _mds.Update(output, 0, count, null);
+        if (output.Length < count)
+            throw new ArgumentException("Output buffer is too small.", nameof(output));
+        if (_buffer.Length < count)
+            Array.Resize(ref _buffer, count);
+
+        _mds.Update(_buffer, 0, count, null);
+        _buffer.AsSpan(0, count).CopyTo(output);
         if (_opna != null)
         {
             int frameCount = count / 2;
@@ -1843,7 +1939,6 @@ internal sealed class VgmAudioRenderer : IDisposable
                 output[index * 2 + 1] = (short)Math.Clamp(output[index * 2 + 1] + opna[1][index], short.MinValue, short.MaxValue);
             }
         }
-        return output.AsSpan(0, count).ToArray();
     }
 
     public void Dispose()

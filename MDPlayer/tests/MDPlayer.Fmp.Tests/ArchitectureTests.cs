@@ -114,7 +114,7 @@ public class ArchitectureTests
     /// Verify that MDPlayer.Fmp.Cli references no forbidden assemblies.
     /// Searches for the CLI DLL in both Debug and Release configurations.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public void Cli_HasNoForbiddenAssemblyReferences()
     {
         // Load CLI assembly — search both Debug and Release output paths
@@ -140,11 +140,7 @@ public class ArchitectureTests
             if (cliPath != null) break;
         }
 
-        if (cliPath == null)
-        {
-            // CLI not built — skip test (build must run first)
-            return;
-        }
+        Skip.If(cliPath == null, "CLI assembly is not built; build the CLI before running this architecture test.");
 
         var cliAsm = Assembly.LoadFrom(cliPath);
         var refs = cliAsm.GetReferencedAssemblies();

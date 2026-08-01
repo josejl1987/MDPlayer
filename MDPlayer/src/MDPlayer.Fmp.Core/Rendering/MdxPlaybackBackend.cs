@@ -100,6 +100,7 @@ internal sealed class MdxCaptureSession : IPlaybackCaptureSession
     private readonly PlaybackOptions _options;
     private readonly IPlaybackEventSink _events;
     private bool _stopped;
+    private readonly short[] _renderBuffer = new short[2048];
 
     public MdxCaptureSession(
         MdxDocument document,
@@ -154,7 +155,7 @@ internal sealed class MdxCaptureSession : IPlaybackCaptureSession
                 cancellationToken.ThrowIfCancellationRequested();
                 if (_stopped)
                     break;
-                RenderUntil(audio, writer, ref rendered, source.SamplePosition, fadeStart, baseEnd);
+                RenderUntil(audio, writer, _renderBuffer, ref rendered, source.SamplePosition, fadeStart, baseEnd);
                 var write = new TimedChipWrite(
                     source.SamplePosition,
                     new DeviceId(ChipType.Ym2151, 0),
@@ -166,7 +167,7 @@ internal sealed class MdxCaptureSession : IPlaybackCaptureSession
                 SamplePosition = source.SamplePosition;
             }
 
-            RenderUntil(audio, writer, ref rendered, end, fadeStart, baseEnd);
+            RenderUntil(audio, writer, _renderBuffer, ref rendered, end, fadeStart, baseEnd);
             SamplePosition = rendered;
             IsComplete = true;
         }
@@ -182,6 +183,7 @@ internal sealed class MdxCaptureSession : IPlaybackCaptureSession
     private static void RenderUntil(
         VgmAudioRenderer audio,
         WavWriter writer,
+        short[] buffer,
         ref long rendered,
         long target,
         long fadeStart,
@@ -192,14 +194,15 @@ internal sealed class MdxCaptureSession : IPlaybackCaptureSession
         while (rendered < target)
         {
             int count = (int)Math.Min(1024, target - rendered);
-            short[] pcm = audio.Render(count);
+            Span<short> pcm = buffer.AsSpan(0, count * 2);
+            audio.Render(count, pcm);
             ApplyFade(pcm, rendered, fadeStart, baseEnd);
             writer?.Write(pcm);
             rendered += count;
         }
     }
 
-    private static void ApplyFade(short[] pcm, long start, long fadeStart, long baseEnd)
+    private static void ApplyFade(Span<short> pcm, long start, long fadeStart, long baseEnd)
     {
         for (int index = 0; index < pcm.Length / 2; index++)
         {

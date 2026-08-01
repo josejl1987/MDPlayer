@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Buffers;
+using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using Fmp.Core.Rendering;
 
 namespace Fmp.Core.Visualization.Rendering;
@@ -13,10 +16,37 @@ namespace Fmp.Core.Visualization.Rendering;
 /// </summary>
 internal sealed class SinglePassComposer
 {
+    internal interface IRawFrameSourceFactory
+    {
+        IRawFrameSource Create(Process process);
+    }
+    internal interface IRawFrameSource : IDisposable
+    {
+        bool Read(byte[] buffer, int count);
+        void Drain();
+    }
+    internal sealed class ProcessRawFrameSourceFactory : IRawFrameSourceFactory
+    {
+        public IRawFrameSource Create(Process process) => new ProcessRawFrameSource(process.StandardOutput.BaseStream);
+    }
+    private sealed class ProcessRawFrameSource : IRawFrameSource
+    {
+        private readonly Stream _stream;
+        public ProcessRawFrameSource(Stream stream) => _stream = stream;
+        public bool Read(byte[] buffer, int count) => ReadExactly(_stream, buffer, count);
+        public void Drain() => SinglePassComposer.Drain(_stream);
+        public void Dispose() { }
+    }
     internal sealed record ComposeMetrics(
         double CorrscopeWaitSeconds,
         double OverlayCpuSeconds,
-        double FfmpegWriteWaitSeconds);
+        double FfmpegWriteWaitSeconds,
+        int MaxQueueDepth = 0,
+        long StarvationCount = 0,
+        double BlockingSeconds = 0,
+        double WallTimeSeconds = 0,
+        long FrameCount = 0,
+        int QueueCapacity = 3);
 
     public sealed class Options
     {
@@ -28,80 +58,56 @@ internal sealed class SinglePassComposer
         public string VideoCrf { get; set; } = "18";
         /// <summary>Encoder for the final encode.</summary>
         public VideoEncoder Encoder { get; set; } = VideoEncoder.Auto;
+        public VisualizationRendererMode Renderer { get; set; } = VisualizationRendererMode.Auto;
+        /// <summary>Bounded producer/consumer queue capacity, constrained to 2..4.</summary>
+        public int QueueCapacity { get; set; } = 3;
     }
 
     private readonly string _ffmpegPath;
     private readonly Options _options;
+    private readonly IVideoEncoderProbe _encoderProbe;
 
     public ComposeMetrics LastMetrics { get; private set; } = new(0, 0, 0);
+    public EncoderProbeResult LastEncoderProbe { get; private set; }
 
     public SinglePassComposer(string ffmpegPath, Options options = null)
     {
         _ffmpegPath = ExecutableResolver.Resolve(ffmpegPath, "ffmpeg");
         _options = options ?? new Options();
+        if (_options.QueueCapacity is < 2 or > 4)
+            throw new ArgumentOutOfRangeException(nameof(options), "QueueCapacity must be between 2 and 4.");
+        _encoderProbe = new FfmpegVideoEncoderProbe(_ffmpegPath);
         if (_options.Encoder == VideoEncoder.Auto)
-            _options.Encoder = SupportsEncoder(VideoEncoder.Nvenc)
+        {
+            LastEncoderProbe = _encoderProbe.Probe(VideoEncoder.Nvenc);
+            _options.Encoder = LastEncoderProbe.Supported
                 ? VideoEncoder.Nvenc
                 : VideoEncoder.LibX264;
+        }
+        if (_options.Renderer == VisualizationRendererMode.Cpu)
+            return;
+
+        VisualizationGpuProbe gpu = VisualizationGpuSupport.Probe();
+        if (_options.Renderer == VisualizationRendererMode.Gpu && !gpu.Supported)
+            throw new InvalidOperationException($"GPU renderer unavailable: {gpu.Reason}");
+        if (_options.Renderer == VisualizationRendererMode.Auto)
+            _options.Renderer = gpu.Supported
+                ? VisualizationRendererMode.Gpu
+                : VisualizationRendererMode.Cpu;
     }
 
     public bool IsAvailable => _ffmpegPath != null;
     public string FfmpegPath => _ffmpegPath ?? "ffmpeg";
     public VideoEncoder EffectiveEncoder => _options.Encoder;
+    public VisualizationRendererMode EffectiveRenderer => _options.Renderer;
 
     public bool SupportsEncoder(VideoEncoder encoder)
+        => ProbeEncoder(encoder).Supported;
+
+    public EncoderProbeResult ProbeEncoder(VideoEncoder encoder)
     {
-        if (!IsAvailable)
-            return false;
-        if (encoder != VideoEncoder.Nvenc)
-            return true;
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _ffmpegPath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        // Listing the encoder is insufficient: FFmpeg can expose h264_nvenc
-        // even when the host has no usable CUDA device. Probe one tiny frame
-        // so automatic selection reflects actual runtime availability.
-        startInfo.ArgumentList.Add("-hide_banner");
-        startInfo.ArgumentList.Add("-loglevel");
-        startInfo.ArgumentList.Add("error");
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("lavfi");
-        startInfo.ArgumentList.Add("-i");
-        startInfo.ArgumentList.Add("color=c=black:s=16x16:d=0.1");
-        startInfo.ArgumentList.Add("-frames:v");
-        startInfo.ArgumentList.Add("1");
-        startInfo.ArgumentList.Add("-an");
-        startInfo.ArgumentList.Add("-c:v");
-        startInfo.ArgumentList.Add("h264_nvenc");
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("null");
-        startInfo.ArgumentList.Add("-");
-
-        try
-        {
-            using var process = new Process { StartInfo = startInfo };
-            if (!process.Start())
-                return false;
-            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
-            Task<string> stderr = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(10_000))
-            {
-                try { process.Kill(entireProcessTree: true); } catch { }
-                return false;
-            }
-            Task.WaitAll(stdout, stderr);
-            return process.ExitCode == 0;
-        }
-        catch
-        {
-            return false;
-        }
+        LastEncoderProbe = _encoderProbe.Probe(encoder);
+        return LastEncoderProbe;
     }
 
     /// <summary>
@@ -114,7 +120,9 @@ internal sealed class SinglePassComposer
         Process corrProcess,
         string masterAudioPath,
         string outputVideoPath,
-        PanelOverlayRenderer overlayRenderer)
+        PanelOverlayRenderer overlayRenderer,
+        IRawFrameSourceFactory sourceFactory = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(corrProcess);
         ArgumentNullException.ThrowIfNull(overlayRenderer);
@@ -167,61 +175,67 @@ internal sealed class SinglePassComposer
             ffmpegErrTask = ffmpeg.StandardError.ReadToEndAsync();
             corrErrTask = corrProcess.StandardError.ReadToEndAsync();
 
-            int gridFrameBytes = overlayRenderer.Width * overlayRenderer.Layout.CorrscopeGridHeight * 4;
+            int gridFrameBytes = overlayRenderer.ScopeFrameByteCount;
             int outFrameBytes = overlayRenderer.FrameByteCount;
-            byte[] grid = new byte[gridFrameBytes];
-            byte[] frame = new byte[outFrameBytes];
             long total = overlayRenderer.TotalFrames;
 
-            Stream corrOut = corrProcess.StandardOutput.BaseStream;
             Stream ffmpegIn = ffmpeg.StandardInput.BaseStream;
-
-            bool anyGrid = false;
-            long corrscopeTicks = 0;
-            long overlayTicks = 0;
-            long ffmpegWriteTicks = 0;
+            using IRawFrameSource source = (sourceFactory ?? new ProcessRawFrameSourceFactory()).Create(corrProcess);
             SequentialCompositeSession session = overlayRenderer.CreateSequentialSession();
-            session.Initialize(frame);
+            bool anyGrid = false;
+            ComposeMetrics pipelineMetrics;
             try
             {
-                for (long i = 0; i < total; i++)
-                {
-                    // Read the next scope grid frame; on EOF (Corrscope ends
-                    // when its longest channel does) keep the last frame so the
-                    // scope freezes during the master-audio tail.
-                    long stageStart = Stopwatch.GetTimestamp();
-                    if (ReadExactly(corrOut, grid, gridFrameBytes))
-                        anyGrid = true;
-                    corrscopeTicks += Stopwatch.GetTimestamp() - stageStart;
+                pipelineMetrics = RunFramePipeline(
+                    _options.QueueCapacity,
+                    gridFrameBytes,
+                    outFrameBytes,
+                    total,
+                    (slot, _) =>
+                    {
+                        slot.HasGrid = source.Read(slot.Grid, gridFrameBytes);
+                        return true;
+                    },
+                    (slot, index, metrics) =>
+                    {
+                        // On EOF, RenderNext receives an empty grid and keeps
+                        // the last scope frame frozen during the audio tail.
+                        if (slot.HasGrid)
+                            anyGrid = true;
+                        if (!slot.HasGrid)
+                            metrics.StarvationCount++;
 
-                    stageStart = Stopwatch.GetTimestamp();
-                    session.RenderNext(i, anyGrid ? grid : ReadOnlySpan<byte>.Empty, frame);
-                    overlayTicks += Stopwatch.GetTimestamp() - stageStart;
+                        long stageStart = Stopwatch.GetTimestamp();
+                        session.RenderNext(index, anyGrid ? slot.Grid : ReadOnlySpan<byte>.Empty, slot.Frame);
+                        metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
 
-                    stageStart = Stopwatch.GetTimestamp();
-                    ffmpegIn.Write(frame, 0, outFrameBytes);
-                    ffmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
-                }
+                        stageStart = Stopwatch.GetTimestamp();
+                        try
+                        {
+                            ffmpegIn.Write(slot.Frame, 0, outFrameBytes);
+                        }
+                        catch (IOException)
+                        {
+                            // FFmpeg's exit status and stderr below are authoritative.
+                            return false;
+                        }
+                        metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
+                        return true;
+                    },
+                    slot => session.Initialize(slot.Frame),
+                    includeQueueWaitInCorrscopeMetrics: true,
+                    cancellationToken,
+                    abortProducer: () => { try { corrProcess.Kill(entireProcessTree: true); } catch { } });
+                LastMetrics = pipelineMetrics;
                 ffmpeg.StandardInput.Close();
 
                 // Corrscope emits one more frame than the overlay expects
                 // (end_frame = fps * end_time + 1). Drain the remainder so the
                 // bridge exits cleanly instead of hitting a broken pipe.
-                Drain(corrOut);
-            }
-            catch (IOException)
-            {
-                // FFmpeg exited early; its exit code/stderr are the truth.
-            }
-            catch
-            {
-                try { corrProcess.Kill(entireProcessTree: true); } catch { }
-                try { ffmpeg.Kill(entireProcessTree: true); } catch { }
-                throw;
+                try { source.Drain(); } catch (IOException) { }
             }
             finally
             {
-                // Unblock Corrscope's stdout write if it still has frames left.
                 try { corrProcess.StandardOutput.Close(); } catch { }
                 try { ffmpeg.StandardInput.Close(); } catch { }
             }
@@ -246,10 +260,6 @@ internal sealed class SinglePassComposer
 
             string corrErr = corrErrTask?.GetAwaiter().GetResult() ?? "";
             string ffmpegErr = ffmpegErrTask?.GetAwaiter().GetResult() ?? "";
-            LastMetrics = new ComposeMetrics(
-                corrscopeTicks / (double)Stopwatch.Frequency,
-                overlayTicks / (double)Stopwatch.Frequency,
-                ffmpegWriteTicks / (double)Stopwatch.Frequency);
             if (corrProcess.ExitCode != 0)
             {
                 if (corrErr.Length > 2000)
@@ -342,28 +352,47 @@ internal sealed class SinglePassComposer
         {
             process.Start();
             Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-            byte[] frame = new byte[overlayRenderer.FrameByteCount];
             SequentialCompositeSession session = overlayRenderer.CreateSequentialSession();
-            session.Initialize(frame);
-            long overlayTicks = 0;
-            long writeTicks = 0;
+            int gridFrameBytes = overlayRenderer.ScopeFrameByteCount;
+            int outFrameBytes = overlayRenderer.FrameByteCount;
+            Stream input = process.StandardInput.BaseStream;
+            ComposeMetrics pipelineMetrics;
             try
             {
-                using Stream input = process.StandardInput.BaseStream;
-                for (long frameIndex = 0; frameIndex < overlayRenderer.TotalFrames; frameIndex++)
-                {
-                    long stageStart = Stopwatch.GetTimestamp();
-                    session.RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, frame);
-                    overlayTicks += Stopwatch.GetTimestamp() - stageStart;
+                pipelineMetrics = RunFramePipeline(
+                    _options.QueueCapacity,
+                    gridFrameBytes,
+                    outFrameBytes,
+                    overlayRenderer.TotalFrames,
+                    (slot, _) =>
+                    {
+                        slot.HasGrid = false;
+                        return true;
+                    },
+                    (slot, frameIndex, metrics) =>
+                    {
+                        long stageStart = Stopwatch.GetTimestamp();
+                        session.RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, slot.Frame);
+                        metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
 
-                    stageStart = Stopwatch.GetTimestamp();
-                    input.Write(frame, 0, frame.Length);
-                    writeTicks += Stopwatch.GetTimestamp() - stageStart;
-                }
-            }
-            catch (IOException)
-            {
-                // FFmpeg's exit status and stderr below are authoritative.
+                        stageStart = Stopwatch.GetTimestamp();
+                        try
+                        {
+                            input.Write(slot.Frame, 0, outFrameBytes);
+                        }
+                        catch (IOException)
+                        {
+                            // FFmpeg's exit status and stderr below are authoritative.
+                            return false;
+                        }
+                        metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
+                        return true;
+                    },
+                    slot => session.Initialize(slot.Frame),
+                    includeQueueWaitInCorrscopeMetrics: false,
+                    CancellationToken.None,
+                    abortProducer: null);
+                LastMetrics = pipelineMetrics;
             }
             finally
             {
@@ -380,10 +409,6 @@ internal sealed class SinglePassComposer
             }
 
             string stderr = stderrTask.GetAwaiter().GetResult();
-            LastMetrics = new ComposeMetrics(
-                0,
-                overlayTicks / (double)Stopwatch.Frequency,
-                writeTicks / (double)Stopwatch.Frequency);
             if (process.ExitCode != 0 || !File.Exists(tempPath))
             {
                 if (stderr.Length > 4000)
@@ -406,6 +431,228 @@ internal sealed class SinglePassComposer
         finally
         {
             process.Dispose();
+        }
+    }
+
+    private sealed class PipelineMetrics
+    {
+        public long QueueWaitTicks;
+        public long OverlayTicks;
+        public long FfmpegWriteTicks;
+        public long BlockingTicks;
+        public int MaxQueueDepth;
+        public long StarvationCount;
+        public long FrameCount;
+
+        public ComposeMetrics ToComposeMetrics(bool includeQueueWaitInCorrscopeMetrics, long wallStart, int queueCapacity)
+        {
+            return new ComposeMetrics(
+                includeQueueWaitInCorrscopeMetrics
+                    ? QueueWaitTicks / (double)Stopwatch.Frequency
+                    : 0,
+                OverlayTicks / (double)Stopwatch.Frequency,
+                FfmpegWriteTicks / (double)Stopwatch.Frequency,
+                MaxQueueDepth,
+                StarvationCount,
+                BlockingTicks / (double)Stopwatch.Frequency,
+                (Stopwatch.GetTimestamp() - wallStart) / (double)Stopwatch.Frequency,
+                FrameCount,
+                queueCapacity);
+        }
+    }
+
+    private static ComposeMetrics RunFramePipeline(
+        int queueCapacity,
+        int gridFrameBytes,
+        int outFrameBytes,
+        long totalFrames,
+        Func<FrameSlot, long, bool> fillFrame,
+        Func<FrameSlot, long, PipelineMetrics, bool> consumeFrame,
+        Action<FrameSlot> initializeSession,
+        bool includeQueueWaitInCorrscopeMetrics,
+        CancellationToken cancellationToken,
+        Action abortProducer)
+    {
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var free = new BlockingCollection<FrameSlot>(queueCapacity);
+        var ready = new BlockingCollection<FrameSlot>(queueCapacity);
+        var slots = new FrameSlot[queueCapacity];
+        var metrics = new PipelineMetrics();
+        long wallStart = Stopwatch.GetTimestamp();
+        Exception producerError = null;
+        Task producer = null;
+
+        try
+        {
+            for (int n = 0; n < slots.Length; n++)
+            {
+                slots[n] = new FrameSlot(gridFrameBytes, outFrameBytes);
+                free.Add(slots[n]);
+            }
+
+            // Reserve a pooled output buffer while the session is initialized.
+            // The producer starts only after it has been returned to the free queue.
+            FrameSlot initial = free.Take(CancellationToken.None);
+            try
+            {
+                initializeSession(initial);
+            }
+            finally
+            {
+                free.Add(initial);
+            }
+
+            producer = Task.Run(() =>
+            {
+                try
+                {
+                    for (long index = 0; index < totalFrames; index++)
+                    {
+                        linkedCancellation.Token.ThrowIfCancellationRequested();
+                        long waitStart = Stopwatch.GetTimestamp();
+                        FrameSlot slot = free.Take(linkedCancellation.Token);
+                        metrics.BlockingTicks += Stopwatch.GetTimestamp() - waitStart;
+                        bool published = false;
+                        try
+                        {
+                            slot.Index = index;
+                            slot.HasGrid = fillFrame(slot, index);
+                            ready.Add(slot, linkedCancellation.Token);
+                            published = true;
+                        }
+                        finally
+                        {
+                            if (!published)
+                                free.Add(slot);
+                        }
+                    }
+                }
+                catch (Exception error)
+                {
+                    producerError = error;
+                    linkedCancellation.Cancel();
+                }
+                finally
+                {
+                    ready.CompleteAdding();
+                }
+            }, CancellationToken.None);
+
+            Exception consumerError = null;
+            bool stopped = false;
+            try
+            {
+                for (long index = 0; index < totalFrames; index++)
+                {
+                    FrameSlot slot;
+                    long waitStart = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        slot = ready.Take(linkedCancellation.Token);
+                    }
+                    catch (Exception error)
+                    {
+                        consumerError = error;
+                        break;
+                    }
+
+                    if (includeQueueWaitInCorrscopeMetrics)
+                        metrics.QueueWaitTicks += Stopwatch.GetTimestamp() - waitStart;
+                    metrics.MaxQueueDepth = Math.Max(metrics.MaxQueueDepth, ready.Count);
+                    try
+                    {
+                        if (!consumeFrame(slot, index, metrics))
+                        {
+                            stopped = true;
+                            linkedCancellation.Cancel();
+                            break;
+                        }
+
+                        metrics.FrameCount++;
+                    }
+                    catch (Exception error)
+                    {
+                        consumerError = error;
+                        linkedCancellation.Cancel();
+                        break;
+                    }
+                    finally
+                    {
+                        // The slot remains pooled for the complete run and is
+                        // returned to ArrayPool only after the producer joins.
+                        free.Add(slot, CancellationToken.None);
+                    }
+                }
+            }
+            finally
+            {
+                if (consumerError != null || stopped)
+                {
+                    linkedCancellation.Cancel();
+                    try { abortProducer?.Invoke(); } catch { }
+                }
+            }
+
+            producer.GetAwaiter().GetResult();
+
+            if (producerError != null &&
+                !(producerError is OperationCanceledException && (stopped || consumerError != null)))
+            {
+                ExceptionDispatchInfo.Capture(producerError).Throw();
+            }
+
+            if (consumerError != null)
+                ExceptionDispatchInfo.Capture(consumerError).Throw();
+
+            return metrics.ToComposeMetrics(includeQueueWaitInCorrscopeMetrics, wallStart, queueCapacity);
+        }
+        finally
+        {
+            linkedCancellation.Cancel();
+            if (producer != null)
+            {
+                try { producer.GetAwaiter().GetResult(); } catch { }
+            }
+
+            while (free.TryTake(out FrameSlot returned))
+                _ = returned;
+            while (ready.TryTake(out FrameSlot returned))
+                _ = returned;
+            free.Dispose();
+            ready.Dispose();
+            foreach (FrameSlot slot in slots)
+                slot?.Return();
+        }
+    }
+
+    private sealed class FrameSlot
+    {
+        public readonly byte[] Grid;
+        public readonly byte[] Frame;
+        public long Index;
+        public bool HasGrid;
+        private int _returned;
+
+        public FrameSlot(int gridBytes, int frameBytes)
+        {
+            Grid = ArrayPool<byte>.Shared.Rent(gridBytes);
+            try
+            {
+                Frame = ArrayPool<byte>.Shared.Rent(frameBytes);
+            }
+            catch
+            {
+                ArrayPool<byte>.Shared.Return(Grid);
+                throw;
+            }
+        }
+
+        public void Return()
+        {
+            if (Interlocked.Exchange(ref _returned, 1) != 0)
+                return;
+            ArrayPool<byte>.Shared.Return(Grid);
+            ArrayPool<byte>.Shared.Return(Frame);
         }
     }
 
@@ -438,8 +685,8 @@ internal sealed class SinglePassComposer
         {
             args.Add("-filter_complex");
             args.Add(
-                $"[1:a]showwaves=s={width}x{height}:mode=cline:rate={frameRate}:colors=0x7aa4ff,format=rgba[wave];" +
-                "[wave][0:v]overlay=shortest=1:format=auto[v]");
+                $"[0:v]null[overlay];[1:a]showwaves=s={width}x{height}:mode=cline:rate={frameRate}:colors=0x7aa4ff,format=rgba[wave];" +
+                "[wave][overlay]overlay=shortest=1:format=auto[v]");
             args.AddRange(["-map", "[v]"]);
         }
         else
@@ -489,9 +736,8 @@ internal sealed class SinglePassComposer
             "-framerate", frameRate,
             "-i", "pipe:0",
             "-i", masterAudioPath,
-            "-map", "0:v:0",
-            "-map", "1:a:0",
         };
+        args.AddRange(["-map", "0:v:0", "-map", "1:a:0"]);
         VideoEncoderArgs.Append(args, options.Encoder, options.VideoPreset, options.VideoCrf);
         args.AddRange(new[]
         {

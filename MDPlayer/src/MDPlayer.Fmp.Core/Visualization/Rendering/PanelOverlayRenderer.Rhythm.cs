@@ -1,6 +1,6 @@
 namespace Fmp.Core.Visualization.Rendering;
 
-// Rhythm lane drawing seam; the fixed six-voice lane model is unchanged.
+// Rhythm lane drawing seam. Row identity comes from the topology descriptor.
 internal sealed partial class PanelOverlayRenderer
 {
     private void DrawRhythmPanel(Span<byte> frame, PanelData panel, long currentSample)
@@ -15,7 +15,10 @@ internal sealed partial class PanelOverlayRenderer
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         PreparedRhythmEvent[] rhythm = panel.Prepared.Rhythm;
         int first = LowerBoundRhythm(rhythm, windowStart);
-        int rowHeight = Math.Max(1, lane.Height / RhythmVoices.Length);
+        PanelRowDefinition[] rows = panel.Prepared.Rows;
+        if (rows.Length == 0)
+            return;
+        int rowHeight = Math.Max(1, lane.Height / rows.Length);
         OverlayColor accent = _panelAccents[panel.Index];
 
         for (int index = first; index < rhythm.Length; index++)
@@ -23,9 +26,15 @@ internal sealed partial class PanelOverlayRenderer
             PreparedRhythmEvent evt = rhythm[index];
             if (evt.SamplePosition >= windowEnd)
                 break;
-            int voice = Array.IndexOf(RhythmVoiceIds, evt.Voice);
+            int voice = Array.FindIndex(rows, row => string.Equals(row.Id, evt.Voice, StringComparison.Ordinal));
             if (voice < 0)
-                continue;
+            {
+                // Legacy captures can contain a percussion identity that was
+                // not known when the fixed diagnostic rows were prepared.
+                // Preserve the hit in the final stable row rather than
+                // silently discarding semantic data.
+                voice = rows.Length - 1;
+            }
 
             double xFrac = _layout.SampleToX(evt.SamplePosition, currentSample, _timeline.SampleRate, lane);
             int x = (int)Math.Round(xFrac);

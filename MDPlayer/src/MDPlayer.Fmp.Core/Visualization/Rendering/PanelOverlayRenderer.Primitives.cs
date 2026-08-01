@@ -8,11 +8,18 @@ internal sealed partial class PanelOverlayRenderer
     private void DrawFm3OperatorRibbons(Span<byte> frame, PanelData panel, long currentSample)
     {
         OverlayRect ribbons = _layout.GetFm3OperatorRect(panel.Index);
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
+        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        int playheadX = _layout.GetPlayheadX(panel.Index);
         int rowHeight = Math.Max(1, ribbons.Height / 4);
         for (int op = 0; op < 4; op++)
         {
             var row = new OverlayRect(ribbons.X + 20, ribbons.Y + op * rowHeight, Math.Max(1, ribbons.Width - 20), rowHeight);
-            DrawVisibleNotes(frame, panel, panel.Prepared.OperatorNotes[op], row, currentSample, true);
+            DrawVisibleNotes(
+                frame, panel, panel.Prepared.OperatorNotes[op], row, currentSample, true,
+                windowStart, windowEnd, windowSamples, minMidi, maxMidi, playheadX, 0);
         }
     }
 
@@ -95,7 +102,7 @@ internal sealed partial class PanelOverlayRenderer
             PreparedPanel prepared = _panels[panelIndex].Prepared;
             if (ContainsRecentNote(prepared.MainNotes, recentStart, currentSample))
                 return true;
-            if (_panels[panelIndex].Kind == PanelKind.Fm3)
+            if (_panels[panelIndex].TrackKind == VisualizationTrackKind.FmOperatorGroup)
             {
                 foreach (PreparedNote[] operatorNotes in prepared.OperatorNotes)
                 {
@@ -103,19 +110,24 @@ internal sealed partial class PanelOverlayRenderer
                         return true;
                 }
             }
-            if (_panels[panelIndex].Kind == PanelKind.Rhythm)
+            if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Percussion)
             {
                 PreparedRhythmEvent[] events = prepared.Rhythm;
                 int first = LowerBoundRhythm(events, recentStart);
                 if (first < events.Length && events[first].SamplePosition <= currentSample)
                     return true;
             }
-            else if (_panels[panelIndex].Kind == PanelKind.Placeholder)
+            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Sample)
             {
-                if (ContainsRecentPpz8(prepared.Ppz8, recentStart, currentSample)
-                    || ContainsRecentAdpcm(prepared.AdpcmB, recentStart, currentSample))
+                if (ContainsRecentSample(prepared.SamplePlayback, recentStart, currentSample))
                     return true;
             }
+            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Noise
+                && ContainsRecentNoise(prepared.Noise, recentStart, currentSample))
+                return true;
+            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.AggregateActivity
+                && ContainsRecentAggregate(prepared.AggregateHits, recentStart, currentSample))
+                return true;
         }
         return false;
     }
@@ -134,12 +146,12 @@ internal sealed partial class PanelOverlayRenderer
         return false;
     }
 
-    private static bool ContainsRecentPpz8(Ppz8Event[] events, long recentStart, long currentSample)
+    private static bool ContainsRecentSample(SamplePlaybackEvent[] events, long recentStart, long currentSample)
     {
-        int first = LowerBoundPpz8(events, recentStart);
+        int first = LowerBoundPlayback(events, recentStart);
         for (int index = first; index < events.Length; index++)
         {
-            Ppz8Event value = events[index];
+            SamplePlaybackEvent value = events[index];
             if (value.StartSample > currentSample)
                 break;
             if (value.EndSample > recentStart)
@@ -148,24 +160,70 @@ internal sealed partial class PanelOverlayRenderer
         return false;
     }
 
-    private static bool ContainsRecentAdpcm(AdpcmBEvent[] events, long recentStart, long currentSample)
+    private static bool ContainsRecentNoise(NoiseStateEvent[] events, long recentStart, long currentSample)
     {
-        int first = LowerBoundAdpcmB(events, recentStart);
+        int first = LowerBoundNoiseByStart(events, recentStart);
+        if (first > 0)
+            first--;
         for (int index = first; index < events.Length; index++)
         {
-            AdpcmBEvent value = events[index];
+            NoiseStateEvent value = events[index];
             if (value.StartSample > currentSample)
                 break;
             if (value.EndSample > recentStart)
                 return true;
         }
         return false;
+    }
+
+    private static int LowerBoundNoiseByStart(NoiseStateEvent[] events, long sample)
+    {
+        int low = 0;
+        int high = events.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (events[middle].StartSample < sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
+    }
+
+    private static bool ContainsRecentAggregate(AggregateHitEvent[] events, long recentStart, long currentSample)
+    {
+        int first = LowerBoundAggregate(events, recentStart);
+        for (int index = first; index < events.Length; index++)
+        {
+            AggregateHitEvent value = events[index];
+            if (value.SamplePosition > currentSample)
+                break;
+            if (value.SamplePosition >= recentStart)
+                return true;
+        }
+        return false;
+    }
+
+    private static int LowerBoundAggregate(AggregateHitEvent[] events, long sample)
+    {
+        int low = 0;
+        int high = events.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (events[middle].SamplePosition < sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
     }
 
     private bool HasPanelContactActivity(PanelData panel, long currentSample)
     {
         long tolerance = Math.Max(1, (long)Math.Ceiling(_samplesPerFrame * 2));
-        if (panel.Kind == PanelKind.Rhythm)
+        if (panel.TrackKind == VisualizationTrackKind.Percussion)
         {
             PreparedRhythmEvent[] events = panel.Prepared.Rhythm;
             int first = LowerBoundRhythm(events, currentSample - tolerance);
@@ -178,25 +236,42 @@ internal sealed partial class PanelOverlayRenderer
                     return true;
             }
         }
-        else if (panel.Kind == PanelKind.Placeholder)
+        else if (panel.TrackKind == VisualizationTrackKind.Sample)
         {
-            int ppzFirst = LowerBoundPpz8(panel.Prepared.Ppz8, currentSample);
-            for (int index = ppzFirst; index < panel.Prepared.Ppz8.Length; index++)
+            int first = LowerBoundPlayback(panel.Prepared.SamplePlayback, currentSample);
+            for (int index = first; index < panel.Prepared.SamplePlayback.Length; index++)
             {
-                Ppz8Event value = panel.Prepared.Ppz8[index];
+                SamplePlaybackEvent value = panel.Prepared.SamplePlayback[index];
                 if (value.StartSample > currentSample)
                     break;
                 if (value.StartSample <= currentSample && currentSample < value.EndSample)
                     return true;
             }
-
-            int adpcmFirst = LowerBoundAdpcmB(panel.Prepared.AdpcmB, currentSample);
-            for (int index = adpcmFirst; index < panel.Prepared.AdpcmB.Length; index++)
+        }
+        else if (panel.TrackKind == VisualizationTrackKind.Noise)
+        {
+            int first = LowerBoundNoiseByStart(panel.Prepared.Noise, currentSample - tolerance);
+            if (first > 0)
+                first--;
+            for (int index = first; index < panel.Prepared.Noise.Length; index++)
             {
-                AdpcmBEvent value = panel.Prepared.AdpcmB[index];
-                if (value.StartSample > currentSample)
+                NoiseStateEvent value = panel.Prepared.Noise[index];
+                if (value.StartSample > currentSample + tolerance)
                     break;
-                if (value.StartSample <= currentSample && currentSample < value.EndSample)
+                if (value.StartSample <= currentSample + tolerance
+                    && currentSample - tolerance < value.EndSample)
+                    return true;
+            }
+        }
+        else if (panel.TrackKind == VisualizationTrackKind.AggregateActivity)
+        {
+            int first = LowerBoundAggregate(panel.Prepared.AggregateHits, currentSample - tolerance);
+            for (int index = first; index < panel.Prepared.AggregateHits.Length; index++)
+            {
+                long hitSample = panel.Prepared.AggregateHits[index].SamplePosition;
+                if (hitSample > currentSample + tolerance)
+                    break;
+                if (Math.Abs(hitSample - currentSample) <= tolerance)
                     return true;
             }
         }
@@ -254,11 +329,33 @@ internal sealed partial class PanelOverlayRenderer
         leftX = rightX = 0;
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        return TryClipTimeSpanFractional(
+            startSample,
+            endSample,
+            windowStart,
+            windowEnd,
+            _layout.WindowSeconds * _timeline.SampleRate,
+            lane,
+            out leftX,
+            out rightX);
+    }
+
+    private bool TryClipTimeSpanFractional(
+        long startSample,
+        long endSample,
+        long windowStart,
+        long windowEnd,
+        double windowSamples,
+        OverlayRect lane,
+        out double leftX,
+        out double rightX)
+    {
+        leftX = rightX = 0;
         if (startSample >= windowEnd || endSample <= windowStart || endSample <= startSample)
             return false;
 
-        double rawLeft = _layout.SampleToX(startSample, currentSample, _timeline.SampleRate, lane);
-        double rawRight = _layout.SampleToX(endSample, currentSample, _timeline.SampleRate, lane);
+        double rawLeft = lane.X + (startSample - windowStart) * lane.Width / windowSamples;
+        double rawRight = lane.X + (endSample - windowStart) * lane.Width / windowSamples;
         leftX = Math.Max(lane.X, rawLeft);
         rightX = Math.Min(lane.Right, rawRight);
         return rightX > leftX;
@@ -445,7 +542,8 @@ internal sealed partial class PanelOverlayRenderer
         Span<byte> frame,
         OverlayRect header,
         InstrumentDefinition def,
-        int rightLimit)
+        int rightLimit,
+        int panelIndex)
     {
         var operators = def.Operators;
         int n = Math.Min(4, operators.Count);
@@ -479,7 +577,7 @@ internal sealed partial class PanelOverlayRenderer
 
             // Dot: AmplitudeModulation enabled → accent pixel at the bar's top.
             if (opDef.AmplitudeModulation && header.Contains(x, barTop))
-                SetPixel(frame, x, barTop, _panelAccents[0]);
+                SetPixel(frame, x, barTop, _panelAccents[panelIndex]);
         }
     }
 
@@ -740,6 +838,19 @@ internal sealed partial class PanelOverlayRenderer
             return;
 
         int destinationAlpha = frame[offset + 3];
+        // Prepared frames are opaque. Keep the common alpha-composite case on
+        // the integer fast path: the general straight-alpha calculation below
+        // performs several redundant divisions when the destination is already
+        // fully opaque. The equations are identical for destinationAlpha=255.
+        if (destinationAlpha == 255)
+        {
+            int opaqueInverse = 255 - source.A;
+            frame[offset] = (byte)((source.R * source.A + frame[offset] * opaqueInverse + 127) / 255);
+            frame[offset + 1] = (byte)((source.G * source.A + frame[offset + 1] * opaqueInverse + 127) / 255);
+            frame[offset + 2] = (byte)((source.B * source.A + frame[offset + 2] * opaqueInverse + 127) / 255);
+            return;
+        }
+
         int inverse = 255 - source.A;
         int outputAlpha = source.A + (destinationAlpha * inverse + 127) / 255;
         if (outputAlpha == 0)

@@ -153,11 +153,22 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
 
         if (_notes[channel] != null)
         {
-            _notes[channel]!.AddPitch(sample, state.Pitch);
-            return;
+            string currentSampleId = $"sample:{ChipType.ToString().ToLowerInvariant()}:{state.SampleKey}";
+            if (_notes[channel]!.SampleId == currentSampleId
+                && Math.Abs(_notes[channel]!.Pitch.MidiNote - state.Pitch.MidiNote) < 0.0001)
+            {
+                _notes[channel]!.AddPitch(sample, state.Pitch);
+                return;
+            }
         }
 
         string instrument = $"{ChipType.ToString().ToLowerInvariant()}:pcm:{channel + 1}";
+        string sampleId = $"sample:{ChipType.ToString().ToLowerInvariant()}:{state.SampleKey}";
+        _timeline.AddSample(VisualizationAssetBuilder.CreateSyntheticSample(
+            sampleId,
+            "pcm",
+            0,
+            displayName: $"{ChipType} {state.SampleKey}"));
         _timeline.AddInstrument(new InstrumentDefinition(
             instrument,
             "pcm",
@@ -166,11 +177,15 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
             null,
             null,
             Array.Empty<FmOperatorDefinition>()));
+        bool retrigger = _notes[channel] != null;
+        Close(ref _notes[channel], sample);
         _notes[channel] = new MutableNote(
             new VoiceId(_device.Id, VoiceKind.Pcm, channel),
             sample,
             state.Pitch,
-            instrument);
+            instrument,
+            sampleId,
+            retrigger);
     }
 
     private ChannelState ReadState(int channel)
@@ -195,7 +210,8 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
         return new ChannelState(
             !stopped && multiplier > 0,
             Pitch.FromMultiplier(multiplier),
-            stopped);
+            stopped,
+            $"start:{ReadAddress(offset, 0, 3):X6}");
     }
 
     private ChannelState ReadRf(int channel)
@@ -211,7 +227,8 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
                 value => 0x0800
                     * PcmPitchTable.Multiplier(value)
                     * Math.Pow(2, value / 12 - 4)),
-            !active);
+            !active,
+            $"start:{ReadAddress(offset, 0, 2):X4}");
     }
 
     private ChannelState ReadC140(int channel)
@@ -228,7 +245,8 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
                     * 8_000.0
                     * PcmPitchTable.Multiplier(value)
                     * Math.Pow(2, value / 12 - 3)),
-            !active);
+            !active,
+            $"start:{ReadAddress(offset, 0, 3):X6}");
     }
 
     private ChannelState ReadC352(int channel)
@@ -245,7 +263,8 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
                     * PcmPitchTable.Multiplier(value)
                     * Math.Pow(2, value / 12 - 1)
                     / Math.Max(1, _device.ClockHz / 288)),
-            !active);
+            !active,
+            $"start:{ReadAddress(offset, 0, 3):X6}");
     }
 
     private ChannelState ReadK054539(int channel)
@@ -260,7 +279,8 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
             Pitch.FromFrequency(
                 (_device.ClockHz >= 1_000_000 ? _device.ClockHz / 384.0 : _device.ClockHz)
                 / (0x10000 / (double)frequency)),
-            !active);
+            !active,
+            $"start:{ReadAddress(offset, 0, 3):X6}");
     }
 
     private ChannelState ReadGa20(int channel)
@@ -272,7 +292,16 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
         return new ChannelState(
             active,
             Pitch.FromFrequency((_device.ClockHz / 4.0) / Math.Max(1, 256 - frequency)),
-            frequency <= 0);
+            frequency <= 0,
+            $"start:{ReadAddress(offset, 0, 4):X8}");
+    }
+
+    private int ReadAddress(int offset, int firstByte, int byteCount)
+    {
+        int value = 0;
+        for (int index = 0; index < byteCount; index++)
+            value |= (_registers[offset + firstByte + index] & 0xFF) << (index * 8);
+        return value;
     }
 
     private void Close(ref MutableNote? note, long endSample)
@@ -289,15 +318,16 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
                 note.Pitch.FrequencyHz,
                 note.InstrumentId,
                 VisualizationNoteMode.Pcm,
-                false,
-                note.PitchChanges.ToArray());
+                note.IsRetrigger,
+                note.PitchChanges.ToArray(),
+                note.SampleId);
         }
         note = null;
     }
 
-    private readonly record struct ChannelState(bool Active, Pitch Pitch, bool StopRequested)
+    private readonly record struct ChannelState(bool Active, Pitch Pitch, bool StopRequested, string SampleKey)
     {
-        public static readonly ChannelState Inactive = new(false, Pitch.Unpitched, true);
+        public static readonly ChannelState Inactive = new(false, Pitch.Unpitched, true, "inactive");
     }
 
     private readonly record struct Pitch(double FrequencyHz, double MidiNote)
@@ -335,18 +365,28 @@ internal sealed class PcmChipTimelineDecoder : IChipTimelineDecoder
 
     private sealed class MutableNote
     {
-        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId)
+        public MutableNote(
+            VoiceId voice,
+            long startSample,
+            Pitch pitch,
+            string instrumentId,
+            string sampleId,
+            bool isRetrigger)
         {
             Voice = voice;
             StartSample = startSample;
             Pitch = pitch;
             InstrumentId = instrumentId;
+            SampleId = sampleId;
+            IsRetrigger = isRetrigger;
         }
 
         public VoiceId Voice { get; }
         public long StartSample { get; }
         public Pitch Pitch { get; }
         public string InstrumentId { get; }
+        public string SampleId { get; }
+        public bool IsRetrigger { get; }
         public List<PitchChange> PitchChanges { get; } = [];
 
         public void AddPitch(long sample, Pitch pitch)

@@ -189,8 +189,8 @@ internal class MaskedChipSink : IFmpChipSink
             var keyOnGroup = FmChannelToGroup(globalCh);
             if (!_activeChannels.HasFlag(keyOnGroup))
             {
-                // Suppress key-on by clearing bit 7 (key-on flag)
-                byte masked = (byte)(value & ~0x80);
+                // Suppress key-on by clearing bits 4-7 (YM2608 key-on/off flags).
+                byte masked = (byte)(value & 0x0F);
                 return masked;
             }
             return value;

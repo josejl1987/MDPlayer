@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Fmp.Core.IO;
 
 namespace Fmp.Core.Nise98
 {
@@ -91,7 +92,9 @@ namespace Fmp.Core.Nise98
             }
         }
 
-        public void Init(Action<string, object[]> msgWrite, Action<ChipDatum> opnaWrite,fileTemp fileTemp, enmOngenBoardType ongen = enmOngenBoardType.PC9801_86B)
+        public void Init(Action<string, object[]> msgWrite, Action<ChipDatum> opnaWrite,
+            fileTemp fileTemp, enmOngenBoardType ongen = enmOngenBoardType.PC9801_86B,
+            IFmpFileSystem fileSystem = null)
         {
             Log.WriteLine(musicDriverInterface.LogLevel.DEBUG, "<Nise98>Init");
 
@@ -99,7 +102,7 @@ namespace Fmp.Core.Nise98
             this.fileTemp = fileTemp;
             regs = new Register286();
             mem = new Memory98(16 * 64 * 1024);
-            dos = new NiseDos(regs, mem,fileTemp);
+            dos = new NiseDos(regs, mem, fileTemp, fileSystem);
             cpu = new Nise286(this);
             int08Timer = new NiseInt08Timer(cpu);
             ppz8 = new NisePPZ8(this);

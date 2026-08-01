@@ -136,7 +136,7 @@ public sealed class SnesDspPresentationTests
         for (int i = 0; i < 8; i++)
         {
             Assert.Equal($"VOICE {i + 1}", topology.Panels[i].Label);
-            Assert.Equal(PreparedPanelKind.Pitched, topology.Panels[i].Kind);
+            Assert.Equal(PreparedPanelKind.PcmVoice, topology.Panels[i].Kind);
             Assert.Equal(PanelContentKind.SingleVoice, topology.Panels[i].Content);
             Assert.Equal(i, topology.Panels[i].Order);
         }
@@ -158,7 +158,7 @@ public sealed class SnesDspPresentationTests
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(timeline);
 
         // The generic FMP path is unchanged for non-S-DSP timelines.
-        Assert.Equal(12, topology.Panels.Count);
+        Assert.Equal(11, topology.Panels.Count);
         Assert.Equal("FM1", topology.Panels[0].Label);
     }
 

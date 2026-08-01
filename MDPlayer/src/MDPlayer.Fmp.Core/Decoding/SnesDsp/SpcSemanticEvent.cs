@@ -34,16 +34,19 @@ internal readonly record struct SpcSemanticEvent(
     SpcSemanticEventKind Kind,
     int Value = 0,
     int Value2 = 0,
-    ushort EffectivePitch = 0)
+    ushort EffectivePitch = 0,
+    bool HasSourceNumber = false)
 {
     /// <summary>Pitch register value that plays the source at its natural rate (§13.3).</summary>
     public const ushort UnityPitch = 0x1000;
 
-    public static SpcSemanticEvent KeyOn(long samplePosition, int voice, int sourceNumber = 0, ushort effectivePitch = UnityPitch) =>
-        new(samplePosition, voice, SpcSemanticEventKind.KeyOn, sourceNumber, 0, effectivePitch);
+    public static SpcSemanticEvent KeyOn(long samplePosition, int voice, int? sourceNumber = null, ushort effectivePitch = UnityPitch) =>
+        new(samplePosition, voice, SpcSemanticEventKind.KeyOn, sourceNumber ?? 0, 0,
+            effectivePitch, sourceNumber.HasValue);
 
-    public static SpcSemanticEvent ReleaseStart(long samplePosition, int voice) =>
-        new(samplePosition, voice, SpcSemanticEventKind.ReleaseStart);
+    public static SpcSemanticEvent ReleaseStart(
+        long samplePosition, int voice, int envelopeLevel = 0) =>
+        new(samplePosition, voice, SpcSemanticEventKind.ReleaseStart, envelopeLevel);
 
     public static SpcSemanticEvent VoiceEnd(long samplePosition, int voice) =>
         new(samplePosition, voice, SpcSemanticEventKind.VoiceEnd);
@@ -54,11 +57,15 @@ internal readonly record struct SpcSemanticEvent(
     public static SpcSemanticEvent PitchChanged(long samplePosition, int voice, ushort effectivePitch) =>
         new(samplePosition, voice, SpcSemanticEventKind.PitchChanged, 0, 0, effectivePitch);
 
-    public static SpcSemanticEvent VolumeChanged(long samplePosition, int voice, int volume) =>
-        new(samplePosition, voice, SpcSemanticEventKind.VolumeChanged, volume);
+    public static SpcSemanticEvent VolumeChanged(
+        long samplePosition, int voice, int volumeLeft, int volumeRight = 0) =>
+        new(samplePosition, voice, SpcSemanticEventKind.VolumeChanged,
+            volumeLeft, volumeRight);
 
-    public static SpcSemanticEvent EnvelopeModeChanged(long samplePosition, int voice, int envelopeMode) =>
-        new(samplePosition, voice, SpcSemanticEventKind.EnvelopeModeChanged, envelopeMode);
+    public static SpcSemanticEvent EnvelopeModeChanged(
+        long samplePosition, int voice, int envelopeMode, int envelopeLevel = 0) =>
+        new(samplePosition, voice, SpcSemanticEventKind.EnvelopeModeChanged,
+            envelopeMode, envelopeLevel);
 
     public static SpcSemanticEvent GlobalStateChanged(long samplePosition, int stateMask) =>
         new(samplePosition, 0, SpcSemanticEventKind.GlobalStateChanged, stateMask);

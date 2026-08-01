@@ -4,9 +4,10 @@
  * All state is read through the build-time patched accessors:
  *   Spc_Emu::apu_ref() -> Snes_Spc&   (for smp_ram(), the 64K shared RAM)
  *   Spc_Emu::dsp_ref() -> Spc_Dsp&    (for voices() and regs())
- * No function here writes to the emulator or changes execution order, which is
- * what keeps the master output bit-identical to an uninstrumented render
- * (spec §5.3).
+ * The event callback writes only the patched DSP's non-emulation capture
+ * fields and the caller's event buffer. Snapshot reads happen after render;
+ * neither path changes DSP execution order or emulation state, which keeps
+ * the master output bit-identical to an uninstrumented render (spec §5.3).
  */
 #include "spc_capture.h"
 
@@ -39,10 +40,39 @@ inline void append_event(mdp_spc_event* events, int capacity, int* written,
     }
 }
 
+void on_dsp_event(void* opaque, int sample, int type, int channel,
+                  int param0, int param1)
+{
+    spc_capture::event_capture_context* context =
+        static_cast<spc_capture::event_capture_context*>(opaque);
+    append_event(context->events, context->capacity, &context->written,
+                 &context->overflow, context->block_start + sample, type,
+                 channel, param0, param1);
+}
+
 } // namespace
 
 namespace spc_capture
 {
+
+void begin_event_capture(Spc_Dsp& dsp, event_capture_context* context)
+{
+    if (!context)
+        return;
+    context->written = 0;
+    context->overflow = 0;
+    if (!context->events || context->capacity <= 0)
+    {
+        dsp.clear_event_capture();
+        return;
+    }
+    dsp.set_event_capture(&on_dsp_event, context);
+}
+
+void end_event_capture(Spc_Dsp& dsp)
+{
+    dsp.clear_event_capture();
+}
 
 void snapshot(Spc_Dsp& dsp, const uint8_t* ram, int channel,
               mdp_spc_voice_snapshot* out)
@@ -53,7 +83,7 @@ void snapshot(Spc_Dsp& dsp, const uint8_t* ram, int channel,
     const int bit = 1 << channel;
 
     out->channel = channel;
-    out->active = (v.enabled != 0 && v.env_mode != Spc_Dsp::env_release && v.env > 0)
+    out->active = (v.enabled != 0 && v.env > 0)
                       ? 1 : 0;
     out->volume_l = vregs[Spc_Dsp::v_voll];
     out->volume_r = vregs[Spc_Dsp::v_volr];
@@ -133,7 +163,8 @@ int emit_events(const mdp_spc_voice_snapshot* prev,
 
         if (!p.active && c.active)
             append_event(events, capacity, &written, overflow, frame,
-                         MDP_SPC_EVENT_KEY_ON, ch, c.source_number, 0);
+                         MDP_SPC_EVENT_KEY_ON, ch, c.source_number,
+                         c.effective_pitch);
 
         if (p.envelope_mode != MDP_SPC_ENV_RELEASE &&
             c.envelope_mode == MDP_SPC_ENV_RELEASE)

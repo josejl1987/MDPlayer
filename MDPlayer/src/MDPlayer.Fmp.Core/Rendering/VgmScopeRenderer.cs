@@ -48,6 +48,13 @@ internal static class VgmScopeRenderer
                 sampleRate,
                 channels: 1);
         }
+        var pcmBuffers = new short[channelCount][];
+        var monoBuffers = new short[channelCount][];
+        for (int channel = 0; channel < channelCount; channel++)
+        {
+            pcmBuffers[channel] = new short[2048];
+            monoBuffers[channel] = new short[1024];
+        }
 
         var result = new ScopeRenderer.ScopeResult
         {
@@ -60,6 +67,9 @@ internal static class VgmScopeRenderer
         {
             Name = "master",
             Label = "Master",
+            SemanticClass = ScopeSemanticClass.Mixed,
+            StableOrder = 0,
+            DefaultColor = "#7aa4ff",
             WavPath = masterAudioPath,
             Channels = 2,
             Success = File.Exists(masterAudioPath),
@@ -87,6 +97,8 @@ internal static class VgmScopeRenderer
                 RenderUntil(
                     renderers,
                     writers,
+                    pcmBuffers,
+                    monoBuffers,
                     ref rendered,
                     target,
                     fadeStart,
@@ -101,7 +113,7 @@ internal static class VgmScopeRenderer
                     renderer.Write(normalized);
             }
 
-            RenderUntil(renderers, writers, ref rendered, end, fadeStart, baseEnd);
+            RenderUntil(renderers, writers, pcmBuffers, monoBuffers, ref rendered, end, fadeStart, baseEnd);
             result.MasterSamples = rendered;
             result.Success = true;
             result.CompletionReason = "completed";
@@ -113,6 +125,11 @@ internal static class VgmScopeRenderer
                 {
                     Name = spec.Name,
                     Label = spec.Label,
+                    SemanticClass = spec.SemanticClass,
+                    StableOrder = spec.StableOrder,
+                    WindowWidth = spec.WindowWidth,
+                    DefaultAmplification = spec.DefaultAmplification,
+                    DefaultColor = spec.DefaultColor,
                     WavPath = Path.Combine(audioDir, spec.Name + ".wav"),
                     RenderedSamples = rendered,
                     Channels = 1,
@@ -139,6 +156,8 @@ internal static class VgmScopeRenderer
     private static StemSpec[] BuildSpecs(VgmDocument document)
     {
         var specs = new List<StemSpec>();
+        string[] fmColors = ["#ff665c", "#ffb44c", "#f2df5b", "#44cc44", "#44aaff", "#aa44ff"];
+        string[] pulseColors = ["#62b8ff", "#3399ee", "#62b8ff"];
         if (document.Devices.Count(device => device.Id.Type == ChipType.Huc6280) == 1)
         {
             for (int channel = 0; channel < 6; channel++)
@@ -146,7 +165,60 @@ internal static class VgmScopeRenderer
                     $"huc6280-wave{channel + 1}",
                     $"HuC6280 Wave {channel + 1}",
                     ChipType.Huc6280,
-                    channel));
+                    channel,
+                    ScopeSemanticClass.PulseStable,
+                    10 + channel,
+                    1,
+                    1.0,
+                    fmColors[channel]));
+        }
+
+        if (document.Devices.Count(device => device.Id.Type == ChipType.Ym2608) == 1)
+        {
+            for (int channel = 0; channel < 6; channel++)
+                specs.Add(new StemSpec(
+                    $"ym2608-fm{channel + 1}",
+                    $"YM2608 FM {channel + 1}",
+                    ChipType.Ym2608,
+                    channel,
+                    ScopeSemanticClass.FmEvolving,
+                    10 + channel,
+                    1,
+                    1.0,
+                    fmColors[channel]));
+
+            for (int channel = 0; channel < 3; channel++)
+                specs.Add(new StemSpec(
+                    $"ym2608-ssg{channel + 1}",
+                    $"YM2608 SSG {channel + 1}",
+                    ChipType.Ym2608,
+                    6 + channel,
+                    ScopeSemanticClass.PulseStable,
+                    20 + channel,
+                    1,
+                    0.7,
+                    pulseColors[channel]));
+
+            specs.Add(new StemSpec(
+                "ym2608-rhythm",
+                "YM2608 Rhythm",
+                ChipType.Ym2608,
+                9,
+                ScopeSemanticClass.Percussive,
+                30,
+                2,
+                0.75,
+                "#db72ff"));
+            specs.Add(new StemSpec(
+                "ym2608-adpcm",
+                "YM2608 ADPCM-B",
+                ChipType.Ym2608,
+                10,
+                ScopeSemanticClass.Pcm,
+                31,
+                2,
+                1.0,
+                "#66cc66"));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Ym2612) == 1)
@@ -156,7 +228,12 @@ internal static class VgmScopeRenderer
                     $"ym2612-fm{channel + 1}",
                     $"YM2612 FM {channel + 1}",
                     ChipType.Ym2612,
-                    channel));
+                    channel,
+                    ScopeSemanticClass.FmEvolving,
+                    20 + channel,
+                    1,
+                    1.0,
+                    fmColors[channel]));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Sn76489) == 1)
@@ -166,12 +243,22 @@ internal static class VgmScopeRenderer
                     $"sn76489-tone{channel + 1}",
                     $"SN76489 Tone {channel + 1}",
                     ChipType.Sn76489,
-                    channel));
+                    channel,
+                    ScopeSemanticClass.PulseStable,
+                    30 + channel,
+                    1,
+                    0.7,
+                    pulseColors[channel]));
             specs.Add(new StemSpec(
                 "sn76489-noise",
                 "SN76489 Noise",
                 ChipType.Sn76489,
-                3));
+                3,
+                ScopeSemanticClass.Noise,
+                33,
+                1,
+                0.7,
+                "#3399ee"));
         }
 
         return specs.ToArray();
@@ -181,7 +268,12 @@ internal static class VgmScopeRenderer
         string Name,
         string Label,
         ChipType FilterType,
-        int Channel);
+        int Channel,
+        ScopeSemanticClass SemanticClass,
+        int StableOrder,
+        int WindowWidth,
+        double DefaultAmplification,
+        string DefaultColor);
 
     private static IEnumerable<VgmRegisterWrite> ExpandWrites(
         VgmDocument document,
@@ -216,6 +308,8 @@ internal static class VgmScopeRenderer
     private static void RenderUntil(
         VgmAudioRenderer[] renderers,
         WavWriter[] writers,
+        short[][] pcmBuffers,
+        short[][] monoBuffers,
         ref long rendered,
         long target,
         long fadeStart,
@@ -224,15 +318,14 @@ internal static class VgmScopeRenderer
         if (target < rendered)
             throw new InvalidOperationException("VGM stems are not monotonic after loop expansion.");
 
-        short[][] mono = renderers
-            .Select(_ => new short[1024])
-            .ToArray();
         while (rendered < target)
         {
             int count = (int)Math.Min(1024, target - rendered);
             for (int channel = 0; channel < renderers.Length; channel++)
             {
-                short[] pcm = renderers[channel].Render(count);
+                Span<short> pcm = pcmBuffers[channel].AsSpan(0, count * 2);
+                renderers[channel].Render(count, pcm);
+                Span<short> mono = monoBuffers[channel].AsSpan(0, count);
                 for (int sample = 0; sample < count; sample++)
                 {
                     long absolute = rendered + sample;
@@ -242,9 +335,9 @@ internal static class VgmScopeRenderer
                             ? 1
                             : (baseEnd - absolute) / (double)(baseEnd - fadeStart);
                     int mixed = (pcm[sample * 2] + pcm[sample * 2 + 1]) / 2;
-                    mono[channel][sample] = (short)Math.Clamp(mixed * gain, short.MinValue, short.MaxValue);
+                    mono[sample] = (short)Math.Clamp(mixed * gain, short.MinValue, short.MaxValue);
                 }
-                writers[channel].Write(mono[channel].AsSpan(0, count));
+                writers[channel].Write(mono);
             }
             rendered += count;
         }

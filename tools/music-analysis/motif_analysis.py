@@ -68,9 +68,10 @@ def analyze_motifs(notes, detail="standard", loops=None):
     if detail == "minimal":
         return []
     output = []
-    for channel_id in sorted({n["channelId"] for n in notes}):
+    grouped = getattr(notes, "by_channel", None)
+    for channel_id in sorted(grouped if grouped is not None else {n["channelId"] for n in notes}):
         sequence = sorted(
-            [n for n in notes if n["channelId"] == channel_id
+            [n for n in (grouped[channel_id] if grouped is not None else notes) if n["channelId"] == channel_id
              and n.get("theoryPitched", True)
              and n.get("pitchClass", -1) in range(12)],
             key=lambda n: (n.get("startSample", 0), n.get("id", "")),
@@ -92,10 +93,11 @@ def analyze_motifs(notes, detail="standard", loops=None):
 
         for length in range(min(12, len(sequence)), 2, -1):
             buckets = {}
+            fingerprints = {}
             for start in range(0, len(sequence) - length + 1):
                 if _crosses_boundary(sequence, start, length, boundaries):
                     continue
-                fingerprint = _fingerprint(sequence, start, length)
+                fingerprint = fingerprints.setdefault(start, _fingerprint(sequence, start, length))
                 if _is_trivial(fingerprint, sequence, start, length):
                     continue
                 buckets.setdefault(fingerprint, []).append(start)

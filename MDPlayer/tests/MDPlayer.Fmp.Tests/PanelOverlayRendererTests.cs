@@ -737,7 +737,7 @@ public sealed class PanelOverlayRendererTests
         Assert.Contains(missing, exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SkippableFact]
     public void ExplicitFontMissingRequiredGlyph_ReportsUnicodeScalar()
     {
         string asciiFont = new[]
@@ -745,8 +745,7 @@ public sealed class PanelOverlayRendererTests
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         }.FirstOrDefault(File.Exists);
-        if (asciiFont == null)
-            return;
+        Skip.If(asciiFont == null, "No ASCII font is installed for coverage test.");
 
         var exception = Assert.Throws<InvalidOperationException>(() =>
             new PanelOverlayRenderer(
@@ -859,7 +858,7 @@ public sealed class PanelOverlayRendererTests
         byte[] frame = renderer.RenderFrame(40); // FM1 note active, has pitch changes
         int playheadX = renderer.Layout.GetPlayheadX(0);
         OverlayRect lane = renderer.Layout.GetPitchedLaneRect(0, false);
-        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent(0);
+        OverlayColor accent = InstrumentColorResolver.ResolveChannelAccent("ym2608.0.fm.1", 0);
         OverlayColor markerColor = accent.Lighten(0.5);
 
         // Scan a 5px-wide column around the playhead for the marker color.

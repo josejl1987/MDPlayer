@@ -10,6 +10,9 @@ public class FmpFileSystem : IFmpFileSystem
 {
     private readonly List<string> _searchPaths = new();
 
+    /// <summary>Normalized search paths used by the virtual DOS file system.</summary>
+    public IReadOnlyList<string> SearchPaths => _searchPaths;
+
     public FmpFileSystem(IEnumerable<string> searchPaths)
     {
         foreach (var p in searchPaths)

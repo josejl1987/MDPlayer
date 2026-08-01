@@ -34,9 +34,6 @@ internal sealed class SequentialCompositeSession
         if (!_initialized)
             throw new InvalidOperationException("The sequential session must be initialized first.");
 
-        _renderer.ValidateFrameForSession(frameIndex, destination);
-        _renderer.RestoreDynamicRegions(destination);
-        _renderer.PlaceScopeRowsForSession(scopeGrid, destination);
-        _renderer.DrawDynamicForSession(frameIndex, destination);
+        _renderer.RenderForSession(frameIndex, scopeGrid, destination);
     }
 }

@@ -21,6 +21,7 @@ public sealed class Ppz8AdpcmTimelineTests
         VisualizationTimeline timeline = sink.Complete(300, "test");
 
         Assert.Equal(2, timeline.Ppz8.Length);
+        Assert.Equal(8, timeline.Voices.Count(voice => voice.Id.Device.Type == ChipType.Ppz8));
         Ppz8Event first = Assert.Single(timeline.Ppz8, value => value.Channel == 0);
         Ppz8Event second = Assert.Single(timeline.Ppz8, value => value.Channel == 1);
         Assert.Equal(100, first.StartSample);
@@ -30,6 +31,8 @@ public sealed class Ppz8AdpcmTimelineTests
         Assert.Equal(12, first.SampleNumber);
         Assert.Equal(22_050, first.FrequencyHz);
         Assert.NotNull(first.MidiNote);
+        Assert.Contains(timeline.SamplePlayback, value => value.VoiceId == "ppz8.0.pcm.1");
+        Assert.Contains(timeline.SamplePlayback, value => value.VoiceId == "ppz8.0.pcm.2");
     }
 
     [Fact]

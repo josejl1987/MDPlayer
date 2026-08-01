@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline, deterministic symbolic analysis worker for MDPlayer timelines."""
 from __future__ import annotations
-import argparse, hashlib, json, math, sys
+import argparse, hashlib, json, math, sys, time
 from pathlib import Path
 from score_builder import build_score
 from key_analysis import analyze_key
@@ -12,7 +12,8 @@ from motif_analysis import analyze_motifs
 from pattern_analysis import analyze_boundaries, analyze_pedal_tones, analyze_ostinatos
 from relationship_analysis import analyze_relationships
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
+WORKER_COMPATIBILITY = "1.1.0"
 REQUIRED_MUSIC21_VERSION = "10.5.0"
 
 class InputSchemaError(Exception):
@@ -40,11 +41,33 @@ def _public_candidates(items, detail):
         return []
     return [{**item, "status": "experimental"} for item in items]
 
-def probe():
+def _stage(profile, name, started):
+    if not profile:
+        return
+    elapsed_ns = time.monotonic_ns() - started
+    print(json.dumps({"event": "analysis-stage", "stage": name,
+                      "elapsedNs": elapsed_ns,
+                      "elapsedMs": round(elapsed_ns / 1_000_000, 3)}, sort_keys=True),
+          file=sys.stderr)
+
+
+def probe(as_json=False):
     import music21
     if music21.__version__ != REQUIRED_MUSIC21_VERSION:
         raise ImportError(f"music21=={REQUIRED_MUSIC21_VERSION} required; found {music21.__version__}")
-    print(music21.__version__)
+    result = {
+        "worker": "mdplayer-music-analysis",
+        "version": VERSION,
+        "workerVersion": VERSION,
+        "compatibility": WORKER_COMPATIBILITY,
+        "schemaVersion": 1,
+        "outputSchemaVersion": 1,
+        "music21Version": music21.__version__,
+        "requiredMusic21Version": REQUIRED_MUSIC21_VERSION,
+        "partituraVersion": None,
+        "compatible": True,
+    }
+    print(json.dumps(result, sort_keys=True) if as_json else music21.__version__)
 
 
 def _assert_finite(value, path="$"):
@@ -96,18 +119,22 @@ def validate_input(data):
             if not data["startSample"] <= beat.get("sample", -1) <= data["endSample"]:
                 raise InputSchemaError("beat event is outside the source range")
 
-def run(inp, detail):
+def run(inp, detail, analysis_profile=False):
+    profile_started = time.monotonic_ns()
     import music21
     if music21.__version__ != REQUIRED_MUSIC21_VERSION:
         raise ImportError(f"music21=={REQUIRED_MUSIC21_VERSION} required; found {music21.__version__}")
     score, notes, warnings = build_score(inp, detail)
+    _stage(analysis_profile, "score", profile_started)
     key = analyze_key(score, notes, detail)
+    _stage(analysis_profile, "key", profile_started)
     local_keys = analyze_local_keys(notes, inp.get("timing", {}), detail)
+    _stage(analysis_profile, "local-keys", profile_started)
     features = analyze_features(notes, score, detail)
+    _stage(analysis_profile, "features", profile_started)
     warnings.extend({"code": "JSYMBOLIC_LIMITED", "message": message}
                     for message in features.pop("_warnings", []))
-    harmony = _public_candidates(
-        analyze_harmony(
+    harmony = _public_candidates(analyze_harmony(
             score,
             notes,
             key,
@@ -115,32 +142,22 @@ def run(inp, detail):
             inp.get("arpeggioEvidence", []),
             inp.get("sampleRate"),
             inp.get("timing", {}).get("loops", []),
-        ),
-        detail,
-    ) if detail == "full" else []
-    motifs = _public_candidates(
-        analyze_motifs(notes, detail, inp.get("timing", {}).get("loops", [])), detail
-    )
-    pedal_tones = _public_candidates(
-        analyze_pedal_tones(notes, float(inp.get("sampleRate", 1) or 1)), detail
-    )
-    ostinatos = _public_candidates(
-        analyze_ostinatos(
+        ), detail) if detail == "full" else []
+    motifs = _public_candidates(analyze_motifs(notes, detail, inp.get("timing", {}).get("loops", [])), detail) if detail == "full" else []
+    pedal_tones = _public_candidates(analyze_pedal_tones(notes, float(inp.get("sampleRate", 1) or 1)), detail) if detail == "full" else []
+    ostinatos = _public_candidates(analyze_ostinatos(
             notes,
             detail,
             inp.get("timing", {}).get("loops", []),
             float(inp.get("sampleRate", 1) or 1),
-        ),
-        detail,
-    )
-    relationships = _public_candidates(
-        analyze_relationships(notes, float(inp.get("sampleRate", 1) or 1), detail), detail
-    )
+        ), detail) if detail == "full" else []
+    relationships = _public_candidates(analyze_relationships(notes, float(inp.get("sampleRate", 1) or 1), detail), detail) if detail == "full" else []
     boundaries = _public_candidates(analyze_boundaries(
         notes,
         float(inp.get("sampleRate", 1) or 1),
         inp.get("timing", {}).get("loops", []),
-    ), detail)
+    ), detail) if detail == "full" else []
+    _stage(analysis_profile, "full-analysis", profile_started)
     timing = inp.get("timing", {})
     timing_mode = "beats" if timing.get("timingMode") == "beats" and timing.get("beats") else "seconds"
     key_regions = []
@@ -180,13 +197,17 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--input"); p.add_argument("--output"); p.add_argument("--detail", choices=("minimal","standard","full"), default="standard")
     p.add_argument("--probe", action="store_true")
+    p.add_argument("--json", action="store_true", dest="probe_json",
+                   help="emit structured output for --probe")
+    p.add_argument("--analysis-profile", action="store_true",
+                   help="emit monotonic analysis stage metrics on stderr")
     a = p.parse_args(argv)
     try:
-        if a.probe: probe(); return 0
+        if a.probe: probe(a.probe_json); return 0
         if not a.input or not a.output: p.error("--input and --output are required")
         data = json.loads(Path(a.input).read_text(encoding="utf-8"))
         validate_input(data)
-        result = run(data, a.detail)
+        result = run(data, a.detail, a.analysis_profile)
         try:
             import jsonschema
             schema = json.loads((Path(__file__).parent / "schemas" / "analysis-output.schema.json").read_text(encoding="utf-8"))

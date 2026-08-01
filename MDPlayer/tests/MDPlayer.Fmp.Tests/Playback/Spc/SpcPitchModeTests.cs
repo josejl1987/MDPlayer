@@ -20,7 +20,7 @@ public sealed class SpcPitchModeTests
     [Fact]
     public void Cli_ParsesSpcPitchRelative()
     {
-        var options = VgmVisualizeCommand.Parse(["track.spc", "--spc-pitch", "relative"]);
+        var options = VisualizeCommand.ParseArgs(["track.spc", "--spc-pitch", "relative"]);
         Assert.NotNull(options);
         Assert.Equal(SpcPitchMode.Relative, options.SpcPitchMode);
     }
@@ -28,7 +28,7 @@ public sealed class SpcPitchModeTests
     [Fact]
     public void Cli_ParsesSpcPitchEstimateInline()
     {
-        var options = VgmVisualizeCommand.Parse(["track.spc", "--spc-pitch=estimate"]);
+        var options = VisualizeCommand.ParseArgs(["track.spc", "--spc-pitch=estimate"]);
         Assert.NotNull(options);
         Assert.Equal(SpcPitchMode.Estimate, options.SpcPitchMode);
     }
@@ -36,7 +36,7 @@ public sealed class SpcPitchModeTests
     [Fact]
     public void Cli_SpcPitchDefaultsToEstimate()
     {
-        var options = VgmVisualizeCommand.Parse(["track.spc"]);
+        var options = VisualizeCommand.ParseArgs(["track.spc"]);
         Assert.NotNull(options);
         Assert.Equal(SpcPitchMode.Estimate, options.SpcPitchMode);
     }
@@ -44,9 +44,19 @@ public sealed class SpcPitchModeTests
     [Fact]
     public void Cli_RejectsUnknownSpcPitchValue_WithActionableMessage()
     {
-        var ex = Assert.Throws<ArgumentException>(
-            () => VgmVisualizeCommand.Parse(["track.spc", "--spc-pitch", "octave"]));
-        Assert.Contains("estimate or relative", ex.Message, StringComparison.Ordinal);
+        var original = Console.Error;
+        var buffer = new StringWriter();
+        Console.SetError(buffer);
+        try
+        {
+            var options = VisualizeCommand.ParseArgs(["track.spc", "--spc-pitch", "octave"]);
+            Assert.Null(options);
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
+        Assert.Contains("estimate or relative", buffer.ToString(), StringComparison.Ordinal);
     }
 
     // ---- Instrument build: relative skips root estimation (§25.3) ----
@@ -124,7 +134,7 @@ public sealed class SpcPitchModeTests
     private static SpcSnapshot BuildSnapshot()
     {
         byte[] blocks = TestBrrEncoder.EncodeSineBlocks(
-            TestBrrEncoder.GenerateSine(400, BrrDecoder.SampleRateHz, 20000, 288));
+            TestBrrEncoder.GenerateSine(400, BrrDecoder.SampleRateHz, 12000, 288));
         var ram = new byte[0x10000];
         blocks.CopyTo(ram, 0x0100);
         ram[0x0200] = 0x00; // DIR entry srcn 0: start 0x0100
@@ -170,7 +180,7 @@ public sealed class SpcPitchModeTests
 
         // BRR sine loop at 0x0400.
         byte[] blocks = TestBrrEncoder.EncodeSineBlocks(
-            TestBrrEncoder.GenerateSine(400, BrrDecoder.SampleRateHz, 20000, 288));
+            TestBrrEncoder.GenerateSine(400, BrrDecoder.SampleRateHz, 12000, 288));
         blocks.CopyTo(spc, 0x100 + 0x0400);
 
         // DSP registers (linear file layout at 0x10100).

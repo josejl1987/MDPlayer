@@ -11,12 +11,14 @@ internal static class UnicodeStaticTextRenderer
 {
     public static bool CanRender(
         VisualizationPresentation presentation,
-        string configuredFontPath)
+        string configuredFontPath,
+        IReadOnlyList<string> trackLabels = null,
+        bool preferAntialiased = false)
     {
         if (presentation == null)
             return false;
 
-        List<Rune> required = CollectRunes(presentation);
+        List<Rune> required = CollectRunes(presentation, trackLabels);
         if (required.Count == 0)
             return false;
         bool hasNonAscii = required.Exists(rune => rune.Value > 0x7F);
@@ -25,7 +27,7 @@ internal static class UnicodeStaticTextRenderer
         // ASCII-only metadata is deliberately allowed to use the deterministic
         // bitmap layer. Do not let an unrelated broken system CJK candidate
         // turn an ASCII render into a font failure.
-        if (!hasNonAscii && !explicitFont)
+        if (!hasNonAscii && !explicitFont && !preferAntialiased)
             return false;
         string fontPath = CjkFontResolver.Resolve(configuredFontPath);
         if (string.IsNullOrEmpty(fontPath))
@@ -48,12 +50,16 @@ internal static class UnicodeStaticTextRenderer
         int height,
         OverlayLayout layout,
         VisualizationPresentation presentation,
-        string configuredFontPath)
+        string configuredFontPath,
+        IReadOnlyList<string> trackLabels = null)
     {
-        if (presentation == null
-            || (string.IsNullOrWhiteSpace(presentation.Title)
-                && string.IsNullOrWhiteSpace(presentation.Subtitle)
-                && string.IsNullOrWhiteSpace(presentation.Credits)))
+        bool hasMetadata = presentation is not null
+            && (!string.IsNullOrWhiteSpace(presentation.Title)
+                || !string.IsNullOrWhiteSpace(presentation.Subtitle)
+                || !string.IsNullOrWhiteSpace(presentation.Credits));
+        bool hasTrackLabels = trackLabels is { Count: > 0 }
+            && trackLabels.Any(label => !string.IsNullOrWhiteSpace(label));
+        if (presentation is null || (!hasMetadata && !hasTrackLabels))
         {
             return false;
         }
@@ -65,9 +71,10 @@ internal static class UnicodeStaticTextRenderer
         FontFamily family;
         Font titleFont;
         Font secondaryFont;
-        family = CjkFontResolver.LoadFamily(fontPath, CollectRunes(presentation));
+        family = CjkFontResolver.LoadFamily(fontPath, CollectRunes(presentation, trackLabels));
         titleFont = family.CreateFont(28, FontStyle.Regular);
         secondaryFont = family.CreateFont(16, FontStyle.Regular);
+        Font trackFont = family.CreateFont(height >= 720 ? 16 : 10, FontStyle.Regular);
 
         using var image = new Image<Rgba32>(width, height, Color.Transparent);
         image.Mutate(context =>
@@ -81,7 +88,7 @@ internal static class UnicodeStaticTextRenderer
                     presentation.Title,
                     titleFont,
                     Color.FromRgb(222, 226, 238),
-                    new PointF(top.X + 24, top.Y + 6));
+                    new PointF(top.X + layout.SafeHorizontalMargin, top.Y + 6));
             }
 
             if (!string.IsNullOrWhiteSpace(presentation.Subtitle))
@@ -90,7 +97,7 @@ internal static class UnicodeStaticTextRenderer
                     presentation.Subtitle,
                     secondaryFont,
                     Color.FromRgb(139, 146, 167),
-                    new PointF(top.X + 24, top.Y + 39));
+                    new PointF(top.X + layout.SafeHorizontalMargin, top.Y + 39));
             }
 
             if (!string.IsNullOrWhiteSpace(presentation.Credits))
@@ -99,7 +106,23 @@ internal static class UnicodeStaticTextRenderer
                     presentation.Credits,
                     secondaryFont,
                     Color.FromRgb(139, 146, 167),
-                    new PointF(bottom.X + 24, bottom.Y + 8));
+                    new PointF(bottom.X + layout.SafeHorizontalMargin, bottom.Y + 8));
+            }
+
+            if (trackLabels is { Count: > 0 })
+            {
+                for (int index = 0; index < trackLabels.Count; index++)
+                {
+                    string label = trackLabels[index];
+                    if (string.IsNullOrWhiteSpace(label) || index >= layout.PanelCount)
+                        continue;
+                    OverlayRect header = layout.GetHeaderRect(index);
+                    context.DrawText(
+                        label,
+                        trackFont,
+                        Color.FromRgb(222, 226, 238),
+                        new PointF(header.X + 10, header.Y + Math.Max(1, (header.Height - trackFont.Size) / 2)));
+                }
             }
         });
 
@@ -132,12 +155,17 @@ internal static class UnicodeStaticTextRenderer
         return true;
     }
 
-    private static List<Rune> CollectRunes(VisualizationPresentation presentation)
+    private static List<Rune> CollectRunes(
+        VisualizationPresentation presentation,
+        IReadOnlyList<string> trackLabels)
     {
         var result = new List<Rune>();
         AddRunes(result, presentation.Title);
         AddRunes(result, presentation.Subtitle);
         AddRunes(result, presentation.Credits);
+        if (trackLabels is not null)
+            foreach (string label in trackLabels)
+                AddRunes(result, label);
         return result;
     }
 

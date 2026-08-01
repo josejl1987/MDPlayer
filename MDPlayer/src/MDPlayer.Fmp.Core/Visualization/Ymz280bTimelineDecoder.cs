@@ -81,13 +81,18 @@ internal sealed class Ymz280bTimelineDecoder : IChipTimelineDecoder
             return;
         }
 
+        string sampleKey = $"start:{_registers[offset]:X2}{_registers[offset + 1]:X2}{_registers[offset + 2]:X2}";
+        string sampleId = $"sample:ymz280b:{sampleKey.ToLowerInvariant()}";
         if (_notes[channel] != null
-            && Math.Abs(_notes[channel].Pitch.MidiNote - pitch.MidiNote) < 0.0001)
+            && _notes[channel]!.SampleId == sampleId
+            && Math.Abs(_notes[channel]!.Pitch.MidiNote - pitch.MidiNote) < 0.0001)
             return;
 
         bool retrigger = _notes[channel] != null;
         Close(ref _notes[channel], sample);
         string instrument = $"ymz280b:pcm:{channel + 1}";
+        _timeline.AddSample(VisualizationAssetBuilder.CreateSyntheticSample(
+            sampleId, "pcm", 0, displayName: $"YMZ280B {sampleKey}"));
         _timeline.AddInstrument(new InstrumentDefinition(
             instrument, "pcm", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
         _notes[channel] = new MutableNote(
@@ -95,6 +100,7 @@ internal sealed class Ymz280bTimelineDecoder : IChipTimelineDecoder
             sample,
             pitch,
             instrument,
+            sampleId,
             retrigger);
     }
 
@@ -125,7 +131,8 @@ internal sealed class Ymz280bTimelineDecoder : IChipTimelineDecoder
                 note.InstrumentId,
                 VisualizationNoteMode.Pcm,
                 note.IsRetrigger,
-                note.PitchChanges.ToArray());
+                note.PitchChanges.ToArray(),
+                note.SampleId);
         }
         note = null;
     }
@@ -137,12 +144,19 @@ internal sealed class Ymz280bTimelineDecoder : IChipTimelineDecoder
 
     private sealed class MutableNote
     {
-        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId, bool retrigger)
+        public MutableNote(
+            VoiceId voice,
+            long startSample,
+            Pitch pitch,
+            string instrumentId,
+            string sampleId,
+            bool retrigger)
         {
             Voice = voice;
             StartSample = startSample;
             Pitch = pitch;
             InstrumentId = instrumentId;
+            SampleId = sampleId;
             IsRetrigger = retrigger;
         }
 
@@ -150,6 +164,7 @@ internal sealed class Ymz280bTimelineDecoder : IChipTimelineDecoder
         public long StartSample { get; }
         public Pitch Pitch { get; }
         public string InstrumentId { get; }
+        public string SampleId { get; }
         public bool IsRetrigger { get; }
         public List<PitchChange> PitchChanges { get; } = [];
     }

@@ -1,4 +1,5 @@
 using Fmp.Core.IO;
+using Fmp.Core.Rendering;
 
 namespace Fmp.Cli;
 
@@ -40,9 +41,9 @@ internal static class TrackPreparation
             throw new TrackPreparationException($"input not found: {input.FullName}", 3);
 
         string extension = input.Extension.ToLowerInvariant();
-        if (extension is not (".ovi" or ".opi" or ".ozi" or ".mpi" or ".mvi" or ".mzi"))
+        if (!FmpFormat.IsSupportedExtension(extension))
             throw new TrackPreparationException(
-                $"unsupported format: {extension} (expected .ovi, .opi, .ozi, .mpi, .mvi, or .mzi)", 3);
+                $"unsupported format: {extension} ({FmpFormat.ExpectedDescription})", 3);
 
         string fmpCom = ToolResolver.ResolveFile(settings.FmpCom, settings.AssetsDir, "FMP.COM");
         if (string.IsNullOrEmpty(fmpCom) || !File.Exists(fmpCom))

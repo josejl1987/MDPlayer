@@ -8,7 +8,7 @@ namespace Fmp.Core.Visualization.Rendering;
 /// and a fixed playhead. Scope viewports remain transparent for Corrscope.
 /// Frames are rendered directly into caller-owned RGBA memory.
 /// </summary>
-internal sealed partial class PanelOverlayRenderer
+internal sealed partial class PanelOverlayRenderer : IDisposable
 {
     public sealed class Options
     {
@@ -18,12 +18,28 @@ internal sealed partial class PanelOverlayRenderer
         public int FpsDenominator { get; set; } = 1;
         public double PastSeconds { get; set; } = 0.75;
         public double FutureSeconds { get; set; } = 2.25;
+        public double RollZoom { get; set; } = 1.0;
+        public int? ScopeHeight { get; set; }
+        public int? TimelineHeight { get; set; }
+        public double? ScopeRatio { get; set; }
+        public VisualizationScopePosition ScopePosition { get; set; } = VisualizationScopePosition.Top;
+        public VisualizationChannelFilter Channels { get; set; } = VisualizationChannelFilter.All;
+        public VisualizationGroupBy GroupBy { get; set; } = VisualizationGroupBy.None;
+        public VisualizationTimeGrid TimeGrid { get; set; } = VisualizationTimeGrid.None;
         public VisualizationPresentation Presentation { get; set; } = VisualizationPresentation.Empty;
         public string FontPath { get; set; }
-        public EffectsMode Effects { get; set; } = EffectsMode.All;
+        public bool PreferAntialiasedText { get; set; }
+        public EffectsMode Effects { get; set; } = EffectsMode.Minimal;
         public NoteColorMode NoteColor { get; set; } = NoteColorMode.Instrument;
         public VisualizationLayoutMode LayoutMode { get; set; } = VisualizationLayoutMode.Diagnostic;
         public AnalysisOverlayScene AnalysisOverlay { get; set; } = AnalysisOverlayScene.Empty;
+        public VisualizationPalette Palette { get; set; } = VisualizationPalette.Default;
+        public int MotionBlurSamples { get; set; } = 1;
+        /// <summary>
+        /// Semantic raster backend. CPU is the default for direct renderer
+        /// callers; the CLI resolves auto before constructing this renderer.
+        /// </summary>
+        public VisualizationRendererMode Renderer { get; set; } = VisualizationRendererMode.Cpu;
 
         /// <summary>
         /// Presentation fade-in for the title bars and musical grid. The CLI
@@ -43,35 +59,22 @@ internal sealed partial class PanelOverlayRenderer
         public ChannelEnergyEnvelope[] Energy { get; set; }
     }
 
-    private enum PanelKind
-    {
-        Pitched,
-        Ssg,
-        Fm3,
-        Rhythm,
-        Placeholder,
-    }
-
     /// <summary>
     /// Thin per-panel view over the prepared <see cref="PreparedPanel"/>. The
-    /// renderer keeps its own <see cref="PanelKind"/> enum (used in hot-path
-    /// switches) and a back-reference to the prepared data so the per-frame
-    /// path never touches <see cref="NoteEvent"/>/<see cref="RhythmEvent"/>
-    /// records or performs color resolution.
+    /// renderer keeps only the prepared semantic descriptor and a back-reference
+    /// to the prepared data so the per-frame path never touches
+    /// <see cref="NoteEvent"/>/<see cref="RhythmEvent"/> records or performs
+    /// color resolution.
     /// </summary>
     private sealed class PanelData
     {
         public int Index;
         public string Id = "";
         public string Label = "";
-        public PanelKind Kind;
+        public VisualizationTrackKind TrackKind;
         public PreparedPanel Prepared;
     }
 
-    private static readonly string[] RhythmVoices = ["BD", "SD", "TOP", "HH", "TOM", "RIM"];
-    private static readonly string[] RhythmVoiceIds = ["bd", "sd", "top", "hh", "tom", "rim"];
-    private static readonly string[] Ppz8ChannelLabels = ["0", "1", "2", "3", "4", "5", "6", "7"];
-    private static readonly string[] PpzSampleLabels = BuildPpzSampleLabels();
     private static readonly HashSet<int> BlackPitchClasses = new() { 1, 3, 6, 8, 10 };
 
     /// <summary>
@@ -92,23 +95,16 @@ internal sealed partial class PanelOverlayRenderer
         return labels;
     }
 
-    private static string[] BuildPpzSampleLabels()
-    {
-        var labels = new string[256];
-        for (int index = 0; index < labels.Length; index++)
-            labels[index] = $"S{index:000}";
-        return labels;
-    }
-
-    private static readonly OverlayColor CanvasBackground = new(11, 12, 19);
-    private static readonly OverlayColor HeaderBackground = new(19, 21, 31);
-    private static readonly OverlayColor TimelineBackground = new(15, 17, 25);
-    private static readonly OverlayColor BlackKeyBand = new(11, 13, 20);
-    private static readonly OverlayColor GridLine = new(48, 52, 66, 150);
-    private static readonly OverlayColor Border = new(76, 82, 103, 210);
-    private static readonly OverlayColor MutedText = new(139, 146, 167);
-    private static readonly OverlayColor BrightText = new(222, 226, 238);
-    private static readonly OverlayColor Playhead = new(238, 241, 250, 125);
+    private VisualizationPalette Palette => _options.Palette;
+    private OverlayColor CanvasBackground => Palette.CanvasBackground;
+    private OverlayColor HeaderBackground => Palette.HeaderBackground;
+    private OverlayColor TimelineBackground => Palette.TimelineBackground;
+    private OverlayColor BlackKeyBand => Palette.BlackKeyBand;
+    private OverlayColor GridLine => Palette.GridLine;
+    private OverlayColor Border => Palette.Border;
+    private OverlayColor MutedText => Palette.MutedText;
+    private OverlayColor BrightText => Palette.BrightText;
+    private OverlayColor Playhead => Palette.Playhead;
 
     /// <summary>
     /// Notes are born with an enlarged onset cap for this many milliseconds
@@ -143,6 +139,7 @@ internal sealed partial class PanelOverlayRenderer
     private readonly PanelData[] _panels;
     private readonly Dictionary<string, InstrumentDefinition> _instrumentById;
     private readonly byte[] _staticFrame;
+    private readonly byte[] _motionBlurScratch;
     private readonly OverlayRect[] _dynamicRestoreRects;
     private readonly PitchCamera[] _cameras;
     private readonly VisualizationPresentation _presentation;
@@ -196,6 +193,12 @@ internal sealed partial class PanelOverlayRenderer
     private readonly string[] _clockBySecond;
     private readonly string _totalClockString;
     private readonly string[] _loopLabelByFrame;
+    private readonly VisualizationTimeGridLine[] _timeGrid;
+    private readonly VisualizationOpenClRenderer _openClRenderer = null;
+    private readonly int[] _gpuPrimitiveData = null;
+    private readonly byte[] _gpuFrame = null;
+    private readonly object _gpuFrameGate = new();
+    private readonly object _motionBlurGate = new();
 
     public PanelOverlayRenderer(VisualizationTimeline timeline, Options options = null)
     {
@@ -206,16 +209,33 @@ internal sealed partial class PanelOverlayRenderer
             throw new ArgumentException("Timeline end precedes its start.", nameof(timeline));
 
         _options = options ?? new Options();
+        _options.Palette ??= VisualizationPalette.Default;
+        if (_options.MotionBlurSamples is < 1 or > 8)
+            throw new ArgumentOutOfRangeException(nameof(options), "Motion blur samples must be between 1 and 8.");
         if (_options.FpsNumerator <= 0 || _options.FpsDenominator <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Frame rate must be positive.");
 
-        _topology = VisualizationTopologyBuilder.Build(timeline, _options.LayoutMode);
+        VisualizationLayoutMode selectedLayout = VisualizationLayoutModeResolver.Resolve(
+            timeline, _options.LayoutMode);
+        _topology = VisualizationTopologyBuilder.Build(
+            timeline, selectedLayout, _options.Channels, _options.GroupBy);
         _layout = new OverlayLayout(
             _options.Width,
             _options.Height,
             _options.PastSeconds,
             _options.FutureSeconds,
-            _topology.Panels.Count);
+            _topology.Panels.Count,
+            selectedLayout,
+            _options.ScopeHeight,
+            _options.TimelineHeight,
+            _options.RollZoom,
+            _options.ScopeRatio,
+            _options.ScopePosition);
+        // The compositor remains constructible for synthetic empty timelines
+        // used by low-level video-pipeline tests. The publishing CLI rejects
+        // such captures before it reaches this renderer (§10.4).
+        if (VisualizationContentAvailability.HasRenderableContent(timeline))
+            VisualizationLayoutValidator.Validate(_layout, _topology);
         _presentation = _options.Presentation ?? VisualizationPresentation.Empty;
         _instrumentById = timeline.Instruments.ToDictionary(x => x.Id, StringComparer.Ordinal);
         if (!double.IsFinite(_options.IntroSeconds) || _options.IntroSeconds < 0)
@@ -229,6 +249,7 @@ internal sealed partial class PanelOverlayRenderer
         _taperSamples = (long)Math.Round(0.060 * timeline.SampleRate);
         _effects = _options.Effects;
         _analysisOverlay = _options.AnalysisOverlay ?? AnalysisOverlayScene.Empty;
+        _timeGrid = VisualizationTimeGridBuilder.Build(timeline, _options.TimeGrid);
 
         // Build the prepared scene once: notes/rhythm are sorted, colors are
         // pre-resolved, and pitch ranges are computed here so the per-frame hot
@@ -240,10 +261,14 @@ internal sealed partial class PanelOverlayRenderer
             _layout,
             _topology,
             samplesPerFrame: _samplesPerFrame,
-            noteColorMode: _options.NoteColor);
+            noteColorMode: _options.NoteColor,
+            palette: _options.Palette);
         _panels = BuildPanels();
         _cameras = BuildCameras();
         _staticFrame = new byte[FrameByteCount];
+        _motionBlurScratch = _options.MotionBlurSamples > 1
+            ? new byte[FrameByteCount]
+            : null;
         _totalClockString = FormatTime(
             Math.Max(0, _timeline.EndSample - _timeline.StartSample) / (double)_timeline.SampleRate);
         _clockBySecond = BuildClockStrings(_totalClockString);
@@ -251,28 +276,69 @@ internal sealed partial class PanelOverlayRenderer
         _dynamicRestoreRects = BuildDynamicRestoreRects();
 
         // Per-panel accents come straight from the prepared scene — the builder
-        // resolved them via InstrumentColorResolver.ResolveChannelAccent(index).
+        // resolved them from each panel's stable semantic identity.
         _panelAccents = new OverlayColor[_panels.Length];
         for (int i = 0; i < _panels.Length; i++)
-            _panelAccents[i] = _panels[i].Prepared.Accent;
+        {
+            double emphasis = _layout.Mode is VisualizationLayoutMode.Diagnostic
+                or VisualizationLayoutMode.DiagnosticV2
+                ? 0
+                : Math.Clamp(
+                    (_panels[i].Prepared.Track.SalienceScore - 1.0) / 1.5,
+                    0,
+                    1);
+            _panelAccents[i] = Palette.ResolveAccent(_panels[i].Id, i)
+                .Lighten(emphasis * 0.20);
+        }
 
         // §6.4: build a per-panel energy lookup keyed by panel index.
         _energyByPanel = BuildEnergyLookup(_options.Energy);
 
         // Validate glyph coverage before the static layer is built. Missing
         // non-ASCII glyphs are a publish-time error, never a bitmap '?'.
+        string[] trackLabels = _scene.Panels.Select(panel => panel.Label).ToArray();
         _unicodePresentationRendered = UnicodeStaticTextRenderer.CanRender(
-            _presentation, _options.FontPath);
+            _presentation,
+            _options.FontPath,
+            trackLabels,
+            _options.PreferAntialiasedText);
 
         BuildStaticFrame(_staticFrame, drawFallbackText: !_unicodePresentationRendered);
 
         if (_unicodePresentationRendered)
-            UnicodeStaticTextRenderer.TryDraw(_staticFrame, Width, Height, _layout, _presentation, _options.FontPath);
+        {
+            foreach (int index in Enumerable.Range(0, _panels.Length))
+            {
+                OverlayRect header = _layout.GetHeaderRect(index);
+                int labelWidth = Math.Min(Math.Max(0, header.Width - 14), 76);
+                FillRect(_staticFrame, new OverlayRect(header.X + 4, header.Y, labelWidth, header.Height), HeaderBackground);
+            }
+            UnicodeStaticTextRenderer.TryDraw(
+                _staticFrame, Width, Height, _layout, _presentation, _options.FontPath, trackLabels);
+        }
+
+        if (_options.Renderer == VisualizationRendererMode.Gpu)
+        {
+            int primitiveCapacity = ComputeGpuPrimitiveCapacity();
+            if (!VisualizationOpenClRenderer.TryCreate(
+                    Width,
+                    Height,
+                    primitiveCapacity,
+                    out _openClRenderer,
+                    out string reason))
+            {
+                throw new InvalidOperationException($"GPU semantic renderer unavailable: {reason}");
+            }
+            _gpuPrimitiveData = new int[checked(primitiveCapacity * 9)];
+            _gpuFrame = new byte[FrameByteCount];
+        }
     }
 
     public int Width => _layout.Width;
     public int Height => _layout.Height;
     public int FrameByteCount => checked(Width * Height * 4);
+    public int ScopeFrameByteCount => checked(
+        _layout.CorrscopeGridWidth * _layout.CorrscopeGridHeight * 4);
     public int FpsNumerator => _options.FpsNumerator;
     public int FpsDenominator => _options.FpsDenominator;
     public OverlayLayout Layout => _layout;
@@ -298,6 +364,17 @@ internal sealed partial class PanelOverlayRenderer
     public void RenderFrame(long frameIndex, Span<byte> destination)
         => RenderCompositeFrame(frameIndex, ReadOnlySpan<byte>.Empty, destination);
 
+    public void Dispose()
+    {
+        _openClRenderer?.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    ~PanelOverlayRenderer()
+    {
+        _openClRenderer?.Dispose();
+    }
+
     /// <summary>
     /// Renders only the dynamic overlay content into a transparent destination.
     /// The static chrome (panel backgrounds, borders, labels, metadata bars,
@@ -321,20 +398,99 @@ internal sealed partial class PanelOverlayRenderer
     /// </summary>
     public void RenderCompositeFrame(long frameIndex, ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
     {
+        if (_options.MotionBlurSamples > 1)
+        {
+            RenderMotionBlurFrame(frameIndex, scopeGrid, destination);
+            return;
+        }
+
+        RenderCompositeFrameSingle(frameIndex, scopeGrid, destination);
+    }
+
+    private void RenderCompositeFrameSingle(
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        Span<byte> destination)
+    {
         ValidateFrame(frameIndex, destination);
         if (!scopeGrid.IsEmpty)
         {
-            int gridBytes = Width * _layout.CorrscopeGridHeight * 4;
+            int gridBytes = ScopeFrameByteCount;
             if (scopeGrid.Length < gridBytes)
                 throw new ArgumentException(
                     $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
-                    nameof(scopeGrid));
+                nameof(scopeGrid));
+        }
+
+        if (_openClRenderer != null)
+        {
+            RenderGpuFrame(frameIndex, scopeGrid, destination);
+            return;
         }
 
         _staticFrame.AsSpan().CopyTo(destination);
         if (!scopeGrid.IsEmpty)
             PlaceScopeRows(scopeGrid, destination);
         DrawDynamicCore(frameIndex, destination);
+    }
+
+    private void RenderMotionBlurFrame(
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        Span<byte> destination)
+    {
+        // The temporal scratch frame is prepared once and reused to keep the
+        // hot path allocation-free. Serialize users of that scratch buffer so
+        // random-access callers can still query the same renderer in parallel.
+        lock (_motionBlurGate)
+        {
+            ValidateFrame(frameIndex, destination);
+            int samples = _options.MotionBlurSamples;
+            destination.Clear();
+            int firstOffset = -(samples / 2);
+            for (int sample = 0; sample < samples; sample++)
+            {
+                long sampledFrame = Math.Clamp(
+                    frameIndex + firstOffset + sample,
+                    0,
+                    TotalFrames - 1);
+                RenderCompositeFrameSingle(sampledFrame, scopeGrid, _motionBlurScratch);
+                if (sample == 0)
+                {
+                    _motionBlurScratch.AsSpan().CopyTo(destination);
+                    continue;
+                }
+
+                for (int offset = 0; offset < FrameByteCount; offset++)
+                {
+                    destination[offset] = (byte)((destination[offset] * sample
+                        + _motionBlurScratch[offset]) / (sample + 1));
+                }
+            }
+        }
+    }
+
+    internal void RenderForSession(
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        Span<byte> destination)
+    {
+        if (_options.MotionBlurSamples > 1)
+        {
+            RenderMotionBlurFrame(frameIndex, scopeGrid, destination);
+            return;
+        }
+
+        if (_openClRenderer != null)
+        {
+            RenderGpuFrame(frameIndex, scopeGrid, destination);
+            return;
+        }
+
+        ValidateFrameForSession(frameIndex, destination);
+        RestoreDynamicRegions(destination);
+        PlaceScopeRowsForSession(scopeGrid, destination);
+        DrawDynamicForSession(frameIndex, destination);
     }
 
     internal SequentialCompositeSession CreateSequentialSession()
@@ -353,7 +509,7 @@ internal sealed partial class PanelOverlayRenderer
     {
         if (scopeGrid.IsEmpty)
             return;
-        int gridBytes = Width * _layout.CorrscopeGridHeight * 4;
+        int gridBytes = ScopeFrameByteCount;
         if (scopeGrid.Length < gridBytes)
             throw new ArgumentException(
                 $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
@@ -372,7 +528,10 @@ internal sealed partial class PanelOverlayRenderer
             throw new ArgumentException($"Destination requires at least {FrameByteCount} bytes.", nameof(destination));
     }
 
-    private void DrawDynamicCore(long frameIndex, Span<byte> destination)
+    private void DrawDynamicCore(
+        long frameIndex,
+        Span<byte> destination,
+        bool drawSemantic = true)
     {
         long relativeSample = OverlayLayout.FrameToSample(
             frameIndex,
@@ -386,36 +545,75 @@ internal sealed partial class PanelOverlayRenderer
         DrawProgress(destination, currentSample);
         DrawAnalysisHud(destination, currentSample);
         DrawAnalysisHarmonyStrip(destination, currentSample);
-        DrawAnalysisProgressMarkers(destination);
+        DrawAnalysisProgressMarkers(destination, currentSample);
+        DrawTimeGrid(destination, currentSample);
 
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
             PanelData panel = _panels[panelIndex];
-            switch (panel.Kind)
+            // Dispatch from the immutable semantic descriptor prepared before
+            // frame rendering. Scope-only compositions deliberately suppress
+            // semantic geometry; their panels have no timeline height.
+            if (_layout.HasRoll)
             {
-                case PanelKind.Pitched:
-                    DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
-                    DrawPitchedPanel(destination, panel, currentSample, false);
-                    break;
-                case PanelKind.Fm3:
-                    DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, true);
-                    DrawPitchedPanel(destination, panel, currentSample, true);
-                    DrawFm3OperatorRibbons(destination, panel, currentSample);
-                    break;
-                case PanelKind.Ssg:
-                    DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
-                    DrawSsgPanel(destination, panel, currentSample);
-                    break;
-                case PanelKind.Rhythm:
-                    DrawRhythmPanel(destination, panel, currentSample);
-                    break;
-                case PanelKind.Placeholder:
-                    DrawPcmPanel(destination, panel, currentSample);
-                    break;
-            }
+                switch (panel.TrackKind)
+                {
+                    case VisualizationTrackKind.Pitched:
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
+                        if (drawSemantic)
+                        {
+                            if (panel.Prepared.UsesSsgModes)
+                                DrawSsgPanel(destination, panel, currentSample);
+                            else
+                                DrawPitchedPanel(destination, panel, currentSample, false);
+                        }
+                        break;
+                    case VisualizationTrackKind.FmOperatorGroup:
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, true);
+                        if (drawSemantic)
+                        {
+                            DrawPitchedPanel(destination, panel, currentSample, true);
+                            DrawFm3OperatorRibbons(destination, panel, currentSample);
+                        }
+                        break;
+                    case VisualizationTrackKind.WaveTable:
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
+                        if (drawSemantic)
+                        {
+                            DrawPitchedPanel(destination, panel, currentSample, false);
+                            DrawWavetablePanel(destination, panel, currentSample);
+                        }
+                        break;
+                    case VisualizationTrackKind.Sample:
+                        if (drawSemantic)
+                            DrawPcmVoicePanel(destination, panel, currentSample);
+                        break;
+                    case VisualizationTrackKind.Noise:
+                        if (drawSemantic)
+                            DrawNoisePanel(destination, panel, currentSample);
+                        break;
+                    case VisualizationTrackKind.AggregateActivity:
+                        if (drawSemantic)
+                            DrawAggregatePanel(destination, panel, currentSample);
+                        break;
+                    case VisualizationTrackKind.Percussion:
+                        if (drawSemantic)
+                            DrawRhythmPanel(destination, panel, currentSample);
+                        break;
+                    case VisualizationTrackKind.ParameterActivity:
+                    case VisualizationTrackKind.Unsupported:
+                        DrawPlaceholderPanel(destination, panel, currentSample);
+                        break;
+                }
 
-            DrawDynamicPanelHeader(destination, panel, currentSample);
-            DrawPlayhead(destination, panel.Index);
+                // Shared publishing compositions reserve their header for the
+                // static composition label. Per-channel dynamic state would
+                // repeat across the compact lanes and adds no useful cue to
+                // the unified roll; diagnostic/split layouts retain it.
+                if (!_layout.IsSharedComposition)
+                    DrawDynamicPanelHeader(destination, panel, currentSample);
+                DrawPlayhead(destination, panel.Index);
+            }
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
 
@@ -463,6 +661,59 @@ internal sealed partial class PanelOverlayRenderer
         }
     }
 
+    private void DrawTimeGrid(Span<byte> frame, long currentSample)
+    {
+        if (!_layout.HasRoll || _timeGrid.Length == 0)
+            return;
+
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        int first = LowerBoundTimeGrid(windowStart);
+        for (int index = first; index < _timeGrid.Length; index++)
+        {
+            VisualizationTimeGridLine line = _timeGrid[index];
+            if (line.Sample > windowEnd)
+                break;
+            if (line.Sample < windowStart)
+                continue;
+
+            OverlayColor color = line.Kind switch
+            {
+                VisualizationTimeGridLineKind.Measure => new OverlayColor(120, 132, 164, line.Analytical ? (byte)76 : (byte)126),
+                VisualizationTimeGridLineKind.Beat => new OverlayColor(95, 105, 132, line.Analytical ? (byte)54 : (byte)92),
+                _ => new OverlayColor(72, 80, 104, line.Analytical ? (byte)32 : (byte)56),
+            };
+            for (int panelIndex = 0; panelIndex < _layout.PanelCount; panelIndex++)
+            {
+                OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+                int laneX = timeline.X + Math.Min(_layout.PitchLabelWidth, timeline.Width);
+                int laneWidth = Math.Max(1, timeline.Width - Math.Min(_layout.PitchLabelWidth, timeline.Width));
+                int x = (int)Math.Round(_layout.SampleToX(
+                    line.Sample,
+                    currentSample,
+                    _timeline.SampleRate,
+                    new OverlayRect(laneX, timeline.Y, laneWidth, timeline.Height)));
+                if (x >= laneX && x < timeline.Right)
+                    DrawVerticalLine(frame, x, timeline.Y, timeline.Bottom - 1, color);
+            }
+        }
+    }
+
+    private int LowerBoundTimeGrid(long sample)
+    {
+        int low = 0;
+        int high = _timeGrid.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (_timeGrid[middle].Sample < sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
+    }
+
     private static byte TransitionAlpha(long elapsed, long duration, bool fadeIn)
     {
         double t = Math.Clamp(elapsed / (double)duration, 0, 1);
@@ -487,9 +738,9 @@ internal sealed partial class PanelOverlayRenderer
             return;
 
         string clock = FormatClock(currentSample);
-        int cursor = bar.Right - 24 - BitmapFont.MeasureText(clock, 2) - 10;
+        int cursor = bar.Right - _layout.SafeHorizontalMargin - BitmapFont.MeasureText(clock, 2) - 10;
         int scale = Height >= 720 ? 2 : 1;
-        int leftLimit = bar.X + 24;
+        int leftLimit = bar.X + _layout.SafeHorizontalMargin;
         cursor = DrawAnalysisLabel(frame, harmony, BrightText, scale, cursor, leftLimit);
         cursor = DrawAnalysisLabel(frame, section, MutedText, scale, cursor, leftLimit);
         cursor = DrawAnalysisLabel(frame, relationship, MutedText, scale, cursor, leftLimit);
@@ -524,16 +775,20 @@ internal sealed partial class PanelOverlayRenderer
                 continue;
 
             bool active = marker.StartSample <= currentSample && currentSample < marker.EndSample;
+            bool tentative = marker.Confidence < AnalysisConfidencePolicy.KeyStrongMinimum;
             if (active)
                 FillRect(frame, new OverlayRect(left, strip.Y + 1, right - left, Math.Max(1, strip.Height - 1)),
-                    new OverlayColor(54, 61, 91, 220));
+                    new OverlayColor(54, 61, 91, tentative ? (byte)120 : (byte)220));
             int available = right - left - 4;
             int textWidth = BitmapFont.MeasureText(marker.Label, scale);
             if (textWidth <= available && textWidth > 0)
             {
                 int x = left + Math.Max(2, (right - left - textWidth) / 2);
                 DrawText(frame, x, textY, marker.Label,
-                    active ? BrightText : MutedText, scale, Math.Min(right - 2, strip.Right - 1));
+                    active
+                        ? tentative ? new OverlayColor(222, 226, 238, 170) : BrightText
+                        : tentative ? new OverlayColor(139, 146, 167, 105) : MutedText,
+                    scale, Math.Min(right - 2, strip.Right - 1));
             }
             lastRight = right;
         }
@@ -557,14 +812,17 @@ internal sealed partial class PanelOverlayRenderer
         return x - 10;
     }
 
-    private void DrawAnalysisProgressMarkers(Span<byte> frame)
+    private void DrawAnalysisProgressMarkers(Span<byte> frame, long currentSample)
     {
         if (ReferenceEquals(_analysisOverlay, AnalysisOverlayScene.Empty))
             return;
 
         OverlayRect bar = _layout.BottomBarRect;
         foreach (AnalysisSectionMarker marker in _analysisOverlay.Sections)
+        {
             DrawAnalysisMarker(frame, bar, marker.Sample, AnalysisMarkerKind.Section);
+            DrawAnalysisLaneMarker(frame, marker.Sample, currentSample);
+        }
         foreach (AnalysisProgressMarker marker in _analysisOverlay.PhraseMarkers)
             DrawAnalysisMarker(frame, bar, marker.Sample, marker.Kind);
         OverlayRect markerBar = _layout.AnalysisMarkerRect;
@@ -572,6 +830,32 @@ internal sealed partial class PanelOverlayRenderer
         {
             DrawAnalysisMarker(frame, markerBar, marker.StartSample, AnalysisMarkerKind.Motif);
             DrawAnalysisMarkerLabel(frame, markerBar, marker.StartSample, marker.MotifId);
+        }
+    }
+
+    private void DrawAnalysisLaneMarker(Span<byte> frame, long sample, long currentSample)
+    {
+        long length = _timeline.EndSample - _timeline.StartSample;
+        if (length <= 0)
+            return;
+
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        for (int panelIndex = 0; panelIndex < _layout.PanelCount; panelIndex++)
+        {
+            OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+            int labelWidth = Math.Min(_layout.PitchLabelWidth, timeline.Width);
+            OverlayRect lane = new(
+                timeline.X + labelWidth,
+                timeline.Y,
+                Math.Max(1, timeline.Width - labelWidth),
+                timeline.Height);
+            if (sample < windowStart || sample > windowEnd)
+                continue;
+            int x = (int)Math.Round(_layout.SampleToX(sample, currentSample, _timeline.SampleRate, lane));
+            if (x >= lane.X && x < lane.Right)
+                DrawVerticalLine(frame, x, lane.Y, lane.Bottom - 1,
+                    new OverlayColor(255, 205, 112, 150));
         }
     }
 
@@ -680,7 +964,32 @@ internal sealed partial class PanelOverlayRenderer
         // DrawEnergyScopeBorder draws on its perimeter. Restore the complete
         // scope rectangle before placing the next Corrscope strip so the
         // sequential session cannot retain a previous frame's border.
-        var rects = new OverlayRect[2 + _panels.Length * 3];
+        // A few clipped contact/grid primitives intentionally terminate on a
+        // region edge. Restore the one-pixel static seam as well so a
+        // sequential session cannot retain an edge pixel that a direct frame
+        // starts from freshly copied static chrome. Shared publishing
+        // compositions have no dynamic per-panel headers or scope rows, so
+        // restoring only their timeline regions avoids copying static pixels
+        // on every frame.
+        if (_layout.IsSharedComposition)
+        {
+            var sharedRects = new OverlayRect[3 + _panels.Length * 3];
+            sharedRects[0] = _layout.TopBarRect;
+            sharedRects[1] = _layout.BottomBarRect;
+            sharedRects[2] = _layout.GetScopeRect(0);
+            int sharedIndex = 3;
+            for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+            {
+                sharedRects[sharedIndex++] = _layout.GetHeaderRect(panelIndex);
+                sharedRects[sharedIndex++] = _layout.GetTimelineRect(panelIndex);
+                OverlayRect panelRect = _layout.GetPanelRect(panelIndex);
+                sharedRects[sharedIndex++] = new OverlayRect(
+                    panelRect.X, panelRect.Y, panelRect.Width, 1);
+            }
+            return sharedRects;
+        }
+
+        var rects = new OverlayRect[2 + _panels.Length * 4];
         rects[0] = _layout.TopBarRect;
         rects[1] = _layout.BottomBarRect;
 
@@ -688,13 +997,15 @@ internal sealed partial class PanelOverlayRenderer
         foreach (PanelData panel in _panels)
         {
             OverlayRect header = _layout.GetHeaderRect(panel.Index);
-            rects[index++] = new OverlayRect(
-                header.X + 78,
-                header.Y,
-                Math.Max(0, header.Width - 78),
-                header.Height);
+            // Dynamic state is normally confined to the right side of the
+            // header, but restoring the complete fixed-height header also
+            // protects the static label gutter from accidental edge pixels
+            // emitted by a clipped transient at a panel boundary.
+            rects[index++] = header;
             rects[index++] = _layout.GetTimelineRect(panel.Index);
             rects[index++] = _layout.GetScopeRect(panel.Index);
+            OverlayRect panelRect = _layout.GetPanelRect(panel.Index);
+            rects[index++] = new OverlayRect(panelRect.X, panelRect.Y, panelRect.Width, 1);
         }
         return rects;
     }
@@ -749,20 +1060,31 @@ internal sealed partial class PanelOverlayRenderer
     /// </summary>
     private void PlaceScopeRows(ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
     {
-        int stride = Width * 4;
+        int sourceWidth = _layout.CorrscopeGridWidth;
+        int sourceStride = sourceWidth * 4;
         int scopeHeight = _layout.ScopeHeight;
         for (int row = 0; row < _layout.RowCount; row++)
         {
-            int destY = _layout.GetScopeRowDestinationY(row);
+            OverlayRect scope = _layout.IsSharedComposition
+                ? _layout.SharedScopeRect
+                : _layout.GetScopeRect(Math.Min(row * _layout.ColumnCount, _layout.PanelCount - 1));
+            int destX = scope.X;
+            int destY = _layout.IsSharedComposition
+                ? scope.Y
+                : _layout.GetScopeRowDestinationY(row);
+            int copyWidth = Math.Min(sourceWidth, scope.Width);
             int srcY = row * scopeHeight;
             for (int y = 0; y < scopeHeight; y++)
             {
-                int src = (srcY + y) * stride;
-                int dst = (destY + y) * stride;
-                scopeGrid.Slice(src, stride).CopyTo(destination.Slice(dst, stride));
-                for (int x = 0; x < stride; x += 4)
+                int src = (srcY + y) * sourceStride;
+                int dst = ((destY + y) * Width + destX) * 4;
+                int copyBytes = copyWidth * 4;
+                scopeGrid.Slice(src, copyBytes).CopyTo(destination.Slice(dst, copyBytes));
+                for (int x = 0; x < copyBytes; x += 4)
                     destination[dst + x + 3] = 255;
             }
+            if (_layout.IsSharedComposition)
+                break;
         }
     }
 
@@ -793,21 +1115,12 @@ internal sealed partial class PanelOverlayRenderer
         for (int index = 0; index < panels.Length; index++)
         {
             PreparedPanel prepared = _scene.Panels[index];
-            PanelKind kind = prepared.Kind switch
-            {
-                PreparedPanelKind.Fm3 => PanelKind.Fm3,
-                PreparedPanelKind.Pitched => PanelKind.Pitched,
-                PreparedPanelKind.Ssg => PanelKind.Ssg,
-                PreparedPanelKind.Rhythm => PanelKind.Rhythm,
-                _ => PanelKind.Placeholder,
-            };
-
             panels[index] = new PanelData
             {
                 Index = index,
                 Id = prepared.Id,
                 Label = prepared.Label,
-                Kind = kind,
+                TrackKind = prepared.Track.Kind,
                 Prepared = prepared,
             };
         }
@@ -816,15 +1129,20 @@ internal sealed partial class PanelOverlayRenderer
     private PitchCamera[] BuildCameras()
     {
         var cameras = new PitchCamera[_panels.Length];
-        int laneHeight = _layout.GetPitchedLaneRect(0, false).Height;
         for (int index = 0; index < _panels.Length; index++)
         {
             PanelData panel = _panels[index];
-            if (panel.Kind is PanelKind.Pitched or PanelKind.Fm3 or PanelKind.Ssg)
+            bool pitchTrack = panel.TrackKind is VisualizationTrackKind.Pitched
+                or VisualizationTrackKind.FmOperatorGroup
+                or VisualizationTrackKind.WaveTable;
+            bool pitchedSample = panel.TrackKind == VisualizationTrackKind.Sample
+                && panel.Prepared.MainNotes.Length > 0;
+            if (pitchTrack || pitchedSample)
             {
                 // §11.1: FM3 operator mode may use up to 30 semitones so
                 // operator pitches remain visible; other panels cap at 24.
-                bool extended = panel.Kind == PanelKind.Fm3;
+                bool extended = panel.TrackKind == VisualizationTrackKind.FmOperatorGroup;
+                int laneHeight = _layout.GetPitchedLaneRect(index, extended).Height;
                 cameras[index] = new PitchCamera(
                     panel.Prepared.CameraNotes,
                     laneHeight,
@@ -835,7 +1153,8 @@ internal sealed partial class PanelOverlayRenderer
                     _timeline.EndSample,
                     FpsNumerator,
                     FpsDenominator,
-                    allowExtendedSpan: extended);
+                    allowExtendedSpan: extended,
+                    rollZoom: _layout.RollZoom);
             }
             else
             {
@@ -874,27 +1193,38 @@ internal sealed partial class PanelOverlayRenderer
                 2,
                 header.Right - 8);
 
-            switch (_panels[index].Kind)
+            switch (_panels[index].TrackKind)
             {
-                case PanelKind.Pitched:
-                case PanelKind.Ssg:
-                case PanelKind.Fm3:
+                case VisualizationTrackKind.Pitched:
+                case VisualizationTrackKind.FmOperatorGroup:
+                case VisualizationTrackKind.WaveTable:
                 {
                     // Pitch label column background (chrome). The grid lines and
                     // "C3" labels are dynamic — they depend on the visible pitch
                     // range — so only the static background lives here.
-                    bool reserveFm3Ribbons = _panels[index].Kind == PanelKind.Fm3;
+                    bool reserveFm3Ribbons = _panels[index].TrackKind == VisualizationTrackKind.FmOperatorGroup;
                     OverlayRect lane = _layout.GetPitchedLaneRect(index, reserveFm3Ribbons);
                     FillRect(frame, new OverlayRect(timeline.X, lane.Y, _layout.PitchLabelWidth, lane.Height), HeaderBackground);
 
-                    if (_panels[index].Kind == PanelKind.Fm3)
+                    if (_panels[index].TrackKind == VisualizationTrackKind.FmOperatorGroup)
                         DrawStaticFm3Ribbons(frame, index);
                     break;
                 }
-                case PanelKind.Rhythm:
+                case VisualizationTrackKind.Sample:
+                    DrawStaticPcmLanes(frame, _panels[index], timeline);
+                    if (!_panels[index].Prepared.HasTrackEvents)
+                        DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4),
+                            "SILENT", MutedText, 1, timeline.Right - 8);
+                    break;
+                case VisualizationTrackKind.Noise:
+                case VisualizationTrackKind.AggregateActivity:
+                    DrawStaticEventLane(frame, timeline);
+                    break;
+                case VisualizationTrackKind.Percussion:
                     DrawStaticRhythmRows(frame, index);
                     break;
-                case PanelKind.Placeholder:
+                case VisualizationTrackKind.ParameterActivity:
+                case VisualizationTrackKind.Unsupported:
                     DrawStaticPcmLanes(frame, _panels[index], timeline);
                     if (!_panels[index].Prepared.HasTrackEvents)
                     {
@@ -924,17 +1254,17 @@ internal sealed partial class PanelOverlayRenderer
             // The clock string is constant-width ("MM:SS / MM:SS"), so the
             // right edge of the clock — and therefore the title limit — is fixed.
             int fullClockWidth = BitmapFont.MeasureText($"00:00 / {_totalClockString}", 2);
-            int titleMaxX = topBar.Right - 24 - fullClockWidth - 40;
+            int titleMaxX = topBar.Right - _layout.SafeHorizontalMargin - fullClockWidth - 40;
 
-            if (titleMaxX > topBar.X + 24)
+            if (titleMaxX > topBar.X + _layout.SafeHorizontalMargin)
             {
-                string title = Ellipsize(_presentation.Title, 3, titleMaxX - (topBar.X + 24));
-                DrawText(frame, topBar.X + 24, topBar.Y + 9, title, BrightText, 3, titleMaxX);
+                string title = Ellipsize(_presentation.Title, 3, titleMaxX - (topBar.X + _layout.SafeHorizontalMargin));
+                DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, topBar.Y + 9, title, BrightText, 3, titleMaxX);
 
                 if (!string.IsNullOrEmpty(_presentation.Subtitle))
                 {
-                    string subtitle = Ellipsize(_presentation.Subtitle, 2, titleMaxX - (topBar.X + 24));
-                    DrawText(frame, topBar.X + 24, topBar.Y + 39, subtitle, MutedText, 2, titleMaxX);
+                    string subtitle = Ellipsize(_presentation.Subtitle, 2, titleMaxX - (topBar.X + _layout.SafeHorizontalMargin));
+                    DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, topBar.Y + 39, subtitle, MutedText, 2, titleMaxX);
                 }
             }
 
@@ -943,8 +1273,8 @@ internal sealed partial class PanelOverlayRenderer
                 const int progressHeight = 4;
                 int creditsY = bottomBar.Y + progressHeight
                     + Math.Max(2, (bottomBar.Height - progressHeight - 14) / 2);
-                string credits = Ellipsize(_presentation.Credits, 2, bottomBar.Width - 48);
-                DrawText(frame, bottomBar.X + 24, creditsY, credits, MutedText, 2, bottomBar.Right - 24);
+                string credits = Ellipsize(_presentation.Credits, 2, bottomBar.Width - 2 * _layout.SafeHorizontalMargin);
+                DrawText(frame, bottomBar.X + _layout.SafeHorizontalMargin, creditsY, credits, MutedText, 2, bottomBar.Right - _layout.SafeHorizontalMargin);
             }
         }
     }
@@ -961,11 +1291,13 @@ internal sealed partial class PanelOverlayRenderer
             return;
         }
 
-        var (minMidi, maxMidi) = camera.GetRange(currentSample);
+        var (minMidi, maxMidi) = camera.GetPreciseRange(currentSample);
         DrawPitchGridRange(frame, lane, timeline, minMidi, maxMidi);
     }
     private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi)
     {
+        if (lane.Width <= 0 || lane.Height <= 0)
+            return;
         int firstSemitone = (int)Math.Floor(minMidi);
         int lastSemitone = (int)Math.Ceiling(maxMidi);
         for (int midi = firstSemitone; midi <= lastSemitone; midi++)
@@ -987,7 +1319,14 @@ internal sealed partial class PanelOverlayRenderer
                 if ((uint)octaveIndex < COctaveLabels.Length)
                 {
                     string label = COctaveLabels[octaveIndex];
-                    DrawText(frame, timeline.X + 2, MidiToY(midi, minMidi, maxMidi, lane) - 3, label, MutedText, 1, lane.X - 2);
+                    int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
+                    // Pitch labels are dynamic and must remain inside the
+                    // lane that will be restored by a sequential session.
+                    // Without this guard a bottom-edge glyph can spill into
+                    // the next panel header and leave stale pixels after a
+                    // seek or frame transition.
+                    if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
+                        DrawText(frame, timeline.X + 2, labelY, label, MutedText, 1, lane.X - 2);
                 }
             }
         }

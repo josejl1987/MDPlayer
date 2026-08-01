@@ -15,7 +15,7 @@ public sealed class AnalysisIntegrationTests
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
         if (!File.Exists(python))
-            throw SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
+            throw Xunit.Sdk.SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
 
         string root = Path.Combine(Path.GetTempPath(), "mdplayer-analysis-integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -68,7 +68,7 @@ public sealed class AnalysisIntegrationTests
             File.WriteAllText(cachePath, validMetadata);
 
             File.WriteAllText(cachePath, validMetadata.Replace(
-                "\"workerVersion\": \"1.0.2\"", "\"workerVersion\": \"old-worker\""));
+                "\"workerVersion\": \"1.1.0\"", "\"workerVersion\": \"old-worker\""));
             Assert.Throws<InvalidOperationException>(() => AnalysisRunner.Run(options));
             File.WriteAllText(cachePath, validMetadata);
 
@@ -91,9 +91,9 @@ public sealed class AnalysisIntegrationTests
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
         if (!File.Exists(python))
-            throw SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
+            throw Xunit.Sdk.SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
         if (!OperatingSystem.IsLinux())
-            throw SkipException.ForSkip("wrapper worker fixture requires Linux");
+            throw Xunit.Sdk.SkipException.ForSkip("wrapper worker fixture requires Linux");
 
         string root = Path.Combine(Path.GetTempPath(), "mdplayer-analysis-worker-failure-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);

@@ -8,6 +8,7 @@ internal sealed class NesApuTimelineDecoder : IChipTimelineDecoder
 {
     private readonly byte[] _registers = new byte[0x20];
     private readonly MutableNote?[] _notes = new MutableNote?[3];
+    private MutableDpcm _dpcm;
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private bool _noiseActive;
@@ -57,17 +58,36 @@ internal sealed class NesApuTimelineDecoder : IChipTimelineDecoder
         _noiseActive = noiseActive;
 
         // $4015 bit 4 enables DPCM. A write to $4011 changes its DAC level;
-        // retain that as activity without inventing a conventional pitch.
-        if (write.Address is 0x11 or 0x15
-            && (_registers[0x15] & 0x10) != 0
-            && _registers[0x11] != 0)
+        // retain that as a generic unpitched sample event without inventing a
+        // conventional pitch.
+        if (write.Address is 0x11 or 0x15)
         {
-            _timeline.AddRhythm(new RhythmEvent(
-                "dpcm",
-                new VoiceId(_device.Id, VoiceKind.Dpcm, 0).ToString(),
-                write.SamplePosition,
-                _registers[0x11] / 127.0f,
-                0.5f));
+            bool dpcmActive = (_registers[0x15] & 0x10) != 0 && _registers[0x11] != 0;
+            if (dpcmActive)
+            {
+                _timeline.AddRhythm(new RhythmEvent(
+                    "dpcm",
+                    new VoiceId(_device.Id, VoiceKind.Dpcm, 0).ToString(),
+                    write.SamplePosition,
+                    _registers[0x11] / 127.0f,
+                    0.5f));
+            }
+            if (dpcmActive && _dpcm == null)
+            {
+                string voiceId = new VoiceId(_device.Id, VoiceKind.Dpcm, 0).ToString();
+                const string sampleId = "sample:nes-apu:dpcm";
+                _timeline.AddSample(VisualizationAssetBuilder.CreateSyntheticSample(
+                    sampleId, "dpcm", 0, displayName: "DPCM"));
+                _dpcm = new MutableDpcm(
+                    write.SamplePosition,
+                    voiceId,
+                    sampleId,
+                    Math.Clamp(_registers[0x11] / 127.0f, 0, 1));
+            }
+            else if (!dpcmActive)
+            {
+                CloseDpcm(write.SamplePosition);
+            }
         }
     }
 
@@ -80,6 +100,26 @@ internal sealed class NesApuTimelineDecoder : IChipTimelineDecoder
         _completed = true;
         for (int channel = 0; channel < _notes.Length; channel++)
             Close(ref _notes[channel], endSample);
+        CloseDpcm(endSample);
+    }
+
+    private void CloseDpcm(long endSample)
+    {
+        if (_dpcm == null)
+            return;
+        if (endSample > _dpcm.StartSample)
+            _timeline.AddSamplePlayback(new SamplePlaybackEvent(
+                _dpcm.VoiceId,
+                _dpcm.StartSample,
+                endSample,
+                _dpcm.SampleId,
+                null,
+                1.0,
+                _dpcm.Gain,
+                0,
+                false,
+                false));
+        _dpcm = null;
     }
 
     private void UpdatePulse(int channel, int control, int timerLow, int timerHigh, long sample)
@@ -184,4 +224,10 @@ internal sealed class NesApuTimelineDecoder : IChipTimelineDecoder
         public bool IsRetrigger { get; }
         public List<PitchChange> PitchChanges { get; } = [];
     }
+
+    private sealed record MutableDpcm(
+        long StartSample,
+        string VoiceId,
+        string SampleId,
+        float Gain);
 }

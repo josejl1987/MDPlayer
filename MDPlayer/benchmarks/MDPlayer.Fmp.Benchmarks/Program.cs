@@ -20,6 +20,12 @@ internal static class Program
         Console.WriteLine("MDPlayer Visualization Benchmark (§23.4)");
         Console.WriteLine();
 
+        if (args.Length >= 2 && args[0] == "--profile")
+        {
+            ProfileReal.Run(args[1]);
+            return 0;
+        }
+
         RunPhase1();
 
         if (args.Length > 0 && File.Exists(args[0]))

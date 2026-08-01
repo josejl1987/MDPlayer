@@ -21,12 +21,15 @@ internal sealed partial class PanelOverlayRenderer
         OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
         int labelWidth = _layout.PitchLabelWidth;
         FillRect(frame, new OverlayRect(timeline.X, timeline.Y, labelWidth, timeline.Height), HeaderBackground);
-        int rowHeight = Math.Max(1, timeline.Height / RhythmVoices.Length);
-        for (int row = 0; row < RhythmVoices.Length; row++)
+        PanelRowDefinition[] rows = _panels[panelIndex].Prepared.Rows;
+        if (rows.Length == 0)
+            return;
+        int rowHeight = Math.Max(1, timeline.Height / rows.Length);
+        for (int row = 0; row < rows.Length; row++)
         {
             int y = timeline.Y + row * rowHeight;
             DrawHorizontalLine(frame, timeline.X + labelWidth, timeline.Right - 1, y, GridLine);
-            DrawText(frame, timeline.X + 2, y + Math.Max(1, (rowHeight - 7) / 2), RhythmVoices[row], MutedText, 1, timeline.X + labelWidth - 2);
+            DrawText(frame, timeline.X + 2, y + Math.Max(1, (rowHeight - 7) / 2), rows[row].Label, MutedText, 1, timeline.X + labelWidth - 2);
         }
     }
 
@@ -35,9 +38,9 @@ internal sealed partial class PanelOverlayRenderer
         OverlayRect bar = _layout.TopBarRect;
         string clock = FormatClock(currentSample);
         int clockWidth = BitmapFont.MeasureText(clock, 2);
-        int clockX = bar.Right - 24 - clockWidth;
+        int clockX = bar.Right - _layout.SafeHorizontalMargin - clockWidth;
         int clockY = bar.Y + Math.Max(2, (bar.Height - 14) / 2);
-        DrawText(frame, clockX, clockY, clock, BrightText, 2, bar.Right - 24);
+        DrawText(frame, clockX, clockY, clock, BrightText, 2, bar.Right - _layout.SafeHorizontalMargin);
     }
 
     private void DrawLoopLabel(Span<byte> frame, long frameIndex)
@@ -51,7 +54,7 @@ internal sealed partial class PanelOverlayRenderer
         OverlayRect bar = _layout.TopBarRect;
         string clock = FormatClock(OverlayLayout.FrameToSample(
             frameIndex, _timeline.SampleRate, FpsNumerator, FpsDenominator));
-        int clockX = bar.Right - 24 - BitmapFont.MeasureText(clock, 2);
+        int clockX = bar.Right - _layout.SafeHorizontalMargin - BitmapFont.MeasureText(clock, 2);
         int labelWidth = BitmapFont.MeasureText(label, 1);
         DrawText(frame, clockX - labelWidth - 8,
             bar.Y + Math.Max(2, (bar.Height - 7) / 2), label, MutedText, 1, clockX - 4);
@@ -122,7 +125,7 @@ internal sealed partial class PanelOverlayRenderer
     {
         OverlayRect header = _layout.GetHeaderRect(panel.Index);
         PreparedNote active = FindActive(panel.Prepared.MainNotes, currentSample);
-        if (active == null && panel.Kind == PanelKind.Fm3)
+        if (active == null && panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
         {
             foreach (PreparedNote[] operatorNotes in panel.Prepared.OperatorNotes)
             {
@@ -132,7 +135,7 @@ internal sealed partial class PanelOverlayRenderer
             }
         }
 
-        string modeToken = panel.Kind == PanelKind.Ssg && active != null
+        string modeToken = active != null && IsSsgMode(active.Mode)
             && currentSample >= active.StartSample
             && currentSample - active.StartSample <= (long)Math.Round(0.600 * _timeline.SampleRate)
             ? SsgModeToken(active.Mode)
@@ -157,6 +160,14 @@ internal sealed partial class PanelOverlayRenderer
         string badges = showOverlay
             ? changeNote.Text.ChangeLabel
             : active?.Text.BadgeLabel ?? "";
+
+        if (!showOverlay
+            && ChipPanelHeaderBuilder.TryBuild(
+                panel.Prepared, currentSample, out PanelHeaderData chipHeader))
+        {
+            patch = chipHeader.Label;
+            badges = "";
+        }
 
         // The underline is the compact activity hierarchy: active panels are
         // full strength, recent audio is slightly dimmer, used channels keep
@@ -221,7 +232,7 @@ internal sealed partial class PanelOverlayRenderer
 
         // §13.3: four compact operator bars during the instrument-change overlay.
         if (showOverlay && _instrumentById.TryGetValue(changeNote.InstrumentId, out var def) && def.Operators.Count > 0)
-            DrawOperatorBars(frame, header, def, rightLimit);
+            DrawOperatorBars(frame, header, def, rightLimit, panel.Index);
     }
 
     private static string SsgModeToken(VisualizationNoteMode mode) => mode switch

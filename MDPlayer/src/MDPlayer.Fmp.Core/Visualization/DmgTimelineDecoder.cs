@@ -4,6 +4,8 @@ namespace Fmp.Core.Visualization;
 internal sealed class DmgTimelineDecoder : IChipTimelineDecoder
 {
     private readonly byte[] _registers = new byte[0x40];
+    private readonly byte[] _waveRam = new byte[16];
+    private string _waveformId;
     private readonly MutableNote?[] _notes = new MutableNote?[3];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
@@ -36,6 +38,8 @@ internal sealed class DmgTimelineDecoder : IChipTimelineDecoder
             return;
 
         _registers[write.Address] = (byte)write.Data;
+        if (write.Address is >= 0x20 and <= 0x2F)
+            UpdateWaveform(write.SamplePosition);
         for (int channel = 0; channel < 3; channel++)
         {
             Pitch pitch = DecodePitch(channel);
@@ -106,6 +110,28 @@ internal sealed class DmgTimelineDecoder : IChipTimelineDecoder
             _ => 0x44,
         };
         return envelope > 0 && (_registers[0x15] & panMask) != 0;
+    }
+
+    private void UpdateWaveform(long sample)
+    {
+        for (int index = 0; index < _waveRam.Length; index++)
+            _waveRam[index] = _registers[0x20 + index];
+
+        var source = new int[32];
+        for (int index = 0; index < source.Length; index++)
+        {
+            byte packed = _waveRam[index / 2];
+            source[index] = (index & 1) == 0 ? packed >> 4 : packed & 0x0F;
+        }
+
+        WaveformDefinition waveform = VisualizationAssetBuilder.CreateIntegerWaveform(
+            "wavetable", source, 0, 15, "WAVE");
+        _timeline.AddWaveform(waveform);
+        if (_waveformId == waveform.Id)
+            return;
+        _waveformId = waveform.Id;
+        _timeline.AddWaveformChange(new WaveformChangeEvent(
+            new VoiceId(_device.Id, VoiceKind.Wavetable, 0).ToString(), sample, waveform.Id));
     }
 
     private Pitch DecodePitch(int channel)

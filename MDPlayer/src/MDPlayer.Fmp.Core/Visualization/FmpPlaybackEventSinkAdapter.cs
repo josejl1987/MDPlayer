@@ -42,6 +42,7 @@ internal sealed class FmpPlaybackEventSinkAdapter : IFmpChipSink
             $"ppz8:{bank}:{mode}",
             AssetKind.SampleBank,
             size));
+        _events.OnSampleBank(new DeviceId(ChipType.Ppz8, 0), bank, samples ?? [], samplePosition);
         _downstream?.LoadPpz8Bank(bank, mode, samples, samplePosition);
     }
 

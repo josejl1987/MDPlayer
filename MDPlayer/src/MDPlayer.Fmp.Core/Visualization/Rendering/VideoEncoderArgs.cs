@@ -20,6 +20,25 @@ internal enum VideoEncoder
 /// </summary>
 internal static class VideoEncoderArgs
 {
+    internal static IReadOnlyList<string> BuildRuntimeProbeArguments(
+        string outputPath = "-",
+        VideoEncoder encoder = VideoEncoder.Nvenc,
+        string preset = "veryfast",
+        string crf = "18")
+    {
+        var args = new List<string>
+        {
+            "-hide_banner", "-loglevel", "error",
+            // NVENC rejects dimensions below 256x256 on some FFmpeg builds;
+            // keep the probe small but valid so capability failures are real.
+            "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
+            "-frames:v", "2", "-an"
+        };
+        Append(args, encoder, preset, crf);
+        args.AddRange(["-f", "null", outputPath]);
+        return args;
+    }
+
     /// <summary>
     /// Appends the video encoder arguments for <paramref name="encoder"/>.
     /// <paramref name="preset"/> is a libx264 preset name and

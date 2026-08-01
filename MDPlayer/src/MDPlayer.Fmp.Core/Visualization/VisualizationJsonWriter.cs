@@ -12,6 +12,7 @@ internal static class VisualizationJsonWriter
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(timeline);
+        VisualizationTimelineValidator.Validate(timeline);
 
         string fullPath = Path.GetFullPath(path);
         string directory = Path.GetDirectoryName(fullPath) ?? ".";
@@ -21,7 +22,7 @@ internal static class VisualizationJsonWriter
         try
         {
             using (var stream = File.Create(tempPath))
-                JsonSerializer.Serialize(stream, timeline, Options);
+                JsonSerializer.Serialize(stream, Ordered(timeline), Options);
 
             if (File.Exists(fullPath))
                 File.Delete(fullPath);
@@ -37,7 +38,8 @@ internal static class VisualizationJsonWriter
     public static string Serialize(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        return JsonSerializer.Serialize(timeline, Options);
+        VisualizationTimelineValidator.Validate(timeline);
+        return JsonSerializer.Serialize(Ordered(timeline), Options);
     }
 
     public static VisualizationTimeline Read(string path)
@@ -57,8 +59,10 @@ internal static class VisualizationJsonWriter
                     obj["voiceId"] = obj["channelId"]?.DeepClone();
             }
         }
-        return JsonSerializer.Deserialize<VisualizationTimeline>(root.ToJsonString(), Options)
+        VisualizationTimeline timeline = JsonSerializer.Deserialize<VisualizationTimeline>(root.ToJsonString(), Options)
             ?? throw new JsonException("Visualization timeline is empty.");
+        VisualizationTimelineValidator.Validate(timeline);
+        return timeline;
     }
 
     private static JsonSerializerOptions CreateOptions()
@@ -73,4 +77,101 @@ internal static class VisualizationJsonWriter
         options.Converters.Add(new VoiceIdJsonConverter());
         return options;
     }
+
+    private static VisualizationTimeline Ordered(VisualizationTimeline timeline) => new()
+    {
+        SchemaVersion = timeline.SchemaVersion,
+        SampleRate = timeline.SampleRate,
+        StartSample = timeline.StartSample,
+        EndSample = timeline.EndSample,
+        Source = timeline.Source,
+        StopReason = timeline.StopReason,
+        Devices = (timeline.Devices ?? [])
+            .OrderBy(value => DeviceOrdering.Priority(value.Id.Type))
+            .ThenBy(value => value.Id.Instance)
+            .ThenBy(value => value.Id.ToString(), StringComparer.Ordinal)
+            .ToArray(),
+        Voices = (timeline.Voices ?? [])
+            .OrderBy(value => DeviceOrdering.Priority(value.Id.Device.Type))
+            .ThenBy(value => value.Id.Device.Instance)
+            .ThenBy(value => value.Id.Device.ToString(), StringComparer.Ordinal)
+            .ThenBy(value => value.Order)
+            .ThenBy(value => value.Id.ToString(), StringComparer.Ordinal)
+            .ToArray(),
+        Notes = (timeline.Notes ?? [])
+            .OrderBy(value => value.StartSample)
+            .ThenBy(value => value.ChannelId, StringComparer.Ordinal)
+            .ThenBy(value => value.EndSample)
+            .ToArray(),
+        Rhythm = (timeline.Rhythm ?? [])
+            .OrderBy(value => value.SamplePosition)
+            .ThenBy(value => value.ChannelId, StringComparer.Ordinal)
+            .ThenBy(value => value.Voice, StringComparer.Ordinal)
+            .ToArray(),
+        Ppz8 = (timeline.Ppz8 ?? [])
+            .OrderBy(value => value.StartSample)
+            .ThenBy(value => value.Channel)
+            .ThenBy(value => value.EndSample)
+            .ToArray(),
+        AdpcmB = (timeline.AdpcmB ?? [])
+            .OrderBy(value => value.StartSample)
+            .ThenBy(value => value.EndSample)
+            .ThenBy(value => value.StartAddress)
+            .ToArray(),
+        Waveforms = (timeline.Waveforms ?? []).OrderBy(value => value.Id, StringComparer.Ordinal).ToArray(),
+        Samples = (timeline.Samples ?? []).OrderBy(value => value.Id, StringComparer.Ordinal).ToArray(),
+        WaveformChanges = (timeline.WaveformChanges ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.SamplePosition)
+            .ThenBy(value => value.WaveformId, StringComparer.Ordinal)
+            .ToArray(),
+        SamplePlayback = (timeline.SamplePlayback ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.StartSample)
+            .ThenBy(value => value.SampleId, StringComparer.Ordinal)
+            .ThenBy(value => value.EndSample)
+            .ThenBy(value => value.PlaybackRate)
+            .ThenBy(value => value.Gain)
+            .ThenBy(value => value.Pan)
+            .ThenBy(value => value.Retrigger)
+            .ToArray(),
+        SpcVoiceStates = (timeline.SpcVoiceStates ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.SamplePosition)
+            .ThenBy(value => value.State, StringComparer.Ordinal)
+            .ThenBy(value => value.Value)
+            .ThenBy(value => value.Value2)
+            .ToArray(),
+        NoiseStates = (timeline.NoiseStates ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.StartSample)
+            .ThenBy(value => value.EndSample)
+            .ThenBy(value => value.Mode)
+            .ToArray(),
+        AggregateHits = (timeline.AggregateHits ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.SamplePosition)
+            .ThenBy(value => value.SubVoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.Label, StringComparer.Ordinal)
+            .ThenBy(value => value.AssetId, StringComparer.Ordinal)
+            .ToArray(),
+        Timing = (timeline.Timing ?? [])
+            .OrderBy(value => value.SamplePosition)
+            .ThenBy(value => value.TimerBValue)
+            .ToArray(),
+        Beats = (timeline.Beats ?? [])
+            .OrderBy(value => value.SamplePosition)
+            .ThenBy(value => value.BeatIndex)
+            .ToArray(),
+        LoopMarkers = (timeline.LoopMarkers ?? [])
+            .OrderBy(value => value.SamplePosition)
+            .ThenBy(value => value.Kind)
+            .ThenBy(value => value.Iteration)
+            .ToArray(),
+        Instruments = (timeline.Instruments ?? [])
+            .OrderBy(value => value.Id, StringComparer.Ordinal)
+            .ToArray(),
+        Capabilities = (timeline.Capabilities ?? []).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+        Warnings = (timeline.Warnings ?? []).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+    };
 }

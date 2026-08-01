@@ -1,10 +1,6 @@
 namespace Fmp.Core.Visualization;
 
-/// <summary>
-/// Captures the command stream exposed by the FMP PPZ8 shim. PPZ8 is an
-/// aggregate scope in the fixed presentation, so the eight mutable channel
-/// states become compact sub-lanes in that one panel.
-/// </summary>
+/// <summary>Captures the command stream exposed by the FMP PPZ8 shim.</summary>
 internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
 {
     private readonly State[] _states = new State[8];
@@ -12,6 +8,7 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private int? _currentBank;
+    private readonly Dictionary<(int Bank, int Slot), string> _sampleIds = [];
     private bool _completed;
 
     public ChipType ChipType => ChipType.Ppz8;
@@ -26,14 +23,8 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
         _device = device;
         _timeline = timeline;
         timeline.AddDevice(device);
-        timeline.AddVoice(new VoiceDescriptor(
-            new VoiceId(device.Id, VoiceKind.Pcm, 0, Name: "ppz8"),
-            "PPZ8",
-            VoicePresentationKind.Pcm,
-            0,
-            false,
-            false,
-            false));
+        foreach (VoiceDescriptor voice in VisualizationDeviceCatalog.Ppz8Voices(device.Id.Instance))
+            timeline.AddVoice(voice);
     }
 
     public void ObserveBank(string assetId)
@@ -45,6 +36,26 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
             && int.TryParse(parts[1], out int bank)
             && bank >= 0)
             _currentBank = bank;
+    }
+
+    public void ObserveBank(string assetId, ReadOnlyMemory<byte>[] samples)
+    {
+        ObserveBank(assetId);
+        if (_currentBank is not int bank || samples == null)
+            return;
+        for (int slot = 0; slot < samples.Length; slot++)
+        {
+            ReadOnlySpan<byte> bytes = samples[slot].Span;
+            if (bytes.Length == 0)
+                continue;
+            var normalized = new float[bytes.Length];
+            for (int index = 0; index < bytes.Length; index++)
+                normalized[index] = unchecked((sbyte)bytes[index]) / 128f;
+            SampleDefinition sample = VisualizationAssetBuilder.CreateSample(
+                "pcm", normalized, 16_000, displayName: $"SMP {slot:X2}");
+            _sampleIds[(bank, slot)] = sample.Id;
+            _timeline.AddSample(sample);
+        }
     }
 
     public void Process(in TimedChipWrite write)
@@ -123,7 +134,17 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
         for (int channel = 0; channel < _states.Length; channel++)
             Close(channel, endSample);
         foreach (Ppz8Event value in _events)
-            _timeline.AddPpz8(value);
+        {
+            string sampleId = value.Bank is int bank && value.SampleNumber is int slot
+                && _sampleIds.TryGetValue((bank, slot), out string known)
+                ? known
+                : null;
+            string voiceId = new VoiceId(
+                _device.Id,
+                VoiceKind.Pcm,
+                value.Channel).ToString();
+            _timeline.AddPpz8(value, sampleId, voiceId);
+        }
     }
 
     private void Close(int channel, long endSample)

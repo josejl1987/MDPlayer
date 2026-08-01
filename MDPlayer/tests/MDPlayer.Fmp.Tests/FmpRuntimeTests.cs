@@ -46,18 +46,12 @@ public class FmpRuntimeTests
     /// Test that initialization succeeds with FMP.COM available.
     /// This requires the test fixture FMP.COM in the output directory.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public void InitWithFmpCom_Succeeds()
     {
         string fmpComPath = Path.GetFullPath("testfixtures/FMP.COM");
-        if (!File.Exists(fmpComPath))
-        {
-            // Weak assumption: FMP.COM is copied to the test output dir
-            // If not present, this test validates the path only
-            Assert.False(File.Exists(fmpComPath), 
-                $"FMP.COM not at expected path: {fmpComPath}. Copy it there from your Wine prefix to run this test.");
-            return;
-        }
+        Skip.IfNot(File.Exists(fmpComPath),
+            $"FMP.COM not at expected path: {fmpComPath}.");
 
         var chipSink = new TestChipSink();
         var assets = new FmpRuntimeAssets(fmpComPath);

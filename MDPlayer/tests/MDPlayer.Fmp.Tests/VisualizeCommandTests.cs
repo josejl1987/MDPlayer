@@ -42,6 +42,45 @@ public sealed class VisualizeCommandTests
     }
 
     [Fact]
+    public void ParseArgs_AppliesLayoutTemplatePalettePreviewAndMotionOptions()
+    {
+        string templatePath = Path.Combine(Path.GetTempPath(), $"mdplayer-template-{Guid.NewGuid():N}.json");
+        string palettePath = Path.Combine(Path.GetTempPath(), $"mdplayer-palette-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(templatePath,
+                "{\"layout\":\"hybrid\",\"channels\":\"all\",\"scopePosition\":\"left\",\"scopeRatio\":0.25}");
+            File.WriteAllText(palettePath,
+                "{\"canvasBackground\":\"#010203\",\"accentColors\":[\"#00ff00\"]}");
+
+            var options = VisualizeCommand.ParseArgs([
+                "track.ovi",
+                "--layout-template", templatePath,
+                "--palette", palettePath,
+                "--preview-html", "preview.html",
+                "--diagnostic-pages", "pages",
+                "--renderer", "cpu",
+                "--motion-blur-samples", "3",
+            ]);
+
+            Assert.NotNull(options);
+            Assert.Equal(VisualizationLayoutMode.Hybrid, options.LayoutMode);
+            Assert.Equal(VisualizationChannelFilter.All, options.Channels);
+            Assert.Equal(VisualizationScopePosition.Left, options.ScopePosition);
+            Assert.Equal(0.25, options.ScopeRatio);
+            Assert.Equal(VisualizationRendererMode.Cpu, options.Renderer);
+            Assert.Equal(3, options.MotionBlurSamples);
+            Assert.Equal("preview.html", options.PreviewHtmlPath);
+            Assert.Equal(1, options.Palette.CanvasBackground.R);
+        }
+        finally
+        {
+            if (File.Exists(templatePath)) File.Delete(templatePath);
+            if (File.Exists(palettePath)) File.Delete(palettePath);
+        }
+    }
+
+    [Fact]
     public void ParseArgs_AcceptsAutomaticEncoderSelection()
     {
         var options = VisualizeCommand.ParseArgs(["track.ovi", "--encoder", "auto"]);
@@ -54,6 +93,22 @@ public sealed class VisualizeCommandTests
     public void ParseArgs_RejectsUnknownOption()
     {
         Assert.Null(VisualizeCommand.ParseArgs(["track.ovi", "--scope-trigger"]));
+    }
+
+    [Theory]
+    [InlineData("--max-duration", "0")]
+    [InlineData("--max-duration", "-1")]
+    [InlineData("--duration", "0")]
+    public void ParseArgs_RejectsNonPositiveDuration(string option, string value)
+    {
+        Assert.Null(VisualizeCommand.ParseArgs(["track.ovi", option, value]));
+    }
+
+    [Fact]
+    public void RenderAndBatchRejectNonPositiveDurationBeforeOpeningInputs()
+    {
+        Assert.Equal(2, RenderCommand.Handle(["missing.ovi", "--duration", "0"]));
+        Assert.Equal(2, BatchCommand.Handle(["missing-directory", "--max-duration", "0"]));
     }
 
     [Fact]
@@ -123,6 +178,22 @@ public sealed class VisualizeCommandTests
         Assert.True(options.AnalysisForce);
         Assert.Equal(3, options.AnalysisTimeoutMinutes);
         Assert.Equal("standard", options.AnalysisOverlay);
+    }
+
+    [Fact]
+    public void ParseArgs_AllowsAnalysisToRemainDisabledByDefault()
+    {
+        var options = VisualizeCommand.ParseArgs(["track.ovi", "--analysis-overlay", "none"]);
+
+        Assert.NotNull(options);
+        Assert.False(options.Analysis);
+        Assert.Equal("none", options.AnalysisOverlay);
+    }
+
+    [Fact]
+    public void ParseArgs_RejectsNonPositiveAnalysisTimeout()
+    {
+        Assert.Null(VisualizeCommand.ParseArgs(["track.ovi", "--analysis-timeout-minutes", "0"]));
     }
 
     [Fact]

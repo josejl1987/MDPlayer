@@ -98,11 +98,12 @@ internal class CorrscopeConfigWriter
         sb.AppendLine("  pitch_tracking:");
         sb.AppendLine();
 
-        // Channel list — ordered logically: FM1-FM6, SSG1-SSG3, rhythm, adpcm, ppz8
+        // Channel list — ordered by stable semantic-adapter order.
         // Silently skip stems that have no audible content (below -50 dB threshold)
         var orderedChannels = result.Stems
             .Where(s => (overrides?.IncludeMasterAsChannel == true || s.Name != "master") && s.Success)
-            .OrderBy(s => GetChannelSortKey(s.Name))
+            .OrderBy(s => s.StableOrder)
+            .ThenBy(s => s.Name, StringComparer.Ordinal)
             .ToList();
 
         var audibleChannels = new List<ScopeRenderer.StemResult>();
@@ -112,7 +113,7 @@ internal class CorrscopeConfigWriter
         if (overrides?.IncludeSilentChannels == true)
         {
             // Fixed-grid consumers need channel positions to remain stable even
-            // when a track does not use ADPCM, PPZ8, or one of the melodic voices.
+            // when a track does not use a sample or one of the melodic voices.
             audibleChannels.AddRange(orderedChannels);
         }
         else
@@ -129,6 +130,16 @@ internal class CorrscopeConfigWriter
             if (silentChannels.Count > 0)
             {
                 sb.AppendLine($"# Active channels: {audibleChannels.Count}/{orderedChannels.Count} (silent: {string.Join(", ", silentChannels.Select(s => s.Name))})");
+            }
+
+            // Corrscope treats an empty `channels:` value as null and fails
+            // before rendering. A master-only fallback must remain renderable
+            // even when the short capture is below the silence threshold.
+            if (audibleChannels.Count == 0
+                && overrides?.IncludeMasterAsChannel == true
+                && orderedChannels.Count > 0)
+            {
+                audibleChannels.Add(orderedChannels[0]);
             }
         }
 
@@ -147,7 +158,8 @@ internal class CorrscopeConfigWriter
             double channelAmp;
             if (overrides.PerChannelAmplification != null)
             {
-                channelAmp = overrides.PerChannelAmplification(stem.Name) ?? GetDefaultAmplification(stem.Name);
+                channelAmp = overrides.PerChannelAmplification(stem.Name)
+                    ?? (stem.DefaultAmplification > 0 ? stem.DefaultAmplification : 1.0);
             }
             else
             {
@@ -157,12 +169,12 @@ internal class CorrscopeConfigWriter
                 }
                 catch
                 {
-                    channelAmp = GetDefaultAmplification(stem.Name);
+                    channelAmp = stem.DefaultAmplification > 0 ? stem.DefaultAmplification : 1.0;
                 }
             }
             sb.AppendLine($"  amplification: {channelAmp}");
 
-            int channelWidth = GetChannelWindowWidth(stem.Name);
+            int channelWidth = Math.Max(1, stem.WindowWidth);
             if (channelWidth > 1)
             {
                 sb.AppendLine($"  render_width: {channelWidth}");
@@ -170,13 +182,15 @@ internal class CorrscopeConfigWriter
             }
 
             // Per-channel color
-            string color = overrides.PerChannelColor?.Invoke(stem.Name) ?? GetDefaultColor(stem.Name);
+            string color = overrides.PerChannelColor?.Invoke(stem.Name) ?? stem.DefaultColor;
             if (color != null)
                 sb.AppendLine($"  line_color: {EscapeYamlValue(color)}");
 
-            // Rhythm gets a per-channel trigger override — percussion doesn't benefit
-            // from waveform memory (buffer_strength=0, pure edge detection)
-            if (stem.Name == "ym2608-rhythm")
+            // Percussive waveforms get a transient-oriented trigger override;
+            // percussion doesn't benefit from waveform memory (buffer_strength=0,
+            // pure edge detection). The semantic class is supplied by the decoder
+            // or presentation adapter, so stem naming is not part of this decision.
+            if (stem.SemanticClass == ScopeSemanticClass.Percussive)
             {
                 sb.AppendLine("  trigger:");
                 sb.AppendLine("    edge_strength: 2.5");
@@ -184,7 +198,7 @@ internal class CorrscopeConfigWriter
                 sb.AppendLine("    responsiveness: 1");
                 sb.AppendLine("    reset_below: 0");
             }
-            else if (stem.Name.StartsWith("ym2608-ssg", StringComparison.Ordinal))
+            else if (stem.SemanticClass == ScopeSemanticClass.PulseStable)
             {
                 sb.AppendLine("  trigger:");
                 sb.AppendLine("    edge_strength: 1.5");
@@ -264,14 +278,11 @@ internal class CorrscopeConfigWriter
     }
 
     /// <summary>
-    /// Get a short display label for a stem (e.g. "FM 1" instead of "YM2608 FM1").
+    /// Get the adapter-provided stable display label for a stem.
     /// </summary>
     private static string GetChannelLabel(ScopeRenderer.StemResult stem)
     {
-        // Shorten labels for cleaner display
-        return stem.Label
-            .Replace("YM2608 ", "")
-            .Replace("PPZ8", "PCM");
+        return stem.Label;
     }
 
     /// <summary>
@@ -459,70 +470,6 @@ internal class CorrscopeConfigWriter
 
         double gain = Math.Min(12.0, 0.72 / (p995 / 32768.0));
         return Math.Round(gain, 2);
-    }
-
-    private static int GetChannelWindowWidth(string name)
-    {
-        if (name == "ym2608-rhythm" || name == "ym2608-adpcm" ||
-            name.StartsWith("ppz8-", StringComparison.Ordinal))
-            return 2;
-        return 1;
-    }
-
-    /// <summary>
-    /// Sort key for channel ordering: FM1-FM6 first, then SSG1-SSG3, then rhythm/adpcm/ppz8.
-    /// </summary>
-    private static int GetChannelSortKey(string name)
-    {
-        if (name.StartsWith("ym2608-fm") && name.Length > 9)
-        {
-            if (int.TryParse(name.AsSpan(9), out int n))
-                return n - 1;
-        }
-        if (name.StartsWith("ym2608-ssg") && name.Length > 10)
-        {
-            if (int.TryParse(name.AsSpan(10), out int n))
-                return 10 + n - 1;
-        }
-        if (name == "ym2608-rhythm") return 20;
-        if (name == "ym2608-adpcm") return 21;
-        if (name == "ppz8-01") return 22;
-        return 99;
-    }
-
-    /// <summary>
-    /// Default amplification per channel type.
-    /// </summary>
-    private static double GetDefaultAmplification(string name)
-    {
-        if (name.StartsWith("ym2608-ssg")) return 0.7;
-        if (name == "ym2608-rhythm") return 0.75;
-        return 1.0;
-    }
-
-    /// <summary>
-    /// Default line colors per channel group, based on Corrscope author's 2025 preset.
-    /// </summary>
-    private static string GetDefaultColor(string name)
-    {
-        // Updated to match author preset colors
-        if (name == "ym2608-fm1") return "#ff665c";
-        if (name == "ym2608-fm2") return "#ffb44c";
-        if (name == "ym2608-fm3") return "#f2df5b";
-        if (name == "ym2608-fm4") return "#44cc44";
-        if (name == "ym2608-fm5") return "#44aaff";
-        if (name == "ym2608-fm6") return "#aa44ff";
-
-        if (name == "ym2608-ssg1") return "#62b8ff";
-        if (name == "ym2608-ssg2") return "#3399ee";
-        if (name == "ym2608-ssg3") return "#62b8ff";
-
-        if (name == "ym2608-rhythm") return "#db72ff";
-        if (name == "ym2608-adpcm") return "#66cc66";
-        if (name == "ppz8-01") return "#cc66ff";
-        if (name == "master") return "#7aa4ff";
-
-        return null;
     }
 
     private static string EscapeYamlValue(string value)

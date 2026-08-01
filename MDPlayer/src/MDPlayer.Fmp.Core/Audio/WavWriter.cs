@@ -28,10 +28,9 @@ internal class WavWriter : IDisposable
         _bitsPerSample = bitsPerSample;
         _dataSize = 0;
         _closed = false;
-        _scratch = ArrayPool<byte>.Shared.Rent(8192);
-
         _stream = new FileStream(_tempPath, FileMode.Create, FileAccess.Write);
         WriteHeader(0);
+        _scratch = ArrayPool<byte>.Shared.Rent(8192);
     }
 
     public void Write(ReadOnlySpan<short> samples)

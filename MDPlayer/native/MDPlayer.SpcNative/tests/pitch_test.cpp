@@ -132,7 +132,7 @@ int render_reference(const std::vector<unsigned char>& spc, short* out, int fram
             emu.mute_voices(0);
         }
         for (int pos = 0; !err && pos < frames; pos += MDP_SPC_DEFAULT_BLOCK_FRAMES)
-            err = emu.play(MDP_SPC_DEFAULT_BLOCK_FRAMES, out + (long)pos * 2);
+            err = emu.play(MDP_SPC_DEFAULT_BLOCK_FRAMES * 2, out + (long)pos * 2);
         return err ? 1 : 0;
     }
     catch (...)
@@ -169,6 +169,7 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
     int seen = 0;
     int pitch_changed_for_voice1 = 0;
     int bad_pitch_events = 0;
+    int key_on_for_voice1 = 0;
     int voice0_effective_mismatch = 0; /* != register pitch (must stay 0) */
     int voice1_effective_match = 0;    /* == register pitch (must stay 0) */
     mdp_spc_audio_buffers audio;
@@ -181,6 +182,13 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
         rc = mdp_spc_render(session, block, &audio, events, event_capacity, &result);
         if (rc != MDP_SPC_OK)
             break;
+        if (result.frames_rendered != block)
+        {
+            fprintf(stderr, "PITCH FAIL: expected %d frames, got %d\n",
+                    block, result.frames_rendered);
+            rc = MDP_SPC_ERR_INTERNAL;
+            break;
+        }
         seen += result.events_written;
 
         /* The events array is rewritten from index 0 by each mdp_spc_render
@@ -189,6 +197,17 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
         for (int e = 0; e < result.events_written; e++)
         {
             const mdp_spc_event& ev = block_events[e];
+            if (ev.type == MDP_SPC_EVENT_KEY_ON && ev.channel == 1)
+            {
+                key_on_for_voice1++;
+                /* KEY_ON is sampled at its actual in-block transition. Its
+                 * pitch is therefore not required to equal the voice's final
+                 * effective pitch after the whole block has rendered. */
+                if (ev.param1 <= 0 || ev.param1 > 0x3FFF ||
+                    ev.frame < (long)i * block ||
+                    ev.frame >= (long)(i + 1) * block)
+                    rc = MDP_SPC_ERR_INTERNAL;
+            }
             if (ev.type == MDP_SPC_EVENT_PITCH_CHANGED && ev.channel == 1)
             {
                 pitch_changed_for_voice1++;
@@ -254,6 +273,11 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
         fprintf(stderr, "PITCH FAIL: %d PITCH_CHANGED event(s) reported the "
                         "register pitch instead of the effective pitch\n",
                 bad_pitch_events);
+        return 1;
+    }
+    if (key_on_for_voice1 < 1)
+    {
+        fprintf(stderr, "PITCH FAIL: expected a KEY_ON event for modulated voice 1\n");
         return 1;
     }
     return 0;

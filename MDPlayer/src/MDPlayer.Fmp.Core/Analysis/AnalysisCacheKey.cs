@@ -13,6 +13,9 @@ internal static class AnalysisCacheKey
             .ToLowerInvariant();
     }
 
+    public static string ComputeInputHash(ReadOnlySpan<byte> canonicalUtf8)
+        => "sha256:" + Convert.ToHexString(SHA256.HashData(canonicalUtf8)).ToLowerInvariant();
+
     public static string Compute(
         AnalysisInput input,
         string normalizerVersion,
@@ -39,11 +42,15 @@ internal static class AnalysisCacheKey
 
 internal sealed class AnalysisCacheMetadata
 {
-    public int SchemaVersion { get; init; } = 1;
+    public int SchemaVersion { get; init; } = 2;
     public string InputHash { get; init; } = "";
     public string NormalizerVersion { get; init; } = "";
     public string WorkerVersion { get; init; } = "";
     public string RequiredMusic21Version { get; init; } = "";
     public string AnalysisDetail { get; init; } = "";
     public string OutputHash { get; init; } = "";
+    public Dictionary<string, string> Dependencies { get; init; } = new(StringComparer.Ordinal);
+    public Dictionary<string, string> CaptureOptions { get; init; } = new(StringComparer.Ordinal);
+    public string CaptureHash { get; init; } = "";
+    public string NormalizedHash { get; init; } = "";
 }

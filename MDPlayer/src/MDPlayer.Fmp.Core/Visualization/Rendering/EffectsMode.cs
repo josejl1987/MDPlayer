@@ -1,18 +1,18 @@
 namespace Fmp.Core.Visualization.Rendering;
 
-/// <summary>
-/// Controls decorative active-note effects (Visualization 2.0 §9, §19.3).
-/// <para>
-/// <see cref="All"/> renders the 120-ms active flash and the 220-ms onset
-/// ripple (density-limited per §9.3). <see cref="None"/> is a diagnostic/
-/// performance option that removes only those decorative effects — note
-/// ribbons, onset caps, end caps, pitch bend, the contact rail, and channel
-/// textures all remain.
-/// </para>
-/// </summary>
+/// <summary>Controls restrained versus diagnostic/cinematic attack effects.</summary>
 internal enum EffectsMode
 {
-    /// <summary>Render active flash and onset ripples (default).</summary>
+    /// <summary>Onset cap and active pitch marker only.</summary>
+    Minimal,
+
+    /// <summary>Diagnostic attack/release semantics without cinematic bloom.</summary>
+    Diagnostic,
+
+    /// <summary>One restrained contact effect in addition to the musical marker.</summary>
+    Cinematic,
+
+    /// <summary>Legacy opt-in for the original double-ripple effect.</summary>
     All,
 
     /// <summary>

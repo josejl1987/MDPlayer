@@ -5,11 +5,10 @@ namespace MDPlayer.Fmp.Tests;
 
 public class CorrscopeRunnerTests
 {
-    [Fact]
+    [SkippableFact]
     public void ResolvePythonPath_FollowsCorrscopeSymlinkToItsVenv()
     {
-        if (OperatingSystem.IsWindows())
-            return;
+        Skip.If(OperatingSystem.IsWindows(), "Corrscope symlink resolution test requires Unix semantics.");
 
         string root = Directory.CreateTempSubdirectory("fmp-corrscope-runner-").FullName;
         try

@@ -37,7 +37,8 @@ internal sealed record RhythmEvent(
     [property: JsonPropertyName("voiceId")] string ChannelId,
     long SamplePosition,
     float Strength,
-    float Pan);
+    float Pan,
+    [property: JsonPropertyName("parentVoiceId")] string ParentVoiceId = null);
 
 internal sealed record Ppz8Event(
     int Channel,
@@ -61,6 +62,99 @@ internal sealed record AdpcmBEvent(
     float Level,
     float Pan,
     bool IsRetrigger);
+
+/// <summary>Generic cyclic waveform asset used by wavetable presentations.</summary>
+internal sealed record WaveformDefinition(
+    string Id,
+    string Family,
+    int SourceLength,
+    float[] Preview,
+    string DisplayName);
+
+internal sealed record WaveformChangeEvent(
+    string VoiceId,
+    long SamplePosition,
+    string WaveformId);
+
+internal enum SampleLoopMode
+{
+    None,
+    Forward,
+    PingPong,
+    Unknown,
+}
+
+internal enum AssetIdentityKind
+{
+    ContentHash,
+    BankAndSlot,
+    RuntimeHandle,
+}
+
+internal sealed record WaveformEnvelopePoint(float Minimum, float Maximum);
+
+/// <summary>Generic bounded sample asset. Raw sample bytes never enter a timeline.</summary>
+internal sealed record SampleDefinition(
+    string Id,
+    string Family,
+    int SourceLengthSamples,
+    int? NativeSampleRate,
+    int? LoopStart,
+    int? LoopEnd,
+    SampleLoopMode LoopMode,
+    WaveformEnvelopePoint[] Preview,
+    string DisplayName)
+{
+    public AssetIdentityKind IdentityKind { get; init; } = AssetIdentityKind.ContentHash;
+}
+
+internal sealed record SamplePlaybackEvent(
+    string VoiceId,
+    long StartSample,
+    long EndSample,
+    string SampleId,
+    double? MidiPitch,
+    double PlaybackRate,
+    float Gain,
+    float Pan,
+    bool Retrigger,
+    bool Looping);
+
+/// <summary>Authoritative S-DSP voice-state transition retained for SPC panels.</summary>
+internal sealed record SpcVoiceStateEvent(
+    string VoiceId,
+    long SamplePosition,
+    string State,
+    int Value,
+    int Value2);
+
+internal enum NoiseMode
+{
+    White,
+    Periodic,
+    ShortPeriod,
+    LongPeriod,
+    HardwareDefined,
+    Unknown,
+}
+
+internal sealed record NoiseStateEvent(
+    string VoiceId,
+    long StartSample,
+    long EndSample,
+    double? CentreFrequencyHz,
+    double? Period,
+    float Level,
+    NoiseMode Mode);
+
+internal sealed record AggregateHitEvent(
+    string VoiceId,
+    string SubVoiceId,
+    string Label,
+    long SamplePosition,
+    float Strength,
+    float Pan,
+    string AssetId);
 
 internal enum LoopMarkerKind
 {
@@ -128,6 +222,13 @@ internal sealed class VisualizationTimeline
     public IReadOnlyList<RhythmEvent> Rhythm { get; init; } = Array.Empty<RhythmEvent>();
     public Ppz8Event[] Ppz8 { get; init; } = [];
     public AdpcmBEvent[] AdpcmB { get; init; } = [];
+    public WaveformDefinition[] Waveforms { get; init; } = [];
+    public SampleDefinition[] Samples { get; init; } = [];
+    public WaveformChangeEvent[] WaveformChanges { get; init; } = [];
+    public SamplePlaybackEvent[] SamplePlayback { get; init; } = [];
+    public SpcVoiceStateEvent[] SpcVoiceStates { get; init; } = [];
+    public NoiseStateEvent[] NoiseStates { get; init; } = [];
+    public AggregateHitEvent[] AggregateHits { get; init; } = [];
     public DriverTimingEvent[] Timing { get; init; } = [];
     public BeatEvent[] Beats { get; init; } = [];
     public LoopMarker[] LoopMarkers { get; init; } = [];

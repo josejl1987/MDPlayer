@@ -238,10 +238,28 @@ internal static class VisualizationDeviceCatalog
             | DeviceCapabilities.ParallelSynthesis,
         ScopeSupport.Channel);
 
+    public static IReadOnlyList<VoiceDescriptor> Ppz8Voices(int instance = 0)
+    {
+        DeviceId device = new(ChipType.Ppz8, instance);
+        var voices = new List<VoiceDescriptor>(8);
+        for (int channel = 0; channel < 8; channel++)
+        {
+            voices.Add(new VoiceDescriptor(
+                new VoiceId(device, VoiceKind.Pcm, channel),
+                $"PPZ8 CH {channel + 1}",
+                VoicePresentationKind.Pcm,
+                channel,
+                false,
+                false,
+                true));
+        }
+        return voices;
+    }
+
     public static IReadOnlyList<VoiceDescriptor> Ym2608Voices(int instance = 0)
     {
         DeviceId device = new(ChipType.Ym2608, instance);
-        var voices = new List<VoiceDescriptor>(12);
+        var voices = new List<VoiceDescriptor>(11);
         for (int index = 0; index < 6; index++)
         {
             voices.Add(new VoiceDescriptor(
@@ -273,7 +291,15 @@ internal static class VisualizationDeviceCatalog
             9,
             true,
             true,
-            false));
+            false,
+            [
+                new VisualizationRowDescriptor("bd", "BD", 0, VisualizationRowKind.Trigger),
+                new VisualizationRowDescriptor("sd", "SD", 1, VisualizationRowKind.Trigger),
+                new VisualizationRowDescriptor("top", "TOP", 2, VisualizationRowKind.Trigger),
+                new VisualizationRowDescriptor("hh", "HH", 3, VisualizationRowKind.Trigger),
+                new VisualizationRowDescriptor("tom", "TOM", 4, VisualizationRowKind.Trigger),
+                new VisualizationRowDescriptor("rim", "RIM", 5, VisualizationRowKind.Trigger),
+            ]));
         voices.Add(new VoiceDescriptor(
             new VoiceId(device, VoiceKind.Adpcm, 0, Name: "adpcm-b"),
             "ADPCM-B",
@@ -283,15 +309,6 @@ internal static class VisualizationDeviceCatalog
             false,
             false));
 
-        DeviceId ppz = new(ChipType.Ppz8, instance);
-        voices.Add(new VoiceDescriptor(
-            new VoiceId(ppz, VoiceKind.Pcm, 0, Name: "ppz8"),
-            "PPZ8",
-            VoicePresentationKind.Pcm,
-            11,
-            false,
-            false,
-            false));
         return voices;
     }
 
@@ -448,7 +465,7 @@ internal static class VisualizationDeviceCatalog
         [
             new VoiceDescriptor(new VoiceId(device, VoiceKind.Pulse, 0), "Pulse 1", VoicePresentationKind.Psg, 0, false, false, true),
             new VoiceDescriptor(new VoiceId(device, VoiceKind.Pulse, 1), "Pulse 2", VoicePresentationKind.Psg, 1, false, false, true),
-            new VoiceDescriptor(new VoiceId(device, VoiceKind.Wavetable, 0), "Wave", VoicePresentationKind.Pitched, 2, false, false, true),
+            new VoiceDescriptor(new VoiceId(device, VoiceKind.Wavetable, 0), "Wave", VoicePresentationKind.Wavetable, 2, false, false, true),
             new VoiceDescriptor(new VoiceId(device, VoiceKind.Noise, 0), "Noise", VoicePresentationKind.Noise, 3, false, true, false),
         ];
     }
@@ -493,7 +510,7 @@ internal static class VisualizationDeviceCatalog
             voices.Add(new VoiceDescriptor(
                 new VoiceId(device, VoiceKind.Wavetable, index),
                 $"Wave {index + 1}",
-                VoicePresentationKind.Pitched,
+                VoicePresentationKind.Wavetable,
                 index,
                 false,
                 false,
@@ -518,7 +535,7 @@ internal static class VisualizationDeviceCatalog
             voices.Add(new VoiceDescriptor(
                 new VoiceId(device, VoiceKind.Wavetable, index),
                 $"Wave {index + 1}",
-                VoicePresentationKind.Pitched,
+                VoicePresentationKind.Wavetable,
                 index,
                 false,
                 false,

@@ -1,10 +1,15 @@
 using System.Diagnostics;
+using Fmp.Application.Contracts;
 using Fmp.Core.Audio;
 using Fmp.Core.Analysis;
 using Fmp.Core.Rendering;
 using Fmp.Core.Rendering.Corrscope;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
+// The CLI uses the Core enum types for the render pipeline; the Application
+// contracts import colliding names. Pin the Core types explicitly.
+using VisualizationPreset = Fmp.Core.Visualization.Rendering.VisualizationPreset;
+using VideoEncoder = Fmp.Core.Visualization.Rendering.VideoEncoder;
 
 namespace Fmp.Cli;
 
@@ -17,27 +22,42 @@ internal static class VisualizationRunner
     public static int Run(VisualizeOptions options)
     {
         var totalWatch = Stopwatch.StartNew();
+        ProgressJsonlWriter progress = null;
+        if (string.Equals(options.ProgressMode, "jsonl", StringComparison.Ordinal))
+        {
+            progress = new ProgressJsonlWriter(Console.Out);
+            progress.Started();
+        }
+        // Structured progress owns stdout; human lines move to stderr.
+        TextWriter humanOut = progress == null ? Console.Out : Console.Error;
+        TextWriter resultOut = humanOut;
+
+        int Fail(string message, int exitCode)
+        {
+            progress?.Failed(message, ProgressJsonlWriter.MapFailureCode(message, exitCode), exitCode);
+            Console.Error.WriteLine($"error: {message}");
+            return exitCode;
+        }
+
         var stageWatch = Stopwatch.StartNew();
+        progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.PreparingInput));
         PreparedTrack track;
         try { track = TrackPreparation.Prepare(options.Input, options); }
         catch (TrackPreparationException ex)
         {
-            Console.Error.WriteLine($"error: {ex.Message}");
-            return ex.ExitCode;
+            return Fail(ex.Message, ex.ExitCode);
         }
         stageWatch.Stop();
+        progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.PreparingInput), stageWatch.Elapsed.TotalSeconds);
         double preparationSeconds = stageWatch.Elapsed.TotalSeconds;
 
         CorrscopeRunner corrRunner = null;
         SinglePassComposer singlePass = null;
+        VideoEncoder requestedEncoder = options.Encoder;
+        var encoderFallback = new VisualizationSupport.EncoderFallbackState();
         if (!options.StemsOnly)
         {
             corrRunner = new CorrscopeRunner(options.ExternalToolTimeoutMinutes, options.CorrscopePath);
-            if (!corrRunner.IsAvailable)
-            {
-                Console.Error.WriteLine("error: corr not found (install Corrscope or pass --corrscope PATH)");
-                return 4;
-            }
             singlePass = new SinglePassComposer(
                 options.FfmpegPath,
                 new SinglePassComposer.Options
@@ -46,34 +66,33 @@ internal static class VisualizationRunner
                     VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
                     VideoCrf = options.FinalQuality ? "18" : "20",
                     Encoder = options.Encoder,
+                    Renderer = options.Renderer,
                 });
             if (!singlePass.IsAvailable)
-            {
-                Console.Error.WriteLine("error: ffmpeg not found (install FFmpeg or pass --ffmpeg PATH)");
-                return 4;
-            }
-            if (options.Encoder == VideoEncoder.Nvenc && !singlePass.SupportsEncoder(VideoEncoder.Nvenc))
-            {
-                Console.Error.WriteLine("error: --encoder nvenc requested but FFmpeg does not expose h264_nvenc");
-                return 4;
-            }
+                return Fail("ffmpeg not found (install FFmpeg or pass --ffmpeg PATH)", 4);
+            options.Renderer = singlePass.EffectiveRenderer;
+            EncoderProbeResult nvencProbe = options.Encoder == VideoEncoder.Nvenc
+                ? new FfmpegVideoEncoderProbe(singlePass.FfmpegPath,
+                TimeSpan.FromMinutes(options.ExternalToolTimeoutMinutes)).Probe(VideoEncoder.Nvenc)
+                : null;
+            if (nvencProbe is { Supported: false })
+                return Fail($"--encoder nvenc failed ({nvencProbe.FailureClassification}): {nvencProbe.Diagnostics}", 4);
             options.Encoder = singlePass.EffectiveEncoder;
+            progress?.EncoderSelected(options.Encoder == VideoEncoder.Nvenc ? "h264_nvenc" : "libx264");
             if (!options.Quiet)
-                Console.WriteLine($"Video encoder: {(singlePass.EffectiveEncoder == VideoEncoder.Nvenc ? "h264_nvenc (GPU)" : "libx264 (CPU fallback)")}");
+                humanOut.WriteLine($"Video encoder: {(singlePass.EffectiveEncoder == VideoEncoder.Nvenc ? "h264_nvenc (GPU)" : "libx264 (CPU fallback)")}");
         }
 
         VisualizationWorkspace workspace = VisualizationWorkspace.Create(options, track.Input);
         if (!options.Overwrite && workspace.HasConflict(!options.StemsOnly))
-        {
-            string existing = !options.StemsOnly && File.Exists(workspace.VideoPath)
-                ? workspace.VideoPath : workspace.TimelinePath;
-            Console.Error.WriteLine($"error: output exists: {existing} (use --overwrite)");
-            return 9;
-        }
+            return Fail(
+                $"output exists: {workspace.FirstConflict(!options.StemsOnly)} (use --overwrite)",
+                9);
         workspace.EnsureDirectories();
 
         var capturePipeline = new VisualizationPipeline(track.Assets, track.FileSystem, options.SampleRate);
         stageWatch.Restart();
+        progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
         VisualizationPipeline.Result capture = capturePipeline.Capture(
             track.Data,
             track.Input.FullName,
@@ -86,53 +105,138 @@ internal static class VisualizationRunner
                 TimeoutSeconds = options.Timeout,
             });
         stageWatch.Stop();
+        progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), stageWatch.Elapsed.TotalSeconds);
         double captureSeconds = stageWatch.Elapsed.TotalSeconds;
         if (!capture.Success || capture.Timeline == null)
-        {
-            Console.Error.WriteLine($"error: visualization capture failed: {capture.LastError}");
-            return 7;
-        }
+            return Fail($"visualization capture failed: {capture.LastError}", 7);
+        if (!VisualizationContentAvailability.HasRenderableContent(capture.Timeline))
+            return Fail(
+                "visualization capture contains neither semantic events nor waveform activity",
+                10);
 
-        VisualizationLayoutMode layoutMode = options.LayoutMode;
-        VisualizationTopology topology = VisualizationTopologyBuilder.Build(capture.Timeline, layoutMode);
-        if (layoutMode == VisualizationLayoutMode.Focus
-            && topology.Panels.Any(panel => !IsKnownPanelId(panel.Id)))
+        VisualizationLayoutMode layoutMode = VisualizationLayoutModeResolver.Resolve(
+            capture.Timeline, options.LayoutMode);
+        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+            capture.Timeline, layoutMode, options.Channels, options.GroupBy);
+        OverlayLayout layout = new(
+            options.Width,
+            options.Height,
+            options.PastSeconds,
+            options.FutureSeconds,
+            topology.Panels.Count,
+            layoutMode,
+            options.ScopeHeight,
+            options.TimelineHeight,
+            options.RollZoom,
+            options.ScopeRatio,
+            options.ScopePosition);
+        VisualizationLayoutValidator.Validate(layout, topology);
+        if (!string.IsNullOrWhiteSpace(options.PreviewHtmlPath))
         {
-            // The current FMP scope backend has a fixed stem vocabulary. Keep
-            // the generic diagnostic topology if a future descriptor cannot be
-            // represented by that backend yet.
-            layoutMode = VisualizationLayoutMode.Diagnostic;
-            topology = VisualizationTopologyBuilder.Build(capture.Timeline, layoutMode);
+            VisualizationPreviewWriter.Write(
+                options.PreviewHtmlPath,
+                capture.Timeline,
+                VisualizationLayoutPlan.Create(
+                    capture.Timeline,
+                    topology,
+                    layout,
+                    options.LayoutMode,
+                    options.Channels,
+                    options.GroupBy,
+                    options.TimeGrid,
+                    options.ScopePosition,
+                    options.ScopeRatio,
+                    options.Fps,
+                    options.FpsDenominator,
+                    options.Encoder.ToString(),
+                    options.Analysis ? "requested" : "none"));
         }
-        OverlayLayout layout = new(options.Width, options.Height, 0.75, 2.25, topology.Panels.Count);
-        StemPass[] scopeStems = SelectScopeStems(topology, layoutMode);
+        if (!string.IsNullOrWhiteSpace(options.DiagnosticPagesPath))
+        {
+            VisualizationTopology diagnosticTopology = VisualizationTopologyBuilder.Build(
+                capture.Timeline,
+                VisualizationLayoutMode.Diagnostic,
+                VisualizationChannelFilter.All,
+                options.GroupBy);
+            OverlayLayout diagnosticLayout = new(
+                options.Width,
+                options.Height,
+                options.PastSeconds,
+                options.FutureSeconds,
+                diagnosticTopology.Panels.Count,
+                VisualizationLayoutMode.Diagnostic,
+                options.ScopeHeight,
+                options.TimelineHeight,
+                options.RollZoom,
+                options.ScopeRatio,
+                options.ScopePosition);
+            VisualizationLayoutValidator.Validate(diagnosticLayout, diagnosticTopology);
+            VisualizationDiagnosticPagesWriter.Write(
+                options.DiagnosticPagesPath,
+                capture.Timeline,
+                VisualizationLayoutPlan.Create(
+                    capture.Timeline,
+                    diagnosticTopology,
+                    diagnosticLayout,
+                    VisualizationLayoutMode.Diagnostic,
+                    VisualizationChannelFilter.All,
+                    options.GroupBy,
+                    options.TimeGrid,
+                    options.ScopePosition,
+                    options.ScopeRatio,
+                    options.Fps,
+                    options.FpsDenominator,
+                    options.Encoder.ToString(),
+                    options.Analysis ? "requested" : "none"));
+        }
+        VisualizationPlanOutput.Emit(
+            capture.Timeline,
+            topology,
+            layout,
+            options.LayoutMode,
+            options.Channels,
+            options.GroupBy,
+            options.TimeGrid,
+            options.ScopePosition,
+            options.ScopeRatio,
+            options.Fps,
+            options.FpsDenominator,
+            options.Encoder.ToString(),
+            options.Analysis ? "requested" : "none",
+            options.PrintLayout,
+            options.LayoutJson);
+        bool useScopes = options.StemsOnly || layout.HasScopes;
+        StemPass[] scopeStems = useScopes
+            ? SelectScopeStems(topology, layoutMode)
+            : [DefaultStems.All[0]];
 
         try { VisualizationJsonWriter.Write(workspace.TimelinePath, capture.Timeline); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"error: writing timeline — {ex.Message}");
-            return 7;
+            return Fail($"writing timeline — {ex.Message}", 7);
         }
 
         AnalysisOutput analysisOutput = null;
         if (options.Analysis)
         {
-            int analysisExit = AnalysisRunner.Run(new AnalyzeOptions
+            stageWatch.Restart();
+            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.RunningAnalysis));
+            AnalysisExecutionResult analysis = AnalysisRunner.Execute(new AnalyzeOptions
             {
-                Timeline = workspace.TimelinePath,
+                CapturedTimeline = capture.Timeline,
                 AnalysisPython = options.AnalysisPython,
-                AnalysisOutput = options.AnalysisOutput,
+                AnalysisOutput = options.AnalysisOutput ?? Path.Combine(workspace.OutputDir, "analysis"),
                 AnalysisCache = options.AnalysisCache,
                 Detail = options.AnalysisDetail,
                 Force = options.AnalysisForce,
                 TimeoutMinutes = options.AnalysisTimeoutMinutes,
+                Output = humanOut,
             });
-            if (analysisExit != 0)
-                return analysisExit;
-            string analysisPath = ResolveAnalysisOutputPath(options, workspace);
-            analysisOutput = AnalysisResultValidator.ReadAndValidate(
-                analysisPath,
-                FmpSymbolicNormalizer.Normalize(capture.Timeline));
+            stageWatch.Stop();
+            progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.RunningAnalysis), stageWatch.Elapsed.TotalSeconds);
+            if (analysis.ExitCode != 0)
+                return Fail($"analysis failed (exit {analysis.ExitCode})", analysis.ExitCode);
+            analysisOutput = analysis.Output;
         }
 
         var scopeRenderer = new ScopeRenderer(
@@ -145,25 +249,23 @@ internal static class VisualizationRunner
             options.MaxDuration,
             options.SsgGainDb);
         stageWatch.Restart();
+        progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.RenderingChannelStems));
         ScopeRenderer.ScopeResult scopeResult = scopeRenderer.Render(
             track.Data,
             track.Input.FullName,
             workspace.ScopeDir,
             scopeStems,
             VisualizationSupport.CreateProgressReporter(options.Quiet),
-            skipSilentStems: false);
+            skipSilentStems: false,
+            audioDir: workspace.AudioDir,
+            metadataPath: workspace.ScopeMetadataPath);
         stageWatch.Stop();
+        progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.RenderingChannelStems), stageWatch.Elapsed.TotalSeconds);
         double stemRenderSeconds = stageWatch.Elapsed.TotalSeconds;
         if (!scopeResult.Success)
-        {
-            Console.Error.WriteLine($"error: scope render failed: {scopeResult.LastError}");
-            return 7;
-        }
+            return Fail($"scope render failed: {scopeResult.LastError}", 7);
         if (scopeResult.SampleRate != capture.Timeline.SampleRate)
-        {
-            Console.Error.WriteLine($"error: scope/timeline sample-rate mismatch: {scopeResult.SampleRate} vs {capture.Timeline.SampleRate}");
-            return 7;
-        }
+            return Fail($"scope/timeline sample-rate mismatch: {scopeResult.SampleRate} vs {capture.Timeline.SampleRate}", 7);
 
         string[] missingStems = scopeStems
             .Where(pass => !scopeResult.Stems.Any(stem => stem.Name == pass.Name
@@ -172,44 +274,57 @@ internal static class VisualizationRunner
             .Select(pass => pass.Name)
             .ToArray();
         if (scopeResult.MasterSamples <= 0 || missingStems.Length > 0)
-        {
-            Console.Error.WriteLine($"error: Corrscope layout requires synchronized stems: {string.Join(", ", missingStems)}");
-            return 7;
-        }
+            return Fail($"Corrscope layout requires synchronized stems: {string.Join(", ", missingStems)}", 7);
 
-        string yamlPath = Path.Combine(workspace.ScopeDir, "corrscope-grid.yaml");
+        string yamlPath = workspace.CorrscopeConfigPath;
         if (options.StemsOnly)
         {
             CorrscopeConfigWriter.Write(yamlPath, workspace.ScopeDir, scopeResult,
+                audioDir: "../audio",
                 overrides: new CorrscopeOverrides
                 {
                     Fps = options.Fps,
-                    RenderWidth = options.Width,
+                    RenderWidth = layout.CorrscopeGridWidth,
                     RenderHeight = options.Height,
                     LayoutNCols = layout.ColumnCount,
-                    IncludeSilentChannels = true,
-                    HideLabels = true,
+                    IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
+                    HideLabels = layoutMode != VisualizationLayoutMode.Scope,
                     FfmpegVideoTemplate = options.CorrscopeVideoTemplate,
                     ResDivisor = options.FinalQuality ? 1.0 : 2.0,
                     Antialiasing = options.FinalQuality,
                 });
-            VisualizationSupport.WriteSummary(options, workspace.TimelinePath, null, capture, scopeResult);
-            if (!options.Quiet) Console.Error.WriteLine($"stems: {workspace.ScopeDir}");
+            VisualizationResultWriter.Write(
+                VisualizationResultBuilder.Build(
+                    options, workspace, capture, scopeResult,
+                    backend: null, availability: null, portable: true,
+                    encoder: null, encoderFallback: null,
+                    preparationSeconds, captureSeconds, stemRenderSeconds, energySeconds: 0,
+                    compositionSeconds: 0, backendResolutionSeconds: 0, totalWatch.Elapsed.TotalSeconds,
+                    composeMetrics: null, warnings: new[] { $"stems: {workspace.ScopeDir}" }),
+                humanReadable: true, json: options.Json, quiet: options.Quiet,
+                output: resultOut);
+            progress?.Completed(workspace.ScopeDir, totalWatch.Elapsed.TotalSeconds);
             return 0;
         }
 
-        CorrscopeConfigWriter.Write(yamlPath, workspace.ScopeDir, scopeResult,
-            overrides: new CorrscopeOverrides
-            {
-                Fps = options.Fps,
-                RenderWidth = options.Width,
-                RenderHeight = layout.CorrscopeGridHeight,
-                LayoutNCols = layout.ColumnCount,
-                IncludeSilentChannels = true,
-                HideLabels = true,
-                ResDivisor = 1.0,
-                Antialiasing = options.FinalQuality,
-            });
+        if (layout.HasScopes)
+        {
+            CorrscopeConfigWriter.Write(yamlPath, workspace.ScopeDir, scopeResult,
+                audioDir: "../audio",
+                overrides: new CorrscopeOverrides
+                {
+                    Fps = options.Fps,
+                    RenderWidth = layout.CorrscopeGridWidth,
+                    RenderHeight = layout.CorrscopeGridHeight,
+                    LayoutNCols = layout.IsSharedComposition
+                        ? Math.Max(1, scopeStems.Length)
+                        : layout.ColumnCount,
+                    IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
+                    HideLabels = layoutMode != VisualizationLayoutMode.Scope,
+                    ResDivisor = 1.0,
+                    Antialiasing = options.FinalQuality,
+                });
+        }
 
         VisualizationTimeline videoTimeline = VisualizationSupport.AlignTimelineToAudio(
             capture.Timeline, scopeResult.MasterSamples);
@@ -219,16 +334,14 @@ internal static class VisualizationRunner
             : AnalysisOverlaySceneBuilder.Build(
                 analysisOutput,
                 videoTimeline,
-                allowTentative: options.AnalysisOverlay == "standard");
+                allowTentative: options.AnalysisOverlay is "standard" or "full");
         string masterAudioPath = scopeResult.Stems
             .FirstOrDefault(stem => stem.Name == "master" && stem.Success)?.WavPath;
         if (string.IsNullOrEmpty(masterAudioPath) || !File.Exists(masterAudioPath))
-        {
-            Console.Error.WriteLine("error: master WAV was not produced by the scope render");
-            return 7;
-        }
+            return Fail("master WAV was not produced by the scope render", 7);
 
         stageWatch.Restart();
+        progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy));
         int totalFrames = (int)Math.Ceiling(scopeResult.MasterSamples *
             (double)options.Fps / scopeResult.SampleRate);
         ChannelEnergyEnvelope[] energy = ChannelEnergyAnalyzer.Analyze(
@@ -239,6 +352,7 @@ internal static class VisualizationRunner
             options.Fps,
             options.FpsDenominator);
         stageWatch.Stop();
+        progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy), stageWatch.Elapsed.TotalSeconds);
         double energySeconds = stageWatch.Elapsed.TotalSeconds;
 
         VisualizationPresentation presentation = VisualizationSupport.ResolvePresentation(options, track.Input);
@@ -251,12 +365,25 @@ internal static class VisualizationRunner
                 Height = options.Height,
                 FpsNumerator = options.Fps,
                 FpsDenominator = options.FpsDenominator,
-                PastSeconds = 0.75,
-                FutureSeconds = 2.25,
+                PastSeconds = options.PastSeconds,
+                FutureSeconds = options.FutureSeconds,
+                RollZoom = options.RollZoom,
+                ScopeHeight = options.ScopeHeight,
+                TimelineHeight = options.TimelineHeight,
+                ScopeRatio = options.ScopeRatio,
+                ScopePosition = options.ScopePosition,
+                Channels = options.Channels,
+                GroupBy = options.GroupBy,
+                TimeGrid = options.TimeGrid,
                 Presentation = presentation,
                 FontPath = options.FontPath,
+                PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic
+                    && layoutMode != VisualizationLayoutMode.DiagnosticV2,
                 Effects = options.Effects,
                 NoteColor = options.NoteColor,
+                Palette = options.Palette,
+                MotionBlurSamples = options.MotionBlurSamples,
+                Renderer = options.Renderer,
                 LayoutMode = layoutMode,
                 IntroSeconds = 0.75,
                 OutroSeconds = Math.Min(0.45, options.Tail),
@@ -265,30 +392,71 @@ internal static class VisualizationRunner
             });
 
         stageWatch.Restart();
+        progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.ComposingFrames));
         try
         {
-            string bridgePath = Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py");
-            if (!File.Exists(bridgePath))
+            if (!layout.HasScopes)
             {
-                Console.Error.WriteLine($"error: bridge script not found: {bridgePath}");
-                return 7;
+                singlePass.ComposeMasterOnly(
+                    masterAudioPath,
+                    workspace.VideoPath,
+                    panelRenderer,
+                    includeWaveform: false);
             }
-            string pythonPath = CorrscopeRunner.ResolvePythonPath(corrRunner.CorrPath);
-            Process corrProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
-            singlePass.Compose(corrProcess, masterAudioPath, workspace.VideoPath, panelRenderer);
+            else
+            {
+                if (corrRunner is null || !corrRunner.IsAvailable)
+                    return Fail("Corrscope is required for this layout (install Corrscope or pass --corrscope PATH)", 4);
+                string bridgePath = Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py");
+                if (!File.Exists(bridgePath))
+                    return Fail($"bridge script not found: {bridgePath}", 7);
+                string pythonPath = CorrscopeRunner.ResolvePythonPath(corrRunner.CorrPath);
+                Process corrProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
+                try
+                {
+                    singlePass.Compose(corrProcess, masterAudioPath, workspace.VideoPath, panelRenderer);
+                }
+                catch (Exception ex) when (encoderFallback.ShouldRetry(requestedEncoder, ex))
+                {
+                    Console.Error.WriteLine("warning: NVENC runtime failure; restarting Corrscope and retrying with libx264");
+                    progress?.Warning("NVENC runtime failure; restarting Corrscope and retrying with libx264");
+                    options.Encoder = VideoEncoder.LibX264;
+                    singlePass = new SinglePassComposer(options.FfmpegPath, new SinglePassComposer.Options
+                    {
+                        TimeoutMinutes = options.ExternalToolTimeoutMinutes,
+                        VideoPreset = options.FinalQuality ? "veryfast" : "ultrafast",
+                        VideoCrf = options.FinalQuality ? "18" : "20",
+                        Encoder = VideoEncoder.LibX264,
+                        Renderer = options.Renderer,
+                    });
+                    Process retryProcess = corrRunner.StartRawFrames(pythonPath, bridgePath, yamlPath);
+                    singlePass.Compose(retryProcess, masterAudioPath, workspace.VideoPath, panelRenderer);
+                }
+            }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"error: single-pass video composition failed: {ex.Message}");
-            return 7;
+            return Fail($"single-pass video composition failed: {ex.Message}", 7);
         }
         stageWatch.Stop();
+        progress?.StageCompleted(ProgressJsonlWriter.StageName(ExportStage.ComposingFrames), stageWatch.Elapsed.TotalSeconds);
         double compositionSeconds = stageWatch.Elapsed.TotalSeconds;
+        progress?.OutputCreated(workspace.VideoPath);
         totalWatch.Stop();
-        VisualizationSupport.WriteSummary(options, workspace.TimelinePath, workspace.VideoPath,
-            capture, scopeResult, captureSeconds, stemRenderSeconds, energySeconds,
-            preparationSeconds, compositionSeconds, totalWatch.Elapsed.TotalSeconds,
-            singlePass.LastMetrics);
+        VisualizationResultWriter.Write(
+            VisualizationResultBuilder.Build(
+                options, workspace, capture, scopeResult,
+                backend: "fmp", availability: "available", portable: true,
+                encoder: singlePass.EffectiveEncoder.ToString(),
+                encoderFallback: encoderFallback.Retried
+                    ? new EncoderFallbackResult("composition", "nvenc runtime failure", encoderFallback.Diagnostics, Retried: true)
+                    : null,
+                preparationSeconds, captureSeconds, stemRenderSeconds, energySeconds,
+                compositionSeconds, backendResolutionSeconds: preparationSeconds, totalWatch.Elapsed.TotalSeconds,
+                composeMetrics: singlePass.LastMetrics, warnings: Array.Empty<string>()),
+            humanReadable: true, json: options.Json, quiet: options.Quiet,
+            output: resultOut);
+        progress?.Completed(workspace.VideoPath, totalWatch.Elapsed.TotalSeconds);
         return 0;
     }
 
@@ -308,35 +476,21 @@ internal static class VisualizationRunner
         VisualizationTopology topology,
         VisualizationLayoutMode layoutMode)
     {
-        if (layoutMode == VisualizationLayoutMode.Diagnostic)
+        if (layoutMode is VisualizationLayoutMode.Diagnostic or VisualizationLayoutMode.DiagnosticV2)
             return DefaultStems.All;
 
-        var activePanelIds = topology.Panels
-            .Select(panel => panel.Id)
+        // Unified and hybrid layouts intentionally collapse compatible voices
+        // into a shared semantic panel. Scope selection must retain the
+        // source-track identities carried by that panel; matching only its
+        // synthetic panel ID would silently reduce the scope wall to master.
+        var activeTrackIds = topology.Panels
+            .SelectMany(panel => new[] { panel.Id }
+                .Concat(panel.VoiceIds)
+                .Concat(panel.OperatorVoiceIds))
             .ToHashSet(StringComparer.Ordinal);
         return DefaultStems.All
-            .Where(stem => stem.Name == "master"
-                || activePanelIds.Contains(StemNameToPanelId(stem.Name)))
+            .Where(stem => stem.PresentationTrackId == "master"
+                || activeTrackIds.Contains(stem.PresentationTrackId))
             .ToArray();
     }
-
-    private static bool IsKnownPanelId(string panelId)
-        => DefaultStems.All.Any(stem => StemNameToPanelId(stem.Name) == panelId);
-
-    private static string StemNameToPanelId(string stemName) => stemName switch
-    {
-        "ym2608-fm1" => "ym2608.0.fm.1",
-        "ym2608-fm2" => "ym2608.0.fm.2",
-        "ym2608-fm3" => "ym2608.0.fm.3",
-        "ym2608-fm4" => "ym2608.0.fm.4",
-        "ym2608-fm5" => "ym2608.0.fm.5",
-        "ym2608-fm6" => "ym2608.0.fm.6",
-        "ym2608-ssg1" => "ym2608.0.ssg.1",
-        "ym2608-ssg2" => "ym2608.0.ssg.2",
-        "ym2608-ssg3" => "ym2608.0.ssg.3",
-        "ym2608-rhythm" => "ym2608.0.rhythm",
-        "ym2608-adpcm" => "ym2608.0.adpcm-b",
-        "ppz8-01" => "ppz8.0",
-        _ => null,
-    };
 }

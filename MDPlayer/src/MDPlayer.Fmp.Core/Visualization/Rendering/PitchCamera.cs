@@ -3,11 +3,16 @@ using Fmp.Core.Visualization;
 namespace Fmp.Core.Visualization.Rendering;
 
 /// <summary>
-/// Precomputed, deterministic pitch-range camera (§11). Expands immediately when
-/// a note would leave the range; contracts after a 0.75 s hold (§11.3). Short
-/// ornaments are not zoomed for (§11.3). Boundaries prefer C (§11.4). The
-/// final range is critically-damped between keyframes (§11.5). All state is
-/// baked at construction — GetRange/IsClipped are pure lookups.
+/// Precomputed, deterministic pitch-range camera (§11). The per-frame target
+/// expands as soon as lookahead reveals a note and contracts after a 0.75 s
+/// hold (§11.3). Short ornaments are not zoomed for (§11.3). Boundaries prefer
+/// C, but only inside the interval that keeps every note visible (§11.4). The
+/// baked range is critically damped in both directions (§11.5): every target
+/// anticipates its notes by at least <see cref="AdditionalLookaheadSeconds"/>
+/// of lookahead while damping converges in ~0.2 s, so no sounding note is ever
+/// hidden. The configured spans are readability targets; important content
+/// may expand them. All state is baked at construction — GetRange/IsClipped
+/// are pure lookups.
 /// </summary>
 internal sealed class PitchCamera
 {
@@ -19,13 +24,15 @@ internal sealed class PitchCamera
     private const double AdditionalLookaheadSeconds = 0.50;
     private const double OrnamentClipThresholdSemitones = 2.0;
     private const double DampingTimeConstantSeconds = 0.045;
+    private const int DefaultMinMidi = 48;
+    private const int DefaultMaxMidi = 72;
 
     private readonly FrameRange[] _frames;
     private readonly long _timelineStartSample;
     private readonly long _timelineEndSample;
     private readonly int _totalFrames;
 
-    private sealed record FrameRange(long FromSample, int MinMidi, int MaxMidi, bool IsClipped, bool IsEmpty);
+    private sealed record FrameRange(long FromSample, double MinMidi, double MaxMidi, bool IsClipped, bool IsEmpty);
 
     public PitchCamera(
         PreparedNote[] mainNotes,
@@ -37,13 +44,20 @@ internal sealed class PitchCamera
         long timelineEndSample,
         int fpsNumerator = 60,
         int fpsDenominator = 1,
-        bool allowExtendedSpan = false)
+        bool allowExtendedSpan = false,
+        double rollZoom = 1.0)
     {
+        if (!double.IsFinite(rollZoom) || rollZoom <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rollZoom));
         _timelineStartSample = timelineStartSample;
         _timelineEndSample = timelineEndSample;
         // Keep ordinary pitch lanes musically readable: 16–18 semitones is
-        // the preferred window, while MinSpan/MaxSpan remain hard bounds.
-        int preferredSpan = Math.Clamp((int)Math.Round(laneHeight / 7.0), 16, 18);
+        // the preferred window. Minimum and maximum spans are soft targets;
+        // important content is allowed to expand the viewport.
+        int preferredSpan = Math.Clamp(
+            (int)Math.Round(laneHeight / (7.0 * rollZoom)),
+            rollZoom > 1.0 ? MinSpan : 16,
+            18);
         int maxSpan = allowExtendedSpan ? Fm3MaxSpan : MaxSpan;
 
         double totalSeconds = Math.Max(0, (timelineEndSample - timelineStartSample) / (double)sampleRate);
@@ -65,7 +79,11 @@ internal sealed class PitchCamera
         {
             ref RawTarget t = ref targets[i];
             if (t.IsEmpty) continue;
-            (int low, int high) = AlignToOctave(t.MinMidi, t.MaxMidi, preferredSpan, maxSpan);
+            (int low, int high) = AlignToOctave(
+                (int)Math.Round(t.MinMidi),
+                (int)Math.Round(t.MaxMidi),
+                preferredSpan,
+                maxSpan);
             t.MinMidi = low; t.MaxMidi = high;
         }
 
@@ -84,7 +102,25 @@ internal sealed class PitchCamera
     public (int MinMidi, int MaxMidi) GetRange(long currentSample)
     {
         var f = _frames[SampleToFrame(currentSample)];
-        return f.IsEmpty ? (48, 72) : (f.MinMidi, f.MaxMidi);
+        return f.IsEmpty
+            ? (DefaultMinMidi, DefaultMaxMidi)
+            : ((int)Math.Round(f.MinMidi), (int)Math.Round(f.MaxMidi));
+    }
+
+    /// <summary>
+    /// Returns the continuous camera range used by the renderer. The integer
+    /// accessor remains for callers that need stable MIDI boundaries.
+    /// </summary>
+    public (double MinMidi, double MaxMidi) GetPreciseRange(long currentSample)
+    {
+        var f = _frames[SampleToFrame(currentSample)];
+        return f.IsEmpty ? (DefaultMinMidi, DefaultMaxMidi) : (f.MinMidi, f.MaxMidi);
+    }
+
+    public PitchViewport GetViewport(long currentSample)
+    {
+        (double min, double max) = GetPreciseRange(currentSample);
+        return new PitchViewport(min, max);
     }
 
     /// <summary>True when an ornament was deliberately excluded (§11.3), for edge indicators.</summary>
@@ -115,7 +151,8 @@ internal sealed class PitchCamera
     private struct RawTarget(long fromSample)
     {
         public long FromSample = fromSample;
-        public int MinMidi, MaxMidi;
+        public double MinMidi, MaxMidi;
+        public double? ActiveMinMidi, ActiveMaxMidi;
         public bool IsEmpty = true, IsClipped;
     }
 
@@ -140,6 +177,8 @@ internal sealed class PitchCamera
         long ornamentSamples = (long)(OrnamentThresholdSeconds * sampleRate);
 
         int noteCount = 0;
+        double? activeMin = null;
+        double? activeMax = null;
         Span<NoteExtent> extents = notes.Length <= 128
             ? stackalloc NoteExtent[notes.Length]
             : new NoteExtent[notes.Length];
@@ -159,14 +198,23 @@ internal sealed class PitchCamera
             {
                 if (pc.MidiNote < 0 || pc.SamplePosition > lookaheadEnd) continue;
                 // Keep the actual prepared contour in the camera extent. The
-                // range solver applies the hard 24/30-semitone limit; clipping
-                // an intentional ornament is then surfaced by IsClipped so
-                // the renderer can draw an edge indicator.
+                // §11.3 ornament exclusion below surfaces deliberate exclusions
+                // via IsClipped; important content wider than the preferred span
+                // expands the range and is not flagged as clipped.
                 int pitchMidi = Math.Clamp((int)Math.Round(pc.MidiNote), 0, 127);
                 if (pitchMidi < noteMin) noteMin = pitchMidi;
                 if (pitchMidi > noteMax) noteMax = pitchMidi;
             }
             extents[noteCount++] = new NoteExtent(noteMin, noteMax, note.EndSample - note.StartSample);
+            if (note.StartSample <= currentSample && currentSample < note.EndSample)
+            {
+                activeMin = activeMin is double activeMinValue
+                    ? Math.Min(activeMinValue, noteMin)
+                    : noteMin;
+                activeMax = activeMax is double activeMaxValue
+                    ? Math.Max(activeMaxValue, noteMax)
+                    : noteMax;
+            }
         }
 
         if (noteCount == 0)
@@ -201,7 +249,15 @@ internal sealed class PitchCamera
             { minMidi = newMin; clipped = true; }
         }
 
-        return new RawTarget(currentSample) { MinMidi = minMidi, MaxMidi = maxMidi, IsEmpty = false, IsClipped = clipped };
+        return new RawTarget(currentSample)
+        {
+            MinMidi = minMidi,
+            MaxMidi = maxMidi,
+            ActiveMinMidi = activeMin,
+            ActiveMaxMidi = activeMax,
+            IsEmpty = false,
+            IsClipped = clipped,
+        };
     }
 
     /// <summary>§11.3: expand immediately; contract only after a 0.75 s hold.</summary>
@@ -220,7 +276,7 @@ internal sealed class PitchCamera
                 continue;
             }
 
-            int targetMin = t.MinMidi, targetMax = t.MaxMidi;
+            int targetMin = (int)Math.Round(t.MinMidi), targetMax = (int)Math.Round(t.MaxMidi);
             if (!heldMin.HasValue)
             {
                 heldMin = targetMin; heldMax = targetMax;
@@ -247,26 +303,39 @@ internal sealed class PitchCamera
         }
     }
 
-    /// <summary>§11.4: prefer boundaries near C when it keeps notes well-centered.</summary>
+    /// <summary>
+    /// §11.4: prefer boundaries near C, but only inside the containment
+    /// interval — alignment never pushes a note out of the half-open window.
+    /// </summary>
     private static (int Low, int High) AlignToOctave(int minMidi, int maxMidi, int preferredSpan, int maxSpan)
     {
-        int span = Math.Clamp(Math.Max(preferredSpan, maxMidi - minMidi), MinSpan, maxSpan);
-        int range = maxMidi - minMidi;
+        // A half-open [low, high) window needs range+1 rows to contain both
+        // endpoints; sizing from range alone dropped the top boundary pitch.
+        int required = maxMidi - minMidi + 1;
+        // The preferred/max spans are readability targets, not permission to
+        // hide an important sounding pitch. A bend or simultaneous note that
+        // exceeds the preferred range expands the viewport for this target;
+        // contraction can restore the readable span after the hold interval.
+        int span = Math.Max(preferredSpan, required);
 
-        // The range must contain all important pitches whenever it fits under
-        // the hard maximum. C-aligned low or high boundaries are preferred
-        // only when they move the otherwise centered window by at most three
-        // semitones.
-        int validLow = Math.Min(minMidi, maxMidi - span);
-        int validHigh = Math.Max(minMidi, maxMidi - span);
-        int idealLow = range <= span
-            ? minMidi - (span - range) / 2
-            : maxMidi - span;
-        idealLow = Math.Clamp(idealLow, validLow, validHigh);
+        if (required > span)
+        {
+            // Content cannot fit under the hard maximum: anchor to the top so
+            // the extreme boundary pitch itself stays visible.
+            return (maxMidi - span + 1, maxMidi + 1);
+        }
+
+        // Any low inside [lowMin, lowMax] keeps every note visible. The
+        // centered position is the default, with the odd spare semitone going
+        // below the content so the lowest voice never hugs the bottom edge.
+        // A C-aligned boundary replaces it only within three semitones.
+        int lowMin = maxMidi - span + 1;
+        int lowMax = minMidi;
+        int idealLow = Math.Clamp(minMidi - (span - required + 1) / 2, lowMin, lowMax);
 
         int best = idealLow;
         int bestDistance = 4;
-        for (int candidate = validLow - 12; candidate <= validHigh + 12; candidate++)
+        for (int candidate = lowMin; candidate <= lowMax; candidate++)
         {
             bool lowIsC = Mod(candidate, 12) == 0;
             bool highIsC = Mod(candidate + span, 12) == 0;
@@ -288,36 +357,77 @@ internal sealed class PitchCamera
         return result < 0 ? result + modulus : result;
     }
 
-    /// <summary>§11.5: critically-damped interpolation. Expansion snaps; contraction eases.</summary>
+    /// <summary>
+    /// §11.5: analytical critically-damped interpolation in both directions.
+    /// The camera keeps continuous position and velocity state; integer MIDI
+    /// values are produced only by the compatibility accessor above.
+    /// </summary>
     private void ApplyDampedInterpolation(RawTarget[] targets, int sampleRate)
     {
         if (targets.Length <= 1) return;
         double durationSeconds = Math.Max(1, _timelineEndSample - _timelineStartSample) / (double)sampleRate;
-        double frameSeconds = durationSeconds / _totalFrames;
-        double alpha = 1.0 - Math.Exp(-frameSeconds / DampingTimeConstantSeconds);
+        double frameSeconds = durationSeconds / Math.Max(1, _totalFrames - 1);
+        double angularFrequency = 1.0 / DampingTimeConstantSeconds;
 
-        int curMin = targets[0].MinMidi, curMax = targets[0].MaxMidi;
+        double curMin = targets[0].IsEmpty ? DefaultMinMidi : targets[0].MinMidi;
+        double curMax = targets[0].IsEmpty ? DefaultMaxMidi : targets[0].MaxMidi;
+        double minVelocity = 0;
+        double maxVelocity = 0;
         for (int i = 1; i < targets.Length; i++)
         {
             ref RawTarget t = ref targets[i];
-            if (t.IsEmpty) { curMin = 0; curMax = 0; continue; }
+            double targetMin = t.IsEmpty ? DefaultMinMidi : t.MinMidi;
+            double targetMax = t.IsEmpty ? DefaultMaxMidi : t.MaxMidi;
 
-            int targetMin = t.MinMidi, targetMax = t.MaxMidi;
-            // Expand immediately (never hide a note); contract with damping.
-            if (targetMin < curMin) curMin = targetMin;
-            else if (targetMin > curMin)
-                curMin = (int)Math.Round(curMin + (targetMin - curMin) * alpha);
-            if (targetMax > curMax) curMax = targetMax;
-            else if (targetMax < curMax)
-                curMax = (int)Math.Round(curMax + (targetMax - curMax) * alpha);
+            StepCriticallyDamped(
+                ref curMin,
+                ref minVelocity,
+                targetMin,
+                frameSeconds,
+                angularFrequency);
+            StepCriticallyDamped(
+                ref curMax,
+                ref maxVelocity,
+                targetMax,
+                frameSeconds,
+                angularFrequency);
+
+            // Lookahead expansion remains damped for visual continuity. Once
+            // a note is actually sounding, the active-content guard prevents
+            // the camera from clipping its pitch even if damping has not yet
+            // reached the wider future target.
+            if (t.ActiveMinMidi is double activeMin
+                && t.ActiveMaxMidi is double activeMax)
+            {
+                if (curMin > activeMin)
+                    curMin = activeMin;
+                if (curMax < activeMax)
+                    curMax = activeMax;
+            }
 
             if (curMax - curMin < MinSpan)
             {
-                int center = (curMin + curMax) / 2;
+                double center = (curMin + curMax) / 2;
                 curMin = center - MinSpan / 2;
                 curMax = curMin + MinSpan;
             }
             t.MinMidi = curMin; t.MaxMidi = curMax;
         }
+    }
+
+    private static void StepCriticallyDamped(
+        ref double position,
+        ref double velocity,
+        double target,
+        double deltaSeconds,
+        double angularFrequency)
+    {
+        double offset = position - target;
+        double decay = Math.Exp(-angularFrequency * deltaSeconds);
+        double nextOffset = (offset + (velocity + angularFrequency * offset) * deltaSeconds) * decay;
+        double nextVelocity = (velocity - angularFrequency
+            * (velocity + angularFrequency * offset) * deltaSeconds) * decay;
+        position = target + nextOffset;
+        velocity = nextVelocity;
     }
 }

@@ -1,0 +1,136 @@
+--- a/Spc_Dsp.cpp
++++ b/Spc_Dsp.cpp
+@@ -258,6 +258,7 @@
+ 			int pitch = GET_LE16A( &VREG(v_regs,pitchl) ) & 0x3FFF;
+ 			if ( REG(pmon) & vbit )
+ 				pitch += ((pmon_input >> 5) * pitch) >> 10;
++			int capture_pitch = pitch;
+ 
+ 			// PR 8 instrumentation (MDPlayer): optionally capture the effective
+ 			// pitch (register pitch after the PMON adjustment, spec sections
+@@ -267,6 +268,37 @@
+ 			if ( int* const ep_tap = m.effective_pitch_out [v - m.voices] )
+ 				*ep_tap = pitch;
+ 
++			if ( m.event_capture )
++			{
++				int voice = int(v - m.voices);
++				int source = VREG(v_regs,srcn);
++				int volume_l = VREG(v_regs,voll);
++				int volume_r = VREG(v_regs,volr);
++				int flags = ((REG(non)  & vbit) ? 1 : 0) |
++					((REG(pmon) & vbit) ? 2 : 0) |
++					((REG(eon)  & vbit) ? 4 : 0);
++				if ( source != m.capture_source [voice] )
++				{
++					this->emit_event( 4, voice, source, m.capture_source [voice] );
++					m.capture_source [voice] = source;
++				}
++				if ( volume_l != m.capture_volume_l [voice] ||
++					volume_r != m.capture_volume_r [voice] )
++				{
++					this->emit_event( 6, voice, volume_l, volume_r );
++					m.capture_volume_l [voice] = volume_l;
++					m.capture_volume_r [voice] = volume_r;
++				}
++				int old_flags = m.capture_flags [voice];
++				if ( (flags ^ old_flags) & 1 )
++					this->emit_event( 7, voice, flags & 1, 0 );
++				if ( (flags ^ old_flags) & 2 )
++					this->emit_event( 8, voice, (flags >> 1) & 1, 0 );
++				if ( (flags ^ old_flags) & 4 )
++					this->emit_event( 9, voice, (flags >> 2) & 1, 0 );
++				m.capture_flags [voice] = flags;
++			}
++
+ 			// KON phases
+ 			if ( --kon_delay >= 0 )
+ 			{
+@@ -383,12 +415,29 @@
+ 				// KON
+ 				if ( m.kon & vbit )
+ 				{
++					if ( m.event_capture )
++					{
++						int voice = int(v - m.voices);
++						this->emit_event( 1, voice, VREG(v_regs,srcn), capture_pitch );
++						m.capture_keyed [voice] = 1;
++					}
+ 					v->kon_delay = 5;
+ 					v->env_mode  = env_attack;
+ 					REG(endx) &= ~vbit;
+ 				}
+ 			}
+ 
++			if ( m.event_capture && m.capture_sample > 0 &&
++				(m.capture_sample & 7) == 0 )
++			{
++				int voice = int(v - m.voices);
++				if ( abs(capture_pitch - m.capture_pitch [voice]) > 1 )
++				{
++					this->emit_event( 5, voice, capture_pitch, m.capture_pitch [voice] );
++					m.capture_pitch [voice] = capture_pitch;
++				}
++			}
++
+ 			// Envelope
+ 			if ( !v->kon_delay )
+ 			{
+@@ -399,6 +448,25 @@
+ 					if ( env <= 0 )
+ 					{
+ 						v->env = 0;
++						if ( m.event_capture )
++						{
++							int voice = int(v - m.voices);
++							if ( (int)v->env_mode != m.capture_mode [voice] )
++							{
++								this->emit_event( 10, voice, (int)v->env_mode, v->env );
++								m.capture_mode [voice] = (int)v->env_mode;
++							}
++							if ( m.capture_keyed [voice] == 1 )
++							{
++								this->emit_event( 2, voice, v->env, 0 );
++								m.capture_keyed [voice] = 2;
++							}
++						}
++						if ( m.event_capture && m.capture_keyed [v - m.voices] )
++						{
++							this->emit_event( 3, int(v - m.voices), 0, 0 );
++							m.capture_keyed [v - m.voices] = 0;
++						}
+ 						goto skip_brr; // no BRR decoding for you!
+ 					}
+ 				}
+@@ -484,6 +552,21 @@
+ 				}
+ 			}
+ 		exit_env:
++			if ( m.event_capture )
++			{
++				int voice = int(v - m.voices);
++				if ( (int)v->env_mode != m.capture_mode [voice] )
++				{
++					this->emit_event( 10, voice, (int)v->env_mode, v->env );
++					m.capture_mode [voice] = (int)v->env_mode;
++				}
++			}
++			if ( m.event_capture && v->env_mode == env_release &&
++				m.capture_keyed [v - m.voices] == 1 )
++			{
++				this->emit_event( 2, int(v - m.voices), v->env, 0 );
++				m.capture_keyed [v - m.voices] = 2;
++			}
+ 
+ 			{
+ 				// Apply pitch
+@@ -679,6 +762,8 @@
+ 		sample_t* out = m.out;
+ 		WRITE_SAMPLES( l, r, out );
+ 		m.out = out;
++		if ( m.event_capture )
++			m.capture_sample++;
+ 		if ( m.voice_taps_on || m.echo_tap )
+ 			m.tap_sample++; // PR 6: advance the per-sample tap index
+ 	}
+

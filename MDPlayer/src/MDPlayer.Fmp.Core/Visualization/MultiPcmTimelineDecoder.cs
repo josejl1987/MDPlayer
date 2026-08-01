@@ -71,13 +71,18 @@ internal sealed class MultiPcmTimelineDecoder : IChipTimelineDecoder
             Close(ref _notes[channel], sample);
             return;
         }
+        string sampleKey = $"slot:{_registers[channel, 0]:X2}";
         if (_notes[channel] != null
-            && Math.Abs(_notes[channel].Pitch.MidiNote - pitch.MidiNote) < 0.0001)
+            && _notes[channel]!.SampleId == $"sample:multipcm:{sampleKey.ToLowerInvariant()}"
+            && Math.Abs(_notes[channel]!.Pitch.MidiNote - pitch.MidiNote) < 0.0001)
             return;
 
         bool retrigger = _notes[channel] != null;
         Close(ref _notes[channel], sample);
         string instrument = $"multipcm:pcm:{channel + 1}";
+        string sampleId = $"sample:multipcm:{sampleKey.ToLowerInvariant()}";
+        _timeline.AddSample(VisualizationAssetBuilder.CreateSyntheticSample(
+            sampleId, "pcm", 0, displayName: $"MultiPCM {sampleKey}"));
         _timeline.AddInstrument(new InstrumentDefinition(
             instrument, "pcm", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
         _notes[channel] = new MutableNote(
@@ -85,6 +90,7 @@ internal sealed class MultiPcmTimelineDecoder : IChipTimelineDecoder
             sample,
             pitch,
             instrument,
+            sampleId,
             retrigger);
     }
 
@@ -103,7 +109,8 @@ internal sealed class MultiPcmTimelineDecoder : IChipTimelineDecoder
                 note.InstrumentId,
                 VisualizationNoteMode.Pcm,
                 note.IsRetrigger,
-                note.PitchChanges.ToArray());
+                note.PitchChanges.ToArray(),
+                note.SampleId);
         }
         note = null;
     }
@@ -115,12 +122,19 @@ internal sealed class MultiPcmTimelineDecoder : IChipTimelineDecoder
 
     private sealed class MutableNote
     {
-        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId, bool retrigger)
+        public MutableNote(
+            VoiceId voice,
+            long startSample,
+            Pitch pitch,
+            string instrumentId,
+            string sampleId,
+            bool retrigger)
         {
             Voice = voice;
             StartSample = startSample;
             Pitch = pitch;
             InstrumentId = instrumentId;
+            SampleId = sampleId;
             IsRetrigger = retrigger;
         }
 
@@ -128,6 +142,7 @@ internal sealed class MultiPcmTimelineDecoder : IChipTimelineDecoder
         public long StartSample { get; }
         public Pitch Pitch { get; }
         public string InstrumentId { get; }
+        public string SampleId { get; }
         public bool IsRetrigger { get; }
         public List<PitchChange> PitchChanges { get; } = [];
     }

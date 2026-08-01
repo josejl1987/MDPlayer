@@ -52,10 +52,11 @@ struct mdp_spc_session
     uint8_t ram[MDP_SPC_RAM_SIZE];          /* initial snapshot state (PR 2) */
     uint8_t dsp[MDP_SPC_DSP_REGISTER_SIZE]; /* initial snapshot state (PR 2) */
 
-    /* PR 3: previous-block voice snapshots for per-block event capture. */
+    /* Retained for ABI-compatible diagnostics; production events are emitted
+     * directly by the per-sample DSP callback. */
     spc_capture::mdp_spc_voice_snapshot prev_voices[MDP_SPC_VOICE_COUNT];
     bool has_prev;
-    int64_t total_frames; /* frames rendered so far (event frame base) */
+    int64_t total_frames; /* frames rendered so far (absolute event base) */
 
     /* PR 8: per-block effective-pitch tap results (see spc_pitch.h). */
     spc_pitch::taps_t pitch_taps;
@@ -191,7 +192,8 @@ int mdp_spc_render(
         return MDP_SPC_ERR_SESSION_CLOSED;
     if (!result
         || requested_frames < MDP_SPC_MIN_BLOCK_FRAMES
-        || requested_frames > MDP_SPC_MAX_BLOCK_FRAMES)
+        || requested_frames > MDP_SPC_MAX_BLOCK_FRAMES
+        || (requested_frames & 1) != 0)
         return MDP_SPC_ERR_INVALID_ARGUMENT;
 
     result->frames_rendered = 0;
@@ -200,8 +202,15 @@ int mdp_spc_render(
     result->voice_flags = 0;
     result->event_overflow = 0;
 
+    spc_capture::event_capture_context capture;
+    memset(&capture, 0, sizeof(capture));
+    capture.events = events;
+    capture.capacity = events && event_capacity > 0 ? event_capacity : 0;
+    capture.block_start = session->total_frames;
+
     if (audio_buffers && audio_buffers->master_stereo)
     {
+        bool event_capture_armed = false;
         try
         {
             /* PR 6: arm the per-voice/echo tap destinations before the block
@@ -234,10 +243,16 @@ int mdp_spc_render(
              * whether or not taps are set, so the master stays bit-identical
              * to a no-tap render (spec §5.3). */
             spc_pitch::begin_block(spc_emu(session), &session->pitch_taps);
+            spc_capture::begin_event_capture(spc_emu(session).dsp_ref(), &capture);
+            event_capture_armed = true;
 
-            /* Music_Emu::play fills count stereo frames into master_stereo. */
-            const char* err = session->emu->play(requested_frames, audio_buffers->master_stereo);
+            /* Music_Emu::play counts interleaved int16 samples, not stereo
+             * frames. The public SPC ABI is frame-based, so request two
+             * samples for every frame written to master_stereo. */
+            const char* err = session->emu->play(requested_frames * 2, audio_buffers->master_stereo);
 
+            spc_capture::end_event_capture(spc_emu(session).dsp_ref());
+            event_capture_armed = false;
             spc_pitch::end_block(spc_emu(session), &session->pitch_taps);
             if (taps_armed)
                 spc_taps::disable(spc_emu(session));
@@ -245,10 +260,13 @@ int mdp_spc_render(
             if (err)
                 return MDP_SPC_ERR_INTERNAL;
             result->frames_rendered = requested_frames;
+            result->is_end = session->emu->track_ended() ? 1 : 0;
         }
         catch (...)
         {
             /* Never leave tap destinations armed, even on a failed block. */
+            if (event_capture_armed)
+                spc_capture::end_event_capture(spc_emu(session).dsp_ref());
             if (session->enable_voice_pcm || session->enable_echo_pcm)
                 spc_taps::disable(spc_emu(session));
             spc_pitch::end_block(spc_emu(session), &session->pitch_taps);
@@ -270,14 +288,13 @@ int mdp_spc_render(
 
     if (result->frames_rendered > 0)
     {
-        int overflow = 0;
-        if (events && event_capacity > 0 && session->has_prev)
-        {
-            result->events_written = spc_capture::emit_events(
-                session->prev_voices, current, session->total_frames,
-                events, event_capacity, &overflow);
-        }
-        result->event_overflow = overflow;
+        result->events_written = capture.written;
+        result->event_overflow = capture.overflow;
+        /* The per-call capacity is the ONLY bound on the events buffer: the
+         * ABI carries no separate buffer length, so substituting the session
+         * default when event_capacity == 0 would write past a deliberately
+         * empty buffer (a pinned 0-length array still yields a non-NULL
+         * pointer). 0 means \"no events wanted\". */
         memcpy(session->prev_voices, current, sizeof(current));
         session->has_prev = true;
         session->total_frames += result->frames_rendered;

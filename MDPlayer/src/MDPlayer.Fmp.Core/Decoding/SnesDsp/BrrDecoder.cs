@@ -21,7 +21,7 @@ internal static class BrrDecoder
         {
             int offset = b * BrrSampleReader.BlockSize;
             byte header = sample.EncodedBlocks[offset];
-            int range = Math.Min(header >> 4, 12); // 13-15 are reserved; clamp like the reference
+            int range = header >> 4;
             int filter = (header >> 2) & 0x03;
             for (int i = 1; i < BrrSampleReader.BlockSize; i++)
             {
@@ -60,25 +60,35 @@ internal static class BrrDecoder
         return block >= sample.EncodedBlocks.Length / BrrSampleReader.BlockSize ? -1 : (int)block;
     }
 
-    // One 4-bit sub-sample: sign-extend the nibble, apply the range shift, then the filter.
     private static short DecodeSample(int nibble, int range, int filter, ref int old1, ref int old2)
     {
-        int s = (nibble < 8 ? nibble : nibble - 16) << 12 >> range;
+        // Sign-extend the nibble and apply the range shift exactly like the
+        // upstream S-DSP reference (range values 13..15 are intentionally not clamped).
+        int rightShift = range == 0 ? 13 : range <= 12 ? 12 : 16;
+        int leftShift = range == 0 ? 0 : range <= 12 ? range - 1 : 11;
+        int s = ((nibble < 8 ? nibble : nibble - 16) << 12) >> rightShift;
+        s <<= leftShift;
+
+        int p1 = old1;
+        int p2 = old2 >> 1;
         switch (filter)
         {
             case 1:
-                s += (old1 >> 1) + (old1 >> 4) - (old2 >> 1);
+                s += (p1 >> 1) + ((-p1) >> 5);
                 break;
             case 2:
-                s += old1 + (old1 >> 4) - (old2 >> 1) - (old2 >> 1);
+                s += p1 - p2 + (p2 >> 4) + ((p1 * -3) >> 6);
                 break;
             case 3:
-                s += (old1 >> 1) + (old1 >> 4) + (old2 >> 1) - (old2 >> 4);
+                s += p1 - p2 + ((p1 * -13) >> 7) + ((p2 * 3) >> 4);
                 break;
         }
+
         old2 = old1;
-        old1 = Clamp16(s);
-        return (short)old1;
+        int clamped = Clamp16(s);
+        // Spc_Dsp keeps decoded history at *2 scale; expose the unscaled 16-bit sample.
+        old1 = clamped * 2;
+        return (short)clamped;
     }
 
     private static int Clamp16(int value) =>

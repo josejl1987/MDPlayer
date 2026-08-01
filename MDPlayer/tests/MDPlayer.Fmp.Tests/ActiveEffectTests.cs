@@ -320,7 +320,7 @@ public sealed class ActiveEffectTests
     private static int CountAccentPixelsNearPlayhead(byte[] frame, PanelOverlayRenderer renderer, OverlayRect lane)
     {
         int playheadX = PlayheadX(renderer);
-        var accent = InstrumentColorResolver.ResolveChannelAccent(0).Lighten(0.5);
+        var accent = InstrumentColorResolver.ResolveChannelAccent(Fm1, 0).Lighten(0.5);
         int count = 0;
         // Scan a 20px-wide, full-lane-height window centered on the playhead.
         for (int x = Math.Max(lane.X, playheadX - 10); x < Math.Min(lane.Right, playheadX + 10); x++)

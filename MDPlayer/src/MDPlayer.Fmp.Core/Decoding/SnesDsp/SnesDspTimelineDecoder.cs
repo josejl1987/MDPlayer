@@ -10,10 +10,14 @@ namespace Fmp.Core.Decoding.SnesDsp;
 /// </summary>
 internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
 {
+    private const double A4Anchor = 69.0;
+
     private const int VoiceCount = 8;
 
     private readonly SpcActiveNote?[] _notes = new SpcActiveNote?[VoiceCount];
     private readonly int[] _latchedSources = new int[VoiceCount];
+    private readonly Dictionary<int, double> _rootOffsetBySource = new();
+    private readonly Dictionary<int, string> _sampleIdBySource = new();
 
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
@@ -68,9 +72,22 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
                 _latchedSources[@event.Voice] = @event.Value;
                 break;
             default:
-                // Volume, envelope-mode, noise, pitch-mod, echo-send, sample
-                // loop and global transitions do not change the note timeline.
                 break;
+        }
+
+        if (@event.Kind is SpcSemanticEventKind.SourceLatched
+            or SpcSemanticEventKind.VolumeChanged
+            or SpcSemanticEventKind.EnvelopeModeChanged
+            or SpcSemanticEventKind.NoiseChanged
+            or SpcSemanticEventKind.PitchModChanged
+            or SpcSemanticEventKind.EchoSendChanged)
+        {
+            _timeline.AddSpcVoiceState(new SpcVoiceStateEvent(
+                new VoiceId(_device.Id, VoiceKind.PcmVoice, @event.Voice).ToString(),
+                @event.SamplePosition,
+                @event.Kind.ToString(),
+                @event.Value,
+                @event.Value2));
         }
     }
 
@@ -83,6 +100,81 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         _completed = true;
         for (int voice = 0; voice < VoiceCount; voice++)
             Close(voice, endSample);
+    }
+
+    /// <summary>
+    /// §25.3: installs per-source BRR root estimates so notes land at their
+    /// sounding pitch (root + relative S-DSP semitones). Sources without an
+    /// estimate keep the A4 anchor (natural rate = 69/440 Hz).
+    /// </summary>
+    public void SetSourceRoots(IReadOnlyList<SpcSourceRootInfo> sources)
+    {
+        _rootOffsetBySource.Clear();
+        if (sources == null)
+            return;
+        foreach (SpcSourceRootInfo info in sources)
+        {
+            if (info.EstimatedRootHz is > 0)
+                _rootOffsetBySource[info.SourceNumber] =
+                    12.0 * Math.Log2(info.EstimatedRootHz.Value / 440.0);
+        }
+    }
+
+    /// <summary>Installs bounded generic PCM assets for the BRR sources.</summary>
+    public void SetSamples(IReadOnlyList<SpcSampleEntry> samples)
+    {
+        _sampleIdBySource.Clear();
+        if (samples == null)
+            return;
+
+        foreach (SpcSampleEntry entry in samples.OrderBy(value => value.Hash, StringComparer.Ordinal))
+        {
+            string sampleId = "sample:" + entry.ShortHash;
+            BrrSample brr = new(
+                entry.StartAddress,
+                entry.LoopAddress,
+                entry.EncodedBytes ?? Array.Empty<byte>(),
+                entry.Loops,
+                entry.EncodedBytes is { Length: > 0 },
+                entry.Hash);
+            short[] decoded = BrrDecoder.Decode(brr);
+            SampleDefinition definition;
+            if (decoded.Length > 0)
+            {
+                float[] normalized = new float[decoded.Length];
+                for (int index = 0; index < decoded.Length; index++)
+                    normalized[index] = decoded[index] / 32768f;
+                int? loopStart = entry.Loops
+                    ? Math.Clamp((entry.LoopAddress - entry.StartAddress) / BrrSampleReader.BlockSize
+                        * BrrDecoder.SamplesPerBlock, 0, decoded.Length)
+                    : null;
+                definition = VisualizationAssetBuilder.CreateSample(
+                    "brr",
+                    normalized,
+                    BrrDecoder.SampleRateHz,
+                    loopStart,
+                    entry.Loops ? decoded.Length : null,
+                    entry.Loops ? SampleLoopMode.Forward : SampleLoopMode.None,
+                    $"BRR {entry.ShortHash}") with
+                {
+                    Id = sampleId,
+                };
+            }
+            else
+            {
+                definition = VisualizationAssetBuilder.CreateSyntheticSample(
+                    sampleId,
+                    "brr",
+                    0,
+                    loopMode: SampleLoopMode.Unknown,
+                    displayName: $"BRR {entry.ShortHash}",
+                    identityKind: AssetIdentityKind.ContentHash);
+            }
+
+            _timeline?.AddSample(definition);
+            foreach (int source in entry.SourceNumbers ?? [])
+                _sampleIdBySource[source] = sampleId;
+        }
     }
 
     /// <summary>Diagnostic snapshot of one voice's current state.</summary>
@@ -98,7 +190,7 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
             note?.ReleaseStartSample,
             note?.SourceNumber ?? _latchedSources[voice],
             note?.InstrumentId ?? "",
-            note?.InitialRelativeSemitones ?? 0,
+            note?.InitialSemitones ?? 0,
             note?.Pitch.Count ?? 0);
     }
 
@@ -108,10 +200,17 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         bool retrigger = _notes[voice] != null;
         Close(voice, @event.SamplePosition);
 
-        // The native core only emits effective transitions, so KEY_ON is
-        // authoritative. The source number comes from the event itself, or
-        // falls back to the last latched source for the voice.
-        int source = @event.Value > 0 ? @event.Value : _latchedSources[voice];
+        // Native KEY_ON events carry an authoritative source number, including
+        // SRCN 0. Synthetic events may explicitly omit it and use the last
+        // latched source instead.
+        int source = @event.HasSourceNumber ? @event.Value : _latchedSources[voice];
+        _latchedSources[voice] = source;
+        _timeline.AddSpcVoiceState(new SpcVoiceStateEvent(
+            new VoiceId(_device.Id, VoiceKind.PcmVoice, voice).ToString(),
+            @event.SamplePosition,
+            nameof(SpcSemanticEventKind.SourceLatched),
+            source,
+            0));
         string instrument = $"spc:src{source}";
         _timeline.AddInstrument(new InstrumentDefinition(
             instrument, "pcm", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
@@ -124,7 +223,7 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
             StartSample = @event.SamplePosition,
             SourceNumber = source,
             InstrumentId = instrument,
-            InitialRelativeSemitones = RelativeSemitones(@event.EffectivePitch),
+            InitialSemitones = SoundingSemitones(source, @event.EffectivePitch),
             IsRetrigger = retrigger,
         };
     }
@@ -151,8 +250,8 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         List<PitchChange> pitch = note.Pitch;
         if (pitch.Count > 0 && @event.SamplePosition <= pitch[^1].SamplePosition)
             return;
-        double semitones = RelativeSemitones(@event.EffectivePitch);
-        pitch.Add(new PitchChange(@event.SamplePosition, FrequencyHz(semitones), semitones));
+        double semitones = SoundingSemitones(note.SourceNumber, @event.EffectivePitch);
+        pitch.Add(new PitchChange(@event.SamplePosition, FrequencyHz(semitones), A4Anchor + semitones));
     }
 
     private void Close(int voice, long endSample)
@@ -166,12 +265,13 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
                 new VoiceId(_device.Id, VoiceKind.PcmVoice, voice),
                 note.StartSample,
                 endSample,
-                note.InitialRelativeSemitones,
-                FrequencyHz(note.InitialRelativeSemitones),
+                A4Anchor + note.InitialSemitones,
+                FrequencyHz(note.InitialSemitones),
                 note.InstrumentId,
                 VisualizationNoteMode.Pcm,
                 note.IsRetrigger,
-                note.Pitch.ToArray());
+                note.Pitch.ToArray(),
+                _sampleIdBySource.TryGetValue(note.SourceNumber, out string sampleId) ? sampleId : null);
         }
         _notes[voice] = null;
     }
@@ -187,6 +287,14 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         ushort pitch = effectivePitch == 0 ? SpcSemanticEvent.UnityPitch : effectivePitch;
         return 12.0 * Math.Log2(pitch / (double)SpcSemanticEvent.UnityPitch);
     }
+
+    /// <summary>
+    /// Semitones relative to the A4 anchor including the source's estimated
+    /// root offset (§25.3): 0 = A4 440 Hz. Timeline midi = 69 + this value.
+    /// </summary>
+    private double SoundingSemitones(int source, ushort effectivePitch)
+        => (_rootOffsetBySource.TryGetValue(source, out double offset) ? offset : 0)
+           + RelativeSemitones(effectivePitch);
 
     /// <summary>
     /// Display-only 440 Hz reference for a pitch expressed in relative

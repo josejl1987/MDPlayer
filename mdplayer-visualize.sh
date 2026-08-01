@@ -26,7 +26,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MDPLAYER_RENDER="${MDPLAYER_RENDER:-${FMP_RENDER:-$ROOT/MDPlayer/src/MDPlayer.Fmp.Cli/bin/Release/net8.0/mdplayer-render}}"
-FMP_COM="${FMP_COM:-$ROOT/MDPlayer/MDPlayerx64/bin/Debug/net8.0-windows7.0/win-x64/publish/FMP.COM}"
+FMP_COM="${FMP_COM:-$ROOT/MDPlayer/src/MDPlayer.Fmp.Cli/bin/Release/net8.0/FMP.COM}"
 CORR="${CORR:-$ROOT/_venv/bin/corr}"
 FFMPEG="${FFMPEG:-/usr/bin/ffmpeg}"
 

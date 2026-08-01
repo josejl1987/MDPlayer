@@ -1,4 +1,5 @@
 using Fmp.Core.Playback.Spc;
+using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Decoding.SnesDsp;
 
@@ -103,6 +104,42 @@ internal sealed class SpcInstrumentBuilder
     /// samples; never labels an estimate as exact.</summary>
     public (double? Hz, double Confidence, string Accuracy) EstimateRoot(BrrSample sample) =>
         ToRoot(EstimateCached(sample));
+
+    /// <summary>
+    /// §25.3: resolves every valid directory source — not just the sources the
+    /// eight snapshot voices happen to reference — and estimates its BRR root,
+    /// so the timeline decoder can anchor notes at sounding pitch even when a
+    /// source is first keyed on mid-song. Zero-filled (absent) directory
+    /// entries are skipped. Returns an empty list when estimation is disabled
+    /// (<see cref="SpcPitchMode.Relative"/>), leaving the decoder at its
+    /// relative A4 anchor.
+    /// </summary>
+    public IReadOnlyList<SpcSourceRootInfo> ResolveSourceRoots(SpcSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (!_enablePitchEstimation)
+            return Array.Empty<SpcSourceRootInfo>();
+
+        var roots = new List<SpcSourceRootInfo>();
+        for (int srcn = 0; srcn <= 255; srcn++)
+        {
+            if (!TryReadDspRegister(snapshot.DspRegisters, DirRegisterAddress, out byte dirReg))
+                break;
+            ushort dirAddress = (ushort)(dirReg << 8);
+            if (!TryReadDirectoryEntry(snapshot.Ram, dirAddress, srcn, out ushort startAddress, out ushort loopAddress))
+                continue;
+            if (startAddress == 0 && loopAddress == 0)
+                continue; // zero-filled directory slot: no sample wired
+
+            BrrSample sample = BrrSampleReader.Read(snapshot.Ram, startAddress, loopAddress);
+            if (sample == null || !sample.Valid || sample.EncodedBlocks == null || sample.EncodedBlocks.Length == 0)
+                continue;
+            (double? hz, double confidence, string accuracy) = EstimateRoot(sample);
+            if (hz is > 0)
+                roots.Add(new SpcSourceRootInfo(srcn, hz, confidence, accuracy));
+        }
+        return roots;
+    }
 
     private PitchEstimate EstimateCached(BrrSample sample)
     {

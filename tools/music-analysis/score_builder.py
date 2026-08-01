@@ -1,5 +1,45 @@
 from __future__ import annotations
 
+from bisect import bisect_left
+
+
+class AnalysisContext(list):
+    """Canonical note collection plus deterministic indexes for full analysis.
+
+    It remains a list for compatibility with the worker's existing analyzers,
+    while making the repeated structural lookups O(log n) or O(1).
+    """
+
+    def __init__(self, notes=()):
+        super().__init__(notes)
+        self.by_channel = {}
+        self.by_onset = {}
+        self._onsets = []
+        self._score = None
+        for note in self:
+            channel = note.get("channelId", "")
+            self.by_channel.setdefault(channel, []).append(note)
+            onset = int(note.get("startSample", 0))
+            self.by_onset.setdefault(onset, []).append(note)
+        for values in self.by_channel.values():
+            values.sort(key=lambda n: (n.get("startSample", 0), n.get("id", "")))
+        self._onsets = sorted(self.by_onset)
+
+    def notes_in_window(self, start, end):
+        """Return notes beginning before *end*, retaining overlap semantics."""
+        left = bisect_left(self._onsets, start)
+        right = bisect_left(self._onsets, end)
+        earlier = []
+        if left:
+            earlier = [n for n in self.by_onset[self._onsets[left - 1]]
+                       if n.get("endSample", 0) > start]
+        return earlier + [n for onset in self._onsets[left:right] for n in self.by_onset[onset]]
+
+    def score(self, factory):
+        if self._score is None:
+            self._score = factory()
+        return self._score
+
 
 def _theory_pitch(note, pitch):
     if note.get("microtonal", False):
@@ -110,4 +150,4 @@ def build_score(data, detail="standard"):
             "code": "STRUCTURAL_GLIDE",
             "message": "One or more notes contain an unresolved continuous pitch glide; structural pitch was retained without fabricating intermediate notes.",
         })
-    return score, notes, warnings
+    return score, AnalysisContext(notes), warnings

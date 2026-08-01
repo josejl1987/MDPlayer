@@ -21,12 +21,19 @@ internal sealed class PlaybackBackendRegistry
             throw new ArgumentException("At least one playback backend is required.", nameof(backends));
     }
 
-    public static PlaybackBackendRegistry CreateDefault(PlaybackEnvironment environment = null)
+    public static PlaybackBackendRegistry CreateDefault(
+        PlaybackEnvironment environment = null,
+        string explicitFmpCom = null)
     {
         var backends = new List<IPlaybackBackend>();
-        string fmpCom = FindFmpCom(environment?.SearchPaths);
+        IReadOnlyList<string> searchPaths = environment?.SearchPaths ?? [];
+        string fmpCom = ResolveFmpCom(explicitFmpCom, searchPaths);
         if (fmpCom != null)
-            backends.Add(new FmpPlaybackBackend(new FmpRuntimeAssets(fmpCom)));
+        {
+            backends.Add(new FmpPlaybackBackend(
+                new FmpRuntimeAssets(fmpCom),
+                new FmpFileSystem(searchPaths)));
+        }
         backends.AddRange(
         [
             new VgmPlaybackBackend(),
@@ -38,6 +45,19 @@ internal sealed class PlaybackBackendRegistry
             new SpcPlaybackBackend(),
         ]);
         return new PlaybackBackendRegistry(backends);
+    }
+
+    internal static string ResolveFmpCom(
+        string explicitFmpCom,
+        IReadOnlyList<string> searchPaths)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitFmpCom))
+        {
+            string fullPath = Path.GetFullPath(explicitFmpCom);
+            return File.Exists(fullPath) ? fullPath : null;
+        }
+
+        return FindFmpCom(searchPaths);
     }
 
     private static string FindFmpCom(IReadOnlyList<string> searchPaths)

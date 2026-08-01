@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(mdplayer_spc LANGUAGES CXX)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +34,8 @@ set(SPCNATIVE_UPSTREAM_PATCHED_DIR "${CMAKE_CURRENT_BINARY_DIR}/upstream_patched
 set(SPCNATIVE_VOICE_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-voice-capture.patch")
 set(SPCNATIVE_TAPS_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0002-voice-echo-capture.patch")
 set(SPCNATIVE_EFFECTIVE_PITCH_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0003-effective-pitch.patch")
+set(SPCNATIVE_EVENT_CAPTURE_HEADER_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0004-event-capture.patch")
+set(SPCNATIVE_EVENT_CAPTURE_RUN_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0005-event-capture-run.patch")
 
 # blargg headers need an explicit endianness macro (upstream CMake does this
 # via test_big_endian; same logic here so vendored files stay byte-identical).
@@ -46,15 +51,15 @@ find_program(MDPLAYER_SPC_PATCH_EXECUTABLE patch)
 if(NOT MDPLAYER_SPC_PATCH_EXECUTABLE)
     message(FATAL_ERROR "The 'patch' utility is required to apply the build-time "
         "instrumentation patches (0001-voice-capture, 0002-voice-echo-capture, "
-        "0003-effective-pitch)")
+        "0003-effective-pitch, 0004-event-capture, 0005-event-capture-run)")
 endif()
 
-# PR 3 + PR 6 + PR 8 instrumentation: the vendored upstream/ tree must stay
+# PR 3 + PR 6 + PR 8 + PR 11 instrumentation: the vendored upstream/ tree must stay
 # byte-identical on disk (see UPSTREAM.md). We copy it into the build tree and
 # apply the read-only voice-capture patch (0001), the voice/echo tap-capture
-# patch (0002) and the effective-pitch tap patch (0003) THERE, then compile
-# against the patched copy. The patches only add inline accessors and pure
-# writes to caller memory; they never change emulation.
+# patch (0002), the effective-pitch tap patch (0003), and the in-block event
+# capture patches (0004/0005) THERE, then compile against that copy. The
+# instrumentation writes only non-emulation state or caller-owned buffers.
 add_custom_command(
     OUTPUT "${SPCNATIVE_UPSTREAM_PATCHED_DIR}/Spc_Dsp.h"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${SPCNATIVE_UPSTREAM_PATCHED_DIR}"
@@ -66,11 +71,19 @@ add_custom_command(
         "${SPCNATIVE_UPSTREAM_PATCHED_DIR}" -i "${SPCNATIVE_TAPS_PATCH}"
     COMMAND ${MDPLAYER_SPC_PATCH_EXECUTABLE} -p1 -d
         "${SPCNATIVE_UPSTREAM_PATCHED_DIR}" -i "${SPCNATIVE_EFFECTIVE_PITCH_PATCH}"
+    COMMAND ${MDPLAYER_SPC_PATCH_EXECUTABLE} -p1 -d
+        "${SPCNATIVE_UPSTREAM_PATCHED_DIR}" --fuzz=0
+        -i "${SPCNATIVE_EVENT_CAPTURE_HEADER_PATCH}"
+    COMMAND ${MDPLAYER_SPC_PATCH_EXECUTABLE} -p1 -d
+        "${SPCNATIVE_UPSTREAM_PATCHED_DIR}" --fuzz=0
+        -i "${SPCNATIVE_EVENT_CAPTURE_RUN_PATCH}"
     DEPENDS
         "${SPCNATIVE_VOICE_PATCH}"
         "${SPCNATIVE_TAPS_PATCH}"
         "${SPCNATIVE_EFFECTIVE_PITCH_PATCH}"
-    COMMENT "Applying 0001/0002/0003 instrumentation patches to the build-tree upstream copy"
+        "${SPCNATIVE_EVENT_CAPTURE_HEADER_PATCH}"
+        "${SPCNATIVE_EVENT_CAPTURE_RUN_PATCH}"
+    COMMENT "Applying 0001/0002/0003/0004/0005 instrumentation patches to the build-tree upstream copy"
     VERBATIM)
 add_custom_target(upstream_patched ALL
     DEPENDS "${SPCNATIVE_UPSTREAM_PATCHED_DIR}/Spc_Dsp.h")
@@ -147,11 +160,10 @@ target_link_libraries(mdplayer_spc_parity_test PRIVATE mdplayer_spc)
 add_dependencies(mdplayer_spc_parity_test upstream_patched)
 mdplayer_spc_enable_sanitizers(mdplayer_spc_parity_test)
 add_test(NAME mdplayer_spc_parity COMMAND mdplayer_spc_parity_test)
-
 # PR 6 native tap test (spec §5.3, §8.2, §8.4): renders the synthetic SPC with
 # per-voice/echo tap capture armed and asserts the master stays bit-identical
 # to a taps-disabled render, voices 0/1 are non-silent, voices 2..7 are silent,
-# and the echo return is silent (no EON, echo volumes zero).
+# and the echo return is non-silent (EON and echo volumes are non-zero).
 add_executable(mdplayer_spc_tap_test tests/tap_test.cpp)
 target_include_directories(mdplayer_spc_tap_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -178,3 +190,13 @@ target_link_libraries(mdplayer_spc_pitch_test PRIVATE mdplayer_spc)
 add_dependencies(mdplayer_spc_pitch_test upstream_patched)
 mdplayer_spc_enable_sanitizers(mdplayer_spc_pitch_test)
 add_test(NAME mdplayer_spc_pitch COMMAND mdplayer_spc_pitch_test)
+
+# In-block event semantics: KON/KOFF/retrigger/source/pitch transitions must
+# retain their DSP-time positions, and release audio must outlive KOFF.
+add_executable(mdplayer_spc_event_capture_test tests/event_capture_test.cpp)
+target_include_directories(mdplayer_spc_event_capture_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(mdplayer_spc_event_capture_test PRIVATE mdplayer_spc)
+add_dependencies(mdplayer_spc_event_capture_test upstream_patched)
+mdplayer_spc_enable_sanitizers(mdplayer_spc_event_capture_test)
+add_test(NAME mdplayer_spc_event_capture COMMAND mdplayer_spc_event_capture_test)

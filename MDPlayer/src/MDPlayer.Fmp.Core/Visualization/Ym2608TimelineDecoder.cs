@@ -93,6 +93,36 @@ internal sealed class Ym2608TimelineDecoder
             .Select(note => note.ToImmutable())
             .ToArray();
 
+        SampleDefinition[] samples = _adpcmB
+            .Select(value => new
+            {
+                Id = $"sample:adpcm-b:{value.StartAddress:X6}-{value.EndAddress:X6}".ToLowerInvariant(),
+                Value = value,
+            })
+            .GroupBy(value => value.Id, StringComparer.Ordinal)
+            .Select(group => VisualizationAssetBuilder.CreateSyntheticSample(
+                group.Key,
+                "adpcm",
+                Math.Max(0, group.First().Value.EndAddress - group.First().Value.StartAddress),
+                displayName: "ADPCM-B"))
+            .OrderBy(value => value.Id, StringComparer.Ordinal)
+            .ToArray();
+        SamplePlaybackEvent[] samplePlayback = _adpcmB
+            .Select(value => new SamplePlaybackEvent(
+                "ym2608.0.adpcm-b",
+                value.StartSample,
+                value.EndSample,
+                $"sample:adpcm-b:{value.StartAddress:X6}-{value.EndAddress:X6}".ToLowerInvariant(),
+                value.FrequencyHz is > 0 and double frequency
+                    ? 69 + 12 * Math.Log2(frequency / 440.0)
+                    : null,
+                value.DeltaN > 0 ? value.DeltaN / 0x10000d : 1.0,
+                Math.Clamp(value.Level, 0, 1),
+                Math.Clamp(value.Pan, -1, 1),
+                value.IsRetrigger,
+                false))
+            .ToArray();
+
         return new VisualizationTimeline
         {
             SchemaVersion = 2,
@@ -114,6 +144,8 @@ internal sealed class Ym2608TimelineDecoder
                 .Where(value => value.EndSample > value.StartSample)
                 .OrderBy(value => value.StartSample)
                 .ToArray(),
+            Samples = samples,
+            SamplePlayback = samplePlayback,
             Timing = _timing
                 .OrderBy(value => value.SamplePosition)
                 .ToArray(),
@@ -607,7 +639,8 @@ internal sealed class Ym2608TimelineDecoder
                 $"ym2608.0.rhythm.{name}",
                 samplePosition,
                 Math.Clamp(totalGain * voiceGain, 0, 1),
-                pan));
+                pan,
+                "ym2608.0.rhythm"));
         }
     }
 

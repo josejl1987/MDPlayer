@@ -81,13 +81,17 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
         bool writeStems = options.WriteSpcStems && !string.IsNullOrEmpty(options.OutputAudioPath);
 
         // Emit the device BEFORE rendering so the sink creates the SPC timeline
-        // decoder and can receive OnSpcEvent during the render loop below.
+        // decoder and can receive OnSpcEvent during the render loop below. The
+        // per-source root estimates follow immediately so every key-on — even
+        // one in the first rendered block — is already anchored (§25.3).
         eventSink.OnDevice(VisualizationDeviceCatalog.SnesDsp());
+        eventSink.OnSpcInstruments(instruments.ResolveSourceRoots(snapshot));
+        eventSink.OnSpcSamples(instruments.Samples.ToArray());
 
         using (SpcNativeSession native = SpcNativeSession.Open(data, StemOptions(writeStems)))
         {
             var stereo = new short[SpcNativeSession.DefaultBlockFrames * 2];
-            var eventBuffer = new SpcNativeSession.SpcEvent[256];
+            var eventBuffer = new SpcNativeSession.SpcEvent[4096];
             if (!string.IsNullOrEmpty(options.OutputAudioPath))
             {
                 string? dir = Path.GetDirectoryName(Path.GetFullPath(options.OutputAudioPath));
@@ -172,9 +176,10 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
         {
             long remaining = totalFrames - rendered;
             int need = (int)Math.Min(blockFrames, remaining);
-            // The native block API requires 256..4096 frames; clamp the final
-            // short block up and keep only the frames that belong to the track.
-            int request = Math.Max(need, SpcNativeSession.MinBlockFrames);
+            // Native block rendering requires an even frame count. Round the final
+            // partial block down before applying the minimum; a remaining count of
+            // one is rendered in the minimum block and only that frame is kept.
+            int request = Math.Max(need & ~1, SpcNativeSession.MinBlockFrames);
             SpcNativeSession.SpcRenderResult rr;
             if (stems != null)
                 rr = native.RenderStemsAndCapture(stereo, request, voices, echo, eventBuffer);
@@ -190,7 +195,7 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
             for (int i = 0; i < eventsWritten; i++)
             {
                 ref SpcNativeSession.SpcEvent ev = ref eventBuffer[i];
-                long samplePos = rendered + ev.Frame;
+                long samplePos = ev.Frame; // Native event frames are absolute frame positions.
                 SpcSemanticEvent semantic = TranslateEvent(ev, samplePos);
                 eventSink.OnSpcEvent(in semantic);
             }
@@ -228,7 +233,7 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
                     sourceNumber: param0,
                     effectivePitch: (ushort)param1);
             case SpcNativeSession.SpcEventType.ReleaseStart:
-                return SpcSemanticEvent.ReleaseStart(samplePos, voice);
+                return SpcSemanticEvent.ReleaseStart(samplePos, voice, param0);
             case SpcNativeSession.SpcEventType.VoiceEnd:
                 return SpcSemanticEvent.VoiceEnd(samplePos, voice);
             case SpcNativeSession.SpcEventType.SourceChanged:
@@ -236,13 +241,15 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
             case SpcNativeSession.SpcEventType.PitchChanged:
                 return SpcSemanticEvent.PitchChanged(samplePos, voice, (ushort)param0);
             case SpcNativeSession.SpcEventType.VolumeChanged:
-                return SpcSemanticEvent.VolumeChanged(samplePos, voice, param0);
+                return SpcSemanticEvent.VolumeChanged(samplePos, voice, param0, param1);
             case SpcNativeSession.SpcEventType.NoiseChanged:
                 return new SpcSemanticEvent(samplePos, voice, SpcSemanticEventKind.NoiseChanged, param0);
             case SpcNativeSession.SpcEventType.PitchModChanged:
                 return new SpcSemanticEvent(samplePos, voice, SpcSemanticEventKind.PitchModChanged, param0);
             case SpcNativeSession.SpcEventType.EchoSendChanged:
                 return new SpcSemanticEvent(samplePos, voice, SpcSemanticEventKind.EchoSendChanged, param0);
+            case SpcNativeSession.SpcEventType.EnvelopeModeChanged:
+                return new SpcSemanticEvent(samplePos, voice, SpcSemanticEventKind.EnvelopeModeChanged, param0, param1);
             default:
                 return default;
         }
@@ -263,7 +270,6 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
             EnableVoicePcm = 1,
             EnableEchoPcm = 1,
             AccurateDsp = 1,
-            BlockFrames = SpcNativeSession.DefaultBlockFrames,
         };
     }
 

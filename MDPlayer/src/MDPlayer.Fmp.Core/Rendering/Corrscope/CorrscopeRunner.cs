@@ -66,13 +66,14 @@ internal class CorrscopeRunner
             StartInfo = new ProcessStartInfo
             {
                 FileName = _corrPath,
-                Arguments = string.Join(" ", args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a)),
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
             }
         };
+        foreach (string arg in args)
+            process.StartInfo.ArgumentList.Add(arg);
 
         string stderr = null;
         string stdout = null;

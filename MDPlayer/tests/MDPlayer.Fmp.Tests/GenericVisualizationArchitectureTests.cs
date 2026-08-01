@@ -9,6 +9,60 @@ namespace MDPlayer.Fmp.Tests;
 public sealed class GenericVisualizationArchitectureTests
 {
     [Fact]
+    public void GenericRenderingNamespaceDoesNotReferenceChipSpecificFormats()
+    {
+        string projectRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        string renderingRoot = Path.Combine(
+            projectRoot, "src", "MDPlayer.Fmp.Core", "Visualization", "Rendering");
+        string[] forbidden =
+        [
+            "YM2608", "PPZ8", "SegaPCM", "C140", "C352", "K051649",
+            "HuC6280", "SNES",
+        ];
+        string[] files = Directory.EnumerateFiles(renderingRoot, "*.cs").ToArray();
+
+        Assert.NotEmpty(files);
+        foreach (string file in files)
+        {
+            string source = File.ReadAllText(file);
+            foreach (string name in forbidden)
+                Assert.DoesNotContain(name, source, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void PanelRendererDispatchDoesNotUseLegacyPanelKinds()
+    {
+        string projectRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        string renderingRoot = Path.Combine(
+            projectRoot, "src", "MDPlayer.Fmp.Core", "Visualization", "Rendering");
+        string[] files = Directory.EnumerateFiles(renderingRoot, "PanelOverlayRenderer*.cs").ToArray();
+
+        Assert.NotEmpty(files);
+        foreach (string file in files)
+            Assert.DoesNotContain("PanelKind", File.ReadAllText(file), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TopologyAndScenePreparationDoNotParseChannelIdStructure()
+    {
+        string projectRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        string renderingRoot = Path.Combine(
+            projectRoot, "src", "MDPlayer.Fmp.Core", "Visualization", "Rendering");
+        string[] files =
+        [
+            Path.Combine(renderingRoot, "VisualizationTopology.cs"),
+            Path.Combine(renderingRoot, "OverlaySceneBuilder.cs"),
+        ];
+
+        foreach (string file in files)
+            Assert.DoesNotContain("StartsWith", File.ReadAllText(file), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TypedIds_PreserveStablePanelStrings()
     {
         var ym = new DeviceId(ChipType.Ym2608, 0);
@@ -132,7 +186,7 @@ public sealed class GenericVisualizationArchitectureTests
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(timeline);
         var layout = new OverlayLayout(960, 540, 0.75, 2.25, topology.Panels.Count);
 
-        Assert.Equal(10, topology.Panels.Count);
+        Assert.Equal(11, topology.Panels.Count);
         Assert.Equal(3, layout.ColumnCount);
         Assert.Equal(4, layout.RowCount);
         Assert.Equal("ym2612.0.fm.1", topology.Panels[0].Id);
@@ -140,7 +194,7 @@ public sealed class GenericVisualizationArchitectureTests
     }
 
     [Fact]
-    public void TopologyBuilder_RendersPcmVoicesAsPitchedOrActivityLanes()
+    public void TopologyBuilder_MapsPcmVoicesToPcmVoicePanels()
     {
         var builder = new TimelineBuilder(44_100);
         DeviceDescriptor device = VisualizationDeviceCatalog.Ymf278b();
@@ -155,9 +209,12 @@ public sealed class GenericVisualizationArchitectureTests
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             builder.Build(1_000, "test"));
 
-        Assert.Equal(PreparedPanelKind.Pitched,
+        // Pcm presentation maps to the deliberate PcmVoice panel kind for any
+        // pitch/percussion combination (spec §4.1); specialized renderers key
+        // off the panel kind, not pitch capability flags.
+        Assert.Equal(PreparedPanelKind.PcmVoice,
             Assert.Single(topology.Panels, panel => panel.Id == pitchedId.ToString()).Kind);
-        Assert.Equal(PreparedPanelKind.Rhythm,
+        Assert.Equal(PreparedPanelKind.PcmVoice,
             Assert.Single(topology.Panels, panel => panel.Id == activityId.ToString()).Kind);
     }
 
@@ -193,25 +250,33 @@ public sealed class GenericVisualizationArchitectureTests
     }
 
     [Fact]
-    public void ScopePlanner_DowngradesVgmToMasterAndKeepsFmpChannelScopes()
+    public void ScopePlanner_OnlyReturnsStrategiesWithExecutors()
     {
-        StemPlan vgm = ScopePlanner.Plan(
-            [VisualizationDeviceCatalog.Ym2612(), VisualizationDeviceCatalog.Sn76489()],
-            [.. VisualizationDeviceCatalog.Ym2612Voices(), .. VisualizationDeviceCatalog.Sn76489Voices()],
-            "auto");
-        StemPlan rejected = ScopePlanner.Plan(
-            [VisualizationDeviceCatalog.Ym2612(), VisualizationDeviceCatalog.Sn76489()],
-            [.. VisualizationDeviceCatalog.Ym2612Voices(), .. VisualizationDeviceCatalog.Sn76489Voices()],
-            "channel");
+        DeviceDescriptor[] vgmDevices =
+        [
+            VisualizationDeviceCatalog.Ym2612(),
+            VisualizationDeviceCatalog.Sn76489(),
+        ];
+        VoiceDescriptor[] vgmVoices =
+        [
+            .. VisualizationDeviceCatalog.Ym2612Voices(),
+            .. VisualizationDeviceCatalog.Sn76489Voices(),
+        ];
+
+        StemPlan vgm = ScopePlanner.Plan("vgm", vgmDevices, vgmVoices, "auto");
+        StemPlan rejected = ScopePlanner.Plan("mdplayer", vgmDevices, vgmVoices, "channel");
+        StemPlan device = ScopePlanner.Plan("vgm", vgmDevices, vgmVoices, "device");
         StemPlan fmp = ScopePlanner.Plan(
+            "fmp",
             [VisualizationDeviceCatalog.Ym2608(), VisualizationDeviceCatalog.Ppz8()],
             VisualizationDeviceCatalog.Ym2608Voices(),
             "channel");
 
-        Assert.Equal(StemStrategy.Master, vgm.Strategy);
+        Assert.Equal(StemStrategy.VgmRenderedStems, vgm.Strategy);
         Assert.True(vgm.Supported);
         Assert.False(rejected.Supported);
-        Assert.Equal(StemStrategy.ParallelSynthesis, fmp.Strategy);
+        Assert.False(device.Supported);
+        Assert.Equal(StemStrategy.FmpParallelSynthesis, fmp.Strategy);
         Assert.True(fmp.Supported);
     }
 

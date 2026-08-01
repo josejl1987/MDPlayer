@@ -4,10 +4,26 @@ namespace Fmp.Core.Visualization.Rendering;
 // mechanical extraction; no alternate note renderer is introduced.
 internal sealed partial class PanelOverlayRenderer
 {
+    private static bool IsSsgMode(VisualizationNoteMode mode)
+        => mode is VisualizationNoteMode.SsgTone
+            or VisualizationNoteMode.SsgToneNoise
+            or VisualizationNoteMode.SsgNoise
+            or VisualizationNoteMode.SsgEnvelopeTone
+            or VisualizationNoteMode.SsgEnvelopeToneNoise
+            or VisualizationNoteMode.SsgEnvelopeNoise;
+
     private void DrawPitchedPanel(Span<byte> frame, PanelData panel, long currentSample, bool reserveFm3OperatorRibbons)
     {
         OverlayRect lane = _layout.GetPitchedLaneRect(panel.Index, reserveFm3OperatorRibbons);
-        DrawVisibleNotes(frame, panel, panel.Prepared.MainNotes, lane, currentSample, false);
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
+        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        int preferredRibbonHeight = NormalRibbonHeight(lane, minMidi, maxMidi);
+        DrawVisibleNotes(
+            frame, panel, panel.Prepared.MainNotes, lane, currentSample, false,
+            windowStart, windowEnd, windowSamples, minMidi, maxMidi, _layout.GetPlayheadX(panel.Index),
+            preferredRibbonHeight);
     }
 
     private void DrawSsgPanel(Span<byte> frame, PanelData panel, long currentSample)
@@ -16,6 +32,10 @@ internal sealed partial class PanelOverlayRenderer
         PreparedNote[] notes = panel.Prepared.MainNotes;
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
+        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        int playheadX = _layout.GetPlayheadX(panel.Index);
+        int preferredRibbonHeight = NormalRibbonHeight(lane, minMidi, maxMidi);
         int first = FindFirstVisibleIndex(notes, windowStart);
 
         for (int index = first; index < notes.Length; index++)
@@ -33,7 +53,10 @@ internal sealed partial class PanelOverlayRenderer
                 continue;
             }
 
-            DrawNote(frame, panel, note, lane, currentSample, false);
+            DrawNote(
+                frame, panel, note, lane, currentSample, false,
+                windowStart, windowEnd, windowSamples, minMidi, maxMidi, playheadX,
+                preferredRibbonHeight);
         }
     }
 
@@ -43,10 +66,15 @@ internal sealed partial class PanelOverlayRenderer
         PreparedNote[] notes,
         OverlayRect lane,
         long currentSample,
-        bool operatorRibbon)
+        bool operatorRibbon,
+        long windowStart,
+        long windowEnd,
+        double windowSamples,
+        double panelMinMidi,
+        double panelMaxMidi,
+        int playheadX,
+        int preferredRibbonHeight)
     {
-        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
-        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         int first = FindFirstVisibleIndex(notes, windowStart);
 
         for (int index = first; index < notes.Length; index++)
@@ -56,8 +84,26 @@ internal sealed partial class PanelOverlayRenderer
                 break;
             if (note.EndSample <= windowStart)
                 continue;
-            DrawNote(frame, panel, note, lane, currentSample, operatorRibbon);
+            DrawNote(
+                frame, panel, note, lane, currentSample, operatorRibbon,
+                windowStart, windowEnd, windowSamples, panelMinMidi, panelMaxMidi, playheadX,
+                preferredRibbonHeight);
         }
+    }
+
+    private (double Min, double Max) GetPitchRange(PanelData panel, long currentSample)
+    {
+        if (_cameras[panel.Index] is { } camera)
+            return camera.GetPreciseRange(currentSample);
+        return (panel.Prepared.MinMidi, panel.Prepared.MaxMidi);
+    }
+
+    private static int NormalRibbonHeight(OverlayRect lane, double minMidi, double maxMidi)
+    {
+        double pixelsPerSemitone = lane.Height / (maxMidi - minMidi);
+        int minimum = Math.Max(5, (int)Math.Round(lane.Height * 0.055));
+        int maximum = Math.Max(minimum, (int)Math.Round(lane.Height * 0.12));
+        return Math.Clamp((int)Math.Floor(pixelsPerSemitone * 0.95), minimum, maximum);
     }
 
     private void DrawNote(
@@ -66,13 +112,29 @@ internal sealed partial class PanelOverlayRenderer
         PreparedNote note,
         OverlayRect lane,
         long currentSample,
-        bool operatorRibbon)
+        bool operatorRibbon,
+        long windowStart,
+        long windowEnd,
+        double windowSamples,
+        double panelMinMidi,
+        double panelMaxMidi,
+        int playheadX,
+        int preferredRibbonHeight)
     {
+        if (lane.Width <= 0 || lane.Height <= 0)
+            return;
         if (note.InitialMidiNote < 0 && !operatorRibbon)
             return;
 
-        if (!TryClipTimeSpanFractional(note.StartSample, note.EndSample, currentSample, lane,
-            out double leftX, out double rightX))
+        if (!TryClipTimeSpanFractional(
+                note.StartSample,
+                note.EndSample,
+                windowStart,
+                windowEnd,
+                windowSamples,
+                lane,
+                out double leftX,
+                out double rightX))
             return;
 
         int left = Math.Max(lane.X, (int)Math.Floor(leftX));
@@ -105,8 +167,9 @@ internal sealed partial class PanelOverlayRenderer
         double flashAmount = 0;
         double flashScale = 1.0;
         long ageSamples = currentSample - note.StartSample;
-        bool onsetVisible = note.StartSample >= _layout.WindowStartSample(currentSample, _timeline.SampleRate);
-        if (active && ageSamples >= 0 && onsetVisible && _effects == EffectsMode.All)
+        bool onsetVisible = note.StartSample >= windowStart;
+        if (active && ageSamples >= 0 && onsetVisible
+            && _effects is EffectsMode.Cinematic or EffectsMode.All)
         {
             double ageMs = ageSamples * 1000.0 / _timeline.SampleRate;
             if (ageMs < ActiveFlashMs)
@@ -120,9 +183,6 @@ internal sealed partial class PanelOverlayRenderer
             }
         }
 
-        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
-        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
-
         double minMidi, maxMidi;
         if (operatorRibbon)
         {
@@ -134,34 +194,37 @@ internal sealed partial class PanelOverlayRenderer
             minMidi = opAnchor - 2;
             maxMidi = opAnchor + 2;
         }
-        else if (_cameras[panel.Index] != null)
+        else
         {
-            var (lo, hi) = _cameras[panel.Index].GetRange(currentSample);
-            minMidi = lo;
-            maxMidi = hi;
+            minMidi = panelMinMidi;
+            maxMidi = panelMaxMidi;
+        }
+
+        bool energyEffects = _effects != EffectsMode.None;
+        float energy = active && energyEffects ? GetEnergy(panel.Index, currentSample) : 0.5f;
+        int ribbonHeight;
+        if (!operatorRibbon && !active && flashAmount == 0 && preferredRibbonHeight > 0)
+        {
+            ribbonHeight = preferredRibbonHeight;
         }
         else
         {
-            minMidi = panel.Prepared.MinMidi;
-            maxMidi = panel.Prepared.MaxMidi;
+            double pps = lane.Height / (maxMidi - minMidi);
+            int energyPixels = active && energyEffects ? Math.Min(2, (int)Math.Round(energy * 2)) : 0;
+            // Size ordinary ribbons from the lane itself, not only from the
+            // semitone scale. This keeps them legible after 720p delivery and
+            // still lets the pitch camera provide the vertical detail.
+            int minimumRibbonHeight = operatorRibbon
+                ? Math.Max(2, (int)Math.Round(lane.Height * 0.12))
+                : Math.Max(5, (int)Math.Round(lane.Height * 0.055));
+            int maximumRibbonHeight = operatorRibbon
+                ? Math.Max(minimumRibbonHeight, (int)Math.Round(lane.Height * 0.24))
+                : Math.Max(minimumRibbonHeight, (int)Math.Round(lane.Height * 0.12));
+            ribbonHeight = Math.Clamp(
+                (int)Math.Floor(pps * 0.95 * flashScale) + energyPixels,
+                minimumRibbonHeight,
+                maximumRibbonHeight);
         }
-
-        double pps = lane.Height / (maxMidi - minMidi);
-        float energy = active ? GetEnergy(panel.Index, currentSample) : 0;
-        int energyPixels = active ? Math.Min(2, (int)Math.Round(energy * 2)) : 0;
-        // Size ordinary ribbons from the lane itself, not only from the
-        // semitone scale. This keeps them legible after 720p delivery and
-        // still lets the pitch camera provide the vertical detail.
-        int minimumRibbonHeight = operatorRibbon
-            ? Math.Max(2, (int)Math.Round(lane.Height * 0.12))
-            : Math.Max(5, (int)Math.Round(lane.Height * 0.055));
-        int maximumRibbonHeight = operatorRibbon
-            ? Math.Max(minimumRibbonHeight, (int)Math.Round(lane.Height * 0.24))
-            : Math.Max(minimumRibbonHeight, (int)Math.Round(lane.Height * 0.12));
-        int ribbonHeight = Math.Clamp(
-            (int)Math.Floor(pps * 0.95 * flashScale) + energyPixels,
-            minimumRibbonHeight,
-            maximumRibbonHeight);
 
         // Continuous ribbon: the note body itself follows the interpolated
         // pitch (bends, vibrato, portamento). There is no detached pitch line.
@@ -215,7 +278,7 @@ internal sealed partial class PanelOverlayRenderer
             // passages (§9.3) halve the alpha so overlapping ripples do not
             // wash out the notes. Suppressed entirely by --effects none. The
             // ripple uses absolute onset age, so it is seek-independent.
-            if (_effects == EffectsMode.All)
+            if (_effects is EffectsMode.Cinematic or EffectsMode.All)
             {
                 double rippleAgeMs = (currentSample - note.StartSample) * 1000.0 / _timeline.SampleRate;
                 if (rippleAgeMs >= 0 && rippleAgeMs < RippleMs)
@@ -262,7 +325,10 @@ internal sealed partial class PanelOverlayRenderer
         // camera owns the clip decision; the renderer draws a marker only when
         // the camera flagged an intentional exclusion, rather than drawing
         // triangles for any out-of-range note.
-        if (!operatorRibbon && _cameras[panel.Index] is { } cam && cam.IsClipped(currentSample))
+        if (!operatorRibbon
+            && note.Pitch.Length > 0
+            && _cameras[panel.Index] is { } cam
+            && cam.IsClipped(currentSample))
         {
             int edgeX = lane.Right - 2;
             DrawVerticalLine(frame, edgeX, lane.Y + 1, lane.Bottom - 2, accent);
@@ -283,7 +349,7 @@ internal sealed partial class PanelOverlayRenderer
             DrawText(frame, labelX, labelY, "E", BrightText, 1, right - 1);
         }
 
-        if (!operatorRibbon && panel.Kind != PanelKind.Ssg)
+        if (!operatorRibbon && !IsSsgMode(note.Mode))
         {
             // Active pitch marker: a small bright marker centered on the pitch
             // contour at the playhead, making vibrato and bends easier to follow.
@@ -292,7 +358,6 @@ internal sealed partial class PanelOverlayRenderer
                 double actualMidi = PitchContour.PitchAtSample(note, currentSample, _samplesPerFrame);
                 if (actualMidi >= 0)
                 {
-                    int playheadX = _layout.GetPlayheadX(panel.Index);
                     int markerY = MidiToY(actualMidi, minMidi, maxMidi, lane);
                     if (lane.Contains(playheadX, markerY))
                     {
@@ -316,8 +381,8 @@ internal sealed partial class PanelOverlayRenderer
             if (active && _cameras[panel.Index] != null)
             {
                 double actualMidi = PitchContour.PitchAtSample(note, currentSample, _samplesPerFrame);
-                var (lo, hi) = _cameras[panel.Index].GetRange(currentSample);
-                int playheadX = _layout.GetPlayheadX(panel.Index);
+                double lo = panelMinMidi;
+                double hi = panelMaxMidi;
                 if (actualMidi < lo)
                     DrawChevron(frame, playheadX, lane.Y, true, accent.Lighten(0.5), lane);
                 else if (actualMidi >= hi)
@@ -429,9 +494,12 @@ internal sealed partial class PanelOverlayRenderer
         byte ring2Alpha = (byte)Math.Clamp(alpha * 2 / 3, 0, 255);
         OverlayColor ring2Color = accent.WithAlpha(ring2Alpha);
 
-        bool ssg = panel.Kind == PanelKind.Ssg;
+        bool ssg = IsSsgMode(note.Mode);
         DrawRippleRing(frame, playheadX, centreY, r1, ringColor, ssg, lane);
-        DrawRippleRing(frame, playheadX, centreY, r2, ring2Color, ssg, lane);
+        // Cinematic mode gets one restrained secondary transient. `All` is
+        // retained as the legacy opt-in for the original double-ring effect.
+        if (_effects == EffectsMode.All)
+            DrawRippleRing(frame, playheadX, centreY, r2, ring2Color, ssg, lane);
     }
 
     /// <summary>
@@ -569,6 +637,38 @@ internal sealed partial class PanelOverlayRenderer
         bool taper = note.ReleaseStyle == NoteReleaseStyle.Normal
             && note.EndSample - note.StartSample > _taperSamples;
 
+        // Most publishing notes are flat, inactive ribbons. Their geometry is
+        // constant in Y, so rasterize those pixels as contiguous opaque bands.
+        // This preserves the temporal opacity and release taper as deterministic
+        // quantized runs while avoiding a pitch lookup and strided writes for
+        // every pixel. Active/ornamented ribbons continue through the full path.
+        if (note.Pitch.Length == 0
+            && !stipple
+            && !stripe
+            && !active
+            && opacityFactor == 1.0
+            && flashAmount == 0)
+        {
+            DrawFlatPitchRibbonFast(
+                frame,
+                note,
+                lane,
+                currentSample,
+                fill,
+                firstX,
+                lastXExclusive,
+                leftCoverage,
+                rightCoverage,
+                windowStart,
+                samplesPerPixel,
+                half,
+                taper,
+                minMidi,
+                maxMidi,
+                playheadX);
+            return;
+        }
+
         for (int x = firstColumn; x <= lastColumn; x++)
         {
             double alphaFactor = 1.0;
@@ -641,6 +741,178 @@ internal sealed partial class PanelOverlayRenderer
                     SetPixel(frame, x, topRow, accent.WithAlpha((byte)Math.Round(accent.A * temporalOpacity)));
             }
         }
+    }
+
+    private void DrawFlatPitchRibbonFast(
+        Span<byte> frame,
+        PreparedNote note,
+        OverlayRect lane,
+        long currentSample,
+        OverlayColor fill,
+        int firstX,
+        int lastXExclusive,
+        double leftCoverage,
+        double rightCoverage,
+        long windowStart,
+        double samplesPerPixel,
+        double half,
+        bool taper,
+        double minMidi,
+        double maxMidi,
+        int playheadX)
+    {
+        int firstColumn = Math.Max(lane.X, firstX - 1);
+        int lastColumn = Math.Min(lane.Right - 1, lastXExclusive);
+        if (lastColumn < firstColumn)
+            return;
+
+        double centreY = MidiToY(note.InitialMidiNote, minMidi, maxMidi, lane);
+        double top = centreY - half;
+        double bottom = centreY + half;
+        int firstFull = Math.Max(lane.Y, (int)Math.Ceiling(top - 1e-9));
+        int lastFullExclusive = Math.Min(lane.Bottom, (int)Math.Floor(bottom + 1e-9));
+        if (lastFullExclusive <= firstFull)
+            return;
+
+        // Quantize only the opacity of a flat body into small, deterministic
+        // runs. Opaque row fills keep the raster hot path contiguous; the
+        // visible temporal/release ramp remains a sequence of short bands.
+        int bodyFirst = Math.Max(lane.X, firstX);
+        int bodyLastExclusive = Math.Min(lane.Right, lastXExclusive);
+        int runStart = bodyFirst;
+        int previousBucket = -1;
+        for (int x = bodyFirst; x <= bodyLastExclusive; x++)
+        {
+            double alphaFactor = 1.0;
+            if (x < bodyLastExclusive)
+            {
+                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                if (sample < note.StartSample)
+                    sample = note.StartSample;
+                else if (sample > note.EndSample)
+                    sample = note.EndSample;
+
+                double temporalOpacity;
+                if (Math.Abs(x - playheadX) <= 2)
+                    temporalOpacity = 1.0;
+                else if (sample > currentSample)
+                    temporalOpacity = 0.35;
+                else
+                {
+                    double ageSeconds = Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate);
+                    temporalOpacity = 0.70 - 0.35 * Math.Clamp(ageSeconds / 0.25, 0, 1);
+                }
+
+                alphaFactor = temporalOpacity;
+                if (taper)
+                    alphaFactor *= Math.Clamp(
+                        (note.EndSample - sample) / (double)_taperSamples,
+                        0,
+                        1);
+            }
+
+            int bucket = Math.Clamp((int)Math.Round(alphaFactor * 32), 0, 32);
+            if (previousBucket < 0)
+                previousBucket = bucket;
+            else if (bucket != previousBucket)
+            {
+                FillFlatOpaqueBand(
+                    frame,
+                    fill,
+                    runStart,
+                    x,
+                    firstFull,
+                    lastFullExclusive,
+                    previousBucket / 32.0);
+                runStart = x;
+                previousBucket = bucket;
+            }
+        }
+
+        if (runStart < bodyLastExclusive && previousBucket >= 0)
+        {
+            FillFlatOpaqueBand(
+                frame,
+                fill,
+                runStart,
+                bodyLastExclusive,
+                firstFull,
+                lastFullExclusive,
+                previousBucket / 32.0);
+        }
+
+        // Keep the two fractional horizontal edge columns antialiased. They
+        // are at most two narrow columns per note and do not affect the bulk
+        // rasterization budget.
+        if (firstX > lane.X && leftCoverage > 1e-3)
+            DrawFlatEdgeColumn(frame, fill, firstX - 1, firstFull, lastFullExclusive, leftCoverage);
+        if (lastXExclusive < lane.Right && rightCoverage > 1e-3)
+            DrawFlatEdgeColumn(frame, fill, lastXExclusive, firstFull, lastFullExclusive, rightCoverage);
+    }
+
+    private void FillFlatOpaqueBand(
+        Span<byte> frame,
+        OverlayColor fill,
+        int left,
+        int right,
+        int top,
+        int bottom,
+        double alphaFactor)
+    {
+        if (right <= left || bottom <= top || alphaFactor <= 0)
+            return;
+        byte alpha = (byte)Math.Clamp(Math.Round(fill.A * alphaFactor), 0, 255);
+        if (alpha == 0)
+            return;
+        OverlayColor opaque = new(
+            (byte)((fill.R * alpha + 15 * (255 - alpha) + 127) / 255),
+            (byte)((fill.G * alpha + 17 * (255 - alpha) + 127) / 255),
+            (byte)((fill.B * alpha + 25 * (255 - alpha) + 127) / 255));
+        FillRectOpaque(frame, left, right, top, bottom, opaque);
+    }
+
+    private void DrawFlatEdgeColumn(
+        Span<byte> frame,
+        OverlayColor fill,
+        int x,
+        int top,
+        int bottom,
+        double coverage)
+    {
+        byte alpha = (byte)Math.Clamp(Math.Round(fill.A * coverage), 0, 255);
+        for (int y = top; y < bottom; y++)
+            BlendFlatPixel(frame, x, y, fill, alpha);
+    }
+
+    private void BlendFlatPixel(
+        Span<byte> frame,
+        int x,
+        int y,
+        OverlayColor color,
+        byte alpha)
+    {
+        if (alpha == 0)
+            return;
+        int offset = (y * Width + x) * 4;
+        if (alpha == 255)
+        {
+            frame[offset] = color.R;
+            frame[offset + 1] = color.G;
+            frame[offset + 2] = color.B;
+            frame[offset + 3] = 255;
+            return;
+        }
+
+        if (frame[offset + 3] == 255)
+        {
+            int inverse = 255 - alpha;
+            frame[offset] = (byte)((color.R * alpha + frame[offset] * inverse + 127) / 255);
+            frame[offset + 1] = (byte)((color.G * alpha + frame[offset + 1] * inverse + 127) / 255);
+            frame[offset + 2] = (byte)((color.B * alpha + frame[offset + 2] * inverse + 127) / 255);
+            return;
+        }
+
+        BlendPixel(frame, x, y, color.WithAlpha(alpha));
     }
 
     /// <summary>
@@ -746,7 +1018,8 @@ internal sealed partial class PanelOverlayRenderer
         OverlayColor accent = _panelAccents[panel.Index];
         bool active = note.StartSample <= currentSample && currentSample < note.EndSample;
         if (active)
-            fill = AdjustForEnergy(fill.Lighten(0.14), GetEnergy(panel.Index, currentSample));
+            fill = AdjustForEnergy(fill.Lighten(0.14),
+                _effects == EffectsMode.None ? 0.5f : GetEnergy(panel.Index, currentSample));
 
         int height = Math.Clamp(lane.Height / 8, 5, 9);
         var rect = new OverlayRect(left, lane.Bottom - height - 1, right - left, height);

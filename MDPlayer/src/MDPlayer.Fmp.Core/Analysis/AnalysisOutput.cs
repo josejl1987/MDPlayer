@@ -21,7 +21,7 @@ internal sealed class AnalysisOutput
 internal sealed class AnalysisEngine
 {
     public string Name { get; init; } = "mdplayer-music-analysis";
-    public string Version { get; init; } = "1.0.2";
+    public string Version { get; init; } = "1.1.0";
     public string Music21Version { get; init; } = "";
     public string PartituraVersion { get; init; }
 }

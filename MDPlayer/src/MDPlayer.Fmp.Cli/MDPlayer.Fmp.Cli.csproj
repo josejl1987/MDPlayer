@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MDPlayer.Fmp.Core\MDPlayer.Fmp.Core.csproj" />
+    <ProjectReference Include="..\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
     <Reference Include="MDSound">
       <HintPath>..\..\lib\MDSound.dll</HintPath>
     </Reference>
@@ -27,6 +28,11 @@
     <Content Include="corrscope-frames.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- FMP.COM is required for FMP-family formats (.ovi/.opi/.ozi/.mpi/.mvi/.mzi);
+         the CLI resolves it next to its own executable (ToolResolver.ResolveFile). -->
+    <None Include="FMP.COM">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <Content Include="..\..\..\tools\music-analysis\mdplayer_music_analysis.py" LinkBase="tools\music-analysis">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

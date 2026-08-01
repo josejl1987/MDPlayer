@@ -9,11 +9,15 @@ public sealed class OverlayLayoutTests
         => new(width, height, pastSeconds: 0.75, futureSeconds: 2.25);
 
     [Fact]
-    public void Constructor_RejectsWidthNotDivisibleByColumns()
+    public void Constructor_DistributesWidthRemainderAcrossColumns()
     {
         int width = 1921; // 1921 % 3 != 0
         int height = 1080;
-        Assert.Throws<ArgumentException>(() => new OverlayLayout(width, height, 0.75, 2.25));
+        var layout = new OverlayLayout(width, height, 0.75, 2.25);
+
+        Assert.Equal(width, Enumerable.Range(0, OverlayLayout.Columns)
+            .Sum(column => layout.GetPanelRect(column).Width));
+        Assert.Equal(layout.GetPanelRect(0).Right, layout.GetPanelRect(1).X);
     }
 
     [Fact]
@@ -54,6 +58,16 @@ public sealed class OverlayLayoutTests
         Assert.Equal(layout.ScopeHeight, layout.CorrscopeGridHeight);
         Assert.Equal(layout.GridY, layout.GetPanelRect(0).Y);
         Assert.Equal(layout.GetPanelRect(0).Bottom, layout.BottomBarRect.Y);
+    }
+
+    [Fact]
+    public void LargePcmTopologyFitsAdaptiveGrid()
+    {
+        var layout = new OverlayLayout(1920, 1080, 0.75, 2.25, panelCount: 32);
+
+        Assert.Equal(6, layout.ColumnCount);
+        Assert.Equal(6, layout.RowCount);
+        Assert.Equal(layout.BottomBarRect.Y, layout.GetPanelRect(31).Bottom);
     }
 
     [Fact]

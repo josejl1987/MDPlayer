@@ -7,6 +7,15 @@ namespace MDPlayer.Fmp.Tests.Visualization.Rendering;
 public sealed class NoteColorTests
 {
     [Fact]
+    public void ChannelAccentIsStableWhenLayoutOrderChanges()
+    {
+        OverlayColor first = InstrumentColorResolver.ResolveChannelAccent("ym2608.0.fm.1", 0);
+        OverlayColor filtered = InstrumentColorResolver.ResolveChannelAccent("ym2608.0.fm.1", 7);
+
+        Assert.Equal(first, filtered);
+    }
+
+    [Fact]
     public void InstrumentMode_SameInstrument_SameColor()
     {
         // §12.2: same instrument → same colour across the track.

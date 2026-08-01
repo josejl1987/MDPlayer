@@ -337,6 +337,54 @@ public sealed class VgmPlaybackBackendTests
     }
 
     [Fact]
+    public void VgmScopeRenderer_RendersYm2608ChannelStems()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-ym2608-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-output-{Guid.NewGuid():N}");
+        string master = Path.Combine(output, "master.wav");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgm(
+                0x56, 0xA0, 0x35,
+                0x56, 0xA4, 0x21,
+                0x56, 0x28, 0xF0,
+                0x61, 0x20, 0x00,
+                0x56, 0x28, 0x00,
+                0x66));
+
+            ScopeRenderer.ScopeResult result = VgmScopeRenderer.Render(
+                path,
+                output,
+                master,
+                sampleRate: 44_100,
+                loopCount: 1,
+                fadeSeconds: 0,
+                tailSeconds: 0.01,
+                maxDurationSeconds: 1);
+
+            Assert.True(result.Success, result.LastError);
+            string[] channelStems = result.Stems
+                .Where(stem => stem.Name != "master")
+                .Select(stem => stem.Name)
+                .ToArray();
+        Assert.True(channelStems.Length >= 11);
+            Assert.Contains("ym2608-fm1", channelStems);
+            Assert.Contains("ym2608-ssg1", channelStems);
+            Assert.Contains("ym2608-rhythm", channelStems);
+            Assert.All(result.Stems.Where(stem => stem.Name != "master"), stem =>
+            {
+                Assert.True(stem.Success, stem.Error);
+                Assert.True(File.Exists(stem.WavPath), stem.WavPath);
+            });
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Capture_DecodesYm2610RegisterStream()
     {
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-ym2610-{Guid.NewGuid():N}.vgm");
