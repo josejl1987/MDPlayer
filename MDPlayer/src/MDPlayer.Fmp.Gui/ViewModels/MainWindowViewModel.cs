@@ -89,7 +89,8 @@ public sealed class MainWindowViewModel : ObservableObject
         Preview = new PreviewViewModel();
         Timeline = new TimelineViewModel();
         Command = new CommandViewModel(OnCommandModeChanged);
-        Tools = new ToolStatusViewModel(() => _request, () => _plan, settings.Settings.RenderCliPath);
+        ToolSettings = new ToolSettingsViewModel(settings);
+        Tools = new ToolStatusViewModel(() => _request, () => _plan, settings.Settings.RenderCliPath, settings.Settings.ToToolPaths);
         Diagnostics = new DiagnosticsViewModel(clipboard);
         Export = new ExportProgressViewModel(clipboard, Diagnostics);
         Settings = new SettingsViewModel(this);
@@ -116,6 +117,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public TimelineViewModel Timeline { get; }
     public CommandViewModel Command { get; }
     public ToolStatusViewModel Tools { get; }
+    public ToolSettingsViewModel ToolSettings { get; }
     public ExportProgressViewModel Export { get; }
     public DiagnosticsViewModel Diagnostics { get; }
 

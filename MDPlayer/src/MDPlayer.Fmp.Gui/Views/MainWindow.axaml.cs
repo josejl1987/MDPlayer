@@ -106,6 +106,14 @@ public partial class MainWindow : Window
     {
         ToolDetailsDialog.Show(this, _vm.Tools.Statuses);
     }
+
+    private void ShowToolSettings()
+    {
+        ToolSettingsDialog.Show(this, _vm.ToolSettings);
+    }
+
+    private void OnToolSettingsClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+        => ShowToolSettings();
 }
 
 /// <summary>Small code-built modal dialogs (no extra XAML/compiled-binding surface).</summary>
@@ -291,5 +299,95 @@ internal static class ToolDetailsDialog
         if (content.Children[^1] is Button close)
             close.Click += (_, _) => dialog.Close();
         dialog.ShowDialog(owner);
+    }
+}
+
+/// <summary>
+/// Code-built tool-path settings dialog (Phase 8). Edits the persisted runtime
+/// tool paths (never serialized into projects) and triggers a tool recheck
+/// after saving so the status bar reflects the new configuration.
+/// </summary>
+internal static class ToolSettingsDialog
+{
+    public static void Show(Window owner, ToolSettingsViewModel viewModel)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(viewModel);
+
+        var panel = new StackPanel { Margin = new Thickness(18), Spacing = 12, MinWidth = 520 };
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Runtime tool paths (stored in app settings, never in project files).",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 11,
+            Opacity = 0.8,
+        });
+
+        panel.Children.Add(Row("mdplayer-render executable", nameof(ToolSettingsViewModel.RenderCliPath), viewModel));
+        panel.Children.Add(Row("FMP.COM", nameof(ToolSettingsViewModel.FmpComPath), viewModel));
+        panel.Children.Add(Row("Corrscope", nameof(ToolSettingsViewModel.CorrscopePath), viewModel));
+        panel.Children.Add(Row("FFmpeg", nameof(ToolSettingsViewModel.FfmpegPath), viewModel));
+        panel.Children.Add(Row("Analysis Python", nameof(ToolSettingsViewModel.AnalysisPython), viewModel));
+        panel.Children.Add(Row("Assets directory", nameof(ToolSettingsViewModel.AssetsDir), viewModel));
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 8, 0, 0),
+        };
+        var save = new Button { Content = "Save" };
+        save.Classes.Add("accent");
+        var reset = new Button { Content = "Reset" };
+        var close = new Button { Content = "Close" };
+        buttons.Children.Add(save);
+        buttons.Children.Add(reset);
+        buttons.Children.Add(close);
+        panel.Children.Add(buttons);
+
+        var dialog = new Window
+        {
+            Title = "Tool settings",
+            Width = 560,
+            Height = 420,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Content = panel,
+        };
+
+        save.Click += (_, _) =>
+        {
+            viewModel.SaveCommand.Execute(null);
+            dialog.Close();
+        };
+        reset.Click += (_, _) => viewModel.ResetCommand.Execute(null);
+        close.Click += (_, _) => dialog.Close();
+
+        dialog.ShowDialog(owner);
+    }
+
+    private static Grid Row(string label, string propertyName, ToolSettingsViewModel viewModel)
+    {
+        var grid = new Grid
+        {
+            ColumnDefinitions =
+            {
+                new ColumnDefinition(new GridLength(170, GridUnitType.Pixel)),
+                new ColumnDefinition(new GridLength(1, GridUnitType.Star)),
+            },
+            ColumnSpacing = 8,
+        };
+        grid.Children.Add(new TextBlock
+        {
+            Text = label,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        var textBox = new TextBox { Watermark = "auto (search system paths)" };
+        textBox.Bind(Avalonia.Controls.TextBox.TextProperty,
+            new Avalonia.Data.Binding(propertyName) { Source = viewModel });
+        Grid.SetColumn(textBox, 1);
+        grid.Children.Add(textBox);
+        return grid;
     }
 }

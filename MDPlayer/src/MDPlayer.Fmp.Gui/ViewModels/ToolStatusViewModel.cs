@@ -16,6 +16,7 @@ public sealed class ToolStatusViewModel : ObservableObject
 {
     private readonly Func<VisualizationRequest?> _requestProvider;
     private readonly Func<VisualizationPlanResult?> _planProvider;
+    private readonly Func<ToolPaths> _toolPathsProvider;
     private readonly string? _renderCliUserPath;
     private bool _isRefreshing;
     private string _summary = "Checking tools…";
@@ -23,11 +24,13 @@ public sealed class ToolStatusViewModel : ObservableObject
     public ToolStatusViewModel(
         Func<VisualizationRequest?> requestProvider,
         Func<VisualizationPlanResult?> planProvider,
-        string? renderCliUserPath)
+        string? renderCliUserPath,
+        Func<ToolPaths>? toolPathsProvider = null)
     {
         _requestProvider = requestProvider;
         _planProvider = planProvider;
         _renderCliUserPath = renderCliUserPath;
+        _toolPathsProvider = toolPathsProvider ?? (() => new ToolPaths());
         RecheckCommand = new AsyncRelayCommand(() => RefreshAsync(CancellationToken.None));
         ShowDetailsCommand = new RelayCommand(() => DetailsRequested?.Invoke());
     }
@@ -58,7 +61,7 @@ public sealed class ToolStatusViewModel : ObservableObject
         try
         {
             VisualizationRequest? request = _requestProvider();
-            ToolPaths overrides = new();
+            ToolPaths overrides = _toolPathsProvider();
 
             IReadOnlyList<ToolStatus> resolved = VisualizationToolResolver.ResolveAll(overrides, _renderCliUserPath);
 

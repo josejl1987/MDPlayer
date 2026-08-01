@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Fmp.Application.Contracts;
 
 namespace Fmp.Gui.Services;
 
@@ -67,6 +68,21 @@ public sealed class GuiSettings
     /// <summary>Explicit path override for the mdplayer-render executable.</summary>
     public string? RenderCliPath { get; set; }
 
+    /// <summary>Explicit FMP.COM path (runtime tool; never serialized into projects).</summary>
+    public string? FmpComPath { get; set; }
+
+    /// <summary>Explicit Corrscope executable path.</summary>
+    public string? CorrscopePath { get; set; }
+
+    /// <summary>Explicit FFmpeg executable path.</summary>
+    public string? FfmpegPath { get; set; }
+
+    /// <summary>Explicit analysis Python interpreter path.</summary>
+    public string? AnalysisPython { get; set; }
+
+    /// <summary>Assets directory for chip sample packs.</summary>
+    public string? AssetsDir { get; set; }
+
     /// <summary>Preview frame render width cap.</summary>
     public int PreviewMaxWidth { get; set; } = 960;
 
@@ -81,4 +97,14 @@ public sealed class GuiSettings
 
     /// <summary>Most recently opened inputs/projects (most recent first).</summary>
     public List<string> RecentFiles { get; set; } = new();
+
+    /// <summary>Builds the runtime tool paths from the persisted settings.</summary>
+    public ToolPaths ToToolPaths() => new()
+    {
+        FmpComPath = FmpComPath,
+        AssetsDir = AssetsDir,
+        CorrscopePath = CorrscopePath,
+        FfmpegPath = FfmpegPath,
+        AnalysisPython = AnalysisPython,
+    };
 }
