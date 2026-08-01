@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace Fmp.Core.Visualization;
 
 /// <summary>
@@ -9,14 +11,21 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 {
     private const int RegisterBankSize = 0x100;
     private const double FmDivider = 6.0;
+    private const double DacLaneMidiNote = 60.0;
 
     private readonly byte[] _registers = new byte[RegisterBankSize * 2];
     private readonly MutableNote?[] _fmNotes = new MutableNote?[6];
     private readonly MutableNote?[] _fm3Notes = new MutableNote?[4];
     private readonly int[] _fm3KeyMask = new int[1];
+    private readonly List<byte> _dacBytes = [];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private bool _fm3SpecialMode;
+    private bool _dacEnabled;
+    private long _dacStartSample;
+    private long _dacPreviousSample = -1;
+    private long _dacLastSample = -1;
+    private string _lastDacInstrumentId;
     private bool _completed;
 
     public ChipType ChipType => ChipType.Ym2612;
@@ -30,9 +39,20 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 
         _device = device;
         _timeline = timeline;
-        _timeline.AddDevice(device);
+        _timeline.AddDevice(device with
+        {
+            Capabilities = device.Capabilities | DeviceCapabilities.SampleIdentity,
+        });
         foreach (VoiceDescriptor voice in VisualizationDeviceCatalog.Ym2612Voices(device.Id.Instance))
             _timeline.AddVoice(voice);
+        _timeline.AddVoice(new VoiceDescriptor(
+            DacVoice,
+            "DAC",
+            VoicePresentationKind.Pitched,
+            10,
+            false,
+            false,
+            false));
     }
 
     public void Process(in TimedChipWrite write)
@@ -45,6 +65,16 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
             return;
 
         _registers[write.Port * RegisterBankSize + write.Address] = (byte)write.Data;
+        if (write.Port == 0 && write.Address == 0x2B)
+        {
+            ApplyDacEnable(write.SamplePosition, write.Data);
+            return;
+        }
+        if (write.Port == 0 && write.Address == 0x2A)
+        {
+            ApplyDacWrite(write.SamplePosition, write.Data);
+            return;
+        }
         if (write.Port == 0 && write.Address == 0x27)
         {
             ApplyFm3Mode(write.SamplePosition, write.Data);
@@ -66,11 +96,114 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         if (endSample < 0)
             throw new ArgumentOutOfRangeException(nameof(endSample));
 
+        CloseDac(endSample);
         _completed = true;
         for (int channel = 0; channel < _fmNotes.Length; channel++)
             Close(ref _fmNotes[channel], endSample);
         for (int op = 0; op < _fm3Notes.Length; op++)
             Close(ref _fm3Notes[op], endSample);
+    }
+
+    private VoiceId DacVoice => new(_device.Id, VoiceKind.Pcm, 0, Name: "dac");
+
+    private long DacGapThresholdSamples => Math.Max(
+        32,
+        (long)Math.Round(64.0 * _timeline.SampleRate / 44_100.0, MidpointRounding.AwayFromZero));
+
+    private void ApplyDacEnable(long sample, int value)
+    {
+        bool enabled = (value & 0x80) != 0;
+        if (enabled == _dacEnabled)
+            return;
+
+        if (enabled)
+        {
+            Close(ref _fmNotes[5], sample);
+            _dacEnabled = true;
+            return;
+        }
+
+        CloseDac(sample);
+        _dacEnabled = false;
+    }
+
+    private void ApplyDacWrite(long sample, int value)
+    {
+        if (!_dacEnabled)
+            return;
+
+        if (_dacBytes.Count > 0 && sample - _dacLastSample > DacGapThresholdSamples)
+            CloseDac(EstimatedDacEnd(sample));
+
+        if (_dacBytes.Count == 0)
+        {
+            _dacStartSample = sample;
+            _dacPreviousSample = -1;
+            _dacLastSample = sample;
+        }
+        else
+        {
+            _dacPreviousSample = _dacLastSample;
+            _dacLastSample = sample;
+        }
+        _dacBytes.Add((byte)value);
+    }
+
+    private long EstimatedDacEnd(long boundarySample)
+    {
+        if (_dacLastSample < 0)
+            return boundarySample;
+
+        long interval = _dacPreviousSample >= 0
+            ? Math.Max(1, _dacLastSample - _dacPreviousSample)
+            : 1;
+        interval = Math.Min(interval, DacGapThresholdSamples);
+        long naturalEnd = _dacLastSample > long.MaxValue - interval
+            ? long.MaxValue
+            : _dacLastSample + interval;
+        if (boundarySample <= _dacLastSample)
+            return naturalEnd;
+        return Math.Min(boundarySample, naturalEnd);
+    }
+
+    private void CloseDac(long boundarySample)
+    {
+        if (_dacBytes.Count == 0)
+            return;
+
+        long endSample = EstimatedDacEnd(boundarySample);
+        if (endSample <= _dacStartSample)
+            endSample = _dacStartSample + 1;
+
+        byte[] payload = _dacBytes.ToArray();
+        Span<byte> digest = stackalloc byte[32];
+        SHA256.HashData(payload, digest);
+        string fingerprint = Convert.ToHexString(digest[..8]).ToLowerInvariant();
+        string instrumentId = $"ym2612:dac:{payload.Length:x}:{fingerprint}";
+        _timeline.AddInstrument(new InstrumentDefinition(
+            instrumentId,
+            "pcm",
+            null,
+            null,
+            null,
+            null,
+            Array.Empty<FmOperatorDefinition>()));
+        _timeline.AddNote(
+            DacVoice,
+            _dacStartSample,
+            endSample,
+            DacLaneMidiNote,
+            0,
+            instrumentId,
+            VisualizationNoteMode.Pcm,
+            string.Equals(_lastDacInstrumentId, instrumentId, StringComparison.Ordinal),
+            Array.Empty<PitchChange>());
+        _lastDacInstrumentId = instrumentId;
+
+        _dacBytes.Clear();
+        _dacStartSample = 0;
+        _dacPreviousSample = -1;
+        _dacLastSample = -1;
     }
 
     private void ApplyKey(long sample, int value)
@@ -105,7 +238,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 
         if (channel == 2)
             _fm3KeyMask[0] = keyMask;
-        if (channel == 5 && (_registers[0x2B] & 0x80) != 0)
+        if (channel == 5 && _dacEnabled)
             return;
 
         if (keyMask == 0)
