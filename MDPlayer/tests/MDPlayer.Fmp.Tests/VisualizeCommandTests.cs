@@ -35,10 +35,10 @@ public sealed class VisualizeCommandTests
     [Fact]
     public void ParseArgs_ParsesLayoutMode()
     {
-        var options = VisualizeCommand.ParseArgs(["track.ovi", "--layout", "focus"]);
+        var options = VisualizeCommand.ParseArgs(["track.ovi", "--layout", "diagnostic"]);
 
         Assert.NotNull(options);
-        Assert.Equal(VisualizationLayoutMode.Focus, options.LayoutMode);
+        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
     }
 
     [Fact]
@@ -49,7 +49,7 @@ public sealed class VisualizeCommandTests
         try
         {
             File.WriteAllText(templatePath,
-                "{\"layout\":\"hybrid\",\"channels\":\"all\",\"scopePosition\":\"left\",\"scopeRatio\":0.25}");
+                "{\"layout\":\"diagnostic\",\"channels\":\"all\",\"scopePosition\":\"left\",\"scopeRatio\":0.25}");
             File.WriteAllText(palettePath,
                 "{\"canvasBackground\":\"#010203\",\"accentColors\":[\"#00ff00\"]}");
 
@@ -64,7 +64,7 @@ public sealed class VisualizeCommandTests
             ]);
 
             Assert.NotNull(options);
-            Assert.Equal(VisualizationLayoutMode.Hybrid, options.LayoutMode);
+            Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
             Assert.Equal(VisualizationChannelFilter.All, options.Channels);
             Assert.Equal(VisualizationScopePosition.Left, options.ScopePosition);
             Assert.Equal(0.25, options.ScopeRatio);

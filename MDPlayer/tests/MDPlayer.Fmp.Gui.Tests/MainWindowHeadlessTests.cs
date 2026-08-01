@@ -114,18 +114,18 @@ public sealed class MainWindowHeadlessTests
             Dispatcher.UIThread.RunJobs();
 
             IReadOnlyList<CompositionCardViewModel> cards = viewModel.Settings.Basic.CompositionCards;
-            Assert.Equal(3, cards.Count);
+            Assert.Single(cards);
 
-            CompositionCardViewModel scope = cards.First(card => card.Composition == CompositionKind.ScopeStage);
-            scope.SelectCommand.Execute(null);
+            CompositionCardViewModel diagnostic = cards[0];
+            Assert.Equal(CompositionKind.Diagnostic, diagnostic.Composition);
+            diagnostic.SelectCommand.Execute(null);
 
-            Assert.True(scope.IsSelected, "The clicked composition card must highlight.");
-            Assert.False(cards.First(card => card.Composition == CompositionKind.Performance).IsSelected);
-            Assert.Equal(CompositionKind.ScopeStage, cards.Single(card => card.IsSelected).Composition);
+            Assert.True(diagnostic.IsSelected, "The clicked composition card must highlight.");
 
-            // The formatted command carries the explicit --composition flag.
+            // The diagnostic composition is the default, so the compact
+            // command omits the explicit --composition flag.
             await viewModel.UpdateCommandAsync();
-            Assert.Contains("--composition scope-stage", viewModel.Command.DisplayText);
+            Assert.DoesNotContain("--composition", viewModel.Command.DisplayText);
         }
         finally
         {

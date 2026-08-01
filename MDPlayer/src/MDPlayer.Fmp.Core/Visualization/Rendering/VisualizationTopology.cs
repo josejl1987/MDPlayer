@@ -56,7 +56,7 @@ internal static class VisualizationTopologyBuilder
         => Build(
             timeline,
             layoutMode,
-            layoutMode is VisualizationLayoutMode.Diagnostic or VisualizationLayoutMode.DiagnosticV2
+            layoutMode is VisualizationLayoutMode.Diagnostic
                 ? VisualizationChannelFilter.All
                 : VisualizationChannelFilter.Active);
 
@@ -74,31 +74,30 @@ internal static class VisualizationTopologyBuilder
     {
         ArgumentNullException.ThrowIfNull(timeline);
         layoutMode = VisualizationLayoutModeResolver.Resolve(timeline, layoutMode);
-        if (timeline.Voices.Count == 0)
+        VisualizationTopology inventory = BuildInventory(timeline);
+        VisualizationTopology visible = FilterTopology(
+            inventory, timeline, layoutMode, channelFilter);
+
+        if (groupBy != VisualizationGroupBy.None)
         {
-            VisualizationTopology legacy = VisualizationTopologyCompatibility.BuildLegacyTopology();
-            if (layoutMode is VisualizationLayoutMode.UnifiedRoll
-                or VisualizationLayoutMode.Hybrid
-                or VisualizationLayoutMode.Performance)
-                return BuildUnified(legacy.Panels, timeline, channelFilter);
-            VisualizationTopology filteredLegacy = FilterTopology(legacy, timeline, layoutMode, channelFilter);
-            return layoutMode == VisualizationLayoutMode.Focus
-                ? Focus(filteredLegacy, timeline)
-                : filteredLegacy;
+            visible = new VisualizationTopology(GroupPanels(visible.Panels, timeline, groupBy));
         }
 
+        return visible;
+    }
+
+    /// <summary>
+    /// Builds the one renderer-neutral panel inventory. Composition modes may
+    /// regroup or pack this inventory, but they must not rediscover activity or
+    /// invent a second panel-selection policy.
+    /// </summary>
+    private static VisualizationTopology BuildInventory(VisualizationTimeline timeline)
+    {
+        if (timeline.Voices.Count == 0)
+            return VisualizationTopologyCompatibility.BuildLegacyTopology();
+
         if (VisualizationTopologyCompatibility.IsFixedEightVoiceTimeline(timeline))
-        {
-            VisualizationTopology fixedTopology = VisualizationTopologyCompatibility.BuildFixedEightVoiceTopology(timeline.Voices);
-            if (layoutMode is VisualizationLayoutMode.UnifiedRoll
-                or VisualizationLayoutMode.Hybrid
-                or VisualizationLayoutMode.Performance)
-                return BuildUnified(fixedTopology.Panels, timeline, channelFilter);
-            fixedTopology = FilterTopology(fixedTopology, timeline, layoutMode, channelFilter);
-            return layoutMode == VisualizationLayoutMode.Focus
-                ? Focus(fixedTopology, timeline)
-                : fixedTopology;
-        }
+            return VisualizationTopologyCompatibility.BuildFixedEightVoiceTopology(timeline.Voices);
 
         var source = timeline.Voices
             .OrderBy(voice => DeviceOrdering.Priority(voice.Id.Device.Type))
@@ -187,43 +186,7 @@ internal static class VisualizationTopologyBuilder
 
         if (panels.Count == 0)
             return VisualizationTopologyCompatibility.BuildLegacyTopology();
-
-        VisualizationPanel[] ordered = panels
-            .Where(panel => ShouldInclude(timeline, panel, layoutMode, channelFilter))
-            .OrderBy(panel => panel.Order)
-            .ToArray();
-        if (ordered.Length == 0)
-        {
-            if ((layoutMode is VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage)
-                && HasScopeSource(timeline))
-                return BuildScopeFallback(timeline);
-            ordered = panels.OrderBy(panel => panel.Order).ToArray();
-        }
-        if (groupBy != VisualizationGroupBy.None
-            && layoutMode is not (VisualizationLayoutMode.Diagnostic or VisualizationLayoutMode.DiagnosticV2))
-            ordered = GroupPanels(ordered, timeline, groupBy);
-        if (layoutMode is VisualizationLayoutMode.UnifiedRoll
-            or VisualizationLayoutMode.Hybrid
-            or VisualizationLayoutMode.Performance)
-            return BuildUnified(ordered, timeline, channelFilter);
-
-        if (layoutMode == VisualizationLayoutMode.Focus)
-            return Focus(new VisualizationTopology(ordered), timeline);
-
-        return new VisualizationTopology(ordered);
-    }
-
-    private static VisualizationTopology Focus(
-        VisualizationTopology diagnostic,
-        VisualizationTimeline timeline)
-    {
-        VisualizationPanel[] focused = diagnostic.Panels
-            .Where(panel => HasActivity(timeline, panel))
-            .Select((panel, index) => panel with { Order = index })
-            .ToArray();
-        return focused.Length > 0
-            ? new VisualizationTopology(focused)
-            : diagnostic;
+        return new VisualizationTopology(panels.OrderBy(panel => panel.Order).ToArray());
     }
 
     private static VisualizationTopology FilterTopology(
@@ -238,40 +201,10 @@ internal static class VisualizationTopologyBuilder
         VisualizationPanel[] panels = topology.Panels
             .Where(panel => ShouldInclude(timeline, panel, layoutMode, filter))
             .ToArray();
-        if (panels.Length > 0)
-            return new VisualizationTopology(panels);
-        return (layoutMode is VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage)
-            && HasScopeSource(timeline)
-            ? BuildScopeFallback(timeline)
+        return panels.Length > 0
+            ? new VisualizationTopology(panels)
             : topology;
     }
-
-    private static VisualizationTopology BuildScopeFallback(VisualizationTimeline timeline)
-    {
-        string[] sourceVoiceIds = timeline.Voices.Count > 0
-            ? timeline.Voices.Select(voice => voice.Id.ToString()).ToArray()
-            : timeline.WaveformChanges.Select(value => value.VoiceId)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-        return new VisualizationTopology(
-        [
-            new VisualizationPanel(
-                "visualization.master-scope",
-                "MASTER SCOPE",
-                PreparedPanelKind.Placeholder,
-                PanelContentKind.DeviceAggregate,
-                0,
-                sourceVoiceIds,
-                Array.Empty<string>())
-            {
-                Schema = PanelPresentationSchema.AggregateActivity,
-            },
-        ]);
-    }
-
-    private static bool HasScopeSource(VisualizationTimeline timeline)
-        => timeline.WaveformChanges.Length > 0
-            || timeline.Devices.Any(device => device.ScopeSupport != ScopeSupport.None);
 
     private static VisualizationPanel[] GroupPanels(
         IReadOnlyList<VisualizationPanel> panels,
@@ -426,74 +359,9 @@ internal static class VisualizationTopologyBuilder
             || VisualizationTopologyCompatibility.HasLegacyActivity(timeline, panel.Id);
     }
 
-    private static VisualizationTopology BuildUnified(
-        IReadOnlyList<VisualizationPanel> diagnostic,
-        VisualizationTimeline timeline,
-        VisualizationChannelFilter channelFilter)
-    {
-        var pitchPanels = diagnostic
-            .Where(panel => IsUnifiedPitchPanel(panel, timeline))
-            .Where(panel => ShouldInclude(timeline, panel, VisualizationLayoutMode.UnifiedRoll, channelFilter))
-            .ToArray();
-        var eventPanels = diagnostic
-            .Where(panel => !IsUnifiedPitchPanel(panel, timeline))
-            .Where(panel => ShouldInclude(timeline, panel, VisualizationLayoutMode.UnifiedRoll, channelFilter))
-            .ToArray();
-
-        var panels = new List<VisualizationPanel>(eventPanels.Length + 1);
-        if (pitchPanels.Length > 0)
-        {
-            string[] voiceIds = pitchPanels
-                .SelectMany(panel => panel.VoiceIds.Concat(panel.OperatorVoiceIds))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            panels.Add(new VisualizationPanel(
-                "visualization.unified-roll",
-                "UNIFIED ROLL",
-                PreparedPanelKind.Pitched,
-                PanelContentKind.VoiceGroup,
-                0,
-                voiceIds,
-                Array.Empty<string>())
-            {
-                Schema = PanelPresentationSchema.PitchedLane,
-                Rows = Array.Empty<PanelRowDefinition>(),
-            });
-        }
-
-        panels.AddRange(eventPanels.Select((panel, index) => panel with { Order = index + panels.Count }));
-        return panels.Count > 0
-            ? new VisualizationTopology(panels)
-            : new VisualizationTopology(diagnostic.ToArray());
-    }
-
-    /// <summary>
-    /// A panel participates in the unified roll when it renders on an absolute
-    /// pitch lane. Ordinary pitched, FM-operator, and wavetable panels always
-    /// qualify; sample lanes qualify only when their voices carry real pitch
-    /// (e.g. SPC BRR voices), so a non-pitched PCM percussion channel is never
-    /// forced onto the shared roll.
-    /// </summary>
-    private static bool IsUnifiedPitchPanel(
-        VisualizationPanel panel,
-        VisualizationTimeline timeline)
-    {
-        if (panel.Schema is PanelPresentationSchema.PitchedLane
-            or PanelPresentationSchema.FmOperatorGroup
-            or PanelPresentationSchema.WaveTableLane)
-            return true;
-        if (panel.Schema != PanelPresentationSchema.SampleLane)
-            return false;
-
-        return panel.VoiceIds.Any(voiceId => timeline.Voices.Any(voice =>
-            string.Equals(voice.Id.ToString(), voiceId, StringComparison.Ordinal)
-            && voice.SupportsPitch
-            && !voice.IsNoise
-            && !voice.IsPercussion));
-    }
-
     internal static PanelPresentationSchema SchemaFor(PreparedPanelKind kind) => kind switch
     {
+        PreparedPanelKind.Generic => PanelPresentationSchema.GenericLane,
         PreparedPanelKind.Fm3 => PanelPresentationSchema.FmOperatorGroup,
         PreparedPanelKind.Pitched or PreparedPanelKind.Ssg => PanelPresentationSchema.PitchedLane,
         PreparedPanelKind.Noise => PanelPresentationSchema.NoiseLane,
@@ -563,8 +431,8 @@ internal static class VisualizationTopologyBuilder
     /// <summary>
     /// Presentation-driven panel mapping with explicit precedence. Every
     /// defined <see cref="VoicePresentationKind"/> maps to a deliberate panel
-    /// kind; <see cref="PreparedPanelKind.Placeholder"/> is reserved for
-    /// out-of-range (external) presentation values on ordinary voices.
+    /// kind; <see cref="PreparedPanelKind.Generic"/> is used when a decoder
+    /// provides activity without a specialized presentation.
     /// </summary>
     internal static PreparedPanelKind MapKind(VoiceDescriptor voice) =>
         voice.Presentation switch
@@ -587,7 +455,7 @@ internal static class VisualizationTopologyBuilder
             _ when voice.Id.Kind is VoiceKind.Adpcm or VoiceKind.Pcm or VoiceKind.PcmVoice or VoiceKind.Dpcm
                 => PreparedPanelKind.PcmVoice,
             _ when voice.Id.Kind is VoiceKind.Aggregate => PreparedPanelKind.Aggregate,
-            _ => PreparedPanelKind.Placeholder,
+            _ => PreparedPanelKind.Generic,
         };
 
 }

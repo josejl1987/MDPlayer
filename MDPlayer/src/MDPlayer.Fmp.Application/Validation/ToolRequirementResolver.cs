@@ -22,35 +22,15 @@ public static class ToolRequirementResolver
             Reason = "FFmpeg encodes the composed raw frames into the output video.",
         });
 
-        // Scope Stage always needs scope content → Corrscope. Performance needs
-        // Corrscope only when the optional signal strip is enabled. Diagnostic
-        // may include compact scopes when scope sources exist.
-        bool needsScopes = request.Composition switch
+        // Diagnostic is the only composition and always renders synchronized
+        // scope content → Corrscope is required.
+        requirements.Add(new ToolRequirement
         {
-            CompositionKind.ScopeStage => true,
-            CompositionKind.Diagnostic => true,
-            _ => request.View.PerformanceSignalStrip,
-        };
-        if (needsScopes)
-        {
-            requirements.Add(new ToolRequirement
-            {
-                Role = ToolRoles.Corrscope,
-                Kind = ToolRequirementKind.Required,
-                Feature = "scope content",
-                Reason = "This composition renders synchronized scope frames through Corrscope.",
-            });
-        }
-        else if (request.Composition == CompositionKind.Performance)
-        {
-            requirements.Add(new ToolRequirement
-            {
-                Role = ToolRoles.Corrscope,
-                Kind = ToolRequirementKind.Optional,
-                Feature = "signal strip",
-                Reason = "Scopes are an optional enhancement for Performance; Corrscope is needed only when the signal strip is enabled.",
-            });
-        }
+            Role = ToolRoles.Corrscope,
+            Kind = ToolRequirementKind.Required,
+            Feature = "scope content",
+            Reason = "The diagnostic composition renders synchronized scope frames through Corrscope.",
+        });
 
         if (request.Output.Encoder == VideoEncoder.Nvenc)
         {

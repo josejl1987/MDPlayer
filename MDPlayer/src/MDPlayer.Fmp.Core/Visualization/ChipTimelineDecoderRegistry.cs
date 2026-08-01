@@ -30,6 +30,15 @@ internal sealed class ChipTimelineDecoderRegistry
             ? _midiFactories.ContainsKey(chipType)
             : _factories.ContainsKey(chipType);
 
+    /// <summary>Chip families registered for semantic visualization.</summary>
+    public IReadOnlyList<string> SupportedChipNames
+        => _factories.Keys
+            .Concat(_midiFactories.Keys)
+            .Distinct()
+            .Select(type => type.ToString().ToLowerInvariant())
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
     public void RegisterMidi(ChipType chipType, Func<IMidiTimelineDecoder> factory)
     {
         ArgumentNullException.ThrowIfNull(factory);

@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
     <!-- The CLI and GUI consume the same application layer; tests too. -->
     <InternalsVisibleTo Include="mdplayer-render" />
     <InternalsVisibleTo Include="MDPlayer.Fmp.Tests" />

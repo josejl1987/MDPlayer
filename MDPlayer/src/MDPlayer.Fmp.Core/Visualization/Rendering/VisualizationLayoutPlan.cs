@@ -164,11 +164,9 @@ internal sealed record VisualizationLayoutPlan(
             regions.Add(Region($"panel.{index + 1}.header", "header", layout.GetHeaderRect(index)));
             if (layout.HasRoll)
                 regions.Add(Region($"panel.{index + 1}.timeline", "semantic", layout.GetTimelineRect(index)));
-            if (layout.HasScopes && !layout.IsSharedComposition)
+            if (layout.HasScopes)
                 regions.Add(Region($"panel.{index + 1}.scope", "scope", layout.GetScopeRect(index)));
         }
-        if (layout.HasScopes && layout.IsSharedComposition)
-            regions.Add(Region("shared-scope", "scope", layout.SharedScopeRect));
 
         double frameRate = fpsNumerator / (double)Math.Max(1, fpsDenominator);
         long estimatedFrames = frameRate > 0 && timeline.SampleRate > 0

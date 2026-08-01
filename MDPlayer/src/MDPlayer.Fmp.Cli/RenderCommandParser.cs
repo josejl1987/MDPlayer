@@ -58,7 +58,7 @@ internal static class RenderCommandParser
 
         // Builder state. Defaults come from the canonical schema defaults so an
         // omitted option keeps its request default (same contract as the GUI).
-        CompositionKind composition = CompositionKind.Performance;
+        CompositionKind composition = CompositionKind.Diagnostic;
         OutputSettings output = new();
         TrackSettings tracks = new();
         ViewSettings view = new();
@@ -154,9 +154,6 @@ internal static class RenderCommandParser
                         break;
                     case "--structure":
                         view = view with { Structure = ParseStructure(reader.RequireValue(name)) };
-                        break;
-                    case "--signal-strip" when value == null:
-                        view = view with { PerformanceSignalStrip = true };
                         break;
 
                     // ---- style settings ----
@@ -377,7 +374,6 @@ internal static class RenderCommandParser
         if (HasOption(args, "--future")) merged = merged with { FutureSeconds = cli.FutureSeconds };
         if (HasOption(args, "--time-grid")) merged = merged with { TimeGrid = cli.TimeGrid };
         if (HasOption(args, "--structure")) merged = merged with { Structure = cli.Structure };
-        if (HasOption(args, "--signal-strip")) merged = merged with { PerformanceSignalStrip = true };
         return merged;
     }
 
@@ -421,11 +417,9 @@ internal static class RenderCommandParser
 
     internal static CompositionKind ParseComposition(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
-        "performance" => CompositionKind.Performance,
-        "scope-stage" or "scopestage" => CompositionKind.ScopeStage,
         "diagnostic" => CompositionKind.Diagnostic,
         _ => throw new ArgumentException(
-            $"unknown composition '{raw}' (expected performance, scope-stage, or diagnostic)"),
+            $"unknown composition '{raw}' (expected diagnostic)"),
     };
 
     internal static RenderQuality ParseQuality(string raw) => raw?.Trim().ToLowerInvariant() switch

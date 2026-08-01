@@ -148,6 +148,71 @@ internal sealed partial class PanelOverlayRenderer
         return Math.Clamp((loopStart + loopPosition) / sourceLength, 0, 1);
     }
 
+    private void DrawGenericActivityPanel(Span<byte> frame, PanelData panel, long currentSample)
+    {
+        OverlayRect timeline = _layout.GetTimelineRect(panel.Index);
+        OverlayRect lane = new(
+            timeline.X + _layout.PitchLabelWidth,
+            timeline.Y,
+            Math.Max(1, timeline.Width - _layout.PitchLabelWidth),
+            timeline.Height);
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        int barHeight = Math.Max(4, lane.Height / 3);
+        int barY = lane.Y + Math.Max(0, (lane.Height - barHeight) / 2);
+
+        foreach (PreparedNote note in panel.Prepared.MainNotes)
+        {
+            if (note.EndSample <= windowStart || note.StartSample >= windowEnd)
+                continue;
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(note.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(note.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right > left)
+                FillRectFractionalX(frame, left, right, barY, barHeight, note.Fill);
+        }
+
+        foreach (SamplePlaybackEvent value in panel.Prepared.SamplePlayback)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+            DrawSamplePlayback(frame, panel, value, lane, currentSample);
+        }
+
+        foreach (NoiseStateEvent value in panel.Prepared.Noise)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right > left)
+                FillRectFractionalX(frame, left, right, barY, barHeight, panel.Prepared.Accent.WithAlpha(170));
+        }
+
+        foreach (PreparedRhythmEvent value in panel.Prepared.Rhythm)
+        {
+            if (value.SamplePosition < windowStart || value.SamplePosition >= windowEnd)
+                continue;
+            int x = (int)Math.Round(_layout.SampleToX(
+                value.SamplePosition, currentSample, _timeline.SampleRate, lane));
+            if (x >= lane.X && x < lane.Right)
+                DrawVerticalLine(frame, x, lane.Y, lane.Bottom - 1, panel.Prepared.Accent);
+        }
+
+        foreach (AggregateHitEvent value in panel.Prepared.AggregateHits)
+        {
+            if (value.SamplePosition < windowStart || value.SamplePosition >= windowEnd)
+                continue;
+            int x = (int)Math.Round(_layout.SampleToX(
+                value.SamplePosition, currentSample, _timeline.SampleRate, lane));
+            if (x >= lane.X && x < lane.Right)
+                DrawVerticalLine(frame, x, lane.Y, lane.Bottom - 1, panel.Prepared.Accent);
+        }
+    }
+
     private void DrawPlaceholderPanel(Span<byte> frame, PanelData panel, long currentSample)
     {
         // The static layer owns the true fallback label. Keeping this path

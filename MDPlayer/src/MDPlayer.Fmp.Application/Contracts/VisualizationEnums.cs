@@ -1,20 +1,13 @@
 namespace Fmp.Application.Contracts;
 
 /// <summary>
-/// The three public publishing compositions (final greenfield contract).
-/// There are no legacy aliases, no Auto, and no deprecation period.
-/// The canonical type lives in Core
-/// (<c>Fmp.Core.Visualization.Composition.Contracts.CompositionKind</c>); this
-/// alias keeps the public request contract readable.
+/// The public publishing composition. Currently exactly one: Diagnostic
+/// (technical inspection output: a semantic channel grid). Future layouts can
+/// be added back as additional values; the request contract carries the
+/// composition explicitly and never auto-resolves it.
 /// </summary>
 public enum CompositionKind
 {
-    /// <summary>Default audience-facing composition: a shared pitch roll.</summary>
-    Performance,
-
-    /// <summary>Waveform-focused composition: a large scope mosaic.</summary>
-    ScopeStage,
-
     /// <summary>Technical inspection output: a semantic channel grid.</summary>
     Diagnostic,
 }

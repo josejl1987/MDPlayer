@@ -267,12 +267,10 @@ internal static class VgmVisualizeCommand
                         ResetBelow = 0.2,
                         RenderWidth = layout.CorrscopeGridWidth,
                         RenderHeight = Math.Max(1, layout.CorrscopeGridHeight),
-                        LayoutNCols = layout.IsSharedComposition
-                            ? Math.Max(1, scopeResult.Stems.Count)
-                            : layout.ColumnCount,
+                        LayoutNCols = layout.ColumnCount,
                         IncludeMasterAsChannel = !hasRealStems,
                         IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                        HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
+                        HideLabels = true,
                         ResDivisor = 1.0,
                         Antialiasing = options.FinalQuality,
                     });
@@ -343,8 +341,7 @@ internal static class VgmVisualizeCommand
                             options.Subtitle ?? "",
                             options.Credits ?? ""),
                         FontPath = options.FontPath,
-                        PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic
-                            && layoutMode != VisualizationLayoutMode.DiagnosticV2,
+                        PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic,
                         Effects = options.Effects,
                         NoteColor = options.NoteColor,
                         Palette = options.Palette,

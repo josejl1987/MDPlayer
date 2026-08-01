@@ -45,7 +45,6 @@ public static class InvalidationCategorizer
             or nameof(ViewSettings.FutureSeconds)
             or nameof(ViewSettings.TimeGrid)
             or nameof(ViewSettings.Structure)
-            or nameof(ViewSettings.PerformanceSignalStrip)
             or nameof(OutputSettings.Width)
             or nameof(OutputSettings.Height)
             or nameof(OutputSettings.FpsNumerator)

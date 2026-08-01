@@ -30,7 +30,6 @@ public class InvalidationCategorizerTests
     [InlineData(nameof(ViewSettings.FutureSeconds), InvalidationCategory.LayoutAffecting)]
     [InlineData(nameof(ViewSettings.TimeGrid), InvalidationCategory.LayoutAffecting)]
     [InlineData(nameof(ViewSettings.Structure), InvalidationCategory.LayoutAffecting)]
-    [InlineData(nameof(ViewSettings.PerformanceSignalStrip), InvalidationCategory.LayoutAffecting)]
 
     [InlineData(nameof(VisualizationRequest.Playback), InvalidationCategory.CaptureAffecting)]
     [InlineData(nameof(PlaybackSettings.LoopCount), InvalidationCategory.CaptureAffecting)]

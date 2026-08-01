@@ -280,15 +280,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _panelAccents = new OverlayColor[_panels.Length];
         for (int i = 0; i < _panels.Length; i++)
         {
-            double emphasis = _layout.Mode is VisualizationLayoutMode.Diagnostic
-                or VisualizationLayoutMode.DiagnosticV2
-                ? 0
-                : Math.Clamp(
-                    (_panels[i].Prepared.Track.SalienceScore - 1.0) / 1.5,
-                    0,
-                    1);
-            _panelAccents[i] = Palette.ResolveAccent(_panels[i].Id, i)
-                .Lighten(emphasis * 0.20);
+            _panelAccents[i] = Palette.ResolveAccent(_panels[i].Id, i);
         }
 
         // §6.4: build a per-panel energy lookup keyed by panel index.
@@ -600,27 +592,23 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                         if (drawSemantic)
                             DrawRhythmPanel(destination, panel, currentSample);
                         break;
+                    case VisualizationTrackKind.Generic:
+                        if (drawSemantic)
+                            DrawGenericActivityPanel(destination, panel, currentSample);
+                        break;
                     case VisualizationTrackKind.ParameterActivity:
                     case VisualizationTrackKind.Unsupported:
                         DrawPlaceholderPanel(destination, panel, currentSample);
                         break;
                 }
 
-                // Shared publishing compositions reserve their header for the
-                // static composition label. Per-channel dynamic state would
-                // repeat across the compact lanes and adds no useful cue to
-                // the unified roll; diagnostic/split layouts retain it.
-                if (!_layout.IsSharedComposition)
-                    DrawDynamicPanelHeader(destination, panel, currentSample);
+                // Per-channel dynamic state in the panel header is retained
+                // for the diagnostic grid.
+                DrawDynamicPanelHeader(destination, panel, currentSample);
                 DrawPlayhead(destination, panel.Index);
             }
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
-
-        // ScopeStage reserves a compact synchronized activity strip below the
-        // mosaic. It shares the window and playhead of the scopes above.
-        if (_layout.IsScopeStage)
-            DrawScopeStageStrip(destination, currentSample);
 
         DrawPresentationTransition(destination, currentSample);
     }
@@ -979,29 +967,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         var rects = new List<OverlayRect>(2 + _panels.Length * 4);
         rects.Add(_layout.TopBarRect);
         rects.Add(_layout.BottomBarRect);
-        if (_layout.IsSharedComposition)
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
-            rects.Add(_layout.GetScopeRect(0));
-            for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
-            {
-                rects.Add(_layout.GetHeaderRect(panelIndex));
-                rects.Add(_layout.GetTimelineRect(panelIndex));
-            }
+            rects.Add(_layout.GetHeaderRect(panelIndex));
+            rects.Add(_layout.GetTimelineRect(panelIndex));
+            rects.Add(_layout.GetScopeRect(panelIndex));
         }
-        else
-        {
-            for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
-            {
-                rects.Add(_layout.GetHeaderRect(panelIndex));
-                rects.Add(_layout.GetTimelineRect(panelIndex));
-                rects.Add(_layout.GetScopeRect(panelIndex));
-            }
-        }
-
-        // The ScopeStage activity strip is dynamic content; restore it every
-        // frame so a sequential session cannot retain a previous frame.
-        if (_layout.IsScopeStage)
-            rects.Add(_layout.ScopeStageStripRect);
 
         // Restore runs before every dynamic draw, so copying a superset of a
         // region is always safe. Merge vertically adjacent rects that share
@@ -1122,38 +1093,36 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     }
 
     /// <summary>
-    /// Copies each scope row from the Corrscope grid strip into the transparent
-    /// scope holes of a composite frame. The grid is raw RGB0 (alpha bytes are
-    /// 0), so the alpha of every placed pixel is forced to 255 to make the
-    /// scopes opaque over the canvas.
+    /// Copies each scope cell from the Corrscope grid strip into the
+    /// transparent scope hole of its panel. The grid is raw RGB0 (alpha bytes
+    /// are 0), so the alpha of every placed pixel is forced to 255 to make the
+    /// scopes opaque over the canvas. Each grid row holds one cell per column;
+    /// the cell for panel <c>row*ColumnCount + column</c> starts at
+    /// <c>column * PanelWidth</c> within row <c>row</c>.
     /// </summary>
     private void PlaceScopeRows(ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
     {
         int sourceWidth = _layout.CorrscopeGridWidth;
         int sourceStride = sourceWidth * 4;
         int scopeHeight = _layout.ScopeHeight;
-        for (int row = 0; row < _layout.RowCount; row++)
+
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
-            OverlayRect scope = _layout.IsSharedComposition
-                ? _layout.SharedScopeRect
-                : _layout.GetScopeRect(Math.Min(row * _layout.ColumnCount, _layout.PanelCount - 1));
-            int destX = scope.X;
-            int destY = _layout.IsSharedComposition
-                ? scope.Y
-                : _layout.GetScopeRowDestinationY(row);
-            int copyWidth = Math.Min(sourceWidth, scope.Width);
+            int row = panelIndex / _layout.ColumnCount;
+            int column = panelIndex % _layout.ColumnCount;
+            OverlayRect scope = _layout.GetScopeRect(panelIndex);
+            int copyWidth = Math.Min(sourceWidth / _layout.ColumnCount, scope.Width);
             int srcY = row * scopeHeight;
+            int srcX = column * copyWidth;
             for (int y = 0; y < scopeHeight; y++)
             {
-                int src = (srcY + y) * sourceStride;
-                int dst = ((destY + y) * Width + destX) * 4;
+                int src = (srcY + y) * sourceStride + srcX * 4;
+                int dst = ((scope.Y + y) * Width + scope.X) * 4;
                 int copyBytes = copyWidth * 4;
                 scopeGrid.Slice(src, copyBytes).CopyTo(destination.Slice(dst, copyBytes));
                 for (int x = 0; x < copyBytes; x += 4)
                     destination[dst + x + 3] = 255;
             }
-            if (_layout.IsSharedComposition)
-                break;
         }
     }
 
@@ -1253,14 +1222,17 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
             OverlayColor accent = _panelAccents[index];
             FillRect(frame, new OverlayRect(header.X, header.Y, 4, header.Height), accent);
-            DrawText(
-                frame,
-                header.X + 10,
-                header.Y + Math.Max(2, (header.Height - 14) / 2),
-                _panels[index].Label,
-                BrightText,
-                2,
-                header.Right - 8);
+            if (header.Height > 0)
+            {
+                DrawText(
+                    frame,
+                    header.X + 10,
+                    header.Y + Math.Max(2, (header.Height - 14) / 2),
+                    _panels[index].Label,
+                    BrightText,
+                    2,
+                    header.Right - 8);
+            }
 
             switch (_panels[index].TrackKind)
             {
@@ -1291,6 +1263,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     break;
                 case VisualizationTrackKind.Percussion:
                     DrawStaticRhythmRows(frame, index);
+                    break;
+                case VisualizationTrackKind.Generic:
+                    DrawStaticEventLane(frame, timeline);
+                    if (!_panels[index].Prepared.HasTrackEvents)
+                        DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4),
+                            "ACTIVITY", MutedText, 1, timeline.Right - 8);
                     break;
                 case VisualizationTrackKind.ParameterActivity:
                 case VisualizationTrackKind.Unsupported:

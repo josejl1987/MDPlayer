@@ -23,12 +23,7 @@ public sealed class VisualizationV3ContractTests
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         foreach (VisualizationLayoutMode mode in new[]
         {
-            VisualizationLayoutMode.UnifiedRoll,
-            VisualizationLayoutMode.SplitRoll,
-            VisualizationLayoutMode.Scope,
-            VisualizationLayoutMode.Hybrid,
             VisualizationLayoutMode.Diagnostic,
-            VisualizationLayoutMode.DiagnosticV2,
         })
         {
             try
@@ -41,16 +36,10 @@ public sealed class VisualizationV3ContractTests
                         Height = height,
                         FpsNumerator = 20,
                         LayoutMode = mode,
-                        Channels = VisualizationChannelFilter.Active,
+                        Channels = VisualizationChannelFilter.All,
                     });
 
-                if (mode == VisualizationLayoutMode.DiagnosticV2)
-                    continue;
-
-                if (!renderer.Layout.IsSharedComposition)
-                    Assert.True(renderer.Layout.PanelWidth >= 300);
-                else
-                    Assert.True(renderer.Layout.SharedSemanticRect.Width >= 300);
+                Assert.True(renderer.Layout.PanelWidth >= 300);
             }
             catch (ArgumentException ex)
             {
@@ -65,12 +54,7 @@ public sealed class VisualizationV3ContractTests
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         var cases = new[]
         {
-            (VisualizationLayoutMode.UnifiedRoll, VisualizationScopePosition.Bottom),
-            (VisualizationLayoutMode.SplitRoll, VisualizationScopePosition.Bottom),
-            (VisualizationLayoutMode.Scope, VisualizationScopePosition.Right),
-            (VisualizationLayoutMode.Hybrid, VisualizationScopePosition.Left),
             (VisualizationLayoutMode.Diagnostic, VisualizationScopePosition.Top),
-            (VisualizationLayoutMode.DiagnosticV2, VisualizationScopePosition.Bottom),
         };
 
         foreach ((VisualizationLayoutMode mode, VisualizationScopePosition position) in cases)
@@ -84,9 +68,7 @@ public sealed class VisualizationV3ContractTests
                     FpsNumerator = 20,
                     LayoutMode = mode,
                     ScopePosition = position,
-                    Channels = mode is VisualizationLayoutMode.Diagnostic or VisualizationLayoutMode.DiagnosticV2
-                        ? VisualizationChannelFilter.All
-                        : VisualizationChannelFilter.Active,
+                    Channels = VisualizationChannelFilter.All,
                 });
 
             int[] queriedFrames = [0, 1, 7, 17, 61, 99];
@@ -146,7 +128,7 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 30,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 MotionBlurSamples = 3,
             });
         byte[] scope = new byte[renderer.ScopeFrameByteCount];
@@ -167,7 +149,7 @@ public sealed class VisualizationV3ContractTests
 
         byte[][] parallel = [new byte[renderer.FrameByteCount], new byte[renderer.FrameByteCount]];
         Parallel.For(0, parallel.Length, index =>
-            renderer.RenderCompositeFrame(12, ReadOnlySpan<byte>.Empty, parallel[index]));
+            renderer.RenderCompositeFrame(12, scope, parallel[index]));
         Assert.Equal(SHA256.HashData(direct), SHA256.HashData(parallel[0]));
         Assert.Equal(SHA256.HashData(direct), SHA256.HashData(parallel[1]));
     }
@@ -186,7 +168,7 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 30,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 Renderer = VisualizationRendererMode.Gpu,
             });
         using var cpu = new PanelOverlayRenderer(
@@ -196,7 +178,7 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 30,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 Renderer = VisualizationRendererMode.Cpu,
             });
 
@@ -277,7 +259,7 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 30,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 Palette = palette,
             });
         var baseline = new PanelOverlayRenderer(
@@ -287,7 +269,7 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 30,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
             });
         byte[] customFrame = new byte[layout.FrameByteCount];
         byte[] baselineFrame = new byte[baseline.FrameByteCount];
@@ -307,9 +289,9 @@ public sealed class VisualizationV3ContractTests
                 Width = 1280,
                 Height = 720,
                 FpsNumerator = 20,
-                LayoutMode = VisualizationLayoutMode.Hybrid,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 ScopePosition = VisualizationScopePosition.Bottom,
-                Channels = VisualizationChannelFilter.Active,
+                Channels = VisualizationChannelFilter.All,
             });
 
         int[] frames = [0, 11, 37, 73, 99];
@@ -380,7 +362,7 @@ public sealed class VisualizationV3ContractTests
             "--time-window", "1.25:3.5",
             "--channels", "semantic",
             "--effects", "diagnostic",
-            "--layout", "split",
+            "--layout", "diagnostic",
             "--scope-ratio", "0.32",
             "--time-grid", "authoritative",
             "--layout-json", "plan.json",
@@ -394,14 +376,14 @@ public sealed class VisualizationV3ContractTests
         Assert.Equal(3.5, options.FutureSeconds);
         Assert.Equal(VisualizationChannelFilter.Semantic, options.Channels);
         Assert.Equal(EffectsMode.Diagnostic, options.Effects);
-        Assert.Equal(VisualizationLayoutMode.SplitRoll, options.LayoutMode);
+        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
         Assert.Equal(0.32, options.ScopeRatio);
         Assert.Equal(VisualizationTimeGrid.Authoritative, options.TimeGrid);
         Assert.Equal("plan.json", options.LayoutJson);
     }
 
     [Fact]
-    public void HybridScopeRatioIsAppliedToAvailableContent()
+    public void ScopeRatioIsAppliedToAvailableContent()
     {
         var layout = new OverlayLayout(
             960,
@@ -409,15 +391,17 @@ public sealed class VisualizationV3ContractTests
             0.75,
             2.25,
             1,
-            VisualizationLayoutMode.Hybrid,
+            VisualizationLayoutMode.Diagnostic,
             scopeRatioOverride: 0.32);
 
-        Assert.Equal((int)Math.Round(layout.GridHeight * 0.32), layout.ScopeHeight);
+        Assert.Equal(
+            (int)Math.Round((layout.PanelHeight - layout.PanelHeaderHeight) * 0.32),
+            layout.ScopeHeight);
         Assert.True(layout.TimelineHeight >= 16);
     }
 
     [Fact]
-    public void AutoPrefersPerformanceWhenPitchedVoicesExist()
+    public void AutoResolvesToDiagnosticWhenPitchedVoicesExist()
     {
         VisualizationTimeline timeline = new()
         {
@@ -434,12 +418,12 @@ public sealed class VisualizationV3ContractTests
         };
 
         Assert.Equal(
-            VisualizationLayoutMode.Performance,
+            VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
     }
 
     [Fact]
-    public void AutoUsesOneScopeFallbackWhenOnlyScopeCapabilityIsAvailable()
+    public void AutoKeepsEveryVoiceInTheDiagnosticTopology()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
         VisualizationTimeline timeline = new()
@@ -451,20 +435,17 @@ public sealed class VisualizationV3ContractTests
         };
 
         Assert.Equal(
-            VisualizationLayoutMode.ScopeStage,
+            VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             timeline,
             VisualizationLayoutMode.Auto,
-            VisualizationChannelFilter.Active);
-        VisualizationPanel panel = Assert.Single(topology.Panels);
-        Assert.Equal("visualization.master-scope", panel.Id);
-        Assert.Equal(PanelPresentationSchema.AggregateActivity, panel.Schema);
-        Assert.Equal(VisualizationDeviceCatalog.Ym2608Voices().Count, panel.VoiceIds.Count);
+            VisualizationChannelFilter.All);
+        Assert.Equal(VisualizationDeviceCatalog.Ym2608Voices().Count, topology.Panels.Count);
     }
 
     [Fact]
-    public void AutoFallsBackToScopeStageForIncompatiblePitchModels()
+    public void AutoResolvesToDiagnosticForIncompatiblePitchModels()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
         VoiceDescriptor first = VisualizationDeviceCatalog.Ym2608Voices()[0] with
@@ -488,11 +469,10 @@ public sealed class VisualizationV3ContractTests
             ],
         };
 
-        // A unified roll cannot invent an absolute coordinate for the
-        // relative-only voice; with usable scope stems Auto prefers the
-        // ScopeStage wall, whose waveforms never depend on pitch models.
+        // Auto never substitutes; it resolves to the single Diagnostic
+        // composition whose per-panel grid needs no unified pitch model.
         Assert.Equal(
-            VisualizationLayoutMode.ScopeStage,
+            VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
     }
 
@@ -526,29 +506,6 @@ public sealed class VisualizationV3ContractTests
         Assert.Equal(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutModeResolver.Resolve(timeline, VisualizationLayoutMode.Auto));
-    }
-
-    [Fact]
-    public void ExplicitUnifiedFallsBackWhenAnySelectedPitchModelIsRelative()
-    {
-        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
-        VoiceDescriptor voice = VisualizationDeviceCatalog.Ym2608Voices()[0] with
-        {
-            PitchSystem = PitchCoordinateSystem.RelativeSemitone,
-        };
-        VisualizationTimeline timeline = new()
-        {
-            SampleRate = 1_000,
-            EndSample = 1_000,
-            Devices = [device],
-            Voices = [voice],
-        };
-
-        Assert.Equal(
-            VisualizationLayoutMode.SplitRoll,
-            VisualizationLayoutModeResolver.Resolve(
-                timeline,
-                VisualizationLayoutMode.UnifiedRoll));
     }
 
     [Fact]
@@ -745,58 +702,20 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void UnifiedAndHybridUseSharedSemanticRegions()
-    {
-        var unified = new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
-            new PanelOverlayRenderer.Options
-            {
-                Width = 960,
-                Height = 540,
-                FpsNumerator = 20,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
-                Channels = VisualizationChannelFilter.Active,
-            });
-        var hybrid = new PanelOverlayRenderer(
-            VisualizationTimelineFixture.Create(),
-            new PanelOverlayRenderer.Options
-            {
-                Width = 960,
-                Height = 540,
-                FpsNumerator = 20,
-                LayoutMode = VisualizationLayoutMode.Hybrid,
-                Channels = VisualizationChannelFilter.Active,
-            });
-
-        Assert.True(unified.Layout.IsSharedComposition);
-        Assert.Equal(1, unified.Layout.ColumnCount);
-        Assert.Equal(1, unified.Layout.RowCount);
-        Assert.Equal(0, unified.Layout.ScopeHeight);
-        Assert.True(unified.Layout.SharedSemanticRect.Height >= 120);
-        Assert.True(hybrid.Layout.IsSharedComposition);
-        Assert.True(hybrid.Layout.ScopeHeight > 0);
-        Assert.Equal(hybrid.Layout.ScopeHeight, hybrid.Layout.CorrscopeGridHeight);
-        Assert.True(hybrid.Layout.SharedScopeRect.Bottom <= hybrid.Height - hybrid.Layout.BottomBarHeight);
-
-        _ = unified.RenderFrame(0);
-        _ = hybrid.RenderFrame(0);
-    }
-
-    [Fact]
     public void PreparedPanelsCarryRendererNeutralTrackDescriptors()
     {
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.SplitRoll,
-            VisualizationChannelFilter.Active);
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationChannelFilter.All);
         var layout = new OverlayLayout(
             960,
             720,
             0.75,
             2.25,
             topology.Panels.Count,
-            VisualizationLayoutMode.SplitRoll);
+            VisualizationLayoutMode.Diagnostic);
         OverlayScene scene = OverlaySceneBuilder.Build(timeline, layout, topology);
 
         Assert.Contains(scene.Panels, panel => panel.Track.Kind == VisualizationTrackKind.Pitched);
@@ -821,15 +740,15 @@ public sealed class VisualizationV3ContractTests
             VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
             VisualizationTopology topology = VisualizationTopologyBuilder.Build(
                 timeline,
-                VisualizationLayoutMode.UnifiedRoll,
-                VisualizationChannelFilter.Active);
+                VisualizationLayoutMode.Diagnostic,
+                VisualizationChannelFilter.All);
             var layout = new OverlayLayout(
                 960,
                 540,
                 0.75,
                 2.25,
                 topology.Panels.Count,
-                VisualizationLayoutMode.UnifiedRoll);
+                VisualizationLayoutMode.Diagnostic);
             VisualizationLayoutPlan plan = VisualizationLayoutPlan.Create(
                 timeline,
                 topology,
@@ -878,7 +797,7 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void HorizontalScopePositionUsesASeparateScopeFrameGeometry()
+    public void ScopePositionFlowsIntoScopeFrameGeometry()
     {
         var renderer = new PanelOverlayRenderer(
             VisualizationTimelineFixture.Create(),
@@ -887,15 +806,16 @@ public sealed class VisualizationV3ContractTests
                 Width = 960,
                 Height = 540,
                 FpsNumerator = 20,
-                LayoutMode = VisualizationLayoutMode.Hybrid,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 ScopePosition = VisualizationScopePosition.Left,
-                Channels = VisualizationChannelFilter.Active,
+                Channels = VisualizationChannelFilter.All,
             });
 
-        Assert.True(renderer.Layout.SharedScopeRect.Width < renderer.Width);
-        Assert.Equal(renderer.Layout.SharedScopeRect.Width, renderer.Layout.CorrscopeGridWidth);
-        Assert.Equal(renderer.Layout.SharedScopeRect.Height, renderer.Layout.CorrscopeGridHeight);
-        Assert.True(renderer.Layout.SharedSemanticRect.X > 0);
+        // The per-panel scope rect uses the full canvas width in the
+        // Diagnostic grid (Corrscope agreement), and the frame geometry
+        // matches it exactly.
+        Assert.Equal(renderer.Layout.CorrscopeGridWidth, renderer.Layout.Width);
+        Assert.Equal(renderer.Layout.CorrscopeGridHeight, renderer.Layout.ScopeHeight * renderer.Layout.RowCount);
         Assert.Equal(
             renderer.Layout.CorrscopeGridWidth * renderer.Layout.CorrscopeGridHeight * 4,
             renderer.ScopeFrameByteCount);
@@ -921,13 +841,13 @@ public sealed class VisualizationV3ContractTests
 
         VisualizationTopology ungrouped = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.SplitRoll,
-            VisualizationChannelFilter.Active,
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationChannelFilter.All,
             VisualizationGroupBy.None);
         VisualizationTopology grouped = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.SplitRoll,
-            VisualizationChannelFilter.Active,
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationChannelFilter.All,
             VisualizationGroupBy.Device);
 
         Assert.True(grouped.Panels.Count < ungrouped.Panels.Count);
@@ -935,7 +855,7 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
-    public void PublishingFilterOmitsSilentDescriptorsButDiagnosticKeepsThem()
+    public void ActiveFilterOmitsSilentDescriptorsButAllKeepsThem()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2612();
         VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2612Voices().Take(2).ToArray();
@@ -952,21 +872,21 @@ public sealed class VisualizationV3ContractTests
             ],
         };
 
-        VisualizationTopology publishing = VisualizationTopologyBuilder.Build(
+        VisualizationTopology active = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.SplitRoll,
+            VisualizationLayoutMode.Diagnostic,
             VisualizationChannelFilter.Active);
         VisualizationTopology diagnostic = VisualizationTopologyBuilder.Build(
             timeline,
             VisualizationLayoutMode.Diagnostic,
             VisualizationChannelFilter.All);
 
-        Assert.Single(publishing.Panels);
+        Assert.Single(active.Panels);
         Assert.Equal(2, diagnostic.Panels.Count);
     }
 
     [Fact]
-    public void AllFilterPreservesSilentDescriptorsInSplitLayout()
+    public void AllFilterPreservesSilentDescriptorsInDiagnosticLayout()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2612();
         VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2612Voices().Take(2).ToArray();
@@ -985,7 +905,7 @@ public sealed class VisualizationV3ContractTests
 
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.SplitRoll,
+            VisualizationLayoutMode.Diagnostic,
             VisualizationChannelFilter.All);
 
         Assert.Equal(2, topology.Panels.Count);
@@ -997,8 +917,8 @@ public sealed class VisualizationV3ContractTests
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         VisualizationTopology topology = VisualizationTopologyBuilder.Build(
             timeline,
-            VisualizationLayoutMode.UnifiedRoll,
-            VisualizationChannelFilter.Active,
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationChannelFilter.All,
             VisualizationGroupBy.None);
         var layout = new OverlayLayout(
             1280,
@@ -1006,14 +926,14 @@ public sealed class VisualizationV3ContractTests
             0.75,
             2.25,
             topology.Panels.Count,
-            VisualizationLayoutMode.UnifiedRoll);
+            VisualizationLayoutMode.Diagnostic);
 
         VisualizationLayoutPlan plan = VisualizationLayoutPlan.Create(
             timeline,
             topology,
             layout,
             VisualizationLayoutMode.Auto,
-            VisualizationChannelFilter.Active,
+            VisualizationChannelFilter.All,
             VisualizationGroupBy.None,
             VisualizationTimeGrid.Automatic,
             VisualizationScopePosition.Bottom,
@@ -1023,7 +943,7 @@ public sealed class VisualizationV3ContractTests
             "libx264",
             "none");
 
-        Assert.Equal("unified", plan.SelectedLayout);
+        Assert.Equal("diagnostic", plan.SelectedLayout);
         Assert.True(plan.EstimatedFrameCount > 0);
         Assert.Contains(plan.Tracks, track => track.Selected && track.PitchSystem == "AbsoluteMidi");
         Assert.Contains(plan.Tracks, track => track.CameraMinimumMidi.HasValue

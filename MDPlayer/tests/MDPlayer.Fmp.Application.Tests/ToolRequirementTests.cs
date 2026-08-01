@@ -16,32 +16,10 @@ public class ToolRequirementTests
             && requirement.Kind == ToolRequirementKind.Required);
     }
 
-    [Theory]
-    [InlineData(CompositionKind.ScopeStage)]
-    [InlineData(CompositionKind.Diagnostic)]
-    public void ScopeCompositions_RequireCorrscope(CompositionKind composition)
-    {
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request() with { Composition = composition });
-        Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
-            && requirement.Kind == ToolRequirementKind.Required);
-    }
-
     [Fact]
-    public void Performance_WithoutSignalStrip_CorrscopeIsOptional()
+    public void Diagnostic_RequiresCorrscope()
     {
         IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(Request());
-        Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
-            && requirement.Kind == ToolRequirementKind.Optional);
-    }
-
-    [Fact]
-    public void Performance_WithSignalStrip_RequiresCorrscope()
-    {
-        VisualizationRequest request = Request() with
-        {
-            View = new ViewSettings { PerformanceSignalStrip = true },
-        };
-        IReadOnlyList<ToolRequirement> requirements = ToolRequirementResolver.Resolve(request);
         Assert.Contains(requirements, requirement => requirement.Role == ToolRoles.Corrscope
             && requirement.Kind == ToolRequirementKind.Required);
     }
@@ -69,8 +47,10 @@ public class ToolRequirementTests
         var statuses = new Dictionary<string, ToolStatus>
         {
             [ToolRoles.Ffmpeg] = new() { Role = ToolRoles.Ffmpeg, IsRequired = true, IsAvailable = true },
+            [ToolRoles.Corrscope] = new() { Role = ToolRoles.Corrscope, IsRequired = true, IsAvailable = true },
         };
-        // Default Performance request requires only FFmpeg.
+        // Default Diagnostic request requires FFmpeg and Corrscope; both are
+        // available, so the request is renderable until one of them drops.
         Assert.True(ToolRequirementResolver.AllAvailable(requirements, statuses));
 
         statuses[ToolRoles.Ffmpeg] = statuses[ToolRoles.Ffmpeg] with { IsAvailable = false };

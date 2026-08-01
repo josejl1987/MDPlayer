@@ -18,7 +18,7 @@ public sealed record VisualizationRequest
     public required string OutputPath { get; init; }
 
     /// <summary>Explicit composition. Never auto-resolved; CLI never silently substitutes.</summary>
-    public CompositionKind Composition { get; init; } = CompositionKind.Performance;
+    public CompositionKind Composition { get; init; } = CompositionKind.Diagnostic;
 
     public OutputSettings Output { get; init; } = new();
     public TrackSettings Tracks { get; init; } = new();
@@ -69,9 +69,6 @@ public sealed record ViewSettings
     public TimeGridMode TimeGrid { get; init; } = TimeGridMode.Automatic;
 
     public StructureOverlayMode Structure { get; init; } = StructureOverlayMode.Automatic;
-
-    /// <summary>Performance-only: show the compact signal strip (off by default).</summary>
-    public bool PerformanceSignalStrip { get; init; }
 }
 
 /// <summary>Visual style: effects, note coloring and palette.</summary>

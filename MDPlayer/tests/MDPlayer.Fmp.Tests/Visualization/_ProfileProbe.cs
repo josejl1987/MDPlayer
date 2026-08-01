@@ -23,7 +23,7 @@ public sealed class ProfileProbe
                 Width = 1920,
                 Height = 1080,
                 FpsNumerator = 60,
-                LayoutMode = VisualizationLayoutMode.UnifiedRoll,
+                LayoutMode = VisualizationLayoutMode.Diagnostic,
                 Channels = VisualizationChannelFilter.Active,
                 Effects = EffectsMode.Minimal,
             });

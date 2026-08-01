@@ -13,40 +13,10 @@ internal static class VisualizationLayoutValidator
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(topology);
 
-        // diagnostic-v2 is the explicitly retained compatibility renderer.
-        // Its compact historical geometry must remain available during the
-        // migration window.
-        if (layout.Mode == VisualizationLayoutMode.DiagnosticV2)
-            return;
-
         int minimumPanelWidth = 300;
         int minimumScopeHeight = layout.Height >= 720 ? 56 : Math.Max(24, (int)Math.Round(56 * layout.Height / 720.0));
         int minimumPitchedLaneHeight = layout.Height >= 720 ? 72 : Math.Max(32, (int)Math.Round(72 * layout.Height / 720.0));
         int minimumPercussionRowHeight = layout.Height >= 720 ? 14 : Math.Max(8, (int)Math.Round(14 * layout.Height / 720.0));
-
-        if (layout.IsSharedComposition)
-        {
-            if (layout.SharedSemanticRect.Width < minimumPanelWidth)
-                throw new ArgumentException(
-                    $"{layout.Mode} needs at least {minimumPanelWidth}px of semantic width; "
-                    + "increase the output width or choose a split/scope layout.", nameof(layout));
-
-            int minimumSemanticHeight = layout.Height >= 720
-                ? 220
-                : Math.Max(120, (int)Math.Round(220 * layout.Height / 720.0));
-            if (layout.HasRoll && layout.SharedSemanticRect.Height < minimumSemanticHeight)
-                throw new ArgumentException(
-                    $"{layout.Mode} needs at least {minimumSemanticHeight}px for the shared semantic region; "
-                    + "reduce optional channels, lower the scope ratio, or increase the output height.", nameof(layout));
-
-            if (layout.HasScopes && layout.SharedScopeRect.Height < minimumScopeHeight
-                && layout.ScopePosition is VisualizationScopePosition.Top or VisualizationScopePosition.Bottom)
-                throw new ArgumentException(
-                    $"{layout.Mode} needs at least {minimumScopeHeight}px for the scope region; "
-                    + "reduce the scope ratio only when the resulting scope remains readable.", nameof(layout));
-
-            return;
-        }
 
         if (layout.PanelWidth < minimumPanelWidth)
             throw new ArgumentException(

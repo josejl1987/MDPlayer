@@ -175,7 +175,7 @@ public static class PreviewCommand
 
         var presentation = VisualizationSupport.ResolvePresentation(options, new FileInfo(options.Input));
         (bool hasApproximations, string[] approximationNotes) = ComputeApproximationNotes(
-            request, output.Layout, output.ResolvedLayout);
+            output.Layout);
 
         if (settings.Motion)
             return RunMotion(settings, options, output, presentation, hasApproximations, approximationNotes);
@@ -320,17 +320,10 @@ public static class PreviewCommand
     }
 
     private static (bool HasApproximations, string[] Notes) ComputeApproximationNotes(
-        VisualizationRequest request,
-        OverlayLayout layout,
-        VisualizationLayoutMode resolvedMode)
+        OverlayLayout layout)
     {
         var notes = new List<string>();
-        bool hasScopes = layout.HasScopes
-            || resolvedMode is VisualizationLayoutMode.Scope
-                or VisualizationLayoutMode.ScopeStage
-                or VisualizationLayoutMode.Hybrid
-                or VisualizationLayoutMode.Diagnostic
-                or VisualizationLayoutMode.DiagnosticV2;
+        bool hasScopes = layout.HasScopes;
         if (hasScopes)
             notes.Add("Scope wall omitted in preview");
         return (notes.Count > 0, notes.ToArray());

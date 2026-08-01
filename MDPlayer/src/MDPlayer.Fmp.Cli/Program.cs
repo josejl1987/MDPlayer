@@ -66,7 +66,7 @@ public class Program
         Console.WriteLine();
         Console.WriteLine("Render options:");
         Console.WriteLine("  -o, --output PATH          Output video path");
-        Console.WriteLine("  --composition performance|scope-stage|diagnostic  Composition (default: performance)");
+        Console.WriteLine("  --composition diagnostic       Composition (default: diagnostic)");
         Console.WriteLine("  --quality draft|standard|final  Render quality profile (default: standard)");
         Console.WriteLine("  --width PIXELS             Video width (default: 1920)");
         Console.WriteLine("  --height PIXELS            Video height (default: 1080)");
@@ -79,7 +79,6 @@ public class Program
         Console.WriteLine("  --future SECONDS           Future time window (default: 3.2)");
         Console.WriteLine("  --time-grid none|automatic|authoritative|analytical");
         Console.WriteLine("  --structure off|automatic  Structural analysis overlay");
-        Console.WriteLine("  --signal-strip             Performance: show the compact signal strip");
         Console.WriteLine("  --effects off|subtle|cinematic  Visual effect preset (default: subtle)");
         Console.WriteLine("  --note-color instrument|channel|pitch");
         Console.WriteLine("  --palette default|accessible|monochrome");
@@ -125,7 +124,7 @@ public class Program
         Console.WriteLine("  --corpus DIR               Real-file corpus (or MDPLAYER_REVIEW_CORPUS)");
         Console.WriteLine("  --output DIR               Review artifact directory");
         Console.WriteLine("  --file TEXT --chip NAME --moment NAME");
-        Console.WriteLine("  --composition performance|scope-stage|diagnostic");
+        Console.WriteLine("  --composition diagnostic");
         Console.WriteLine("  --resolution 720p|1080p   --keep-existing");
         Console.WriteLine("  --allow-missing-chips");
         Console.WriteLine();

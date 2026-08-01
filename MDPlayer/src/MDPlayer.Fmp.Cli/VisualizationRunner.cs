@@ -207,7 +207,7 @@ internal static class VisualizationRunner
             options.LayoutJson);
         bool useScopes = options.StemsOnly || layout.HasScopes;
         StemPass[] scopeStems = useScopes
-            ? SelectScopeStems(topology, layoutMode)
+            ? DefaultStems.All
             : [DefaultStems.All[0]];
 
         try { VisualizationJsonWriter.Write(workspace.TimelinePath, capture.Timeline); }
@@ -288,7 +288,7 @@ internal static class VisualizationRunner
                     RenderHeight = options.Height,
                     LayoutNCols = layout.ColumnCount,
                     IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                    HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
+                    HideLabels = true,
                     FfmpegVideoTemplate = options.CorrscopeVideoTemplate,
                     ResDivisor = options.FinalQuality ? 1.0 : 2.0,
                     Antialiasing = options.FinalQuality,
@@ -316,11 +316,9 @@ internal static class VisualizationRunner
                     Fps = options.Fps,
                     RenderWidth = layout.CorrscopeGridWidth,
                     RenderHeight = layout.CorrscopeGridHeight,
-                    LayoutNCols = layout.IsSharedComposition
-                        ? Math.Max(1, scopeStems.Length)
-                        : layout.ColumnCount,
+                    LayoutNCols = layout.ColumnCount,
                     IncludeSilentChannels = options.Channels == VisualizationChannelFilter.All,
-                    HideLabels = layoutMode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage),
+                    HideLabels = true,
                     ResDivisor = 1.0,
                     Antialiasing = options.FinalQuality,
                 });
@@ -377,8 +375,7 @@ internal static class VisualizationRunner
                 TimeGrid = options.TimeGrid,
                 Presentation = presentation,
                 FontPath = options.FontPath,
-                PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic
-                    && layoutMode != VisualizationLayoutMode.DiagnosticV2,
+                PreferAntialiasedText = options.Preset != VisualizationPreset.Diagnostic,
                 Effects = options.Effects,
                 NoteColor = options.NoteColor,
                 Palette = options.Palette,
@@ -470,27 +467,5 @@ internal static class VisualizationRunner
         return string.Equals(Path.GetExtension(configured), ".json", StringComparison.OrdinalIgnoreCase)
             ? configured
             : Path.Combine(configured, "analysis.json");
-    }
-
-    private static StemPass[] SelectScopeStems(
-        VisualizationTopology topology,
-        VisualizationLayoutMode layoutMode)
-    {
-        if (layoutMode is VisualizationLayoutMode.Diagnostic or VisualizationLayoutMode.DiagnosticV2)
-            return DefaultStems.All;
-
-        // Unified and hybrid layouts intentionally collapse compatible voices
-        // into a shared semantic panel. Scope selection must retain the
-        // source-track identities carried by that panel; matching only its
-        // synthetic panel ID would silently reduce the scope wall to master.
-        var activeTrackIds = topology.Panels
-            .SelectMany(panel => new[] { panel.Id }
-                .Concat(panel.VoiceIds)
-                .Concat(panel.OperatorVoiceIds))
-            .ToHashSet(StringComparer.Ordinal);
-        return DefaultStems.All
-            .Where(stem => stem.PresentationTrackId == "master"
-                || activeTrackIds.Contains(stem.PresentationTrackId))
-            .ToArray();
     }
 }

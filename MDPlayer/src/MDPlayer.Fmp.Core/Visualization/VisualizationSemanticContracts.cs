@@ -2,6 +2,7 @@ namespace Fmp.Core.Visualization;
 
 internal enum VisualizationTrackKind
 {
+    Generic,
     Pitched,
     FmOperatorGroup,
     Noise,

@@ -76,7 +76,7 @@ internal static class OverlaySceneBuilder
                 and not PitchCoordinateSystem.AbsoluteMidi)
                 sourceNotes = sourceNotes.Select(note => ConvertPitchCoordinates(note, track));
 
-            var mainNotes = (kind is PreparedPanelKind.Pitched or PreparedPanelKind.Fm3 or PreparedPanelKind.Ssg
+            var mainNotes = (kind is PreparedPanelKind.Generic or PreparedPanelKind.Pitched or PreparedPanelKind.Fm3 or PreparedPanelKind.Ssg
                     or PreparedPanelKind.Wavetable or PreparedPanelKind.PcmVoice or PreparedPanelKind.Noise)
                 ? ToPreparedNotes(
                     sourceNotes,
@@ -234,6 +234,11 @@ internal static class OverlaySceneBuilder
                     samplePlayback.Length > 0 || mainNotes.Length > 0,
                 PreparedPanelKind.Noise => noise.Length > 0 || mainNotes.Length > 0,
                 PreparedPanelKind.Aggregate => aggregateHits.Length > 0,
+                PreparedPanelKind.Generic => mainNotes.Length > 0
+                    || rhythm.Length > 0
+                    || samplePlayback.Length > 0
+                    || noise.Length > 0
+                    || aggregateHits.Length > 0,
                 PreparedPanelKind.Placeholder => false,
                 _ => false,
             };
@@ -303,6 +308,7 @@ internal static class OverlaySceneBuilder
             : panel.Schema;
         VisualizationTrackKind kind = schema switch
         {
+            PanelPresentationSchema.GenericLane => VisualizationTrackKind.Generic,
             PanelPresentationSchema.PitchedLane => VisualizationTrackKind.Pitched,
             PanelPresentationSchema.FmOperatorGroup => VisualizationTrackKind.FmOperatorGroup,
             PanelPresentationSchema.NoiseLane => VisualizationTrackKind.Noise,

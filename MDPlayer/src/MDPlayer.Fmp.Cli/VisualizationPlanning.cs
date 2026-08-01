@@ -21,7 +21,8 @@ internal static class VisualizationPlanning
         VisualizationPlanResult Plan,
         VisualizationTimeline Timeline,
         VisualizationLayoutMode ResolvedLayout,
-        OverlayLayout Layout);
+        OverlayLayout Layout,
+        string MasterAudioPath);
 
     /// <summary>
     /// Full plan for a request. <paramref name="timelinePath"/> reuses an
@@ -40,6 +41,7 @@ internal static class VisualizationPlanning
 
         PreparedTrack? track = null;
         VisualizationTimeline timeline;
+        string masterAudioPath = options.ReviewMasterAudioPath;
         if (timelinePath != null && File.Exists(timelinePath))
         {
             timeline = VisualizationJsonWriter.Read(timelinePath);
@@ -98,6 +100,14 @@ internal static class VisualizationPlanning
                             options.SsgGainDb),
                         eventSink);
                     session.Run();
+                    if (!string.IsNullOrWhiteSpace(options.ReviewMasterAudioPath)
+                        && File.Exists(audioPath))
+                    {
+                        string audioDirectory = Path.GetDirectoryName(options.ReviewMasterAudioPath) ?? ".";
+                        Directory.CreateDirectory(audioDirectory);
+                        File.Copy(audioPath, options.ReviewMasterAudioPath, overwrite: true);
+                        masterAudioPath = options.ReviewMasterAudioPath;
+                    }
                     timeline = eventSink.Complete(
                         session.SamplePosition,
                         "completed",
@@ -181,7 +191,7 @@ internal static class VisualizationPlanning
             TimelinePath = timelineOutPath,
         };
 
-        return new PlanOutput(request, plan, timeline, resolvedMode, layout);
+        return new PlanOutput(request, plan, timeline, resolvedMode, layout, masterAudioPath);
     }
 
     /// <summary>
@@ -217,8 +227,7 @@ internal static class VisualizationPlanning
                 TimeGrid = options.TimeGrid,
                 Presentation = presentation,
                 FontPath = options.FontPath,
-                PreferAntialiasedText = options.Preset != Fmp.Core.Visualization.Rendering.VisualizationPreset.Diagnostic
-                    && resolvedMode != VisualizationLayoutMode.DiagnosticV2,
+                PreferAntialiasedText = options.Preset != Fmp.Core.Visualization.Rendering.VisualizationPreset.Diagnostic,
                 Effects = options.Effects,
                 NoteColor = options.NoteColor,
                 LayoutMode = resolvedMode,
@@ -349,12 +358,7 @@ internal static class VisualizationPlanning
             || timeline.WaveformChanges.Any(evt => evt.VoiceId == voiceId);
     }
 
-    internal static string RequestedLayoutName(CompositionKind composition) => composition switch
-    {
-        CompositionKind.ScopeStage => "scope-stage",
-        CompositionKind.Diagnostic => "diagnostic",
-        _ => "performance",
-    };
+    internal static string RequestedLayoutName(CompositionKind composition) => "diagnostic";
 
     private static string SemanticTypeName(VoicePresentationKind presentation) => presentation switch
     {

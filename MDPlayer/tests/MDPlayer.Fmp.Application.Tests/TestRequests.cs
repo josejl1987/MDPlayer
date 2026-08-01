@@ -34,7 +34,7 @@ internal static class TestRequests
         VisualizationRequest request = Valid();
         return request with
         {
-            Composition = CompositionKind.ScopeStage,
+            Composition = CompositionKind.Diagnostic,
             Output = new OutputSettings
             {
                 Quality = RenderQuality.Final,
@@ -58,7 +58,6 @@ internal static class TestRequests
                 FutureSeconds = 1.6,
                 TimeGrid = TimeGridMode.Analytical,
                 Structure = StructureOverlayMode.Off,
-                PerformanceSignalStrip = true,
             },
             Style = new StyleSettings
             {

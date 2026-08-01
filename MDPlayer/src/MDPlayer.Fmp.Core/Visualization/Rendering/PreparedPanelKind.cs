@@ -5,6 +5,8 @@ namespace Fmp.Core.Visualization.Rendering;
 /// </summary>
 internal enum PreparedPanelKind
 {
+    /// <summary>Generic activity lane for an unsupported specialized presentation.</summary>
+    Generic,
     /// <summary>FM pitched channel (panels 0,1,3,4,5).</summary>
     Pitched,
     /// <summary>FM3 special panel with operator lanes (panel 2).</summary>

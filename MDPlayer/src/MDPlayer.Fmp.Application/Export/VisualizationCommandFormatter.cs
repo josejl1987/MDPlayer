@@ -32,9 +32,10 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         ArgumentNullException.ThrowIfNull(request);
         var arguments = new List<string> { "render", request.InputPath };
 
-        // Composition.
+        // Composition. Diagnostic is the only composition and the request
+        // default, so compact output omits it; FullyResolved always emits it.
         AddIf(arguments, "--composition", CompositionName(request.Composition), mode,
-            request.Composition != CompositionKind.Performance);
+            request.Composition != CompositionKind.Diagnostic);
 
         // Output.
         AddIf(arguments, "--output", request.OutputPath, mode, true);
@@ -72,8 +73,6 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         AddIf(arguments, "--future", Format(view.FutureSeconds), mode, view.FutureSeconds != 3.2);
         AddIf(arguments, "--time-grid", TimeGridName(view.TimeGrid), mode, view.TimeGrid != TimeGridMode.Automatic);
         AddIf(arguments, "--structure", StructureName(view.Structure), mode, view.Structure != StructureOverlayMode.Automatic);
-        if (view.PerformanceSignalStrip)
-            arguments.Add("--signal-strip");
 
         // Style.
         StyleSettings style = request.Style;
@@ -109,12 +108,7 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         };
     }
 
-    internal static string CompositionName(CompositionKind composition) => composition switch
-    {
-        CompositionKind.ScopeStage => "scope-stage",
-        CompositionKind.Diagnostic => "diagnostic",
-        _ => "performance",
-    };
+    internal static string CompositionName(CompositionKind composition) => "diagnostic";
 
     internal static string QualityName(RenderQuality quality) => quality.ToString().ToLowerInvariant();
 

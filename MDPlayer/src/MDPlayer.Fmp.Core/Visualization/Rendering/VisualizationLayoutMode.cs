@@ -1,26 +1,13 @@
 namespace Fmp.Core.Visualization.Rendering;
 
 /// <summary>
-/// Renderer composition. The publishing surface exposes three intentional
-/// compositions — Performance (unified roll), ScopeStage (scope wall) and
-/// Diagnostic (full channel grid). The remaining values are legacy modes kept
-/// for CLI/GUI back-compatibility; they resolve to the same rendering paths
-/// as the three canonical compositions.
+/// Renderer composition. The publishing surface currently exposes a single
+/// composition — Diagnostic (full channel grid). <see cref="Auto"/> resolves
+/// to Diagnostic and exists as the default entry point; future layouts can be
+/// added back as additional enum values without touching the dispatch surface.
 /// </summary>
 internal enum VisualizationLayoutMode
 {
     Diagnostic,
-    Focus,
-    Scope,
-    SplitRoll,
-    UnifiedRoll,
-    Hybrid,
     Auto,
-    DiagnosticV2,
-    /// <summary>Canonical publishing composition: one dominant unified roll,
-    /// compact unpitched lanes, and an optional compact scope strip.</summary>
-    Performance,
-    /// <summary>Canonical publishing composition: a large scope mosaic with a
-    /// compact synchronized activity strip below the scopes.</summary>
-    ScopeStage,
 }

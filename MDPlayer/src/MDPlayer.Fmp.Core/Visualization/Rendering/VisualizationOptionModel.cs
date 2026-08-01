@@ -150,14 +150,11 @@ internal static class VisualizationOptionParsing
 internal static class VisualizationLayoutModeResolver
 {
     /// <summary>
-    /// The three canonical publishing compositions. Auto resolves to one of
-    /// these; every other mode is a legacy alias or an explicit technical
-    /// request that renders as-is.
+    /// The canonical publishing compositions. Currently exactly one: Diagnostic.
+    /// Auto resolves to it; the array is the extension point for future layouts.
     /// </summary>
     public static readonly VisualizationLayoutMode[] CanonicalCompositions =
     [
-        VisualizationLayoutMode.Performance,
-        VisualizationLayoutMode.ScopeStage,
         VisualizationLayoutMode.Diagnostic,
     ];
 
@@ -166,60 +163,10 @@ internal static class VisualizationLayoutModeResolver
         VisualizationLayoutMode requested)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        if (requested is (VisualizationLayoutMode.UnifiedRoll
-            or VisualizationLayoutMode.Hybrid
-            or VisualizationLayoutMode.Performance)
-            && timeline.Voices.Any(voice => voice.SupportsPitch
-                && !voice.IsNoise
-                && !voice.IsPercussion
-                && !IsAbsolutePitchSystem(voice.PitchSystem)))
-        {
-            // A shared composition cannot invent an absolute coordinate for a
-            // relative-only voice. Split is the actionable safe fallback and
-            // is reported as the selected layout in the prepared plan.
-            return VisualizationLayoutMode.SplitRoll;
-        }
-
-        if (requested != VisualizationLayoutMode.Auto)
-            return requested;
-
-        HashSet<string> noteChannels = timeline.Notes
-            .Where(note => VisualizationActivity.IsMeaningfulNote(timeline, note))
-            .Select(note => note.ChannelId)
-            .ToHashSet(StringComparer.Ordinal);
-        int pitched = timeline.Voices.Count(voice => voice.SupportsPitch
-            && !voice.IsNoise
-            && !voice.IsPercussion
-            && noteChannels.Contains(voice.Id.ToString()));
-        bool hasScope = timeline.WaveformChanges.Length > 0
-            || timeline.Devices.Any(device => device.ScopeSupport != ScopeSupport.None);
-
-        bool pitchModelsCompatible = timeline.Voices
-            .Where(voice => voice.SupportsPitch
-                && !voice.IsNoise
-                && !voice.IsPercussion
-                && noteChannels.Contains(voice.Id.ToString()))
-            .Select(voice => voice.PitchSystem)
-            .All(IsAbsolutePitchSystem);
-
-        // Canonical Auto policy. Auto chooses among exactly three publishing
-        // compositions and is deterministic for a given captured timeline:
-        //   * compatible pitched voices present -> Performance (unified roll)
-        //   * only scope content reliable       -> ScopeStage (scope wall)
-        //   * otherwise                          -> Diagnostic (grid)
-        if (pitched >= 1 && pitchModelsCompatible)
-            return VisualizationLayoutMode.Performance;
-
-        if (hasScope)
-            return VisualizationLayoutMode.ScopeStage;
-
-        return VisualizationLayoutMode.Diagnostic;
+        return requested == VisualizationLayoutMode.Auto
+            ? VisualizationLayoutMode.Diagnostic
+            : requested;
     }
-
-    private static bool IsAbsolutePitchSystem(PitchCoordinateSystem system)
-        => system is PitchCoordinateSystem.AbsoluteMidi
-            or PitchCoordinateSystem.AbsoluteSemitone
-            or PitchCoordinateSystem.FrequencyHz;
 }
 
 internal static class VisualizationContentAvailability
@@ -243,31 +190,18 @@ internal static class VisualizationLayoutNames
 {
     public static string ToCliName(VisualizationLayoutMode mode) => mode switch
     {
-        VisualizationLayoutMode.Focus => "auto",
-        VisualizationLayoutMode.UnifiedRoll => "unified",
-        VisualizationLayoutMode.SplitRoll => "split",
-        VisualizationLayoutMode.DiagnosticV2 => "diagnostic-v2",
-        VisualizationLayoutMode.Performance => "performance",
-        VisualizationLayoutMode.ScopeStage => "scope-stage",
+        VisualizationLayoutMode.Auto => "auto",
+        VisualizationLayoutMode.Diagnostic => "diagnostic",
         _ => mode.ToString().ToLowerInvariant(),
     };
 
     /// <summary>
-    /// The canonical composition family of a resolved mode. Legacy modes map
-    /// onto their publishing equivalent so plans, HTML previews and the GUI
-    /// all speak the three-composition vocabulary.
+    /// The canonical composition family of a resolved mode. Currently every
+    /// mode maps to Diagnostic; kept as a switch so future layouts can map
+    /// onto their publishing equivalent.
     /// </summary>
-    public static VisualizationLayoutMode CanonicalFamily(VisualizationLayoutMode mode) => mode switch
-    {
-        VisualizationLayoutMode.Performance
-            or VisualizationLayoutMode.UnifiedRoll
-            or VisualizationLayoutMode.Hybrid
-            or VisualizationLayoutMode.SplitRoll
-            or VisualizationLayoutMode.Focus => VisualizationLayoutMode.Performance,
-        VisualizationLayoutMode.ScopeStage
-            or VisualizationLayoutMode.Scope => VisualizationLayoutMode.ScopeStage,
-        _ => VisualizationLayoutMode.Diagnostic,
-    };
+    public static VisualizationLayoutMode CanonicalFamily(VisualizationLayoutMode mode)
+        => mode is VisualizationLayoutMode.Auto ? VisualizationLayoutMode.Diagnostic : mode;
 
     public static string ToCompositionName(VisualizationLayoutMode mode)
         => ToCliName(CanonicalFamily(mode));

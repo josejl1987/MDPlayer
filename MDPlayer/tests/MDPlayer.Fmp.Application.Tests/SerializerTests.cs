@@ -18,7 +18,7 @@ public class SerializerTests
         // assert canonical JSON stability plus targeted field checks.
         Assert.Equal(json, VisualizationRequestSerializer.Serialize(restored));
 
-        Assert.Equal(CompositionKind.ScopeStage, restored.Composition);
+        Assert.Equal(CompositionKind.Diagnostic, restored.Composition);
         Assert.Equal(RenderQuality.Final, restored.Output.Quality);
         Assert.Equal(60000, restored.Output.FpsNumerator);
         Assert.Equal(1001, restored.Output.FpsDenominator);
@@ -34,7 +34,6 @@ public class SerializerTests
         Assert.Equal(1.6, restored.View.FutureSeconds);
         Assert.Equal(TimeGridMode.Analytical, restored.View.TimeGrid);
         Assert.Equal(StructureOverlayMode.Off, restored.View.Structure);
-        Assert.True(restored.View.PerformanceSignalStrip);
 
         Assert.Equal(VisualEffects.Cinematic, restored.Style.Effects);
         Assert.Equal(NoteColorMode.Channel, restored.Style.NoteColor);

@@ -13,12 +13,12 @@ namespace MDPlayer.Fmp.Tests;
 public sealed class VgmVisualizeFlagTests
 {
     [Fact]
-    public void Parse_ParsesLayoutFocus()
+    public void Parse_ParsesLayoutDiagnostic()
     {
-        var options = VisualizeCommand.ParseArgs(["track.vgm", "--layout", "focus"]);
+        var options = VisualizeCommand.ParseArgs(["track.vgm", "--layout", "diagnostic"]);
 
         Assert.NotNull(options);
-        Assert.Equal(VisualizationLayoutMode.Focus, options.LayoutMode);
+        Assert.Equal(VisualizationLayoutMode.Diagnostic, options.LayoutMode);
     }
 
     [Fact]
@@ -37,7 +37,7 @@ public sealed class VgmVisualizeFlagTests
         (VisualizeOptions options, string stderr) = ParseCapture(["track.vgm", "--layout", "mosaic"]);
 
         Assert.Null(options);
-        Assert.Contains("auto, performance, scope-stage, diagnostic", stderr, StringComparison.Ordinal);
+        Assert.Contains("auto or diagnostic", stderr, StringComparison.Ordinal);
     }
 
     [Fact]

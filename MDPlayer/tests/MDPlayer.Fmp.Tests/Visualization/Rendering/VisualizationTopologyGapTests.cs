@@ -120,10 +120,10 @@ public sealed class VisualizationTopologyGapTests
     }
 
     [Fact]
-    public void MapKind_ExternalPresentationOnOrdinaryVoiceStaysPlaceholder()
+    public void MapKind_ExternalPresentationOnOrdinaryVoiceUsesGenericFallback()
     {
         var voice = Voice((VoicePresentationKind)999);
-        Assert.Equal(PreparedPanelKind.Placeholder, VisualizationTopologyBuilder.MapKind(voice));
+        Assert.Equal(PreparedPanelKind.Generic, VisualizationTopologyBuilder.MapKind(voice));
     }
 
     [Fact]

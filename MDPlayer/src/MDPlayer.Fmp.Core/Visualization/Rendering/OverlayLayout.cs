@@ -9,8 +9,9 @@ internal readonly record struct OverlayRect(int X, int Y, int Width, int Height)
 
 /// <summary>
 /// Adaptive panel geometry shared by the musical overlay and the Corrscope
-/// compositor. Layout mode controls whether the composition is a scope wall,
-/// a split piano roll, a unified roll, or the diagnostic hybrid.
+/// compositor. The current single composition is the diagnostic full channel
+/// grid; the constructor keeps the layout-mode switch so future layouts can
+/// add their own geometry without changing the dispatch surface.
 /// </summary>
 internal sealed class OverlayLayout
 {
@@ -35,11 +36,6 @@ internal sealed class OverlayLayout
     public static readonly string[] PanelIds = VisualizationTopologyCompatibility.LegacyPanelIds;
 
     public static readonly string[] PanelLabels = VisualizationTopologyCompatibility.LegacyPanelLabels;
-
-    private readonly bool _sharedComposition;
-    private readonly OverlayRect _sharedSemanticRect;
-    private readonly OverlayRect _sharedScopeRect;
-    private readonly OverlayRect[] _sharedCompactRegions;
 
     public OverlayLayout(int width, int height, double pastSeconds, double futureSeconds)
         : this(width, height, pastSeconds, futureSeconds, panelCount: 12)
@@ -75,12 +71,7 @@ internal sealed class OverlayLayout
     {
         if (panelCount is < 1 or > 64)
             throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 64.");
-        _sharedComposition = mode is VisualizationLayoutMode.UnifiedRoll
-            or VisualizationLayoutMode.Hybrid
-            or VisualizationLayoutMode.Performance;
-        (int columns, int rows) = _sharedComposition
-            ? (1, 1)
-            : GridForPanelCount(panelCount);
+        (int columns, int rows) = GridForPanelCount(panelCount);
         if (width <= 0)
             throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be positive.");
         if (!double.IsFinite(pastSeconds) || pastSeconds <= 0)
@@ -104,14 +95,8 @@ internal sealed class OverlayLayout
         Mode = mode;
         RollZoom = rollZoom;
         ScopePosition = scopePosition;
-        HasScopes = mode is VisualizationLayoutMode.Diagnostic
-            or VisualizationLayoutMode.DiagnosticV2
-            or VisualizationLayoutMode.Focus
-            or VisualizationLayoutMode.Scope
-            or VisualizationLayoutMode.ScopeStage
-            or VisualizationLayoutMode.Hybrid
-            or VisualizationLayoutMode.Performance;
-        HasRoll = mode is not (VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage);
+        HasScopes = true;
+        HasRoll = true;
 
         // Reserve the top and bottom metadata bands. The bands scale
         // proportionally with the canvas height, clamped to sensible minimums,
@@ -122,15 +107,6 @@ internal sealed class OverlayLayout
         int nominalBottom = ClampBand((int)Math.Round(height * (DefaultBottomBarHeight / 1080.0)), 24, 64);
 
         int gridHeight = height - nominalTop - nominalBottom;
-        // ScopeStage reserves a compact synchronized activity strip at the
-        // bottom of the grid. The scope mosaic above it must stay exactly
-        // divisible by RowCount because Corrscope and the overlay agree on
-        // exact cell sizes.
-        int scopeStageStrip = mode == VisualizationLayoutMode.ScopeStage
-            ? Math.Clamp((int)Math.Round(height * (72.0 / 1080.0)), 36, 96)
-            : 0;
-        if (scopeStageStrip > 0)
-            gridHeight -= scopeStageStrip;
         // Adjust the bottom bar so the grid divides evenly into Rows.
         int remainder = gridHeight % RowCount;
         if (remainder != 0)
@@ -138,7 +114,7 @@ internal sealed class OverlayLayout
             // Push the shortfall into the bottom bar so the top bar stays stable
             // (the top bar carries the title, which should not jump around).
             nominalBottom += remainder;
-            gridHeight = height - nominalTop - nominalBottom - scopeStageStrip;
+            gridHeight = height - nominalTop - nominalBottom;
         }
 
         if (gridHeight <= 0)
@@ -153,7 +129,6 @@ internal sealed class OverlayLayout
         TopBarHeight = nominalTop;
         BottomBarHeight = nominalBottom;
         GridHeight = gridHeight;
-        ScopeStageStripHeight = scopeStageStrip;
 
         OuterMargin = 0;
         ColumnGap = 0;
@@ -167,142 +142,26 @@ internal sealed class OverlayLayout
         SafeHorizontalMargin = Math.Clamp((int)Math.Round(width * (32.0 / 1920.0)), 16, 32);
         SafeVerticalMargin = Math.Clamp((int)Math.Round(height * (24.0 / 1080.0)), 12, 24);
 
-        if (_sharedComposition)
-        {
-            PanelHeaderHeight = Math.Clamp(
-                (int)Math.Round(height * (DefaultPanelHeaderHeight / 1080.0)),
-                height >= 720 ? 20 : 12,
-                32);
-            int divider = HasScopes
-                ? Math.Max(1, (int)Math.Round(height * (DefaultDividerHeight / 1080.0)))
-                : 0;
-            int minimumSemanticHeight = height >= 720 ? 220 : 120;
-            bool horizontalScope = HasScopes
-                && (scopePosition is VisualizationScopePosition.Left or VisualizationScopePosition.Right);
-            int requestedScope = HasScopes
-                ? scopeHeightOverride ?? (int)Math.Round(
-                    (horizontalScope ? width : gridHeight) * (scopeRatioOverride ?? DefaultScopeRatio(mode)))
-                : 0;
-            int minimumScopeSize = height >= 720 ? 56 : 32;
-            int maximumScopeSize = horizontalScope
-                ? Math.Max(minimumScopeSize, width - 300 - divider)
-                : Math.Max(minimumScopeSize, gridHeight - minimumSemanticHeight - divider);
-            int scopeSize = HasScopes
-                ? Math.Clamp(requestedScope, minimumScopeSize, maximumScopeSize)
-                : 0;
-            DividerHeight = divider;
-
-            int semanticBandHeight = horizontalScope
-                ? gridHeight
-                : gridHeight - scopeSize - DividerHeight;
-            int compactCount = Math.Max(0, panelCount - 1);
-            // Performance keeps the unpitched lanes deliberately compact
-            // (≈15 px at 1080p) so the unified roll stays the dominant visual
-            // region; legacy shared modes retain the previous 24 px lanes.
-            double laneScale = mode == VisualizationLayoutMode.Performance ? 10.0 : 16.0;
-            int compactLaneHeight = compactCount == 0
-                ? 0
-                : Math.Max(
-                    mode == VisualizationLayoutMode.Performance ? 10 : 12,
-                    (int)Math.Round(height * (laneScale / 720.0)));
-            if (compactCount > 0
-                && semanticBandHeight - compactCount * compactLaneHeight < minimumSemanticHeight)
-            {
-                compactLaneHeight = (semanticBandHeight - minimumSemanticHeight) / compactCount;
-                if (compactLaneHeight < 12)
-                    throw new ArgumentOutOfRangeException(
-                        nameof(panelCount),
-                        "Shared layout cannot keep the semantic region and compact event lanes readable; reduce channels or group tracks.");
-            }
-
-            int mainHeight = semanticBandHeight - compactCount * compactLaneHeight;
-            if (mainHeight - PanelHeaderHeight < 16)
-                throw new ArgumentOutOfRangeException(
-                    nameof(height),
-                    "Shared layout cannot provide the minimum readable semantic region at this resolution.");
-
-            bool scopeAtTop = scopePosition == VisualizationScopePosition.Top;
-            bool scopeAtLeft = scopePosition == VisualizationScopePosition.Left;
-            int semanticX = horizontalScope && scopeAtLeft
-                ? scopeSize + DividerHeight
-                : 0;
-            int semanticY = !horizontalScope && scopeAtTop
-                ? GridY + scopeSize + DividerHeight
-                : GridY;
-            int semanticWidth = horizontalScope
-                ? width - scopeSize - DividerHeight
-                : width;
-            int scopeX = horizontalScope && !scopeAtLeft
-                ? semanticWidth + DividerHeight
-                : 0;
-            int scopeY = !horizontalScope && !scopeAtTop
-                ? semanticY + semanticBandHeight + DividerHeight
-                : GridY;
-            ScopeHeight = horizontalScope ? gridHeight : scopeSize;
-            _sharedSemanticRect = new(semanticX, semanticY, semanticWidth, mainHeight);
-            _sharedScopeRect = new(
-                scopeX,
-                scopeY,
-                horizontalScope ? scopeSize : width,
-                horizontalScope ? gridHeight : scopeSize);
-            _sharedCompactRegions = new OverlayRect[compactCount];
-            for (int i = 0; i < compactCount; i++)
-            {
-                _sharedCompactRegions[i] = new OverlayRect(
-                    semanticX,
-                    semanticY + mainHeight + i * compactLaneHeight,
-                    semanticWidth,
-                    compactLaneHeight);
-            }
-
-            PanelWidth = semanticWidth;
-            PanelHeight = mainHeight;
-            TimelineHeight = mainHeight - PanelHeaderHeight;
-            PitchLabelWidth = Math.Max(20, width / 80);
-            PlayheadFraction = pastSeconds / (pastSeconds + futureSeconds);
-            return;
-        }
-
-        _sharedSemanticRect = default;
-        _sharedScopeRect = default;
-        _sharedCompactRegions = Array.Empty<OverlayRect>();
-
         // Panel sub-regions scale with the panel height, anchored to the
         // reference 1080p proportions (header 20, scope 84, divider 2,
         // timeline 138 out of 244).
-        PanelHeaderHeight = mode is VisualizationLayoutMode.Scope
-            or VisualizationLayoutMode.ScopeStage
-            ? 0
-            : Math.Clamp(
-                (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight)),
-                height >= 720 ? 20 : 12,
-                32);
+        PanelHeaderHeight = Math.Clamp(
+            (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight)),
+            height >= 720 ? 20 : 12,
+            32);
 
         int availableContentHeight = PanelHeight - PanelHeaderHeight;
-        if (mode is VisualizationLayoutMode.Scope or VisualizationLayoutMode.ScopeStage)
-        {
-            ScopeHeight = availableContentHeight;
-            DividerHeight = 0;
-            TimelineHeight = 0;
-        }
-        else
-        {
-            int defaultScopeHeight = (int)Math.Round(
-                PanelHeight * (DefaultScopeHeight / (double)DefaultPanelHeight));
-            if (mode == VisualizationLayoutMode.Hybrid && scopeHeightOverride is null)
-            {
-                double ratio = scopeRatioOverride ?? 0.32;
-                defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * ratio));
-            }
+        int defaultScopeHeight = (int)Math.Round(
+            PanelHeight * (DefaultScopeHeight / (double)DefaultPanelHeight));
+        if (scopeHeightOverride is null && scopeRatioOverride is not null)
+            defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * scopeRatioOverride.Value));
 
-            ScopeHeight = scopeHeightOverride ?? (HasScopes
-                ? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2))
-                : 0);
-            DividerHeight = HasScopes ? Math.Max(1,
-                (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight))) : 0;
-            int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
-            TimelineHeight = timelineHeightOverride ?? derivedTimeline;
-        }
+        ScopeHeight = scopeHeightOverride
+            ?? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2));
+        DividerHeight = Math.Max(1,
+            (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight)));
+        int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
+        TimelineHeight = timelineHeightOverride ?? derivedTimeline;
 
         if (ScopeHeight < 0 || TimelineHeight < 0
             || PanelHeaderHeight + ScopeHeight + DividerHeight + TimelineHeight > PanelHeight)
@@ -323,8 +182,6 @@ internal sealed class OverlayLayout
     public int TopBarHeight { get; }
     public int BottomBarHeight { get; }
     public int GridHeight { get; }
-    /// <summary>Height reserved for the ScopeStage compact activity strip.</summary>
-    public int ScopeStageStripHeight { get; }
     public int GridY => TopBarHeight;
     public int OuterMargin { get; }
     public int ColumnGap { get; }
@@ -338,12 +195,8 @@ internal sealed class OverlayLayout
     public int DividerHeight { get; }
     public double WindowSeconds => PastSeconds + FutureSeconds;
     public double PlayheadFraction { get; }
-    public int CorrscopeGridHeight => _sharedComposition
-        ? ScopeHeight
-        : ScopeHeight * RowCount;
-    public int CorrscopeGridWidth => _sharedComposition
-        ? _sharedScopeRect.Width
-        : Width;
+    public int CorrscopeGridHeight => ScopeHeight * RowCount;
+    public int CorrscopeGridWidth => Width;
     public double PastSeconds { get; }
     public double FutureSeconds { get; }
     public int PitchLabelWidth { get; }
@@ -353,21 +206,6 @@ internal sealed class OverlayLayout
     public VisualizationScopePosition ScopePosition { get; }
     public bool HasScopes { get; }
     public bool HasRoll { get; }
-    public bool IsUnifiedRoll => Mode is VisualizationLayoutMode.UnifiedRoll
-        or VisualizationLayoutMode.Hybrid
-        or VisualizationLayoutMode.Performance;
-    public bool IsSharedComposition => _sharedComposition;
-    public bool IsScopeStage => Mode == VisualizationLayoutMode.ScopeStage;
-    public bool IsPerformance => Mode == VisualizationLayoutMode.Performance;
-    public OverlayRect SharedSemanticRect => _sharedSemanticRect;
-    public OverlayRect SharedScopeRect => _sharedScopeRect;
-
-    /// <summary>
-    /// The compact synchronized activity strip shown below the ScopeStage
-    /// mosaic. Empty for every other composition.
-    /// </summary>
-    public OverlayRect ScopeStageStripRect
-        => new(0, GridY + GridHeight, Width, ScopeStageStripHeight);
 
     public OverlayRect TopBarRect => new(0, 0, Width, TopBarHeight);
 
@@ -397,8 +235,6 @@ internal sealed class OverlayLayout
     {
         if (row < 0 || row >= RowCount)
             throw new ArgumentOutOfRangeException(nameof(row));
-        if (_sharedComposition)
-            return _sharedScopeRect.Y;
         return GetScopeRect(Math.Min(row * ColumnCount, PanelCount - 1)).Y;
     }
 
@@ -406,18 +242,8 @@ internal sealed class OverlayLayout
     {
         if (panelIndex < 0 || panelIndex >= PanelCount)
             throw new ArgumentOutOfRangeException(nameof(panelIndex));
-        if (_sharedComposition)
-        {
-            if (panelIndex == 0)
-                return _sharedSemanticRect;
-            return _sharedCompactRegions[panelIndex - 1];
-        }
         int column = panelIndex % ColumnCount;
         int row = panelIndex / ColumnCount;
-        // Distribute a one- or two-pixel remainder across the rightmost
-        // columns instead of rejecting valid publishing resolutions such as
-        // 2560px wide. Corrscope and the overlay still use the same exact
-        // width because both consume these prepared rectangles.
         int x = OuterMargin + (int)((long)Width * column / ColumnCount);
         int nextX = OuterMargin + (int)((long)Width * (column + 1) / ColumnCount);
         int y = GridY + OuterMargin + row * (PanelHeight + RowGap);
@@ -434,8 +260,6 @@ internal sealed class OverlayLayout
     public OverlayRect GetScopeRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        if (_sharedComposition)
-            return _sharedScopeRect;
         int y = ScopePosition == VisualizationScopePosition.Bottom
             ? panel.Bottom - ScopeHeight
             : panel.Y + PanelHeaderHeight;
@@ -445,24 +269,6 @@ internal sealed class OverlayLayout
     public OverlayRect GetTimelineRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        if (_sharedComposition)
-        {
-            if (panelIndex == 0)
-            {
-                return new OverlayRect(
-                    panel.X,
-                    panel.Y + PanelHeaderHeight,
-                    panel.Width,
-                    Math.Max(0, panel.Height - PanelHeaderHeight));
-            }
-
-            int headerHeight = Math.Min(PanelHeaderHeight, panel.Height);
-            return new OverlayRect(
-                panel.X,
-                panel.Y + headerHeight,
-                panel.Width,
-                Math.Max(0, panel.Height - headerHeight));
-        }
         int y = ScopePosition == VisualizationScopePosition.Bottom
             ? panel.Y + PanelHeaderHeight + DividerHeight
             : panel.Y + PanelHeaderHeight + ScopeHeight + DividerHeight;
@@ -523,15 +329,6 @@ internal sealed class OverlayLayout
 
     private static int ClampBand(int value, int min, int max)
         => Math.Clamp(value, min, max);
-
-    /// <summary>
-    /// Default scope-strip ratio for shared compositions. Performance keeps
-    /// the strip deliberately compact (≈170 px at 1080p) so the unified roll
-    /// stays the dominant visual region; legacy Hybrid retains the previous
-    /// larger ratio for back-compatibility.
-    /// </summary>
-    private static double DefaultScopeRatio(VisualizationLayoutMode mode)
-        => mode == VisualizationLayoutMode.Performance ? 0.18 : 0.32;
 
     private static (int Columns, int Rows) GridForPanelCount(int panelCount) => panelCount switch
     {

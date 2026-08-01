@@ -16,12 +16,6 @@ public static class VisualizeCommand
             Console.Error.WriteLine("error: no input file specified");
             return 2;
         }
-        if (options.LayoutMode == VisualizationLayoutMode.Focus)
-        {
-            Console.Error.WriteLine("warning: --layout focus is deprecated; using --layout auto --channels active");
-            options.LayoutMode = VisualizationLayoutMode.Auto;
-            options.Channels = VisualizationChannelFilter.Active;
-        }
 
         VisualizationBackendResolution resolution;
         try

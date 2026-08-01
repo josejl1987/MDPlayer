@@ -124,6 +124,8 @@ internal sealed partial class PanelOverlayRenderer
     private void DrawDynamicPanelHeader(Span<byte> frame, PanelData panel, long currentSample)
     {
         OverlayRect header = _layout.GetHeaderRect(panel.Index);
+        if (header.Height <= 0)
+            return;
         PreparedNote active = FindActive(panel.Prepared.MainNotes, currentSample);
         if (active == null && panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
         {

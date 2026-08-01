@@ -70,7 +70,7 @@ public class FormatterTests
         [
             "render",
             request.InputPath,
-            "--composition", "scope-stage",
+            "--composition", "diagnostic",
             "--output", request.OutputPath,
             "--quality", "final",
             "--width", "1920",
@@ -86,7 +86,6 @@ public class FormatterTests
             "--future", "1.6",
             "--time-grid", "analytical",
             "--structure", "off",
-            "--signal-strip",
             "--effects", "cinematic",
             "--note-color", "channel",
             "--palette", "accessible",
@@ -119,7 +118,7 @@ public class FormatterTests
             "--composition", "--output",
             "--quality", "--width", "--height", "--fps", "--fps-denominator",
             "--tracks", "--include-track", "--exclude-track", "--include-inactive",
-            "--past", "--future", "--time-grid", "--structure", "--signal-strip",
+            "--past", "--future", "--time-grid", "--structure",
             "--effects", "--note-color", "--palette",
             "--title", "--subtitle", "--credits", "--font",
             "--loops", "--fade", "--tail", "--max-duration", "--sample-rate",
@@ -195,8 +194,6 @@ public class FormatterTests
     // ---- CLI-name mapping of enum values (formatter static helpers) ----
 
     [Theory]
-    [InlineData(CompositionKind.Performance, "performance")]
-    [InlineData(CompositionKind.ScopeStage, "scope-stage")]
     [InlineData(CompositionKind.Diagnostic, "diagnostic")]
     public void CompositionName_MapsCliNames(CompositionKind value, string expected)
         => Assert.Equal(expected, VisualizationCommandFormatter.CompositionName(value));

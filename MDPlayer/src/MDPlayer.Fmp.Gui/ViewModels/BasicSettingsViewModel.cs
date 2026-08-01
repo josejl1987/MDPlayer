@@ -21,16 +21,6 @@ public sealed class BasicSettingsViewModel : ObservableObject
         CompositionCards =
         [
             new CompositionCardViewModel(
-                "Performance",
-                "Large shared roll · best for publishing",
-                CompositionKind.Performance,
-                SelectComposition),
-            new CompositionCardViewModel(
-                "Scope Stage",
-                "Large waveforms · best for timbre",
-                CompositionKind.ScopeStage,
-                SelectComposition),
-            new CompositionCardViewModel(
                 "Diagnostic",
                 "Technical channel grid · best for inspection",
                 CompositionKind.Diagnostic,
@@ -38,7 +28,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
         ];
     }
 
-    /// <summary>The three intentional publishing compositions, shown as cards.</summary>
+    /// <summary>The single published composition, shown as a card. Future layouts extend this list.</summary>
     public IReadOnlyList<CompositionCardViewModel> CompositionCards { get; }
 
     private void SelectComposition(CompositionKind composition)

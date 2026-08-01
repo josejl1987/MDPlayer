@@ -9,6 +9,7 @@ namespace Fmp.Core.Visualization.Rendering;
 internal enum PanelPresentationSchema
 {
     Unknown,
+    GenericLane,
     PitchedLane,
     NoiseLane,
     SampleLane,

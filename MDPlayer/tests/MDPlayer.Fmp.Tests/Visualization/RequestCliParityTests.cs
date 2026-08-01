@@ -95,7 +95,7 @@ public class RequestCliParityTests
     /// the request-json visualize parser) are fed back through the parser and
     /// must resolve identically to the request-json path. Options the current
     /// CLI does not accept (--composition, --quality, --tracks, --past/--future,
-    /// --structure, --signal-strip, --palette, --include-inactive) are excluded
+    /// --structure, --palette, --include-inactive) are excluded
     /// here; <see cref="Formatter_EmittedRenderCommand_MatchesTheRequestSchema"/>
     /// pins them until the render pipeline switches.
     /// </summary>
@@ -183,7 +183,6 @@ public class RequestCliParityTests
         AssertOption(args, "--sample-rate", request.Playback.SampleRate.ToString());
         AssertOption(args, "--encoder", CliEncoder(request.Output.Encoder));
         AssertFlag(args, "--overwrite", request.Output.Overwrite);
-        AssertFlag(args, "--signal-strip", request.View.PerformanceSignalStrip);
         AssertFlag(args, "--include-inactive", request.Tracks.IncludeInactiveDiagnosticTracks);
         if (request.Presentation.Title is not null) AssertOption(args, "--title", request.Presentation.Title);
         if (request.Presentation.Subtitle is not null) AssertOption(args, "--subtitle", request.Presentation.Subtitle);
@@ -211,11 +210,11 @@ public class RequestCliParityTests
         {
             VisualizationRequestSerializer.WriteToFile(request, jsonPath);
             VisualizeOptions options = VisualizeOptionsParser.ParseForRequest(
-                jsonPath, new[] { "--width", "640", "--height", "360", "--layout", "scope-stage" });
+                jsonPath, new[] { "--width", "640", "--height", "360", "--layout", "diagnostic" });
 
             Assert.Equal(640, options.Width);
             Assert.Equal(360, options.Height);
-            Assert.Equal(CoreLayout.ScopeStage, options.LayoutMode);
+            Assert.Equal(CoreLayout.Diagnostic, options.LayoutMode);
             // Non-overridden fields still come from the request.
             Assert.Equal(request.InputPath, options.Input);
         }
@@ -231,7 +230,7 @@ public class RequestCliParityTests
     /// CLI render parser must reproduce the request exactly. This is the full
     /// round trip the earlier subset test could not cover; every formatter
     /// option (composition, quality, tracks, past/future, structure,
-    /// signal-strip, effects, note-color, palette, include-inactive, playback,
+    /// effects, note-color, palette, include-inactive, playback,
     /// presentation) must survive the CLI parse with identical semantics.
     /// </summary>
     [Theory]
@@ -266,7 +265,6 @@ public class RequestCliParityTests
         Assert.Equal(request.View.FutureSeconds, parsed.View.FutureSeconds);
         Assert.Equal(request.View.TimeGrid, parsed.View.TimeGrid);
         Assert.Equal(request.View.Structure, parsed.View.Structure);
-        Assert.Equal(request.View.PerformanceSignalStrip, parsed.View.PerformanceSignalStrip);
 
         Assert.Equal(request.Style.Effects, parsed.Style.Effects);
         Assert.Equal(request.Style.NoteColor, parsed.Style.NoteColor);
@@ -302,7 +300,7 @@ public class RequestCliParityTests
                 RenderCommandParser.ParseCore(new[]
                 {
                     "--request-json", jsonPath,
-                    "--composition", "scope-stage",
+                    "--composition", "diagnostic",
                     "--width", "1280",
                     "--fps", "30",
                     "--quality", "draft",
@@ -310,7 +308,7 @@ public class RequestCliParityTests
                 });
 
             // CLI overrides win.
-            Assert.Equal(CompositionKind.ScopeStage, parsed.Composition);
+            Assert.Equal(CompositionKind.Diagnostic, parsed.Composition);
             Assert.Equal(1280, parsed.Output.Width);
             Assert.Equal(30, parsed.Output.FpsNumerator);
             Assert.Equal(RenderQuality.Draft, parsed.Output.Quality);
@@ -424,12 +422,7 @@ public class RequestCliParityTests
     // Canonical CLI names (contract pins; mirror the formatter's output)
     // ------------------------------------------------------------------
 
-    private static string CliComposition(CompositionKind composition) => composition switch
-    {
-        CompositionKind.ScopeStage => "scope-stage",
-        CompositionKind.Diagnostic => "diagnostic",
-        _ => "performance",
-    };
+    private static string CliComposition(CompositionKind composition) => "diagnostic";
 
     private static string CliQuality(RenderQuality quality) => quality.ToString().ToLowerInvariant();
 
@@ -459,12 +452,7 @@ public class RequestCliParityTests
     // Request → Core-backed CLI model mapping (mirrors ApplyRequest)
     // ------------------------------------------------------------------
 
-    private static CoreLayout ExpectedLayout(CompositionKind composition) => composition switch
-    {
-        CompositionKind.ScopeStage => CoreLayout.ScopeStage,
-        CompositionKind.Diagnostic => CoreLayout.Diagnostic,
-        _ => CoreLayout.Performance,
-    };
+    private static CoreLayout ExpectedLayout(CompositionKind composition) => CoreLayout.Diagnostic;
 
     private static CorePreset ExpectedPreset(RenderQuality quality) => quality switch
     {
@@ -549,7 +537,7 @@ public class RequestCliParityTests
                 Height = 540,
                 FpsNumerator = 30,
             },
-            View = request.View with { PastSeconds = 0.4, FutureSeconds = 1.6, PerformanceSignalStrip = true },
+            View = request.View with { PastSeconds = 0.4, FutureSeconds = 1.6 },
         };
     }
 

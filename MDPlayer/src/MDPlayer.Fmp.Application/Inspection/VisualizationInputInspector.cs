@@ -162,6 +162,7 @@ public static class VisualizationInputInspector
         out bool supportsSemantic,
         out bool supportsScope)
     {
+        extension = "." + extension.TrimStart('.');
         var file = new FileInfo(fullPath);
         var environment = new PlaybackEnvironment([file.DirectoryName ?? "."]);
         ChipTimelineDecoderRegistry decoderRegistry = ChipTimelineDecoderRegistry.CreateDefault();
@@ -349,9 +350,10 @@ public static class VisualizationInputInspector
     {
         if (string.IsNullOrWhiteSpace(extension))
             return false;
-        return FmpFamilyExtensions.Contains(extension)
-            || DriverTrackedExtensions.Contains(extension)
-            || extension is ".s98" or ".xgm" or ".mid" or ".midi" or ".vgm" or ".vgz" or ".spc";
+        string normalized = "." + extension.TrimStart('.');
+        return FmpFamilyExtensions.Contains(normalized)
+            || DriverTrackedExtensions.Contains(normalized)
+            || normalized is ".s98" or ".xgm" or ".mid" or ".midi" or ".vgm" or ".vgz" or ".spc";
     }
 
     private static string SafeExtension(string path)

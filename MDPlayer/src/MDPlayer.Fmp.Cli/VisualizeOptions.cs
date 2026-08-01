@@ -88,6 +88,9 @@ internal sealed class VisualizeOptions : RenderSettings
     /// <summary>Path of the request JSON file that seeded this options snapshot.</summary>
     public string RequestJsonPath { get; set; }
 
+    /// <summary>Temporary master WAV retained for an in-process review scope.</summary>
+    internal string ReviewMasterAudioPath { get; set; }
+
     /// <summary>
     /// Structured progress mode. "jsonl" emits one camelCase JSON event per
     /// line on stdout; null keeps the classic human-only progress output.
@@ -193,12 +196,8 @@ internal sealed class VisualizeOptions : RenderSettings
         _ => VisualizationPreset.Balanced,
     };
 
-    private static VisualizationLayoutMode MapComposition(Fmp.Application.Contracts.CompositionKind composition) => composition switch
-    {
-        Fmp.Application.Contracts.CompositionKind.ScopeStage => VisualizationLayoutMode.ScopeStage,
-        Fmp.Application.Contracts.CompositionKind.Diagnostic => VisualizationLayoutMode.Diagnostic,
-        _ => VisualizationLayoutMode.Performance,
-    };
+    private static VisualizationLayoutMode MapComposition(Fmp.Application.Contracts.CompositionKind composition)
+        => VisualizationLayoutMode.Diagnostic;
 
     private static VisualizationChannelFilter MapTrackSelection(
         Fmp.Application.Contracts.TrackSelectionMode mode) => mode switch
@@ -620,16 +619,8 @@ internal static class VisualizeOptionsParser
     private static VisualizationLayoutMode ParseLayout(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
         "auto" => VisualizationLayoutMode.Auto,
-        "performance" => VisualizationLayoutMode.Performance,
-        "scope-stage" or "scopestage" => VisualizationLayoutMode.ScopeStage,
         "diagnostic" => VisualizationLayoutMode.Diagnostic,
-        "diagnostic-v2" => VisualizationLayoutMode.DiagnosticV2,
-        "focus" => VisualizationLayoutMode.Focus,
-        "scope" => VisualizationLayoutMode.Scope,
-        "split-roll" or "split" => VisualizationLayoutMode.SplitRoll,
-        "unified-roll" or "unified" => VisualizationLayoutMode.UnifiedRoll,
-        "hybrid" => VisualizationLayoutMode.Hybrid,
-        _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto, performance, scope-stage, diagnostic, or a legacy name: unified, split, scope, hybrid, diagnostic-v2, focus)"),
+        _ => throw new ArgumentException($"unknown layout '{raw}' (expected auto or diagnostic)"),
     };
 
     private static VisualizationRendererMode ParseRenderer(string raw) => raw?.Trim().ToLowerInvariant() switch
