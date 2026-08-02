@@ -516,7 +516,7 @@ internal sealed class SinglePassComposer
                         stageStart = Stopwatch.GetTimestamp();
                         try
                         {
-                            input.Write(slot.Frame, 0, slot.Frame.Length);
+                            WriteRawFrame(input, slot.Frame, frameRenderer.FrameByteCount);
                         }
                         catch (IOException)
                         {
@@ -958,5 +958,23 @@ internal sealed class SinglePassComposer
         catch (IOException)
         {
         }
+    }
+
+    /// <summary>
+    /// Writes exactly <paramref name="frameByteCount"/> bytes of an RGBA frame to
+    /// <paramref name="output"/>. The caller's pooled buffer (<paramref name="buffer"/>)
+    /// may be larger than the logical frame size (ArrayPool rents can exceed the
+    /// requested length), so only the logical byte count is written — writing the
+    /// buffer's full capacity would shift every FFmpeg frame boundary.
+    /// </summary>
+    internal static void WriteRawFrame(
+        Stream output,
+        byte[] buffer,
+        int frameByteCount)
+    {
+        if (buffer.Length < frameByteCount)
+            throw new ArgumentException("Frame buffer is too small.", nameof(buffer));
+
+        output.Write(buffer, 0, frameByteCount);
     }
 }

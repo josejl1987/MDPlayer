@@ -9,6 +9,22 @@ namespace MDPlayer.Fmp.Tests;
 public sealed class SinglePassComposerTests
 {
     [Fact]
+    public void WriteRawFrame_WritesLogicalFrameSize_NotBufferCapacity()
+    {
+        const int frameBytes = 320 * 180 * 4;
+        byte[] oversized = new byte[frameBytes + 4096];
+
+        using var output = new MemoryStream();
+
+        SinglePassComposer.WriteRawFrame(
+            output,
+            oversized,
+            frameBytes);
+
+        Assert.Equal(frameBytes, output.Length);
+    }
+
+    [Fact]
     public void Compose_SyntheticCorrscopeFramesProducesOneFinalMp4()
     {
         string root = Path.Combine(Path.GetTempPath(), $"single-pass-{Guid.NewGuid():N}");

@@ -291,7 +291,10 @@ internal static class VisualizationPrepareCoordinator
         // Ordered panels of the current topology. A stem belongs to a panel when
         // its presentation track id (or, failing that, its stem name) matches
         // any of the panel's ids — including operator voice ids, which the old
-        // mapping omitted.
+        // mapping omitted — or, for a percussion group, any of its six rhythm
+        // child ids (bd/sd/top/hh/tom/rim). The rhythm aggregate owns those
+        // child identities, so a stem stamped with a child id must still land
+        // on the rhythm panel.
         IReadOnlyList<VisualizationPanel> panels = layout.Topology.Panels;
         var panelIndexOf = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < panels.Count; i++)
@@ -301,6 +304,8 @@ internal static class VisualizationPrepareCoordinator
             foreach (string voiceId in panels[i].OperatorVoiceIds)
                 panelIndexOf.TryAdd(voiceId, i);
             panelIndexOf.TryAdd(panels[i].Id, i);
+            foreach (PanelRowDefinition row in panels[i].Rows)
+                panelIndexOf.TryAdd($"{panels[i].Id}.{row.Id}", i);
         }
 
         var projected = new ScopeRenderer.ScopeResult
@@ -335,7 +340,7 @@ internal static class VisualizationPrepareCoordinator
                 int panelIndex = panelIndexOf.TryGetValue(trackId, out int p) ? p : int.MaxValue;
                 return (Stem: stem, PanelIndex: panelIndex);
             })
-            .Where(item => item.PanelIndex >= 0)
+            .Where(item => item.PanelIndex < panels.Count)
             .OrderBy(item => item.PanelIndex)
             .ThenBy(item => item.Stem.StableOrder)
             .Select(item => item.Stem)
