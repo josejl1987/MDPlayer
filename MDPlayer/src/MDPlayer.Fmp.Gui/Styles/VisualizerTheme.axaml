@@ -82,9 +82,11 @@
   <Style Selector="Button.primary:pressed /template/ ContentPresenter">
     <Setter Property="Background" Value="{StaticResource Brush.AccentPressed}"/>
   </Style>
+  <!-- Disabled primary keeps a muted accent tint so Render stays
+       recognizable as the primary action without shouting. -->
   <Style Selector="Button.primary:disabled">
-    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
-    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+    <Setter Property="Background" Value="{StaticResource Brush.AccentSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
   </Style>
 
   <Style Selector="Button.secondary">
@@ -158,6 +160,8 @@
     <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
     <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
     <Setter Property="BorderThickness" Value="0,1,0,0"/>
+    <Setter Property="MinHeight" Value="32"/>
+    <Setter Property="Padding" Value="12,6"/>
   </Style>
 
   <!-- ── Typography classes ────────────────────────────────────────── -->
@@ -195,32 +199,194 @@
 
   <!-- ── Compact controls for the dense sidebar ────────────────────── -->
 
+  <!-- Shared disabled look: the control recedes into the surrounding
+       surface instead of becoming a grey block. -->
+  <Style Selector="ComboBox.compact:disabled,
+                   NumericUpDown.compact:disabled,
+                   TextBox.compact:disabled">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+
+  <!-- ComboBox: field + muted arrow, restrained hover. -->
   <Style Selector="ComboBox.compact">
     <Setter Property="Height" Value="28"/>
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Padding" Value="8,0,26,0"/>
+  </Style>
+  <Style Selector="ComboBox.compact /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+  </Style>
+  <Style Selector="ComboBox.compact:pointerover /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+  </Style>
+  <Style Selector="ComboBox.compact /template/ PathIcon#DropDownGlyph">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+  <Style Selector="ComboBox.compact:pointerover /template/ PathIcon#DropDownGlyph">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
+  </Style>
+  <Style Selector="ComboBox.compact /template/ Border#PopupBorder">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+  </Style>
+  <Style Selector="ComboBox.compact /template/ TextBlock#PlaceholderTextBlock">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
   </Style>
 
+  <!-- Dropdown items: flat rows, subtle selection. -->
+  <Style Selector="ComboBoxItem /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Padding" Value="8,5"/>
+    <Setter Property="Background" Value="Transparent"/>
+  </Style>
+  <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+  </Style>
+  <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.AccentSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+  </Style>
+
+  <!-- NumericUpDown: quiet field, slim spinner buttons. -->
   <Style Selector="NumericUpDown.compact">
     <Setter Property="Height" Value="28"/>
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="Padding" Value="8,0,0,0"/>
+  </Style>
+  <Style Selector="NumericUpDown.compact:pointerover">
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+  </Style>
+  <Style Selector="NumericUpDown.compact /template/ ButtonSpinner#PART_Spinner">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+  </Style>
+  <Style Selector="NumericUpDown.compact /template/ RepeatButton">
+    <Setter Property="MinWidth" Value="20"/>
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+    <Setter Property="FontSize" Value="10"/>
+  </Style>
+  <Style Selector="NumericUpDown.compact /template/ RepeatButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
   </Style>
 
+  <!-- TextBox: quiet field. -->
   <Style Selector="TextBox.compact">
     <Setter Property="Height" Value="28"/>
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="Padding" Value="8,0"/>
+  </Style>
+  <Style Selector="TextBox.compact:pointerover">
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+  </Style>
+  <Style Selector="TextBox.compact:focus-visible">
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.Accent}"/>
+  </Style>
+  <Style Selector="TextBox.compact /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
   </Style>
 
+  <!-- CheckBox: compact box with an accent tick. -->
   <Style Selector="CheckBox.compact">
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="MinHeight" Value="24"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+  </Style>
+  <Style Selector="CheckBox.compact /template/ Border#NormalRectangle">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="3"/>
+    <Setter Property="Width" Value="16"/>
+    <Setter Property="Height" Value="16"/>
+  </Style>
+  <Style Selector="CheckBox.compact:pointerover /template/ Border#NormalRectangle">
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.Accent}"/>
+  </Style>
+  <Style Selector="CheckBox.compact:checked /template/ Border#NormalRectangle">
+    <Setter Property="Background" Value="{StaticResource Brush.Accent}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.Accent}"/>
+  </Style>
+  <Style Selector="CheckBox.compact:checked /template/ Path#CheckGlyph">
+    <Setter Property="Fill" Value="{StaticResource Brush.TextOnAccent}"/>
+  </Style>
+  <Style Selector="CheckBox.compact:disabled">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+  <Style Selector="CheckBox.compact:disabled /template/ Border#NormalRectangle">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
   </Style>
 
+  <!-- Transport slider: accent fill, compact thumb. -->
   <Style Selector="Slider.transport">
     <Setter Property="Height" Value="24"/>
     <Setter Property="VerticalAlignment" Value="Center"/>
+    <Setter Property="Background" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.Accent}"/>
+  </Style>
+  <Style Selector="Slider.transport /template/ Grid#SliderContainer">
+    <Setter Property="Background" Value="Transparent"/>
+  </Style>
+  <Style Selector="Slider.transport /template/ Thumb">
+    <Setter Property="Width" Value="12"/>
+    <Setter Property="Height" Value="12"/>
+    <Setter Property="Background" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="CornerRadius" Value="6"/>
+  </Style>
+  <Style Selector="Slider.transport:pointerover /template/ Thumb">
+    <Setter Property="Background" Value="{StaticResource Brush.AccentHover}"/>
+  </Style>
+  <Style Selector="Slider.transport:disabled /template/ Thumb">
+    <Setter Property="Background" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+  <Style Selector="Slider.transport:disabled">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+    <Setter Property="Background" Value="{StaticResource Brush.BorderSoft}"/>
+  </Style>
+
+  <!-- Status strip: fixed breathing room, top border. -->
+  <Style Selector="Border.status">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="0,1,0,0"/>
+    <Setter Property="MinHeight" Value="32"/>
+    <Setter Property="Padding" Value="12,6"/>
+  </Style>
+
+  <!-- Flat sidebar separators (replaces the card look). -->
+  <Style Selector="Border.separator">
+    <Setter Property="Background" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="Height" Value="1"/>
+    <Setter Property="Margin" Value="0,2"/>
+  </Style>
+
+  <!-- Recent-file row: transparent, subtle hover. -->
+  <Style Selector="Button.recent">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="Padding" Value="8,4"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+    <Setter Property="HorizontalContentAlignment" Value="Left"/>
+  </Style>
+  <Style Selector="Button.recent:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
   </Style>
 
 </Styles>

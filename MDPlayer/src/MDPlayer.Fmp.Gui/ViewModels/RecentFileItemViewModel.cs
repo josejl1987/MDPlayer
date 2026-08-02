@@ -14,6 +14,7 @@ public sealed class RecentFileItemViewModel : ObservableObject
 
     public string Path { get; }
     public string DisplayName => System.IO.Path.GetFileName(Path);
+    public string ParentDirectory => System.IO.Path.GetDirectoryName(Path) ?? string.Empty;
     public string Kind => "Input";
     public bool IsAvailable => File.Exists(Path);
     public AsyncRelayCommand OpenCommand { get; }

@@ -54,6 +54,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private CancellationTokenSource _exportCts = new();
     private Task? _shutdownTask;
 
+    private const int RecentFilesMax = 5;
+
     public MainWindowViewModel(
         GuiSettingsStore settings,
         FileDialogService dialogs,
@@ -761,12 +763,14 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void AddRecentFile(string path)
     {
+        if (!IsPersistableRecent(path))
+            return;
         _settings.Update(settings =>
         {
             settings.RecentFiles.Remove(path);
             settings.RecentFiles.Insert(0, path);
-            if (settings.RecentFiles.Count > 10)
-                settings.RecentFiles.RemoveAt(10);
+            if (settings.RecentFiles.Count > RecentFilesMax)
+                settings.RecentFiles.RemoveAt(RecentFilesMax);
         });
         RefreshRecentFiles();
     }
@@ -774,10 +778,20 @@ public sealed class MainWindowViewModel : ObservableObject
     private void RefreshRecentFiles()
     {
         RecentFiles.Clear();
-        foreach (string path in _settings.Settings.RecentFiles.Take(10))
+        foreach (string path in _settings.Settings.RecentFiles.Where(IsPersistableRecent).Take(RecentFilesMax))
             RecentFiles.Add(new RecentFileItemViewModel(path, OpenInputAsync));
         OnPropertyChanged(nameof(HasRecentFiles));
     }
+
+    /// <summary>
+    /// A path is worth keeping as a recent if it still exists and is not a
+    /// test/temporary artifact (the GUI test suite and preview workspace both
+    /// live under the temp directory).
+    /// </summary>
+    private static bool IsPersistableRecent(string path)
+        => !string.IsNullOrWhiteSpace(path)
+           && File.Exists(path)
+           && !path.StartsWith(Path.GetTempPath(), StringComparison.Ordinal);
 
     private static (int Width, int Height) FitInside(
         int sourceWidth,

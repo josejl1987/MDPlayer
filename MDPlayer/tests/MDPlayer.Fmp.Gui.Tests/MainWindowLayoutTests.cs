@@ -160,6 +160,44 @@ public sealed class MainWindowLayoutTests
             AssertVisible(window, name);
     }
 
+    [AvaloniaFact]
+    public async Task Chrome_SidebarAndStatusStayWithinWindow()
+    {
+        await using TestWindowFixture fixture =
+            await TestWindowFixture.CreateReadyAsync();
+
+        MainWindow window = fixture.Window;
+        window.Width = 1024;
+        window.Height = 700;
+
+        window.Show();
+        window.UpdateLayout();
+
+        StackPanel lastSection =
+            Required<StackPanel>(window, "SidebarLastSection");
+
+        StackPanel sidebarContent =
+            Required<StackPanel>(window, "SidebarScrollContent");
+
+        Border statusBar =
+            Required<Border>(window, "StatusBar");
+
+        Grid mainContent =
+            Required<Grid>(window, "MainContent");
+
+        Assert.True(
+            lastSection.Bounds.Bottom <= sidebarContent.Bounds.Bottom,
+            "The last sidebar section must not overflow the scroll content.");
+
+        Assert.True(
+            statusBar.Bounds.Bottom <= window.ClientSize.Height,
+            "The status bar must not extend past the window bottom.");
+
+        Assert.True(
+            mainContent.Bounds.Bottom <= statusBar.Bounds.Top,
+            "The main content must not overlap the status bar.");
+    }
+
     private static void AssertVisible(Control root, string name)
     {
         Control? control = root.FindControl<Control>(name);
