@@ -142,7 +142,6 @@ public sealed class MainWindowHeadlessTests
             dialogs,
             clipboard,
             new ExportProcessService(null),
-            new NotificationService(),
             factory,
             initialInputPath: null);
         return (new MainWindow(viewModel), viewModel);

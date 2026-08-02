@@ -7,7 +7,6 @@ public sealed class StyleSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
-    private bool _isExpanded;
     private string _selectedEffects = VisualEffects.Subtle.ToString();
     private string _selectedNoteColor = NoteColorMode.Instrument.ToString();
     private decimal? _pastSeconds = 0.8m;
@@ -20,15 +19,8 @@ public sealed class StyleSettingsViewModel : ObservableObject
         _owner = owner;
     }
 
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
-    }
-
     public IReadOnlyList<string> EffectsOptions { get; } = Enum.GetNames<VisualEffects>();
     public IReadOnlyList<string> NoteColorOptions { get; } = Enum.GetNames<NoteColorMode>();
-    public IReadOnlyList<string> TimeScaleOptions { get; } = new[] { "Dense", "Balanced", "Wide" };
     public IReadOnlyList<string> PaletteOptions { get; } = Enum.GetNames<PaletteKind>();
 
     public string EffectsNote => "Preview may reduce the effect frame rate but keeps the composition geometry.";

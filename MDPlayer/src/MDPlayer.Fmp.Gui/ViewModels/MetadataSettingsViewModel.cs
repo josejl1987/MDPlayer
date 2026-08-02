@@ -7,7 +7,6 @@ public sealed class MetadataSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
-    private bool _isExpanded;
     private string? _title;
     private string? _subtitle;
     private string? _credits;
@@ -18,12 +17,6 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         _owner = owner;
         RestoreDetectedCommand = new RelayCommand(() => _owner.RestoreDetectedMetadata());
         BrowseFontCommand = new AsyncRelayCommand(BrowseFontAsync);
-    }
-
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
     }
 
     public RelayCommand RestoreDetectedCommand { get; }

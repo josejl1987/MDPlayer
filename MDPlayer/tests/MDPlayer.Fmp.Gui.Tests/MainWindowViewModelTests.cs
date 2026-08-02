@@ -238,7 +238,6 @@ public sealed class MainWindowViewModelTests
                 new FileDialogService(),
                 new ClipboardService(),
                 new ExportProcessService(null),
-                new NotificationService(),
                 factory,
                 initialInputPath: null);
 

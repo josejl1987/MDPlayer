@@ -29,14 +29,13 @@ public partial class App : global::Avalonia.Application
             var dialogs = new FileDialogService();
             var clipboard = new ClipboardService();
             var export = new ExportProcessService(settings.Settings.RenderCliPath);
-            var notifications = new NotificationService();
 
             // Uses the process-based session factory from the Application layer
             // (drives `mdplayer-render plan/preview` with request JSON).
             var previewFactory = new CliPreviewSessionFactory();
 
             var vm = new MainWindowViewModel(
-                settings, dialogs, clipboard, export, notifications, previewFactory, App.InitialInputPath);
+                settings, dialogs, clipboard, export, previewFactory, App.InitialInputPath);
 
             var window = new MainWindow(vm);
             dialogs.TopLevelProvider = () => window;

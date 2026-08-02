@@ -12,7 +12,6 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
-    private bool _isExpanded;
     private int _loopCount = 2;
     private decimal _fadeSeconds = 5;
     private decimal _tailSeconds = 0.5m;
@@ -28,12 +27,6 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     public AdvancedSettingsViewModel(MainWindowViewModel owner)
     {
         _owner = owner;
-    }
-
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
     }
 
     public IReadOnlyList<string> EncoderOptions { get; } = new[] { "Auto", "LibX264", "Nvenc" };

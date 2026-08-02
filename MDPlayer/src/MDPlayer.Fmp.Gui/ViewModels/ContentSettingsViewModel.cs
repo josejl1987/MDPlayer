@@ -13,7 +13,6 @@ public sealed class ContentSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
-    private bool _isExpanded;
     private string _selectedTrackSelection = TrackSelectionMode.Active.ToString();
     private bool _isCustomSelection;
     private bool _includeInactiveDiagnostics = true;
@@ -21,12 +20,6 @@ public sealed class ContentSettingsViewModel : ObservableObject
     public ContentSettingsViewModel(MainWindowViewModel owner)
     {
         _owner = owner;
-    }
-
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
     }
 
     public IReadOnlyList<string> TrackSelectionOptions { get; } = new[] { "Active", "All", "Custom" };

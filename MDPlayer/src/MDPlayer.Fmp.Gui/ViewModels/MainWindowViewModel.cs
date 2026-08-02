@@ -31,7 +31,6 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly FileDialogService _dialogs;
     private readonly ClipboardService _clipboard;
     private readonly ExportProcessService _exportProcess;
-    private readonly NotificationService _notifications;
     private readonly IVisualizationPreviewSessionFactory _previewFactory;
     private readonly string? _initialInputPath;
     private readonly CancellationTokenSource _lifeCts = new();
@@ -46,7 +45,6 @@ public sealed class MainWindowViewModel : ObservableObject
     private int _refreshSeq;
     private GuiState _state = GuiState.Empty;
     private GuiError? _error;
-    private string? _completionMessage;
     private IReadOnlyList<ValidationIssue> _validationIssues = Array.Empty<ValidationIssue>();
     private bool _hasFatalValidationIssues;
     private double _previewTimeSeconds;
@@ -61,7 +59,6 @@ public sealed class MainWindowViewModel : ObservableObject
         FileDialogService dialogs,
         ClipboardService clipboard,
         ExportProcessService exportProcess,
-        NotificationService notifications,
         IVisualizationPreviewSessionFactory previewFactory,
         string? initialInputPath)
     {
@@ -69,7 +66,6 @@ public sealed class MainWindowViewModel : ObservableObject
         _dialogs = dialogs;
         _clipboard = clipboard;
         _exportProcess = exportProcess;
-        _notifications = notifications;
         _previewFactory = previewFactory;
         _initialInputPath = initialInputPath;
 
@@ -145,12 +141,6 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public bool HasError => Error is not null;
     public string ErrorMessage => Error?.Message ?? "";
-
-    public string? CompletionMessage
-    {
-        get => _completionMessage;
-        private set => SetProperty(ref _completionMessage, value);
-    }
 
     public string InputTitle => _input?.Title ?? _input?.DisplayName ?? "No input open";
 
@@ -305,7 +295,6 @@ public sealed class MainWindowViewModel : ObservableObject
         SetState(GuiState.Rendering);
         Export.Reset();
         _exportCts = new CancellationTokenSource();
-        CompletionMessage = null;
 
         try
         {
@@ -315,8 +304,6 @@ public sealed class MainWindowViewModel : ObservableObject
             SetState(GuiState.Ready);
             if (Export.HasFailed)
                 SetError("Render failed.");
-            else
-                CompletionMessage = "Render completed.";
         }
         catch (OperationCanceledException)
         {
