@@ -46,4 +46,13 @@ public partial class MainWindow : Window
             await _vm.OpenInputAsync(path);
         e.Handled = true;
     }
+
+    // The timeline slider binds Value to PreviewScrubTime (no preview while
+    // dragging); a preview is scheduled exactly once when the drag completes
+    // (pointer release) or after a discrete keyboard jump (key up).
+    private void OnPreviewSliderReleased(object? sender, PointerReleasedEventArgs e)
+        => _vm.CommitScrub();
+
+    private void OnPreviewSliderKeyUp(object? sender, KeyEventArgs e)
+        => _vm.CommitScrub();
 }

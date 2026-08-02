@@ -223,8 +223,13 @@ internal static class VisualizationPrepareCoordinator
             capture.Timeline, projectedScope.MasterSamples);
 
         // ---- Energy analysis ----
-        int totalFrames = (int)Math.Ceiling(projectedScope.MasterSamples
-            * (double)output.FpsNumerator / projectedScope.SampleRate);
+        // Frame count must reflect the *actual* fractional frame rate
+        // (e.g. 60000/1001 ≈ 59.94), not the bare numerator. Using the
+        // numerator alone inflates the frame count ~1,001x and can exhaust
+        // memory building the energy arrays.
+        double fps = output.FpsNumerator / (double)output.FpsDenominator;
+        int totalFrames = checked((int)Math.Ceiling(
+            projectedScope.MasterSamples * fps / projectedScope.SampleRate));
         ChannelEnergyEnvelope[] energy = ChannelEnergyAnalyzer.Analyze(
             projectedScope.Stems.Where(stem => stem.Success)
                 .Select(stem => (stem.Name, stem.WavPath)).ToArray(),
@@ -265,23 +270,35 @@ internal static class VisualizationPrepareCoordinator
         if (!layout.Geometry.HasScopes)
             return captured;
 
-        // Name -> presentation track id from the canonical stem catalog, so a
-        // STEM result can be matched to the topology panels that carry that voice.
-        var stemTrackId = DefaultStems.All.ToDictionary(
-            stem => stem.Name, stem => stem.PresentationTrackId,
-            StringComparer.Ordinal);
+        // Name -> presentation track id derived from the *captured stems*
+        // themselves. The renderers stamp their own channel identity onto each
+        // stem result, so projection never has to consult a backend-specific
+        // catalog (DefaultStems is an FMP catalog; VGM/SPC stems use their own
+        // identifiers or none at all).
+        var stemTrackId = captured.Stems
+            .Where(stem => !string.IsNullOrEmpty(stem.PresentationTrackId))
+            .GroupBy(stem => stem.Name, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First().PresentationTrackId,
+                StringComparer.Ordinal);
 
         var master = captured.Stems.FirstOrDefault(s => s.Name == "master");
         var isolated = captured.Stems
             .Where(s => s.Name != "master" && s.Success)
             .ToList();
 
-        // Ordered panels of the current topology.
+        // Ordered panels of the current topology. A stem belongs to a panel when
+        // its presentation track id (or, failing that, its stem name) matches
+        // any of the panel's ids — including operator voice ids, which the old
+        // mapping omitted.
         IReadOnlyList<VisualizationPanel> panels = layout.Topology.Panels;
         var panelIndexOf = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < panels.Count; i++)
         {
             foreach (string voiceId in panels[i].VoiceIds)
+                panelIndexOf.TryAdd(voiceId, i);
+            foreach (string voiceId in panels[i].OperatorVoiceIds)
                 panelIndexOf.TryAdd(voiceId, i);
             panelIndexOf.TryAdd(panels[i].Id, i);
         }
@@ -306,20 +323,31 @@ internal static class VisualizationPrepareCoordinator
             return ExpandMasterToPanels(workspace, captured, panels.Count);
         }
 
-        // Order isolated stems to follow the current topology's panel order
-        // (stable order as a tie-break). The full synchronized stem set is
-        // retained — final/scoped backends validate all synchronized stems, and
-        // Corrscope maps the channel list onto the current grid geometry.
-        var ordered = isolated.Select(stem =>
+        // Project the isolated stems onto the current topology: keep only stems
+        // that resolve to a panel (request-specific track selection may have
+        // produced a strict subset), ordered by panel index. Anything that does
+        // not belong to a panel is dropped instead of being appended at the end,
+        // which previously could over-fill a custom one-panel grid.
+        var ordered = isolated
+            .Select(stem =>
+            {
+                string trackId = stemTrackId.TryGetValue(stem.Name, out string? id) ? id : stem.Name;
+                int panelIndex = panelIndexOf.TryGetValue(trackId, out int p) ? p : int.MaxValue;
+                return (Stem: stem, PanelIndex: panelIndex);
+            })
+            .Where(item => item.PanelIndex >= 0)
+            .OrderBy(item => item.PanelIndex)
+            .ThenBy(item => item.Stem.StableOrder)
+            .Select(item => item.Stem)
+            .ToList();
+
+        if (ordered.Count == 0)
         {
-            string trackId = stemTrackId.TryGetValue(stem.Name, out string? id) ? id : stem.Name;
-            int panelOrder = panelIndexOf.TryGetValue(trackId, out int p) ? p : int.MaxValue;
-            return (Stem: stem, PanelOrder: panelOrder);
-        })
-        .OrderBy(pair => pair.PanelOrder)
-        .ThenBy(pair => pair.Stem.StableOrder)
-        .Select(pair => pair.Stem)
-        .ToList();
+            // Every isolated stem fell outside the current topology (e.g. a
+            // custom one-panel layout and stems that resolve to no panel):
+            // degrade to the per-panel master fallback so the grid stays full.
+            return ExpandMasterToPanels(workspace, captured, panels.Count);
+        }
 
         projected.Stems.AddRange(ordered);
         return projected;

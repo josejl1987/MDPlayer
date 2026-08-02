@@ -213,4 +213,28 @@ public sealed class CanonicalRenderRequestTests
         Assert.Equal(expected.Presentation, parsed.Request.Presentation);
         Assert.Equal(expected.Playback, parsed.Request.Playback);
     }
+
+    [Fact]
+    public void BareIncludeTrack_ImpliesCustomSelection()
+    {
+        // A bare --include-track without --tracks must select Custom: the
+        // include/exclude lists are only applied in Custom mode, so otherwise
+        // the argument would be silently ignored under the default Active mode.
+        var parsed = RenderCommandParser.ParseCore([
+            "song.vgz", "--include-track", "ym2608.0.fm.1"]);
+
+        Assert.Equal(TrackSelectionMode.Custom, parsed.Request.Tracks.Selection);
+        Assert.Equal(new[] { "ym2608.0.fm.1" }, parsed.Request.Tracks.IncludedIds);
+    }
+
+    [Fact]
+    public void ExplicitTrackMode_OverridesIncludeTrackImplication()
+    {
+        // An explicit --tracks mode wins over the Custom implication.
+        var parsed = RenderCommandParser.ParseCore([
+            "song.vgz", "--tracks", "all", "--include-track", "ym2608.0.fm.1"]);
+
+        Assert.Equal(TrackSelectionMode.All, parsed.Request.Tracks.Selection);
+        Assert.Equal(new[] { "ym2608.0.fm.1" }, parsed.Request.Tracks.IncludedIds);
+    }
 }

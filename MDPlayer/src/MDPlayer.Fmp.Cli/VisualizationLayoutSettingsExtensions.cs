@@ -23,12 +23,22 @@ internal static class VisualizationLayoutSettingsExtensions
                 : request.Tracks.Selection switch
                 {
                     TrackSelectionMode.All => VisualizationChannelFilter.All,
+                    // Custom: start from the full channel set; the include/
+                    // exclude lists below select the subset.
                     TrackSelectionMode.Custom => VisualizationChannelFilter.All,
                     _ => VisualizationChannelFilter.Active,
                 },
             VisualizationGroupBy.None,
-            request.Tracks.IncludedIds.ToList(),
-            request.Tracks.ExcludedIds.ToList());
+            // Include/exclude lists are only meaningful in Custom selection
+            // mode. Forwarding them under Active/All means a previously
+            // selected custom subset silently keeps filtering after the user
+            // switches modes.
+            IncludeTracks: request.Tracks.Selection == TrackSelectionMode.Custom
+                ? request.Tracks.IncludedIds.ToList()
+                : Array.Empty<string>(),
+            ExcludeTracks: request.Tracks.Selection == TrackSelectionMode.Custom
+                ? request.Tracks.ExcludedIds.ToList()
+                : Array.Empty<string>());
     }
 
 

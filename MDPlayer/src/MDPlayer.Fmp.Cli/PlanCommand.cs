@@ -87,8 +87,18 @@ public static class PlanCommand
         var runtime = new RenderRuntimeOptions();
         VisualizationBackendResolution resolution =
             VisualizationBackendResolver.Resolve(request, runtime);
-        VisualizationWorkspace workspace = VisualizationWorkspace.Create(request);
+
+        // Planning must never touch the real output workspace: capture writes
+        // the canonical timeline (and, for generic backends, the master WAV)
+        // into the workspace, so a plain `plan` call would otherwise create or
+        // replace <output>/timeline.json and <output>/audio/master.wav before
+        // the user ever renders. Only an explicit --timeline-out survives.
+        using TemporaryVisualizationWorkspace workspace =
+            TemporaryVisualizationWorkspace.Create("Plan");
         workspace.EnsureDirectories();
+
+        string? durableTimelineOut =
+            string.IsNullOrWhiteSpace(timelineOutPath) ? null : timelineOutPath;
 
         // The planning path is timeline/layout-only: it captures (or seeds) the
         // semantic timeline, resolves the layout and builds the pure plan. It
@@ -101,7 +111,7 @@ public static class PlanCommand
             resolution,
             PrepareFmpTrack(resolution, runtime),
             seedTimelinePath: string.IsNullOrWhiteSpace(timelinePath) ? null : timelinePath,
-            timelineOutPath: string.IsNullOrWhiteSpace(timelineOutPath) ? null : timelineOutPath);
+            timelineOutPath: durableTimelineOut);
 
         ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
             timeline.Timeline,
@@ -112,7 +122,7 @@ public static class PlanCommand
             request,
             timeline.Timeline,
             layout,
-            workspace.TimelinePath);
+            durableTimelineOut ?? workspace.TimelinePath);
 
         if (json)
         {

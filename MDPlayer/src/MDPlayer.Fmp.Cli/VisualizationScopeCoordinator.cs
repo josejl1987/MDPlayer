@@ -44,6 +44,29 @@ internal static class VisualizationScopeCoordinator
         if (!result.Success)
             throw new VisualizationScopeException(
                 $"scope render failed: {result.LastError}", 7);
+
+        // Validate the complete captured FMP stem set here, at capture time,
+        // against the raw render artifacts — not later against the projected,
+        // request-specific channel list. The projected list may be a strict
+        // subset (custom tracks, one-panel layouts), but the synchronized stem
+        // contract holds for the captured set as a whole: every requested stem
+        // must be present, complete and on disk.
+        if (scopesRequired)
+        {
+            string[] missingStems = DefaultStems.All
+                .Where(pass => !result.Stems.Any(stem =>
+                    stem.Name == pass.Name && stem.Success
+                    && stem.RenderedSamples == result.MasterSamples
+                    && File.Exists(stem.WavPath)))
+                .Select(pass => pass.Name)
+                .ToArray();
+            if (result.MasterSamples <= 0 || missingStems.Length > 0)
+            {
+                throw new VisualizationScopeException(
+                    $"Corrscope layout requires synchronized stems: {string.Join(", ", missingStems)}", 7);
+            }
+        }
+
         bool isolated = result.Stems.Any(stem => stem.Name != "master" && stem.Success);
         return new VisualizationScopeArtifacts(plan, result, scopesRequired, isolated);
     }

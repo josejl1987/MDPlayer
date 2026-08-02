@@ -35,16 +35,29 @@ public sealed class MainWindowViewModelTests
     }
 
     [AvaloniaFact]
-    public async Task ChangingCompositionRefreshesPlanAndFrame()
+    public async Task SelectingSameComposition_DoesNotSchedulePreviewRefresh()
     {
+        // The GUI currently exposes exactly one composition (Diagnostic) and
+        // CompositionOptionViewModel is a value record, so assigning the
+        // already-selected composition is a no-op and must NOT schedule a
+        // preview refresh. (When a second composition kind exists this becomes
+        // a change test again; today it pins the no-op contract. The previous
+        // version "passed" only because WaitForPreviewRefreshAsync refreshes
+        // unconditionally, masking the no-op.)
         Harness h = Harness.Create();
         await h.OpenAsync();
         try
         {
             h.ResetCalls();
             h.VM.Settings.Basic.SelectedComposition = h.Compositions[0];
-            await h.VM.WaitForPreviewRefreshAsync();
 
+            // No debounce tick fires for a no-op assignment.
+            await Task.Delay(400);
+            Assert.Equal(0, h.PlanCalls);
+            Assert.Equal(0, h.FrameCalls);
+
+            // An explicit refresh still renders the (single) composition.
+            await h.VM.WaitForPreviewRefreshAsync();
             Assert.Equal(1, h.PlanCalls);
             Assert.Equal(1, h.FrameCalls);
             Assert.Equal(h.Compositions[0].Value, h.LastRequest!.Composition);
@@ -165,18 +178,37 @@ public sealed class MainWindowViewModelTests
             await h.DisposeAsync();
         }
 
-        // With a previously opened input, a failed re-open must fall back to Ready
-        // with the old request still active instead of staying LoadingInput.
+        // With a previously opened input, a failed re-open must be
+        // transactional: the old request stays active with its session intact.
+        // (The previous version never created the "second file", so
+        // OpenInputAsync exited at the File.Exists check and never exercised
+        // FailNextOpen at all.)
         Harness h2 = Harness.Create();
         await h2.OpenAsync();
         try
         {
-            h2.Factory.FailNextOpen = new InvalidOperationException("boom");
-            await h2.VM.OpenInputAsync(Path.Combine(Path.GetTempPath(), "other-" + Guid.NewGuid() + ".vgz"));
+            string secondPath = Path.Combine(Path.GetTempPath(), "other-" + Guid.NewGuid() + ".vgz");
+            await File.WriteAllTextAsync(secondPath, "not really vgz");
+            try
+            {
+                h2.Factory.FailNextOpen = new InvalidOperationException("boom");
+                await h2.VM.OpenInputAsync(secondPath);
 
-            Assert.Equal(GuiState.Ready, h2.VM.State);
-            Assert.NotNull(h2.VM.Error);
-            Assert.NotNull(h2.VM.Request);
+                Assert.Equal(GuiState.Ready, h2.VM.State);
+                Assert.NotNull(h2.VM.Error);
+                // The previous request remains fully active...
+                Assert.NotNull(h2.VM.Request);
+                Assert.Equal(Path.GetFullPath(h2.InputPath), h2.VM.Request!.InputPath);
+
+                // ...and its session is still usable: a preview refresh still works.
+                h2.ResetCalls();
+                await h2.VM.WaitForPreviewRefreshAsync();
+                Assert.Equal(1, h2.PlanCalls);
+            }
+            finally
+            {
+                File.Delete(secondPath);
+            }
         }
         finally
         {

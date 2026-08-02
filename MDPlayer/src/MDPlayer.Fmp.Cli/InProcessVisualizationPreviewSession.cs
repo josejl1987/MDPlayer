@@ -163,11 +163,18 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 context.Renderer.Height,
                 rgba),
             HasApproximations =
-                preview.Fidelity == PreviewFidelity.Layout,
+                preview.Fidelity == PreviewFidelity.Layout
+                || (context.Prepared.Scope.Enabled
+                    && context.Prepared.Layout.Geometry.HasScopes
+                    && !context.Renderer.HasScopeSource),
             ApproximationNotes =
                 preview.Fidelity == PreviewFidelity.Layout
                     ? ["Static layout preview; dynamic scopes and events are omitted."]
-                    : Array.Empty<string>(),
+                    : (context.Prepared.Scope.Enabled
+                        && context.Prepared.Layout.Geometry.HasScopes
+                        && !context.Renderer.HasScopeSource)
+                        ? ["Scope source unavailable; scope regions render transparent."]
+                        : Array.Empty<string>(),
             Warning =
                 context.Prepared.Plan.ValidationIssues
                     .FirstOrDefault(

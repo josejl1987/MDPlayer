@@ -31,6 +31,14 @@ internal class ScopeRenderer
         public string Name { get; init; }
         public string Label { get; init; }
         public ScopeSemanticClass SemanticClass { get; init; } = ScopeSemanticClass.Mixed;
+        /// <summary>
+        /// Backend channel identifier the stem was rendered from (e.g.
+        /// "ym2608.0.fm.1"). Empty for stems that have no stable channel
+        /// identity of their own (such as the generic master fallback).
+        /// Used by layout projection to match stems to panels without
+        /// consulting a backend-specific catalog.
+        /// </summary>
+        public string PresentationTrackId { get; init; } = "";
         public int StableOrder { get; init; } = int.MaxValue;
         public int WindowWidth { get; init; } = 1;
         public double DefaultAmplification { get; init; } = 1.0;
@@ -113,6 +121,7 @@ internal class ScopeRenderer
                 Name = stem.Name,
                 Label = stem.Label,
                 SemanticClass = stem.SemanticClass,
+                PresentationTrackId = stem.PresentationTrackId,
                 StableOrder = stem.StableOrder,
                 WindowWidth = stem.WindowWidth,
                 DefaultAmplification = stem.DefaultAmplification,

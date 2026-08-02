@@ -14,7 +14,7 @@ namespace Fmp.Core.Visualization.Rendering;
 /// A single discard buffer is shared for skipped frames so consuming
 /// everything up to a late frame never hoards per-frame allocations.
 /// </summary>
-internal sealed class CorrscopeFrameSource : IDisposable
+internal sealed class CorrscopeFrameSource : IScopeFrameSource
 {
     private readonly Func<Process> _startProcess;
     private readonly int _frameByteCount;

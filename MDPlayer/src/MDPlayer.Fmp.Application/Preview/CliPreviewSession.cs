@@ -281,13 +281,23 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
 
     private void AddTimelineArgs(List<string> args)
     {
+        // Write the freshly captured timeline back to the session workspace so
+        // it can be inspected, but never *seed* a cached timeline into new
+        // plan/preview subprocesses:
+        //
+        //  1. The cached timeline is keyed only by the input path hash, so
+        //     playback changes (loop count, fade/tail, sample rate, SSG gain,
+        //     SPC pitch mode, backend) would silently reuse a stale timeline.
+        //  2. A seeded timeline skips semantic capture, so the fresh temporary
+        //     workspace never receives a master WAV — backends whose scope
+        //     strategy depends on the captured master then fail with "master
+        //     WAV was not produced by playback capture".
+        //
+        // Each plan/preview therefore re-captures. The durable optimization is
+        // a capture bundle (timeline + master + stems) keyed by the full
+        // CaptureKey, not a bare timeline file.
         args.Add("--timeline-out");
         args.Add(_timelinePath);
-        if (File.Exists(_timelinePath))
-        {
-            args.Add("--timeline");
-            args.Add(_timelinePath);
-        }
     }
 
     private async Task<ProcessOutput> RunCliAsync(IReadOnlyList<string> args, CancellationToken ct)

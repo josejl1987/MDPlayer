@@ -31,8 +31,13 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
 
     public IReadOnlyList<string> EncoderOptions { get; } = new[] { "Auto", "LibX264", "Nvenc" };
     public IReadOnlyList<string> SpcPitchOptions { get; } = Enum.GetNames<SpcPitchInterpretation>();
-    public string SpcPitchNote => "Interprets the SPC pitch register to estimate the song's real tempo.";
-    public string SsgGainNote => "Master voice gain adjustment for FMP-family (FM) sources.";
+    // Estimate resolves each BRR sample's root pitch from the S-DSP registers
+    // for pitch-accurate notes; Relative keeps the raw relative pitch without
+    // estimation. This affects note display, not song tempo.
+    public string SpcPitchNote => "Estimate resolves each sample's root pitch for pitch-accurate notes; Relative keeps the raw relative pitch.";
+    // Applied via mdsound SetVolumeYM2608PSG: the YM2608 SSG (PSG) channel
+    // volume for FMP-family sources, in dB. FM channels are unaffected.
+    public string SsgGainNote => "Volume of the YM2608 SSG (PSG) channels for FMP-family sources, in dB. FM channels are unaffected.";
 
     public bool ShowSsgGain
     {

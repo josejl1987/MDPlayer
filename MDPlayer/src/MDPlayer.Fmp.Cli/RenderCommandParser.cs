@@ -83,6 +83,14 @@ internal static class RenderCommandParser
         CompositionKind composition = seeded?.Composition ?? CompositionKind.Diagnostic;
         OutputSettings output = seeded?.Output ?? new();
         TrackSettings tracks = seeded?.Tracks ?? new();
+        // CLI track lists override the seeded request: the first
+        // --include-track / --exclude-track on the command line *replaces* the
+        // seeded list instead of appending to it. A bare include/exclude also
+        // implies Custom selection so the lists are actually applied (they are
+        // ignored under Active/All), unless the user explicitly chose a mode.
+        bool includeTrackSpecified = false;
+        bool excludeTrackSpecified = false;
+        bool tracksSelectionSpecified = false;
         ViewSettings view = seeded?.View ?? new();
         StyleSettings style = seeded?.Style ?? new();
         PresentationSettings presentation = seeded?.Presentation ?? new();
@@ -154,12 +162,35 @@ internal static class RenderCommandParser
                     // ---- track selection ----
                     case "--tracks":
                         tracks = tracks with { Selection = ParseTrackSelection(reader.RequireValue(name)) };
+                        tracksSelectionSpecified = true;
                         break;
+                    // The first --include-track/--exclude-track on the command
+                    // line *replaces* the list seeded from --request-json; later
+                    // occurrences append. Layering over a seeded request would
+                    // otherwise silently retain the JSON's custom subset.
                     case "--include-track":
-                        tracks = tracks with { IncludedIds = tracks.IncludedIds.Append(reader.RequireValue(name)).ToArray() };
+                        tracks = tracks with
+                        {
+                            IncludedIds = includeTrackSpecified
+                                ? tracks.IncludedIds.Append(reader.RequireValue(name)).ToArray()
+                                : [reader.RequireValue(name)],
+                            Selection = tracksSelectionSpecified
+                                ? tracks.Selection
+                                : TrackSelectionMode.Custom,
+                        };
+                        includeTrackSpecified = true;
                         break;
                     case "--exclude-track":
-                        tracks = tracks with { ExcludedIds = tracks.ExcludedIds.Append(reader.RequireValue(name)).ToArray() };
+                        tracks = tracks with
+                        {
+                            ExcludedIds = excludeTrackSpecified
+                                ? tracks.ExcludedIds.Append(reader.RequireValue(name)).ToArray()
+                                : [reader.RequireValue(name)],
+                            Selection = tracksSelectionSpecified
+                                ? tracks.Selection
+                                : TrackSelectionMode.Custom,
+                        };
+                        excludeTrackSpecified = true;
                         break;
                     case "--include-inactive" when value == null:
                         tracks = tracks with { IncludeInactiveDiagnosticTracks = true };

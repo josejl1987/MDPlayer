@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Fmp.Application.Contracts;
 using Fmp.Cli;
 using Fmp.Core.Analysis;
+using Fmp.Core.Audio;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 using MDPlayer.Fmp.Tests.Fixtures;
@@ -208,9 +209,13 @@ public sealed class PreviewParityTests
     /// The shared scope frame source must restart for a backward seek and read
     /// forward to the requested frame instead of throwing.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public void CorrscopeSourceRestartsForBackwardSeek()
     {
+        Skip.IfNot(
+            IsPython3Available(),
+            "backward-seek bridge test requires python3 on PATH");
+
         const int frameBytes = 16;
         int startCount = 0;
 
@@ -234,6 +239,30 @@ public sealed class PreviewParityTests
         Assert.True(startCount >= 2, $"expected at least 2 starts, got {startCount}");
         // Frame 30 from the restarted source: first byte equals 30.
         Assert.Equal(30, frame30[0]);
+    }
+
+    private static bool IsPython3Available()
+    {
+        try
+        {
+            var probe = Process.Start(new ProcessStartInfo
+            {
+                FileName = "python3",
+                Arguments = "--version",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            if (probe is null)
+                return false;
+            probe.WaitForExit(5000);
+            return probe.HasExited && probe.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static Process StartPatternProcess()
@@ -293,70 +322,134 @@ public sealed class PreviewParityTests
     // ---- I. Production frame == accurate preview frame (PR5 contract) ----
 
     /// <summary>
-    /// The accurate preview renderer is configured with the SAME production
-    /// intro/outro presentation as final rendering (both use introOutro: true),
-    /// so a production frame equals an accurate preview frame even during the
-    /// intro fade, mid-song, and the outro fade — the exact boundaries where the
-    /// pre-fix preview (introOutro: false) used to diverge.
+    /// The PR5 parity contract: final, preview and review all build their frame
+    /// renderer through the single production factory. When the external
+    /// Corrscope bridge is unavailable, the factory must engage the shared
+    /// internal master-waveform fallback so scope cells render real content in
+    /// every consumer — no transparent holes, no FFmpeg-only divergence.
+    /// This replaces the old test, which compared two manually identical
+    /// <see cref="PanelOverlayRenderer"/> instances and could not detect the
+    /// fallback divergence at all.
     /// </summary>
     [Fact]
-    public void ProductionAndAccuratePreview_FramesAreIdenticalAtAllBoundaries()
+    public void SharedFactory_WithoutCorrscope_FillsScopeCellsIdentically()
     {
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         VisualizationRequest request = FixtureRequest();
-        // Use a shorter fade so an outro is present within the fixture's duration.
-        request = request with
-        {
-            Playback = request.Playback with { TailSeconds = 0.6 },
-        };
-
         var presentation = new VisualizationPresentation("TITLE", "SUB", "CRED");
-        var production = new PanelOverlayRenderer(
-            timeline,
-            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
-            VisualizationRendererOptions.Build(request, presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>()));
-        var accuratePreview = new PanelOverlayRenderer(
-            timeline,
-            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
-            VisualizationRendererOptions.Build(request, presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>()));
+        ResolvedVisualizationLayout layout = RendererTestLayout.Build(
+            timeline, request.Output.Width, request.Output.Height);
 
-        Assert.True(production.TotalFrames > 4);
-
-        double[] probeTimes =
+        // A real master WAV is required for the internal fallback.
+        string masterWav = Path.Combine(Path.GetTempPath(), $"parity-{Guid.NewGuid():N}.wav");
+        try
         {
-            0.0,
-            0.4,
-            8.0,
-            Math.Max(0, production.TotalFrames / (double)request.Output.FpsNumerator - 0.2),
-        };
+            WriteSineWav(masterWav);
 
-        foreach (double time in probeTimes)
-        {
-            long index = (long)Math.Round(time * request.Output.FpsNumerator);
-            index = Math.Clamp(index, 0, Math.Max(0, production.TotalFrames - 1));
+            var prepared = new PreparedVisualizationSource(
+                request,
+                timeline,
+                layout,
+                presentation,
+                AnalysisOverlayScene.Empty,
+                Energy: Array.Empty<ChannelEnergyEnvelope>(),
+                Scope: new VisualizationScopeArtifacts(
+                    new StemPlan(false, default, default, 0, 0, "test fallback"),
+                    Result: null, // no Corrscope artifacts -> internal fallback path
+                    Enabled: true,
+                    HasIsolatedStems: false),
+                Plan: new VisualizationPlanResult
+                {
+                    ResolvedLayout = "diagnostic",
+                    RequestedLayout = "diagnostic",
+                    InputPath = request.InputPath,
+                },
+                MasterAudioPath: masterWav,
+                BackendId: "fmp",
+                TimelinePath: "");
+            var runtime = new RenderRuntimeOptions();
+            VisualizationWorkspace workspace = VisualizationWorkspace.Create(request);
 
-            byte[] prod = production.RenderFrame(index);
-            byte[] preview = accuratePreview.RenderFrame(index);
+            using var production = VisualizationFrameRendererFactory.Create(
+                prepared, workspace, runtime, introOutro: true);
+            using var accuratePreview = VisualizationFrameRendererFactory.Create(
+                prepared, workspace, runtime, introOutro: true);
 
-            Assert.Equal(prod.Length, preview.Length);
-            Assert.True(SpanEquals(prod, preview),
-                $"accurate preview frame differs from production frame at t={time} (frame {index})");
+            // The shared factory must engage the internal master-waveform
+            // fallback instead of leaving scope viewports transparent.
+            Assert.True(production.HasScopeSource,
+                "factory must supply an internal master-waveform scope source when Corrscope is unavailable");
+            Assert.True(accuratePreview.HasScopeSource);
+
+            Assert.True(production.TotalFrames > 4);
+
+            double[] probeTimes =
+            {
+                0.0,
+                0.4,
+                2.5,
+                Math.Max(0, production.TotalFrames / (double)request.Output.FpsNumerator - 0.2),
+            };
+
+            foreach (double time in probeTimes)
+            {
+                long index = (long)Math.Round(time * request.Output.FpsNumerator);
+                index = Math.Clamp(index, 0, Math.Max(0, production.TotalFrames - 1));
+
+                byte[] prod = production.RenderFrame(index);
+                byte[] preview = accuratePreview.RenderFrame(index);
+
+                Assert.Equal(prod.Length, preview.Length);
+                Assert.True(SpanEquals(prod, preview),
+                    $"accurate preview frame differs from production frame at t={time} (frame {index})");
+            }
+
+            // Scope cells must contain drawn content (the master waveform), not
+            // transparent holes — the exact divergence the old test missed.
+            byte[] mid = production.RenderFrame(150);
+            Assert.True(HasNonZeroScopePixels(mid, layout.Geometry),
+                "scope cells rendered through the fallback must not be transparent");
+
+            // The shared PNG encoder (used by the preview session) round-trips
+            // the same frame the production path writes.
+            byte[] png = PngFrameEncoder.Encode(production.Width, production.Height, mid);
+            Assert.True(png.Length > 8, "encoded PNG must carry real pixel data");
+            Assert.Equal(0x89, png[0]); // PNG magic
         }
-
-        // The intro/outro transition must actually be active in the shared path:
-        // at t=0 the intro fade makes the preview frame differ from a
-        // content-inspection (no intro/outro) frame, proving introOutro: true is
-        // honored rather than being a silent no-op.
-        var contentInspection = new PanelOverlayRenderer(
-            timeline,
-            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
-            VisualizationRendererOptions.Build(request, presentation, introOutro: false, energy: Array.Empty<ChannelEnergyEnvelope>()));
-
-        byte[] introFrame = accuratePreview.RenderFrame(0);
-        byte[] introInspection = contentInspection.RenderFrame(0);
-        Assert.False(SpanEquals(introFrame, introInspection),
-            "accurate preview intro frame unexpectedly matches a no-intro renderer; introOutro is not being honored");
+        finally
+        {
+            try { File.Delete(masterWav); } catch { }
+        }
     }
+
+    private static void WriteSineWav(string path)
+    {
+        using var writer = new WavWriter(path, sampleRate: 1_000, channels: 2);
+        var samples = new short[5_000];
+        for (int i = 0; i < samples.Length; i++)
+            samples[i] = (short)(Math.Sin(2 * Math.PI * 110 * i / 1_000.0) * short.MaxValue * 0.8);
+        writer.Write(samples);
+        writer.Close();
+    }
+
+    private static bool HasNonZeroScopePixels(byte[] frame, OverlayLayout geometry)
+    {
+        for (int panelIndex = 0; panelIndex < geometry.PanelCount; panelIndex++)
+        {
+            OverlayRect scope = geometry.GetScopeRect(panelIndex);
+            for (int y = scope.Y; y < scope.Y + scope.Height && y < geometry.Height; y++)
+            {
+                for (int x = scope.X; x < scope.X + scope.Width && x < geometry.Width; x++)
+                {
+                    int offset = (y * geometry.Width + x) * 4;
+                    if (frame[offset] != 0 || frame[offset + 1] != 0 || frame[offset + 2] != 0)
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
 
     // ---- K. Inert-setting cleanup ----
 

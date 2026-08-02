@@ -116,25 +116,6 @@ internal static partial class VisualizationRunner
                     $"error: scope/timeline sample-rate mismatch: {scopeResult.SampleRate} vs {timeline.SampleRate}");
                 return 7;
             }
-            if (string.Equals(backend.Id, "fmp", StringComparison.Ordinal))
-            {
-                StemPass[] expectedStems = layout.HasScopes
-                    ? DefaultStems.All
-                    : [DefaultStems.All[0]];
-                string[] missingStems = expectedStems
-                    .Where(pass => !scopeResult.Stems.Any(stem =>
-                        stem.Name == pass.Name && stem.Success
-                        && stem.RenderedSamples == scopeResult.MasterSamples
-                        && File.Exists(stem.WavPath)))
-                    .Select(pass => pass.Name)
-                    .ToArray();
-                if (scopeResult.MasterSamples <= 0 || missingStems.Length > 0)
-                {
-                    Console.Error.WriteLine(
-                        $"error: Corrscope layout requires synchronized stems: {string.Join(", ", missingStems)}");
-                    return 7;
-                }
-            }
 
             using (VisualizationFrameRenderer frameRenderer =
                 VisualizationFrameRendererFactory.Create(

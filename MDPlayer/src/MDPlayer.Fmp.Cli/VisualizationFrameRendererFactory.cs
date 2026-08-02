@@ -34,7 +34,7 @@ internal static class VisualizationFrameRendererFactory
                 introOutro,
                 prepared.Energy));
 
-        CorrscopeFrameSource? scope =
+        IScopeFrameSource? scope =
             CreateScopeSource(
                 prepared,
                 workspace,
@@ -45,10 +45,23 @@ internal static class VisualizationFrameRendererFactory
             && prepared.Scope.Enabled
             && prepared.Layout.Geometry.HasScopes)
         {
-            Console.Error.WriteLine(
-                "warning: scope source unavailable (Corrscope/Python/bridge missing); " +
-                "scope regions will fall back to the internal master waveform, so " +
-                "preview does not equal final frames in those regions");
+            // No external bridge: fall back to the shared internal
+            // master-waveform source so preview, review and final all render
+            // the same scope content. This is the same fallback contract as
+            // Corrscope's own master-waveform mode.
+            scope = MasterWaveformFrameSource.TryCreate(
+                overlay,
+                prepared.MasterAudioPath,
+                overlay.FpsNumerator,
+                overlay.FpsDenominator);
+
+            if (scope is null)
+            {
+                Console.Error.WriteLine(
+                    "warning: no scope source available (Corrscope/Python/bridge " +
+                    "missing and no usable master WAV); scope regions will render " +
+                    "transparent in preview, review AND final");
+            }
         }
 
         return new VisualizationFrameRenderer(overlay, scope);
@@ -56,11 +69,11 @@ internal static class VisualizationFrameRendererFactory
 
     /// <summary>
     /// Starts the Corrscope raw-frame bridge when scopes are enabled and
-    /// Corrscope is available; otherwise returns null (the caller falls back to
-    /// the internal master waveform, exactly as final composition does). The
-    /// created frame source is ready to read frame 0 on first use.
+    /// Corrscope is available; otherwise returns null so the caller falls back
+    /// to the shared internal master-waveform source. The created frame source
+    /// is ready to read frame 0 on first use.
     /// </summary>
-    private static CorrscopeFrameSource? CreateScopeSource(
+    private static IScopeFrameSource? CreateScopeSource(
         PreparedVisualizationSource prepared,
         VisualizationWorkspace workspace,
         RenderRuntimeOptions runtime,

@@ -430,9 +430,11 @@ internal sealed class SinglePassComposer
     /// review do), so this is the production path that makes final, preview and
     /// review share one frame renderer.
     ///
-    /// <paramref name="includeWaveform"/> defers the waveform to FFmpeg (used
-    /// when no isolated scope source is available and the caller wants the
-    /// internal-master fallback drawn as an FFmpeg overlay).
+    /// <paramref name="includeWaveform"/> is a last-resort FFmpeg waveform
+    /// overlay for the pathological case where scopes are enabled but neither
+    /// a Corrscope bridge nor the internal master-waveform source could be
+    /// created (no usable master WAV). Normal fallback is the shared
+    /// <see cref="MasterWaveformFrameSource"/>, which keeps final == preview.
     /// </summary>
     public string Compose(
         string masterAudioPath,
@@ -488,33 +490,47 @@ internal sealed class SinglePassComposer
             process.Start();
             Task<string> stderrTask = process.StandardError.ReadToEndAsync();
             Stream input = process.StandardInput.BaseStream;
-            byte[] frame = new byte[frameRenderer.FrameByteCount];
-            long total = frameRenderer.TotalFrames;
-            var metrics = new PipelineMetrics();
-            long wallStart = Stopwatch.GetTimestamp();
+            ComposeMetrics pipelineMetrics;
             try
             {
-                for (long index = 0; index < total; index++)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    long stageStart = Stopwatch.GetTimestamp();
-                    frameRenderer.RenderFrame(index, frame);
-                    metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
+                // Bounded producer/consumer pipeline: the frame renderer fills
+                // reusable slots while FFmpeg drains the previous frames, so
+                // rendering overlaps with pipe writes instead of serializing
+                // (overlay rendering is the principal bottleneck).
+                pipelineMetrics = RunFramePipeline(
+                    _options.QueueCapacity,
+                    gridFrameBytes: 0,
+                    outFrameBytes: frameRenderer.FrameByteCount,
+                    totalFrames: frameRenderer.TotalFrames,
+                    (slot, _) =>
+                    {
+                        slot.HasGrid = false;
+                        return true;
+                    },
+                    (slot, frameIndex, metrics) =>
+                    {
+                        long stageStart = Stopwatch.GetTimestamp();
+                        frameRenderer.RenderFrame(frameIndex, slot.Frame);
+                        metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
 
-                    stageStart = Stopwatch.GetTimestamp();
-                    try
-                    {
-                        input.Write(frame, 0, frame.Length);
-                    }
-                    catch (IOException)
-                    {
-                        // FFmpeg exit status/stderr below are authoritative.
-                        break;
-                    }
-                    metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
-                    metrics.FrameCount++;
-                }
-                LastMetrics = metrics.ToComposeMetrics(false, wallStart, 1);
+                        stageStart = Stopwatch.GetTimestamp();
+                        try
+                        {
+                            input.Write(slot.Frame, 0, slot.Frame.Length);
+                        }
+                        catch (IOException)
+                        {
+                            // FFmpeg's exit status and stderr below are authoritative.
+                            return false;
+                        }
+                        metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
+                        return true;
+                    },
+                    slot => { },
+                    includeQueueWaitInCorrscopeMetrics: false,
+                    cancellationToken,
+                    abortProducer: null);
+                LastMetrics = pipelineMetrics;
             }
             finally
             {
@@ -666,6 +682,12 @@ internal sealed class SinglePassComposer
             {
                 for (long index = 0; index < totalFrames; index++)
                 {
+                    // Check the token on every consumer iteration, not only when
+                    // blocked in Take: once the producer has published every
+                    // frame, Take returns immediately without examining the
+                    // token, so without this check a cancellation would be
+                    // ignored for the entire remainder of the encode.
+                    linkedCancellation.Token.ThrowIfCancellationRequested();
                     FrameSlot slot;
                     long waitStart = Stopwatch.GetTimestamp();
                     try

@@ -98,12 +98,13 @@ internal class CorrscopeConfigWriter
         sb.AppendLine("  pitch_tracking:");
         sb.AppendLine();
 
-        // Channel list — ordered by stable semantic-adapter order.
+        // Channel list — the caller supplies stems in their desired grid order
+        // (layout projection orders them by panel index). Preserve that order:
+        // re-sorting here would undo the topology-based arrangement and can
+        // misalign grid cells against the overlay panels.
         // Silently skip stems that have no audible content (below -50 dB threshold)
         var orderedChannels = result.Stems
             .Where(s => (overrides?.IncludeMasterAsChannel == true || s.Name != "master") && s.Success)
-            .OrderBy(s => s.StableOrder)
-            .ThenBy(s => s.Name, StringComparer.Ordinal)
             .ToList();
 
         var audibleChannels = new List<ScopeRenderer.StemResult>();

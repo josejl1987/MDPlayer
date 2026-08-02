@@ -17,13 +17,13 @@ namespace Fmp.Core.Visualization.Rendering;
 internal sealed class VisualizationFrameRenderer : IDisposable
 {
     private readonly PanelOverlayRenderer _overlay;
-    private readonly CorrscopeFrameSource? _scopeFrames;
+    private readonly IScopeFrameSource? _scopeFrames;
     private readonly byte[]? _scopeBuffer;
     private bool _disposed;
 
     public VisualizationFrameRenderer(
         PanelOverlayRenderer overlay,
-        CorrscopeFrameSource? scopeFrames)
+        IScopeFrameSource? scopeFrames)
     {
         _overlay = overlay
             ?? throw new ArgumentNullException(nameof(overlay));
@@ -41,10 +41,11 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     public int OverlayFpsDenominator => _overlay.FpsDenominator;
 
     /// <summary>
-    /// True when an external scope frame source (Corrscope) is present. When
-    /// false, scope viewports are left transparent by the overlay; the caller
-    /// should fall back to the internal master-waveform waveform for those
-    /// regions.
+    /// True when a scope frame source (Corrscope bridge or the internal
+    /// master-waveform fallback) is present, so scope viewports render real
+    /// content instead of transparent holes. With the internal fallback this
+    /// is true whenever scopes are enabled and a master WAV exists, keeping
+    /// final, preview and review identical even without Corrscope.
     /// </summary>
     public bool HasScopeSource => _scopeFrames is not null;
 

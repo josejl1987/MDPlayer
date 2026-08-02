@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Fmp.Gui.ViewModels"
+        xmlns:contracts="using:Fmp.Application.Contracts"
         xmlns:sys="using:System"
         x:Class="Fmp.Gui.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
@@ -21,7 +22,7 @@
     <KeyBinding Gesture="End" Command="{Binding SeekEndCommand}"/>
   </Window.KeyBindings>
 
-  <Grid RowDefinitions="Auto,Auto,*,Auto">
+  <Grid RowDefinitions="Auto,Auto,*,Auto,Auto">
 
     <!-- ── Top toolbar ─────────────────────────────────────────────── -->
     <Border Grid.Row="0" Padding="12,8" Background="{DynamicResource SystemChromeLowColor}">
@@ -275,7 +276,9 @@
               <TextBlock Grid.Column="1" Text="{Binding TimeText}" TextAlignment="Center" VerticalAlignment="Center"
                          MinWidth="90"/>
               <Slider Grid.Column="2" Minimum="0" Maximum="{Binding DurationSeconds}"
-                      Value="{Binding PreviewTimeSeconds}" Margin="8,0"/>
+                      Value="{Binding PreviewScrubTime}" Margin="8,0"
+                      PointerReleased="OnPreviewSliderReleased"
+                      KeyUp="OnPreviewSliderKeyUp"/>
               <Button Grid.Column="3" Content="▶" Command="{Binding NextPointCommand}"
                       ToolTip.Tip="Next representative point"/>
               <TextBlock Grid.Column="4" Text="Accurate preview" TextAlignment="Center" FontSize="11"
@@ -310,6 +313,22 @@
           <Button Content="Open folder" Command="{Binding OpenOutputFolderCommand}"/>
         </StackPanel>
       </Grid>
+    </Border>
+
+    <!-- ── Validation issues (why Render may be disabled) ────────────── -->
+    <Border Grid.Row="4" IsVisible="{Binding HasValidationIssues}" Padding="12,5"
+            Background="{DynamicResource SystemChromeMediumLowColor}">
+      <ItemsControl ItemsSource="{Binding ValidationIssues}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="contracts:ValidationIssue">
+            <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,1">
+              <TextBlock Text="{Binding Severity}" FontSize="11"
+                         Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+              <TextBlock Text="{Binding Message}" FontSize="11" TextWrapping="Wrap"/>
+            </StackPanel>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
     </Border>
 
   </Grid>

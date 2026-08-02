@@ -153,7 +153,10 @@ public sealed class MainWindowViewModel : ObservableObject
             string duration = (_input.EstimatedDuration ?? _input.DeclaredDuration) is TimeSpan value
                 ? FormatDuration(value)
                 : "duration unknown";
-            return $"{_input.Format} · {duration} · {_input.Tracks.Count} tracks";
+            // Prefer the planned track count: the inspector's initial track
+            // collection is empty for several formats.
+            int trackCount = _plan?.Tracks.Count ?? _input.Tracks.Count;
+            return $"{_input.Format} · {duration} · {trackCount} tracks";
         }
     }
 
@@ -173,6 +176,10 @@ public sealed class MainWindowViewModel : ObservableObject
         get => _hasFatalValidationIssues;
         private set => SetProperty(ref _hasFatalValidationIssues, value);
     }
+
+    /// <summary>Validation issues for the current request, surfaced to the UI.</summary>
+    public IReadOnlyList<ValidationIssue> ValidationIssues => _validationIssues;
+    public bool HasValidationIssues => _validationIssues.Count > 0;
 
     public ObservableCollection<RecentFileItemViewModel> RecentFiles { get; } = new();
     public bool HasRecentFiles => RecentFiles.Count > 0;
@@ -206,6 +213,30 @@ public sealed class MainWindowViewModel : ObservableObject
                 ScheduleSeekPreview();
             }
         }
+    }
+
+    /// <summary>
+    /// Scrub value bound to the timeline slider. Updates the displayed time
+    /// while dragging but never schedules a preview; the preview fires once on
+    /// drag completion via <see cref="CommitScrub"/>. This keeps slow dragging
+    /// from launching a preview render every debounce tick.
+    /// </summary>
+    public double PreviewScrubTime
+    {
+        get => _previewTimeSeconds;
+        set
+        {
+            double clamped = Math.Clamp(value, 0, Math.Max(0, DurationSeconds));
+            if (SetProperty(ref _previewTimeSeconds, clamped))
+                OnPropertyChanged(nameof(TimeText));
+        }
+    }
+
+    /// <summary>Called when a slider drag (or discrete key jump) completes.</summary>
+    public void CommitScrub()
+    {
+        if (HasInput)
+            ScheduleSeekPreview();
     }
 
     public string TimeText => $"{FormatTime(_previewTimeSeconds)} / {FormatTime(DurationSeconds)}";
@@ -243,9 +274,17 @@ public sealed class MainWindowViewModel : ObservableObject
         SetState(GuiState.LoadingInput);
         try
         {
+            // Transactional open: create the new session BEFORE disposing the
+            // old one, so a failed open leaves the previous input, plan and
+            // session fully intact. Disposing first could strand the UI with a
+            // visible request but no active session.
+            IVisualizationPreviewSession newSession =
+                await _previewFactory.OpenAsync(fullPath, _lifeCts.Token);
+
             await DisposeSessionAsync();
-            _session = await _previewFactory.OpenAsync(fullPath, _lifeCts.Token);
-            _input = _session.Input;
+            _session = newSession;
+            _input = newSession.Input;
+            ClearError();
             OnPropertyChanged(nameof(HasInput), nameof(InputTitle), nameof(InputSummary));
             AddRecentFile(fullPath);
             SetRequest(BuildInitialRequest(fullPath));
@@ -299,11 +338,26 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             var progress = new Progress<ExportProgressEvent>(Export.OnEvent);
-            string workspace = await _exportProcess.StartAsync(request, progress, _exportCts.Token);
-            Export.SetWorkspace(workspace);
+            ExportResult result = await _exportProcess.StartAsync(
+                request,
+                progress,
+                Export.SetWorkspace,
+                _exportCts.Token);
             SetState(GuiState.Ready);
-            if (Export.HasFailed)
+            if (result.Succeeded)
+            {
+                ClearError();
+            }
+            else if (result.Cancelled)
+            {
+                // The failure summary (with the retained workspace/log path)
+                // was already set via the cancelled event.
+                SetError("Render cancelled.");
+            }
+            else
+            {
                 SetError("Render failed.");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -438,19 +492,31 @@ public sealed class MainWindowViewModel : ObservableObject
                 return;
             ApplyPlan(_plan);
 
+            // The preview caps are maximums, not exact dimensions: fit the
+            // request's aspect ratio inside them instead of clamping each axis
+            // independently, which would distort non-16:9 requests.
+            int maxWidth = Math.Max(1, _settings.Settings.PreviewMaxWidth);
+            int maxHeight = Math.Max(1, _settings.Settings.PreviewMaxHeight);
+            (int width, int height) = FitInside(
+                Math.Max(1, request.Output.Width),
+                Math.Max(1, request.Output.Height),
+                maxWidth,
+                maxHeight);
+
             var frame = await _session.RenderFrameAsync(
                 request,
                 new PreviewFrameRequest
                 {
                     TimeSeconds = PreviewTimeSeconds,
-                    Width = _settings.Settings.PreviewMaxWidth,
-                    Height = _settings.Settings.PreviewMaxHeight,
+                    Width = width,
+                    Height = height,
                     Fidelity = PreviewFidelity.AccurateStill,
                 },
                 ct);
             if (IsObsolete(generation, ct))
                 return;
             Preview.ApplyFrame(frame);
+            ClearError();
         }
         catch (OperationCanceledException)
         {
@@ -482,6 +548,7 @@ public sealed class MainWindowViewModel : ObservableObject
         RepresentativePoints.Clear();
         foreach (RepresentativePoint point in plan.RepresentativePoints)
             RepresentativePoints.Add(point);
+        OnPropertyChanged(nameof(InputSummary));
         RefreshCommands();
     }
 
@@ -603,6 +670,7 @@ public sealed class MainWindowViewModel : ObservableObject
             ? Array.Empty<ValidationIssue>()
             : VisualizationRequestValidator.Validate(_request);
         HasFatalValidationIssues = !VisualizationRequestValidator.IsValid(_validationIssues);
+        OnPropertyChanged(nameof(ValidationIssues), nameof(HasValidationIssues));
     }
 
     private void SetState(GuiState state)
@@ -615,6 +683,15 @@ public sealed class MainWindowViewModel : ObservableObject
     private void SetError(string message, string? details = null, string? logPath = null)
     {
         Error = new GuiError(message, details, logPath);
+        OnPropertyChanged(nameof(StatusText));
+        RefreshCommands();
+    }
+
+    private void ClearError()
+    {
+        if (Error is null)
+            return;
+        Error = null;
         OnPropertyChanged(nameof(StatusText));
         RefreshCommands();
     }
@@ -700,6 +777,22 @@ public sealed class MainWindowViewModel : ObservableObject
         foreach (string path in _settings.Settings.RecentFiles.Take(10))
             RecentFiles.Add(new RecentFileItemViewModel(path, OpenInputAsync));
         OnPropertyChanged(nameof(HasRecentFiles));
+    }
+
+    private static (int Width, int Height) FitInside(
+        int sourceWidth,
+        int sourceHeight,
+        int maxWidth,
+        int maxHeight)
+    {
+        double scale = Math.Min(
+            maxWidth / (double)Math.Max(1, sourceWidth),
+            maxHeight / (double)Math.Max(1, sourceHeight));
+        if (scale >= 1)
+            return (sourceWidth, sourceHeight);
+        return (
+            Math.Max(1, (int)Math.Round(sourceWidth * scale)),
+            Math.Max(1, (int)Math.Round(sourceHeight * scale)));
     }
 
     private static string FormatTime(double seconds)
