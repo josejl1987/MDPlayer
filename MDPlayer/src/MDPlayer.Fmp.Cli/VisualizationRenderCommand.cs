@@ -24,7 +24,7 @@ public static class VisualizationRenderCommand
     }
 
     /// <summary>Parser seam for parity tests.</summary>
-    internal static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath)? ParseArgs(
+    internal static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath, string? CaptureDirectory, string? CaptureKey)? ParseArgs(
         string[] args)
         => RenderCommandParser.Parse(args);
 

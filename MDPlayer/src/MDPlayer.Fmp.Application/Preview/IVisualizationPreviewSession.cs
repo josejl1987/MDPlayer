@@ -32,11 +32,9 @@ public interface IVisualizationPreviewSession : IAsyncDisposable
 }
 
 /// <summary>
-/// Creates preview sessions bound to an input. The default implementation is
-/// process-based: it drives the `mdplayer-render plan/preview` commands with
-/// request JSON through an argument-safe child process, keeping the session
-/// workspace (captured timeline, frames) on disk. An in-process implementation
-/// can be supplied later without changing GUI code.
+/// Creates preview sessions bound to an input. The desktop GUI uses a
+/// persistent in-process preview session. The standalone CLI creates a
+/// short-lived in-process session for explicit preview commands.
 /// </summary>
 public interface IVisualizationPreviewSessionFactory
 {

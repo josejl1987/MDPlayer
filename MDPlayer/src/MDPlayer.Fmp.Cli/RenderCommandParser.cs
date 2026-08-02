@@ -35,7 +35,7 @@ internal static class RenderCommandParser
     internal static RenderInvocation ParseInvocationCore(string[] args)
     {
         var parsed = ParseCore(args);
-        return new RenderInvocation(parsed.Request, parsed.Runtime, FindCaptureDirectory(args));
+        return new RenderInvocation(parsed.Request, parsed.Runtime, parsed.CaptureDirectory, parsed.CaptureKey);
     }
 
     public static RenderInvocation? ParseInvocation(string[] args)
@@ -57,7 +57,7 @@ internal static class RenderCommandParser
     /// from that file first and CLI options override individual fields.
     /// Returns null (after printing an error) on invalid arguments.
     /// </summary>
-    public static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath)? Parse(
+    public static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath, string? CaptureDirectory, string? CaptureKey)? Parse(
         string[] args)
     {
         try
@@ -71,7 +71,7 @@ internal static class RenderCommandParser
         }
     }
 
-    internal static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath) ParseCore(
+    internal static (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath, string? CaptureDirectory, string? CaptureKey) ParseCore(
         string[] args)
     {
         string? input = null;
@@ -108,6 +108,8 @@ internal static class RenderCommandParser
         bool json = false;
         string? progressMode = null;
         int toolTimeoutMinutes = 60;
+        string? captureDirectory = null;
+        string? captureKey = null;
 
         var reader = new ArgumentReader(args);
 
@@ -277,6 +279,14 @@ internal static class RenderCommandParser
                         progressMode = ParseProgressMode(reader.RequireValue(name));
                         break;
 
+                    // ---- internal capture reuse (runtime-only) ----
+                    case "--capture-dir":
+                        captureDirectory = reader.RequireValue(name);
+                        break;
+                    case "--capture-key":
+                        captureKey = reader.RequireValue(name);
+                        break;
+
                     default:
                         throw new ArgumentException($"unknown option '{name}'");
                 }
@@ -327,7 +337,22 @@ internal static class RenderCommandParser
             ToolTimeoutMinutes = toolTimeoutMinutes,
         };
 
-        return (request, runtime, requestJsonPath);
+        EnsureCaptureOptionsConsistent(captureDirectory, captureKey);
+
+        return (request, runtime, requestJsonPath, captureDirectory, captureKey);
+    }
+
+    /// <summary>
+    /// Capture reuse requires both a validated capture directory and an
+    /// expected capture identity. Supplying one without the other is an
+    /// argument error (exit code 2).
+    /// </summary>
+    private static void EnsureCaptureOptionsConsistent(string? captureDirectory, string? captureKey)
+    {
+        if (captureDirectory == null && captureKey != null)
+            throw new ArgumentException("--capture-key requires --capture-dir");
+        if (captureDirectory != null && captureKey == null)
+            throw new ArgumentException("--capture-dir requires --capture-key");
     }
 
     // ------------------------------------------------------------------
@@ -341,15 +366,6 @@ internal static class RenderCommandParser
                 return args[i + 1];
         return args.FirstOrDefault(a => a.StartsWith("--request-json=", StringComparison.Ordinal))?
             ["--request-json=".Length..];
-    }
-
-    private static string? FindCaptureDirectory(string[] args)
-    {
-        for (int i = 0; i < args.Length - 1; i++)
-            if (args[i] == "--capture-dir")
-                return args[i + 1];
-        return args.FirstOrDefault(a => a.StartsWith("--capture-dir=", StringComparison.Ordinal))?
-            ["--capture-dir=".Length..];
     }
 
     private static VisualizationRequest ReadSeed(string path)

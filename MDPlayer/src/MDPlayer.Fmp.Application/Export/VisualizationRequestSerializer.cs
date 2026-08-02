@@ -64,6 +64,23 @@ public static class VisualizationRequestSerializer
     }
 }
 
+/// <summary>
+/// Shared JSON serializer options for request/project payloads. Enums as
+/// strings, camelCase property names, indented for readability.
+/// </summary>
+public static class RequestJson
+{
+    public static readonly JsonSerializerOptions Options = Create();
+
+    public static JsonSerializerOptions Create() => new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never,
+    };
+}
+
 /// <summary>Thrown for request JSON/schema problems.</summary>
 public sealed class VisualizationRequestException : Exception
 {

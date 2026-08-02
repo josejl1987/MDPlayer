@@ -100,6 +100,10 @@ public class Program
         Console.WriteLine("  --analysis-python PATH     Python interpreter for symbolic analysis");
         Console.WriteLine("  --tool-timeout-minutes N   External tool timeout (default: 60)");
         Console.WriteLine();
+        Console.WriteLine("Internal capture reuse (runtime-only; not saved in projects):");
+        Console.WriteLine("  --capture-dir DIR          Reuse a validated prepared capture");
+        Console.WriteLine("  --capture-key KEY          Expected capture identity");
+        Console.WriteLine();
         Console.WriteLine("Plan options:");
         Console.WriteLine("  --request-json PATH        Request JSON file");
         Console.WriteLine("  --timeline PATH            Reuse an existing visualization timeline");
@@ -111,7 +115,7 @@ public class Program
         Console.WriteLine("  --time SECONDS             Still frame time (default: 0)");
         Console.WriteLine("  --output PATH              Still output PNG path");
         Console.WriteLine("  --width N --height N       Preview size overrides (cap 1920)");
-        Console.WriteLine("  --fidelity layout|accurate Still fidelity (default: accurate)");
+        Console.WriteLine($"  {Fmp.Cli.PreviewCommand.FidelityHelpLine}  Still fidelity (default: accurate)");
         Console.WriteLine("  --timeline PATH            Reuse an existing visualization timeline");
         Console.WriteLine("  --timeline-out PATH        Write the captured/reused timeline to PATH");
         Console.WriteLine("  --json                     Machine-readable preview metadata on stdout");

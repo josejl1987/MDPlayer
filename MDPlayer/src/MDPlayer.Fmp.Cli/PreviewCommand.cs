@@ -27,8 +27,9 @@ public static class PreviewCommand
         double time = 0;
         int? width = null;
         int? height = null;
-        string fidelity = "accurate";
+        PreviewFidelity fidelity = PreviewFidelity.AccurateStill;
         bool json = false;
+
         bool motion = false;
         double start = 0;
         double duration = 3;
@@ -52,7 +53,7 @@ public static class PreviewCommand
                         case "--output": output = reader.RequireValue(name); break;
                         case "--width": width = reader.ReadInt(name); break;
                         case "--height": height = reader.ReadInt(name); break;
-                        case "--fidelity": fidelity = ParseFidelity(reader.RequireValue(name)); break;
+                        case "--fidelity": fidelity = ParsePreviewFidelity(reader.RequireValue(name)); break;
                         case "--motion" when value == null: motion = true; break;
                         case "--start": start = reader.ReadDouble(name); break;
                         case "--duration": duration = reader.ReadDouble(name); break;
@@ -152,7 +153,7 @@ public static class PreviewCommand
         public double TimeSeconds { get; init; }
         public int? Width { get; init; }
         public int? Height { get; init; }
-        public string Fidelity { get; init; } = "accurate";
+        public PreviewFidelity Fidelity { get; init; } = PreviewFidelity.AccurateStill;
         public bool Json { get; init; }
         public bool Motion { get; init; }
         public double StartSeconds { get; init; }
@@ -205,16 +206,10 @@ public static class PreviewCommand
 
     private static PreviewFrameRequest BuildFrameRequest(PreviewSettings settings)
     {
-        PreviewFidelity fidelity = settings.Fidelity switch
-        {
-            "layout" => PreviewFidelity.Layout,
-            "interactive" => PreviewFidelity.InteractiveStill,
-            _ => PreviewFidelity.AccurateStill,
-        };
         return new PreviewFrameRequest
         {
             TimeSeconds = settings.TimeSeconds,
-            Fidelity = fidelity,
+            Fidelity = settings.Fidelity,
             Width = settings.Width.HasValue
                 ? Math.Min(settings.Width.Value, MaxPreviewDimension)
                 : null,
@@ -245,6 +240,7 @@ public static class PreviewCommand
             width = result.Width,
             height = result.Height,
             fidelity = result.Fidelity.ToString(),
+            scopeKind = result.ScopeKind.ToString(),
             hasApproximations = result.HasApproximations,
             approximationNotes = result.ApproximationNotes,
             warning = result.Warning == null ? null : new
@@ -309,17 +305,27 @@ public static class PreviewCommand
         }
     }
 
-    private static string ParseFidelity(string raw)
+    /// <summary>
+    /// Maps a <c>--fidelity</c> argument to its <see cref="PreviewFidelity"/>.
+    /// Unknown values throw so the caller returns exit code 2 with an error
+    /// listing every supported name (never silently default to accurate).
+    /// </summary>
+    internal static PreviewFidelity ParsePreviewFidelity(string raw)
     {
         return raw?.Trim().ToLowerInvariant() switch
         {
-            "layout" => "layout",
-            "interactive" => "interactive",
-            "accurate" => "accurate",
+            "layout" => PreviewFidelity.Layout,
+            "timeline" => PreviewFidelity.TimelineStill,
+            "interactive" => PreviewFidelity.InteractiveStill,
+            "accurate" => PreviewFidelity.AccurateStill,
             _ => throw new ArgumentException(
-                $"unknown fidelity '{raw}' (expected layout, interactive, or accurate)"),
+                $"unknown fidelity '{raw}' (expected layout, timeline, interactive, or accurate)"),
         };
     }
+
+    /// <summary>Help text for the <c>--fidelity</c> option.</summary>
+    internal static string FidelityHelpLine
+        => "--fidelity layout|timeline|interactive|accurate";
 
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
