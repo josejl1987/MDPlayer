@@ -1,0 +1,226 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <Styles.Resources>
+
+    <!-- ── Palette (dark studio) ───────────────────────────────────── -->
+
+    <Color x:Key="Color.Canvas">#090D13</Color>
+    <Color x:Key="Color.Surface1">#0E141D</Color>
+    <Color x:Key="Color.Surface2">#131B26</Color>
+    <Color x:Key="Color.Surface3">#192331</Color>
+
+    <Color x:Key="Color.BorderSoft">#263140</Color>
+    <Color x:Key="Color.BorderStrong">#374557</Color>
+
+    <Color x:Key="Color.TextPrimary">#E8EDF4</Color>
+    <Color x:Key="Color.TextSecondary">#9CA8B8</Color>
+    <Color x:Key="Color.TextMuted">#69778A</Color>
+    <Color x:Key="Color.TextOnAccent">#FFFFFF</Color>
+
+    <Color x:Key="Color.Accent">#58B957</Color>
+    <Color x:Key="Color.AccentHover">#67C866</Color>
+    <Color x:Key="Color.AccentPressed">#48A049</Color>
+    <Color x:Key="Color.Error">#E36A76</Color>
+    <Color x:Key="Color.Warning">#D9A441</Color>
+
+    <SolidColorBrush x:Key="Brush.Canvas" Color="{StaticResource Color.Canvas}"/>
+    <SolidColorBrush x:Key="Brush.Surface1" Color="{StaticResource Color.Surface1}"/>
+    <SolidColorBrush x:Key="Brush.Surface2" Color="{StaticResource Color.Surface2}"/>
+    <SolidColorBrush x:Key="Brush.Surface3" Color="{StaticResource Color.Surface3}"/>
+    <SolidColorBrush x:Key="Brush.BorderSoft" Color="{StaticResource Color.BorderSoft}"/>
+    <SolidColorBrush x:Key="Brush.BorderStrong" Color="{StaticResource Color.BorderStrong}"/>
+    <SolidColorBrush x:Key="Brush.TextPrimary" Color="{StaticResource Color.TextPrimary}"/>
+    <SolidColorBrush x:Key="Brush.TextSecondary" Color="{StaticResource Color.TextSecondary}"/>
+    <SolidColorBrush x:Key="Brush.TextMuted" Color="{StaticResource Color.TextMuted}"/>
+    <SolidColorBrush x:Key="Brush.TextOnAccent" Color="{StaticResource Color.TextOnAccent}"/>
+    <SolidColorBrush x:Key="Brush.Accent" Color="{StaticResource Color.Accent}"/>
+    <SolidColorBrush x:Key="Brush.AccentHover" Color="{StaticResource Color.AccentHover}"/>
+    <SolidColorBrush x:Key="Brush.AccentPressed" Color="{StaticResource Color.AccentPressed}"/>
+    <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}"/>
+    <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}"/>
+
+    <!-- Derived: translucent surfaces for pills, banners and overlays. -->
+    <SolidColorBrush x:Key="Brush.AccentSoft" Color="#2258B957"/>
+    <SolidColorBrush x:Key="Brush.ErrorSurface" Color="#33E36A76"/>
+    <SolidColorBrush x:Key="Brush.LoadingSurface" Color="#99131B26"/>
+
+    <!-- ── Shape and spacing tokens ────────────────────────────────── -->
+
+    <x:Double x:Key="Radius.Small">3</x:Double>
+    <CornerRadius x:Key="Radius.Panel">6</CornerRadius>
+    <Thickness x:Key="Spacing.Section">12</Thickness>
+    <Thickness x:Key="Spacing.Compact">8</Thickness>
+
+    <!-- ── Typography ──────────────────────────────────────────────── -->
+
+    <!-- Tabular/monospace mode for time, FPS, dimensions and metrics only. -->
+    <FontFamily x:Key="FontFamily.Mono">DejaVu Sans Mono, Liberation Mono, Consolas, monospace</FontFamily>
+
+  </Styles.Resources>
+
+  <!-- ── Base: density and surface defaults ────────────────────────── -->
+
+  <Style Selector="Button">
+    <Setter Property="MinHeight" Value="30"/>
+    <Setter Property="FontSize" Value="13"/>
+  </Style>
+
+  <!-- ── Button variants ───────────────────────────────────────────── -->
+
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{StaticResource Brush.Accent}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextOnAccent}"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Padding" Value="16,8"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="MinHeight" Value="32"/>
+  </Style>
+  <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.AccentHover}"/>
+  </Style>
+  <Style Selector="Button.primary:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.AccentPressed}"/>
+  </Style>
+  <Style Selector="Button.primary:disabled">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+
+  <Style Selector="Button.secondary">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Padding" Value="12,6"/>
+  </Style>
+  <Style Selector="Button.secondary:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderStrong}"/>
+  </Style>
+  <Style Selector="Button.secondary:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
+  </Style>
+  <Style Selector="Button.secondary:disabled">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+
+  <Style Selector="Button.icon">
+    <Setter Property="Width" Value="28"/>
+    <Setter Property="Height" Value="28"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="FontSize" Value="13"/>
+  </Style>
+  <Style Selector="Button.icon:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface3}"/>
+  </Style>
+  <Style Selector="Button.icon:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+  </Style>
+  <Style Selector="Button.icon:disabled">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+
+  <!-- ── Panels ────────────────────────────────────────────────────── -->
+
+  <Style Selector="Border.panel">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="{StaticResource Radius.Panel}"/>
+    <Setter Property="Padding" Value="{StaticResource Spacing.Section}"/>
+  </Style>
+
+  <!-- Chrome bars (toolbar, status strip, preview frame edges). The
+       border side is overridden per use (bottom for the header, top for
+       the attached transport/status). -->
+  <Style Selector="Border.toolbar">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="0,0,0,1"/>
+  </Style>
+
+  <!-- Preview viewport: dark stage that dominates the main content area. -->
+  <Style Selector="Border.preview">
+    <Setter Property="Background" Value="{StaticResource Brush.Canvas}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="ClipToBounds" Value="True"/>
+  </Style>
+
+  <!-- Bottom status strip. -->
+  <Style Selector="Border.status">
+    <Setter Property="Background" Value="{StaticResource Brush.Surface1}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
+    <Setter Property="BorderThickness" Value="0,1,0,0"/>
+  </Style>
+
+  <!-- ── Typography classes ────────────────────────────────────────── -->
+
+  <Style Selector="TextBlock.section-title">
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="LetterSpacing" Value="1"/>
+  </Style>
+
+  <Style Selector="TextBlock.secondary">
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
+  </Style>
+
+  <Style Selector="TextBlock.caption">
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+  </Style>
+
+  <!-- Metric readouts (time, FPS, dimensions, positions) — mono. -->
+  <Style Selector="TextBlock.metric">
+    <Setter Property="FontFamily" Value="{StaticResource FontFamily.Mono}"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
+  </Style>
+
+  <!-- Timecode readout in the preview header/transport. -->
+  <Style Selector="TextBlock.timecode">
+    <Setter Property="FontFamily" Value="{StaticResource FontFamily.Mono}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+  </Style>
+
+  <!-- ── Compact controls for the dense sidebar ────────────────────── -->
+
+  <Style Selector="ComboBox.compact">
+    <Setter Property="Height" Value="28"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="CornerRadius" Value="4"/>
+  </Style>
+
+  <Style Selector="NumericUpDown.compact">
+    <Setter Property="Height" Value="28"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="CornerRadius" Value="4"/>
+  </Style>
+
+  <Style Selector="TextBox.compact">
+    <Setter Property="Height" Value="28"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="CornerRadius" Value="4"/>
+  </Style>
+
+  <Style Selector="CheckBox.compact">
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="MinHeight" Value="24"/>
+  </Style>
+
+  <Style Selector="Slider.transport">
+    <Setter Property="Height" Value="24"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+  </Style>
+
+</Styles>

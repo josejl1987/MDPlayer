@@ -74,9 +74,6 @@ public sealed class GuiSettings
     /// <summary>Preview frame render height cap.</summary>
     public int PreviewMaxHeight { get; set; } = 540;
 
-    /// <summary>"Default", "Light" or "Dark".</summary>
-    public string ThemeVariant { get; set; } = "Default";
-
     /// <summary>Most recently opened inputs (most recent first).</summary>
     public List<string> RecentFiles { get; set; } = new();
 }

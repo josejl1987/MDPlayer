@@ -42,7 +42,6 @@ public sealed class RemainingWorkflowTests
                 s.RenderCliPath = "/opt/mdplayer/bin/mdplayer-render";
                 s.PreviewMaxWidth = 1280;
                 s.PreviewMaxHeight = 720;
-                s.ThemeVariant = "Dark";
                 s.RecentFiles.Add("/tmp/song.vgz");
             });
             store.Save();
@@ -51,7 +50,6 @@ public sealed class RemainingWorkflowTests
             Assert.Equal("/opt/mdplayer/bin/mdplayer-render", reloaded.Settings.RenderCliPath);
             Assert.Equal(1280, reloaded.Settings.PreviewMaxWidth);
             Assert.Equal(720, reloaded.Settings.PreviewMaxHeight);
-            Assert.Equal("Dark", reloaded.Settings.ThemeVariant);
             Assert.Equal(["/tmp/song.vgz"], reloaded.Settings.RecentFiles);
         }
         finally
