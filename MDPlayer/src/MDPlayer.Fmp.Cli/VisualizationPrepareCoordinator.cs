@@ -262,7 +262,7 @@ internal static class VisualizationPrepareCoordinator
     /// means later layout/track-selection changes reuse the raw stems and re-derive
     /// the request-specific scope channel set.
     /// </summary>
-    private static ScopeRenderer.ScopeResult ProjectScopes(
+    internal static ScopeRenderer.ScopeResult ProjectScopes(
         ScopeRenderer.ScopeResult captured,
         ResolvedVisualizationLayout layout,
         VisualizationWorkspace workspace)

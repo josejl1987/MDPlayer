@@ -188,7 +188,14 @@ internal static class VisualizationPlanBuilder
             || timeline.SamplePlayback.Any(evt => evt.VoiceId == voiceId)
             || timeline.NoiseStates.Any(evt => evt.VoiceId == voiceId)
             || timeline.AggregateHits.Any(evt => evt.VoiceId == voiceId)
-            || timeline.WaveformChanges.Any(evt => evt.VoiceId == voiceId);
+            || timeline.WaveformChanges.Any(evt => evt.VoiceId == voiceId)
+            // YM2608 rhythm is a percussion aggregate, not a pitched voice: its
+            // events live in timeline.Rhythm (BD/SD/TOP/HH/TOM/RIM slots), so
+            // note-only checks classify the aggregate as inactive even while
+            // percussion events exist. Any child event makes the parent active.
+            || timeline.Rhythm.Any(evt =>
+                VisualizationTimelineCompatibility.RhythmBelongsToVoice(
+                    timeline, evt, voiceId));
     }
 
     private static string SemanticTypeName(VoicePresentationKind presentation) => presentation switch

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Fmp.Cli;
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
+using Fmp.Core.Visualization.Rendering;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -334,6 +335,45 @@ public sealed class VgmPlaybackBackendTests
             if (File.Exists(wav)) File.Delete(wav);
             if (File.Exists(wav + ".tmp")) File.Delete(wav + ".tmp");
         }
+    }
+
+    [Fact]
+    public void Capture_DecodesYm2608Rhythm()
+    {
+        VisualizationTimeline timeline = CaptureVgm(
+            "ym2608-rhythm",
+
+            // BD key-on
+            0x56, 0x10, 0x01,
+
+            // Wait
+            0x61, 0x10, 0x00,
+
+            // BD dump/key-off
+            0x56, 0x10, 0x81,
+
+            0x66);
+
+        Assert.Contains(
+            timeline.Voices,
+            voice => voice.Id.ToString() == "ym2608.0.rhythm"
+                && voice.Presentation == VoicePresentationKind.Percussion);
+
+        Assert.Contains(
+            timeline.Rhythm,
+            hit => VisualizationTimelineCompatibility.RhythmBelongsToVoice(
+                timeline,
+                hit,
+                "ym2608.0.rhythm"));
+
+        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+            timeline,
+            VisualizationChannelFilter.Active);
+
+        Assert.Contains(
+            topology.Panels,
+            panel => panel.Id == "ym2608.0.rhythm"
+                && panel.Kind == PreparedPanelKind.Rhythm);
     }
 
     [Fact]

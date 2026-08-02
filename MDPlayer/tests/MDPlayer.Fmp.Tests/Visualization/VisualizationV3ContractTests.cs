@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Fmp.Application.Contracts;
 using Fmp.Cli;
+using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 using MDPlayer.Fmp.Tests.Fixtures;
@@ -855,5 +856,193 @@ public sealed class VisualizationV3ContractTests
             && track.CameraMaximumMidi.HasValue);
         Assert.Contains(plan.Regions, region => region.Kind == "metadata");
         Assert.Contains(plan.Regions, region => region.Kind == "semantic");
+    }
+
+    [Fact]
+    public void Ym2608ActiveTopologyKeepsRhythmPanelInPanelOrder()
+    {
+        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
+        VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2608Voices().ToArray();
+        string[] fmIds = Enumerable.Range(1, 6).Select(i => $"ym2608.0.fm.{i}").ToArray();
+        string[] ssgIds = Enumerable.Range(1, 3).Select(i => $"ym2608.0.ssg.{i}").ToArray();
+
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 1_000,
+            EndSample = 2_000,
+            Devices = [device],
+            Voices = voices,
+            Notes = fmIds.Concat(ssgIds)
+                .Select((id, index) => new NoteEvent(
+                    id, 100 + index * 50, 1_500, 440, 69, "i",
+                    VisualizationNoteMode.Fm, false, []))
+                .ToArray(),
+            Rhythm =
+            [
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", 500, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("sd", "ym2608.0.rhythm.sd", 600, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("top", "ym2608.0.rhythm.top", 700, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("hh", "ym2608.0.rhythm.hh", 800, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("tom", "ym2608.0.rhythm.tom", 900, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("rim", "ym2608.0.rhythm.rim", 1_000, 1.0f, 0, "ym2608.0.rhythm"),
+            ],
+        };
+
+        VisualizationTopology active = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationChannelFilter.Active);
+
+        Assert.Equal(
+            fmIds.Concat(ssgIds).Append("ym2608.0.rhythm"),
+            active.Panels.Select(panel => panel.Id));
+
+        VisualizationPanel rhythm = Assert.Single(
+            active.Panels, panel => panel.Id == "ym2608.0.rhythm");
+        Assert.Equal(PanelContentKind.PercussionGroup, rhythm.Content);
+        Assert.Equal(
+            new[] { "bd", "sd", "top", "hh", "tom", "rim" },
+            rhythm.Rows.Select(row => row.Id));
+    }
+
+    [Fact]
+    public void ProjectScopesDropsUnmatchedStemsAndAssignsOneStemPerPanel()
+    {
+        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
+        VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2608Voices().ToArray();
+        string[] fmIds = Enumerable.Range(1, 6).Select(i => $"ym2608.0.fm.{i}").ToArray();
+        string[] ssgIds = Enumerable.Range(1, 3).Select(i => $"ym2608.0.ssg.{i}").ToArray();
+
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 1_000,
+            EndSample = 2_000,
+            Devices = [device],
+            Voices = voices,
+            Notes = fmIds.Concat(ssgIds)
+                .Select((id, index) => new NoteEvent(
+                    id, 100 + index * 50, 1_500, 440, 69, "i",
+                    VisualizationNoteMode.Fm, false, []))
+                .ToArray(),
+            Rhythm =
+            [
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", 500, 1.0f, 0, "ym2608.0.rhythm"),
+            ],
+        };
+
+        ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
+            timeline,
+            VisualizationLayoutMode.Diagnostic,
+            new VisualizationLayoutSettings(
+                1280, 720, 0.75, 2.25, 1.0, null, null, null,
+                VisualizationScopePosition.Bottom,
+                VisualizationChannelFilter.Active,
+                VisualizationGroupBy.None));
+
+        // Captured stems: one per resolved panel, plus an unrelated stem that
+        // belongs to no panel (the old projection retained it with an
+        // int.MaxValue ordering, over-filling the grid and misaligning cells).
+        var captured = new ScopeRenderer.ScopeResult
+        {
+            Success = true,
+            OutputDir = "out",
+            MasterSamples = 44_100,
+            SampleRate = 44_100,
+        };
+        captured.Stems.Add(new ScopeRenderer.StemResult
+        {
+            Name = "master", Label = "Master",
+            PresentationTrackId = "master", WavPath = "master.wav",
+            Success = true,
+        });
+        foreach (string id in fmIds.Concat(ssgIds).Append("ym2608.0.rhythm"))
+        {
+            captured.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = id.Replace('.', '-'),
+                Label = id,
+                PresentationTrackId = id,
+                WavPath = id + ".wav",
+                Success = true,
+            });
+        }
+        captured.Stems.Add(new ScopeRenderer.StemResult
+        {
+            Name = "unrelated",
+            Label = "Unrelated",
+            PresentationTrackId = "some.other.device.1",
+            WavPath = "unrelated.wav",
+            Success = true,
+        });
+
+        using var workspace = TemporaryVisualizationWorkspace.Create("ProjectionTest");
+        ScopeRenderer.ScopeResult projected =
+            VisualizationPrepareCoordinator.ProjectScopes(captured, layout, workspace);
+
+        // The unmatched stem must be dropped, not retained with int.MaxValue
+        // ordering.
+        Assert.DoesNotContain(projected.Stems, stem => stem.Name == "unrelated");
+
+        // Every resolved panel receives exactly one scope, in panel order, with
+        // the master channel first.
+        string[] panelIds = layout.Topology.Panels.Select(panel => panel.Id).ToArray();
+        string[] projectedIds = projected.Stems
+            .Where(stem => stem.Name != "master")
+            .Select(stem => stem.PresentationTrackId)
+            .ToArray();
+        Assert.Equal(panelIds, projectedIds);
+        Assert.Equal("master", projected.Stems[0].Name);
+        Assert.Equal(
+            layout.Topology.Panels.Count + 1,
+            projected.Stems.Count);
+    }
+
+    [Fact]
+    public void PlanReportsRhythmTrackAsActiveFromPercussionEvents()
+    {
+        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2608();
+        VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2608Voices().ToArray();
+
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 1_000,
+            EndSample = 2_000,
+            Devices = [device],
+            Voices = voices,
+            // No pitched notes at all: only percussion events. The rhythm
+            // aggregate must still be reported active; pitched-note checks
+            // alone would classify it as silent and drop it from Active mode.
+            Rhythm =
+            [
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", 500, 1.0f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("hh", "ym2608.0.rhythm.hh", 700, 0.8f, 0, "ym2608.0.rhythm"),
+                new RhythmEvent("rim", "ym2608.0.rhythm.rim", 900, 0.6f, 0, "ym2608.0.rhythm"),
+            ],
+        };
+
+        VisualizationTopology active = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationChannelFilter.Active);
+
+        Assert.Single(active.Panels);
+        Assert.Equal("ym2608.0.rhythm", active.Panels[0].Id);
+
+        VisualizationPlanResult plan = VisualizationPlanBuilder.Build(
+            new VisualizationRequest
+            {
+                InputPath = "input.vgm",
+                OutputPath = "output.mp4",
+                Composition = CompositionKind.Diagnostic,
+            },
+            timeline,
+            VisualizationLayoutBuilder.Build(
+                timeline,
+                VisualizationLayoutMode.Diagnostic,
+                new VisualizationLayoutSettings(
+                    1280, 720, 0.75, 2.25, 1.0, null, null, null,
+                    VisualizationScopePosition.Bottom,
+                    VisualizationChannelFilter.Active,
+                    VisualizationGroupBy.None)));
+
+        TrackSelectionInfo rhythmTrack = Assert.Single(
+            plan.Tracks, track => track.TrackId == "ym2608.0.rhythm");
+        Assert.True(rhythmTrack.ActivityDetected);
     }
 }
