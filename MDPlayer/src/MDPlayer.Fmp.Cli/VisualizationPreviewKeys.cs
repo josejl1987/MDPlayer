@@ -36,16 +36,24 @@ internal readonly record struct TimelineCaptureKey(
 {
     /// <summary>
     /// Builds the key from a real <see cref="FileInfo"/> so input identity
-    /// (path, size, last-write time) is part of the capture identity.
+    /// (path, size, last-write time) is part of the capture identity. A missing
+    /// file yields placeholder values (−1 length / 0 ticks) rather than
+    /// throwing: this path exists only for comparing request snapshots, and the
+    /// real session rejects a missing input in its own <c>KeyFor</c> step.
     /// </summary>
     public static TimelineCaptureKey From(
         VisualizationRequest request,
         FileInfo file,
         RenderRuntimeOptions runtime)
-        => new(
+    {
+        long length = file.Exists ? file.Length : -1;
+        long lastWriteTicks =
+            file.Exists ? file.LastWriteTimeUtc.Ticks : 0;
+
+        return new(
             Path.GetFullPath(request.InputPath),
-            file.Length,
-            file.LastWriteTimeUtc.Ticks,
+            length,
+            lastWriteTicks,
             runtime.Backend ?? "auto",
             request.Playback.LoopCount,
             request.Playback.FadeSeconds,
@@ -54,14 +62,16 @@ internal readonly record struct TimelineCaptureKey(
             request.Playback.SampleRate,
             request.Playback.SsgGainDb,
             request.Playback.SpcPitch);
+    }
 }
 
 /// <summary>
-/// Identity of the channel scope/stem projection. Track selection drives scope
-/// projection and channel-energy preparation, so changing it must not rerun
-/// playback capture but may regenerate scope assets. Equality is value-based
-/// and ID-order-insensitive: included/excluded IDs are compared by content
-/// (ordinal sequence), not by array reference.
+/// Normalized request-specific track/scope projection identity. Track
+/// selection drives scope projection and channel-energy preparation, so
+/// changing it must not rerun playback capture but may rebuild the plan.
+/// It does not cause the raw stem set to be regenerated.
+/// Equality is value-based and ID-order-insensitive: included/excluded IDs are
+/// compared by content (ordinal sequence), not by array reference.
 /// </summary>
 internal sealed class ScopeAssetKey : IEquatable<ScopeAssetKey>
 {
@@ -91,18 +101,16 @@ internal sealed class ScopeAssetKey : IEquatable<ScopeAssetKey>
         => new(
             timeline,
             request.Tracks.Selection,
-            SortIds(request.Tracks.IncludedIds),
-            SortIds(request.Tracks.ExcludedIds),
+            NormalizeIds(request.Tracks.IncludedIds),
+            NormalizeIds(request.Tracks.ExcludedIds),
             request.Tracks.IncludeInactiveDiagnosticTracks);
 
-    private static string[] SortIds(IReadOnlyList<string> ids)
-    {
-        var sorted = new string[ids.Count];
-        for (int i = 0; i < ids.Count; i++)
-            sorted[i] = ids[i];
-        Array.Sort(sorted, StringComparer.Ordinal);
-        return sorted;
-    }
+    private static string[] NormalizeIds(IReadOnlyList<string> ids)
+        => ids
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
 
     public bool Equals(ScopeAssetKey? other)
     {
@@ -125,8 +133,8 @@ internal sealed class ScopeAssetKey : IEquatable<ScopeAssetKey>
         h.Add(Timeline);
         h.Add(Selection);
         h.Add(IncludeInactiveDiagnosticTracks);
-        AddList(h, IncludedIds);
-        AddList(h, ExcludedIds);
+        AddList(ref h, IncludedIds);
+        AddList(ref h, ExcludedIds);
         return h.ToHashCode();
     }
 
@@ -140,10 +148,12 @@ internal sealed class ScopeAssetKey : IEquatable<ScopeAssetKey>
         return true;
     }
 
-    private static void AddList(HashCode h, IReadOnlyList<string> list)
+    private static void AddList(
+        ref HashCode hash,
+        IReadOnlyList<string> list)
     {
         foreach (string id in list)
-            h.Add(id, StringComparer.Ordinal);
+            hash.Add(id, StringComparer.Ordinal);
     }
 }
 

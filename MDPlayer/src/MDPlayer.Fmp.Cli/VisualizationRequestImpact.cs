@@ -5,22 +5,15 @@ namespace Fmp.Cli;
 /// <summary>
 /// Classifies how a change from one request snapshot to the next affects the
 /// staged preview work, so the caller can run the cheapest valid operation.
+/// Only the highest affected stage is returned, not a flags combination.
 /// </summary>
-[Flags]
 internal enum VisualizationRequestImpact
 {
     None = 0,
     ExportOnly = 1,
     Frame = 2,
-    Plan = 4,
-    ScopeAssets = 8,
-    TimelineCapture = 16,
-}
-
-internal static class VisualizationRequestImpactExtensions
-{
-    public static bool Has(this VisualizationRequestImpact impact, VisualizationRequestImpact flag)
-        => (impact & flag) == flag;
+    Plan = 3,
+    TimelineCapture = 4,
 }
 
 internal static class VisualizationRequestImpactClassifier
@@ -53,10 +46,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (previousTimeline != nextTimeline)
         {
-            return VisualizationRequestImpact.TimelineCapture
-                | VisualizationRequestImpact.ScopeAssets
-                | VisualizationRequestImpact.Plan
-                | VisualizationRequestImpact.Frame;
+            return VisualizationRequestImpact.TimelineCapture;
         }
 
         ScopeAssetKey previousScope = ScopeAssetKey.From(previous, previousTimeline);
@@ -64,9 +54,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (!previousScope.Equals(nextScope))
         {
-            return VisualizationRequestImpact.ScopeAssets
-                | VisualizationRequestImpact.Plan
-                | VisualizationRequestImpact.Frame;
+            return VisualizationRequestImpact.Plan;
         }
 
         PlanKey previousPlan = PlanKey.From(previous, previousScope);
@@ -74,8 +62,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (previousPlan != nextPlan)
         {
-            return VisualizationRequestImpact.Plan
-                | VisualizationRequestImpact.Frame;
+            return VisualizationRequestImpact.Plan;
         }
 
         FrameStyleKey previousFrame = FrameStyleKey.From(previous, previousPlan);

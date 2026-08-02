@@ -6,9 +6,9 @@ namespace MDPlayer.Fmp.Tests.Preview;
 
 /// <summary>
 /// Request-difference classification precedence. A change to an earlier staged
-/// key must classify as that stage (and everything derived), an export-only
-/// change must classify as <see cref="VisualizationRequestImpact.ExportOnly"/>,
-/// and an identical request must classify as <see cref="VisualizationRequestImpact.None"/>.
+/// key must classify as that single highest stage (not a flag combination), an
+/// export-only change as <see cref="VisualizationRequestImpact.ExportOnly"/>, and an
+/// identical request as <see cref="VisualizationRequestImpact.None"/>.
 /// </summary>
 public sealed class VisualizationRequestImpactTests : IDisposable
 {
@@ -71,6 +71,12 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         },
     };
 
+    private TimelineCaptureKey TimelineOf(VisualizationRequest request)
+    {
+        var runtime = new RenderRuntimeOptions();
+        return TimelineCaptureKey.From(request, new FileInfo(_inputPath), runtime);
+    }
+
     private static VisualizationRequestImpact Classify(
         VisualizationRequest a,
         VisualizationRequest b)
@@ -88,12 +94,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Playback = a.Playback with { SampleRate = 22050 } };
-
-        VisualizationRequestImpact impact = Classify(a, b);
-        Assert.True(impact.Has(VisualizationRequestImpact.TimelineCapture));
-        Assert.True(impact.Has(VisualizationRequestImpact.ScopeAssets));
-        Assert.True(impact.Has(VisualizationRequestImpact.Plan));
-        Assert.True(impact.Has(VisualizationRequestImpact.Frame));
+        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
     }
 
     [Fact]
@@ -101,20 +102,18 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Playback = a.Playback with { SsgGainDb = -9 } };
-        Assert.True(Classify(a, b).Has(VisualizationRequestImpact.TimelineCapture));
+        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
     }
 
     [Fact]
-    public void TrackSelectionChange_RegeneratesScopeAssetsOnly()
+    public void TrackSelectionChange_IsPlanNotTimelineCapture()
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Tracks = a.Tracks with { Selection = TrackSelectionMode.Active } };
 
         VisualizationRequestImpact impact = Classify(a, b);
-        Assert.False(impact.Has(VisualizationRequestImpact.TimelineCapture));
-        Assert.True(impact.Has(VisualizationRequestImpact.ScopeAssets));
-        Assert.True(impact.Has(VisualizationRequestImpact.Plan));
-        Assert.True(impact.Has(VisualizationRequestImpact.Frame));
+        Assert.NotEqual(VisualizationRequestImpact.TimelineCapture, impact);
+        Assert.Equal(VisualizationRequestImpact.Plan, impact);
     }
 
     [Fact]
@@ -136,12 +135,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Output = a.Output with { Width = 1280, Height = 720 } };
-
-        VisualizationRequestImpact impact = Classify(a, b);
-        Assert.False(impact.Has(VisualizationRequestImpact.TimelineCapture));
-        Assert.False(impact.Has(VisualizationRequestImpact.ScopeAssets));
-        Assert.True(impact.Has(VisualizationRequestImpact.Plan));
-        Assert.True(impact.Has(VisualizationRequestImpact.Frame));
+        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -149,7 +143,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { View = a.View with { PastSeconds = 3.0 } };
-        Assert.True(Classify(a, b).Has(VisualizationRequestImpact.Plan));
+        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -157,7 +151,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { View = a.View with { TimeGrid = TimeGridMode.Authoritative } };
-        Assert.True(Classify(a, b).Has(VisualizationRequestImpact.Plan));
+        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -165,9 +159,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Presentation = a.Presentation with { Title = "New" } };
-
-        VisualizationRequestImpact impact = Classify(a, b);
-        Assert.Equal(VisualizationRequestImpact.Frame, impact);
+        Assert.Equal(VisualizationRequestImpact.Frame, Classify(a, b));
     }
 
     [Fact]
@@ -192,5 +184,66 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Output = a.Output with { Encoder = VideoEncoder.Nvenc, Overwrite = true } };
         Assert.Equal(VisualizationRequestImpact.ExportOnly, Classify(a, b));
+    }
+
+    // ---- Classification/key corrections for this commit ----
+
+    [Fact]
+    public void DuplicateIncludedIds_NormalizeToSameKey()
+    {
+        VisualizationRequest a = BaseRequest() with
+        {
+            Tracks = BaseRequest().Tracks with { IncludedIds = ["b", "a", "b"] },
+        };
+        VisualizationRequest b = BaseRequest() with
+        {
+            Tracks = BaseRequest().Tracks with { IncludedIds = ["a", "b"] },
+        };
+        Assert.Equal(VisualizationRequestImpact.None, Classify(a, b));
+    }
+
+    [Fact]
+    public void IncludedExcludedIds_AffectHashEqualityConsistently()
+    {
+        var timeline = TimelineOf(BaseRequest());
+
+        var a = BaseRequest() with
+        {
+            Tracks = BaseRequest().Tracks with { IncludedIds = ["a", "b"], ExcludedIds = ["c"] },
+        };
+        var b = BaseRequest() with
+        {
+            Tracks = BaseRequest().Tracks with { IncludedIds = ["b", "a"], ExcludedIds = ["c"] },
+        };
+        var c = BaseRequest() with
+        {
+            Tracks = BaseRequest().Tracks with { IncludedIds = ["a", "b"], ExcludedIds = ["d"] },
+        };
+
+        var ka = ScopeAssetKey.From(a, timeline);
+        var kb = ScopeAssetKey.From(b, timeline);
+        var kc = ScopeAssetKey.From(c, timeline);
+
+        Assert.True(ka.Equals(kb));
+        Assert.Equal(ka.GetHashCode(), kb.GetHashCode());
+        Assert.False(ka.Equals(kc));
+    }
+
+    [Fact]
+    public void MissingFile_CanBeClassifiedWithoutThrowing()
+    {
+        string missing = Path.Combine(_tempDir, "does-not-exist.vgz");
+        VisualizationRequest a = BaseRequest() with
+        {
+            InputPath = missing,
+            Playback = BaseRequest().Playback with { SampleRate = 44100 },
+        };
+        VisualizationRequest b = BaseRequest() with
+        {
+            InputPath = missing,
+            Playback = BaseRequest().Playback with { SampleRate = 22050 },
+        };
+
+        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
     }
 }

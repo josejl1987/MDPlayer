@@ -77,7 +77,6 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     private PreparedTimelineSource? _timelineSource;
     private VisualizationFrameRenderer? _timelineRenderer;
 
-    private ScopeAssetKey? _scopeAssetKey;
     private Task<PreparedCapture>? _renderAssetsTask;
     private PreparedCapture? _capture;
 
