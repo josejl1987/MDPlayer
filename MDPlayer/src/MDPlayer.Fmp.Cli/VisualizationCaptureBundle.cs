@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -38,16 +39,18 @@ internal static class VisualizationCaptureBundle
         // the declared fields explicitly to stay robust.
         var sb = new StringBuilder();
         sb.Append(key.InputPath).Append('\n');
-        sb.Append(key.InputLength).Append('\n');
-        sb.Append(key.InputLastWriteUtcTicks).Append('\n');
+        sb.Append(key.InputLength.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(key.InputLastWriteUtcTicks.ToString(CultureInfo.InvariantCulture)).Append('\n');
         sb.Append(key.Backend).Append('\n');
-        sb.Append(key.LoopCount).Append('\n');
-        sb.Append(key.FadeSeconds).Append('\n');
-        sb.Append(key.TailSeconds).Append('\n');
-        sb.Append(key.MaximumDurationSeconds).Append('\n');
-        sb.Append(key.SampleRate).Append('\n');
-        sb.Append(key.SsgGainDb).Append('\n');
-        sb.Append(key.SpcPitch).Append('\n');
+        sb.Append(key.LoopCount.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(key.FadeSeconds.ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(key.TailSeconds.ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(key.MaximumDurationSeconds?.ToString(
+            "R",
+            CultureInfo.InvariantCulture) ?? "<null>").Append('\n');
+        sb.Append(key.SampleRate.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(key.SsgGainDb.ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+        sb.Append(((int)key.SpcPitch).ToString(CultureInfo.InvariantCulture)).Append('\n');
 
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
         return Convert.ToHexString(hash).ToLowerInvariant();
@@ -154,8 +157,20 @@ internal static class VisualizationCaptureBundle
     public static bool IsInsideBundle(string bundleRoot, string relativePath)
     {
         string fullRoot = Path.GetFullPath(bundleRoot);
-        string combined = Path.GetFullPath(Path.Combine(bundleRoot, relativePath));
-        return combined.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        string fullCandidate = Path.GetFullPath(Path.Combine(bundleRoot, relativePath));
+        if (string.Equals(fullCandidate, fullRoot, StringComparison.Ordinal))
+            return false; // an artifact equal to the root is not a valid file artifact
+
+        string relative = Path.GetRelativePath(fullRoot, fullCandidate);
+        if (Path.IsPathRooted(relative))
+            return false;
+        if (relative == "..")
+            return false;
+        if (relative.StartsWith("../", StringComparison.Ordinal))
+            return false;
+        if (relative.StartsWith("..\\", StringComparison.Ordinal))
+            return false;
+        return true;
     }
 
     /// <summary>Resolves a bundle-relative manifest path to an absolute path inside the root.</summary>
@@ -216,6 +231,9 @@ internal static class VisualizationCaptureBundle
                 $"capture bundle manifest is not valid JSON: {ex.Message}",
                 2, "INVALID_REQUEST");
         }
+
+        // Structural validation must hold before any field is trusted.
+        ValidateManifestStructure(manifest);
 
         if (manifest.SchemaVersion != SchemaVersion)
         {
@@ -338,13 +356,79 @@ internal static class VisualizationCaptureBundle
     }
 
     private static ScopeSemanticClass ParseSemanticClass(string value)
-        => value switch
+    {
+        if (!Enum.TryParse(
+                value,
+                ignoreCase: false,
+                out ScopeSemanticClass semanticClass)
+            || !Enum.IsDefined(semanticClass))
         {
-            "Mixed" => ScopeSemanticClass.Mixed,
-            "Voice" => ScopeSemanticClass.Mixed,
-            "Percussion" => ScopeSemanticClass.Percussive,
-            _ => ScopeSemanticClass.Mixed,
-        };
+            throw new VisualizationExecutionException(
+                $"capture bundle stem has unknown semantic class: '{value}'",
+                2, "INVALID_REQUEST");
+        }
+        return semanticClass;
+    }
+
+    /// <summary>
+    /// Validates the structural invariants of a capture manifest before any
+    /// field is trusted. Invalid structure always fails with exit code 2 and
+    /// must never let a <see cref="NullReferenceException"/> escape.
+    /// </summary>
+    private static void ValidateManifestStructure(CaptureManifest manifest)
+    {
+        if (manifest is null)
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is empty", 2, "INVALID_REQUEST");
+        if (manifest.Stems is null)
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is missing its stem collection",
+                2, "INVALID_REQUEST");
+        if (string.IsNullOrWhiteSpace(manifest.CaptureKey))
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is missing its capture key", 2, "INVALID_REQUEST");
+        if (string.IsNullOrWhiteSpace(manifest.BackendId))
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is missing its backend id", 2, "INVALID_REQUEST");
+        if (string.IsNullOrWhiteSpace(manifest.TimelinePath))
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is missing its timeline path", 2, "INVALID_REQUEST");
+        if (string.IsNullOrWhiteSpace(manifest.MasterAudioPath))
+            throw new VisualizationExecutionException(
+                "capture bundle manifest is missing its master audio path", 2, "INVALID_REQUEST");
+        if (manifest.SampleRate <= 0)
+            throw new VisualizationExecutionException(
+                "capture bundle manifest has a non-positive sample rate", 2, "INVALID_REQUEST");
+        if (manifest.MasterSamples <= 0)
+            throw new VisualizationExecutionException(
+                "capture bundle manifest has non-positive master samples", 2, "INVALID_REQUEST");
+
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        var seenPaths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CaptureStem stem in manifest.Stems)
+        {
+            if (string.IsNullOrWhiteSpace(stem.Name))
+                throw new VisualizationExecutionException(
+                    "capture bundle manifest contains a stem with an empty name", 2, "INVALID_REQUEST");
+            if (string.IsNullOrWhiteSpace(stem.WavPath))
+                throw new VisualizationExecutionException(
+                    "capture bundle manifest contains a stem with an empty wav path", 2, "INVALID_REQUEST");
+            if (stem.RenderedSamples <= 0)
+                throw new VisualizationExecutionException(
+                    $"capture bundle stem '{stem.Name}' has non-positive rendered samples", 2, "INVALID_REQUEST");
+            if (stem.Channels <= 0)
+                throw new VisualizationExecutionException(
+                    $"capture bundle stem '{stem.Name}' has non-positive channels", 2, "INVALID_REQUEST");
+            if (!seenNames.Add(stem.Name))
+                throw new VisualizationExecutionException(
+                    $"capture bundle manifest contains duplicate stem name: '{stem.Name}'",
+                    2, "INVALID_REQUEST");
+            if (!seenPaths.Add(stem.WavPath))
+                throw new VisualizationExecutionException(
+                    $"capture bundle manifest contains duplicate stem path: '{stem.WavPath}'",
+                    2, "INVALID_REQUEST");
+        }
+    }
 }
 
 /// <summary>Describes a successful stem within a capture bundle.</summary>

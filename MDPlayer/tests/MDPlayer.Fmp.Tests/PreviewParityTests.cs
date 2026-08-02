@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using Fmp.Application.Contracts;
 using Fmp.Application.Preview;
@@ -605,6 +606,317 @@ public sealed class PreviewParityTests
             try { Directory.Delete(root, recursive: true); }
             catch (IOException) { /* best-effort cleanup */ }
         }
+    }
+
+    // ---- Commit 1: reusable capture identity / fail-closed loading ----
+
+    /// <summary>
+    /// An explicitly supplied capture directory that is missing its manifest
+    /// must fail hard with an exit code 2 rather than silently falling back to
+    /// a fresh capture.
+    /// </summary>
+    [Fact]
+    public async Task Load_SuppliedDirectoryMissingManifest_FailsClosed()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-missing-manifest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            var request = FixtureRequest(input);
+            try
+            {
+                var ex = await Assert.ThrowsAsync<VisualizationExecutionException>(() =>
+                    VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        dir, "some-key", request, "fmp", CancellationToken.None));
+                Assert.Equal(2, ex.ExitCode);
+                Assert.Contains("capture-manifest.json", ex.Message);
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A supplied wrong key must fail before any normal capture path; the
+    /// manifest's own key must equal the supplied key.
+    /// </summary>
+    [Fact]
+    public async Task Load_WrongSuppliedKey_FailsInsteadOfRecapturing()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-wrong-key-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            try
+            {
+                WriteValidBundle(dir, "MY-EXPECTED-KEY", input, "fmp");
+
+                var request = FixtureRequest(input);
+                var ex = await Assert.ThrowsAsync<VisualizationExecutionException>(() =>
+                    VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        dir, "SOME-OTHER-KEY", request, "fmp", CancellationToken.None));
+                Assert.Equal(2, ex.ExitCode);
+                Assert.Contains("does not match", ex.Message);
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// ComputeCaptureKey must be identical regardless of the current culture,
+    /// including comma-decimal cultures.
+    /// </summary>
+    [Fact]
+    public void ComputeCaptureKey_IsCultureIndependent()
+    {
+        var key = new TimelineCaptureKey(
+            "song.vgz", 1024, 1_700_000_000, "fmp", 2,
+            1.5, 0.25, 3.125, 44100, -6.5, SpcPitchInterpretation.Relative);
+
+        CultureInfo original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
+            string enUs = VisualizationCaptureBundle.ComputeCaptureKey(key);
+
+            // de-DE uses ',' as the decimal separator.
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+            string comma = VisualizationCaptureBundle.ComputeCaptureKey(key);
+
+            Assert.Equal(enUs, comma);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+    }
+
+    /// <summary>
+    /// A bundle-relative artifact path that attempts to escape the bundle root
+    /// must be rejected both by containment and by the loader.
+    /// </summary>
+    [Fact]
+    public async Task Load_EscapingRelativeArtifactPath_IsRejected()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-escape-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // Containment check alone rejects an escaping path.
+            Assert.False(VisualizationCaptureBundle.IsInsideBundle(dir, "../outside.wav"));
+            Assert.False(VisualizationCaptureBundle.IsInsideBundle(dir, "..\\outside.wav"));
+
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            try
+            {
+                WriteValidBundle(dir, "KEY", input, "fmp", manifest =>
+                    manifest.TimelinePath = "../outside.timeline.json");
+
+                var request = FixtureRequest(input);
+                var ex = await Assert.ThrowsAsync<VisualizationExecutionException>(() =>
+                    VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        dir, "KEY", request, "fmp", CancellationToken.None));
+                Assert.Equal(2, ex.ExitCode);
+                Assert.Contains("escapes the bundle root", ex.Message);
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// An unknown semantic class in the manifest must be rejected with exit code
+    /// 2 rather than being coerced to Mixed.
+    /// </summary>
+    [Fact]
+    public async Task Load_UnknownSemanticClass_IsRejected()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-badsem-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            try
+            {
+                WriteValidBundle(dir, "KEY", input, "fmp", manifest =>
+                    manifest.Stems![0].SemanticClass = "BogusClass");
+
+                var request = FixtureRequest(input);
+                var ex = await Assert.ThrowsAsync<VisualizationExecutionException>(() =>
+                    VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        dir, "KEY", request, "fmp", CancellationToken.None));
+                Assert.Equal(2, ex.ExitCode);
+                Assert.Contains("unknown semantic class", ex.Message);
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A manifest with a null stem collection must fail with exit code 2 instead
+    /// of letting a NullReferenceException escape.
+    /// </summary>
+    [Fact]
+    public async Task Load_NullStemCollection_IsRejectedCleanly()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-nullstems-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            try
+            {
+                WriteValidBundle(dir, "KEY", input, "fmp", manifest => manifest.Stems = null!);
+
+                var request = FixtureRequest(input);
+                var ex = await Assert.ThrowsAsync<VisualizationExecutionException>(() =>
+                    VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        dir, "KEY", request, "fmp", CancellationToken.None));
+                Assert.Equal(2, ex.ExitCode);
+                Assert.Contains("stem", ex.Message);
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A correctly supplied key validates fully and does NOT fall back to fresh
+    /// capture: the loaded PreparedCapture is reconstructed entirely from the
+    /// bundle artifacts.
+    /// </summary>
+    [Fact]
+    public async Task Load_ValidSuppliedBundle_LoadsExactlyAsRequested()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-validbundle-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string input = Path.Combine(Path.GetTempPath(), $"mdplayer-input-{Guid.NewGuid():N}.vgz");
+            File.WriteAllText(input, "dummy");
+            try
+            {
+                WriteValidBundle(dir, "REUSE-KEY", input, "fmp");
+
+                var request = FixtureRequest(input);
+                PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                    dir, "REUSE-KEY", request, "fmp", CancellationToken.None);
+
+                Assert.NotNull(reuse.Timeline);
+                Assert.Equal("fmp", reuse.BackendId);
+                Assert.True(File.Exists(reuse.MasterAudioPath));
+                Assert.StartsWith(Path.GetFullPath(dir), Path.GetFullPath(reuse.MasterAudioPath));
+            }
+            finally
+            {
+                File.Delete(input);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>Writes a structurally valid capture bundle rooted at <paramref name="dir"/>.</summary>
+    private static void WriteValidBundle(
+        string dir,
+        string captureKey,
+        string inputPath,
+        string backendId,
+        Action<CaptureManifest>? mutate = null)
+    {
+        Directory.CreateDirectory(dir);
+
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        VisualizationJsonWriter.Write(Path.Combine(dir, "timeline.json"), timeline);
+
+        WriteSineWav(Path.Combine(dir, "master.wav"));
+        WriteSineWav(Path.Combine(dir, "channel_0.wav"));
+        File.WriteAllText(Path.Combine(dir, "scope.json"), "{}");
+
+        FileInfo input = new(inputPath);
+        var manifest = new CaptureManifest
+        {
+            SchemaVersion = VisualizationCaptureBundle.SchemaVersion,
+            CaptureKey = captureKey,
+            Input = new CaptureInput
+            {
+                Path = Path.GetFullPath(inputPath),
+                Length = input.Length,
+                LastWriteUtcTicks = input.LastWriteTimeUtc.Ticks,
+            },
+            BackendId = backendId,
+            TimelinePath = "timeline.json",
+            MasterAudioPath = "master.wav",
+            ScopeMetadataPath = "scope.json",
+            Stems =
+            [
+                new CaptureStem
+                {
+                    Name = "master",
+                    Label = "Master",
+                    PresentationTrackId = "master",
+                    SemanticClass = ScopeSemanticClass.Mixed.ToString(),
+                    StableOrder = 0,
+                    WindowWidth = 1,
+                    DefaultAmplification = 1.0,
+                    DefaultColor = "ffffff",
+                    WavPath = "channel_0.wav",
+                    RenderedSamples = 5_000,
+                    Channels = 2,
+                },
+            ],
+            SampleRate = 1_000,
+            MasterSamples = 5_000,
+            ScopeEnabled = false,
+            HasIsolatedStems = false,
+        };
+        mutate?.Invoke(manifest);
+
+        string json = JsonSerializer.Serialize(
+            manifest,
+            new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = true,
+            });
+        File.WriteAllText(
+            Path.Combine(dir, VisualizationCaptureBundle.ManifestFileName), json);
     }
 
     private static bool IsCommandAvailable(string name)

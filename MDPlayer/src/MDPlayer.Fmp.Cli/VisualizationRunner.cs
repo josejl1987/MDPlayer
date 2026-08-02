@@ -19,20 +19,29 @@ internal static partial class VisualizationRunner
             VisualizationBackendResolution resolution =
                 VisualizationBackendResolver.Resolve(request, runtime);
 
-            // When the caller supplied a captured bundle directory, load and
-            // validate the published capture and reuse it for the render
-            // (semantic timeline, scope/stem synthesis, and master audio are all
-            // taken from the bundle instead of being recomputed).
+            // When the caller supplied a captured bundle directory, the bundle
+            // is always validated and loaded exactly as requested. It must
+            // never silently fall back to fresh capture.
             string? seedTimelinePath = null;
             PreparedCapture? reusableCapture = null;
-            if (!string.IsNullOrWhiteSpace(invocation.CaptureDirectory)
-                && File.Exists(VisualizationCaptureBundle.ManifestPath(invocation.CaptureDirectory)))
+            if (!string.IsNullOrWhiteSpace(invocation.CaptureDirectory))
             {
+                // Parser guarantees CaptureKey is also present.
                 var inputFile = new FileInfo(Path.GetFullPath(request.InputPath));
                 TimelineCaptureKey key = TimelineCaptureKey.From(request, inputFile, runtime);
+                if (!string.Equals(
+                        invocation.CaptureKey,
+                        VisualizationCaptureBundle.ComputeCaptureKey(key),
+                        StringComparison.Ordinal))
+                {
+                    throw new VisualizationExecutionException(
+                        "--capture-key does not match the request-derived capture key",
+                        2, "INVALID_REQUEST");
+                }
+
                 reusableCapture = VisualizationCaptureBundle.LoadPreparedCaptureAsync(
                     invocation.CaptureDirectory,
-                    VisualizationCaptureBundle.ComputeCaptureKey(key),
+                    invocation.CaptureKey!,
                     request,
                     resolution.Backend.Id,
                     CancellationToken.None).GetAwaiter().GetResult();
