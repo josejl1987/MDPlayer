@@ -126,6 +126,7 @@ internal static class VgmScopeRenderer
                     Name = spec.Name,
                     Label = spec.Label,
                     SemanticClass = spec.SemanticClass,
+                    PresentationTrackId = spec.PresentationTrackId,
                     StableOrder = spec.StableOrder,
                     WindowWidth = spec.WindowWidth,
                     DefaultAmplification = spec.DefaultAmplification,
@@ -160,6 +161,7 @@ internal static class VgmScopeRenderer
         string[] pulseColors = ["#62b8ff", "#3399ee", "#62b8ff"];
         if (document.Devices.Count(device => device.Id.Type == ChipType.Huc6280) == 1)
         {
+            int instance = FirstInstance(document, ChipType.Huc6280);
             for (int channel = 0; channel < 6; channel++)
                 specs.Add(new StemSpec(
                     $"huc6280-wave{channel + 1}",
@@ -170,11 +172,13 @@ internal static class VgmScopeRenderer
                     10 + channel,
                     1,
                     1.0,
-                    fmColors[channel]));
+                    fmColors[channel],
+                    $"huc6280.{instance}.wavetable.{channel + 1}"));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Ym2608) == 1)
         {
+            int instance = FirstInstance(document, ChipType.Ym2608);
             for (int channel = 0; channel < 6; channel++)
                 specs.Add(new StemSpec(
                     $"ym2608-fm{channel + 1}",
@@ -185,7 +189,8 @@ internal static class VgmScopeRenderer
                     10 + channel,
                     1,
                     1.0,
-                    fmColors[channel]));
+                    fmColors[channel],
+                    $"ym2608.{instance}.fm.{channel + 1}"));
 
             for (int channel = 0; channel < 3; channel++)
                 specs.Add(new StemSpec(
@@ -197,7 +202,8 @@ internal static class VgmScopeRenderer
                     20 + channel,
                     1,
                     0.7,
-                    pulseColors[channel]));
+                    pulseColors[channel],
+                    $"ym2608.{instance}.ssg.{channel + 1}"));
 
             specs.Add(new StemSpec(
                 "ym2608-rhythm",
@@ -208,7 +214,8 @@ internal static class VgmScopeRenderer
                 30,
                 2,
                 0.75,
-                "#db72ff"));
+                "#db72ff",
+                $"ym2608.{instance}.rhythm"));
             specs.Add(new StemSpec(
                 "ym2608-adpcm",
                 "YM2608 ADPCM-B",
@@ -218,11 +225,13 @@ internal static class VgmScopeRenderer
                 31,
                 2,
                 1.0,
-                "#66cc66"));
+                "#66cc66",
+                $"ym2608.{instance}.adpcm-b"));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Ym2612) == 1)
         {
+            int instance = FirstInstance(document, ChipType.Ym2612);
             for (int channel = 0; channel < 6; channel++)
                 specs.Add(new StemSpec(
                     $"ym2612-fm{channel + 1}",
@@ -233,11 +242,13 @@ internal static class VgmScopeRenderer
                     20 + channel,
                     1,
                     1.0,
-                    fmColors[channel]));
+                    fmColors[channel],
+                    $"ym2612.{instance}.fm.{channel + 1}"));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Sn76489) == 1)
         {
+            int instance = FirstInstance(document, ChipType.Sn76489);
             for (int channel = 0; channel < 3; channel++)
                 specs.Add(new StemSpec(
                     $"sn76489-tone{channel + 1}",
@@ -248,7 +259,8 @@ internal static class VgmScopeRenderer
                     30 + channel,
                     1,
                     0.7,
-                    pulseColors[channel]));
+                    pulseColors[channel],
+                    $"sn76489.{instance}.psg.{channel + 1}"));
             specs.Add(new StemSpec(
                 "sn76489-noise",
                 "SN76489 Noise",
@@ -258,10 +270,21 @@ internal static class VgmScopeRenderer
                 33,
                 1,
                 0.7,
-                "#3399ee"));
+                "#3399ee",
+                $"sn76489.{instance}.noise.1"));
         }
 
         return specs.ToArray();
+    }
+
+    private static int FirstInstance(VgmDocument document, ChipType type)
+    {
+        foreach (DeviceDescriptor device in document.Devices)
+        {
+            if (device.Id.Type == type)
+                return device.Id.Instance;
+        }
+        return 0;
     }
 
     private readonly record struct StemSpec(
@@ -273,7 +296,8 @@ internal static class VgmScopeRenderer
         int StableOrder,
         int WindowWidth,
         double DefaultAmplification,
-        string DefaultColor);
+        string DefaultColor,
+        string PresentationTrackId);
 
     private static IEnumerable<VgmRegisterWrite> ExpandWrites(
         VgmDocument document,
