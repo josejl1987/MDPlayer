@@ -1,4 +1,3 @@
-using Fmp.Application.Contracts;
 using Fmp.Gui.Services;
 using Fmp.Gui.ViewModels;
 using Xunit;
@@ -8,84 +7,52 @@ namespace Fmp.Gui.Tests;
 public sealed class RemainingWorkflowTests
 {
     [Fact]
-    public void RecentProject_ExposesProjectKindAndDisablesMissingEntry()
+    public void RecentFile_IsAvailableOnlyWhenFileExists()
     {
-        var item = new RecentFileItemViewModel("/path/does-not-exist.mdpviz.json", _ => Task.CompletedTask);
+        string missing = Path.Combine(Path.GetTempPath(), "mdplayer-missing-" + Guid.NewGuid() + ".vgz");
+        var missingItem = new RecentFileItemViewModel(missing, _ => Task.CompletedTask);
 
-        Assert.Equal("Project", item.Kind);
-        Assert.False(item.IsAvailable);
-        Assert.False(item.OpenCommand.CanExecute(null));
-    }
+        Assert.Equal("Input", missingItem.Kind);
+        Assert.False(missingItem.IsAvailable);
+        Assert.False(missingItem.OpenCommand.CanExecute(null));
 
-    [Fact]
-    public void ToolDetailsCommand_RaisesDetailsRequest()
-    {
-        var viewModel = new ToolStatusViewModel(() => null, () => null, null);
-        bool raised = false;
-        viewModel.DetailsRequested += () => raised = true;
-
-        viewModel.ShowDetailsCommand.Execute(null);
-
-        Assert.True(raised);
-        Assert.Equal("Checking tools…", viewModel.Summary);
-    }
-
-    [Fact]
-    public void ToolSettings_SavePersistsPathsAndRoundTrips()
-    {
-        string settingsPath = Path.Combine(Path.GetTempPath(), $"tool-settings-{Guid.NewGuid():N}.json");
+        string path = Path.Combine(Path.GetTempPath(), "mdplayer-recent-" + Guid.NewGuid() + ".vgz");
+        File.WriteAllBytes(path, new byte[] { 0x56, 0x67, 0x6d });
         try
         {
-            var store = new GuiSettingsStore(settingsPath);
-            var viewModel = new ToolSettingsViewModel(store);
-
-            viewModel.RenderCliPath = "/opt/mdplayer/bin/mdplayer-render";
-            viewModel.FmpComPath = "/opt/fmp/FMP.COM";
-            viewModel.CorrscopePath = "/opt/corrscope/corrscope";
-            viewModel.FfmpegPath = "/usr/bin/ffmpeg";
-            viewModel.AnalysisPython = "/usr/bin/python3";
-            viewModel.AssetsDir = "/opt/mdplayer/assets";
-            Assert.True(viewModel.IsDirty);
-
-            viewModel.SaveCommand.Execute(null);
-            Assert.False(viewModel.IsDirty);
-
-            var reloaded = new GuiSettingsStore(settingsPath);
-            Assert.Equal("/opt/mdplayer/bin/mdplayer-render", reloaded.Settings.RenderCliPath);
-            Assert.Equal("/opt/fmp/FMP.COM", reloaded.Settings.FmpComPath);
-            Assert.Equal("/opt/corrscope/corrscope", reloaded.Settings.CorrscopePath);
-            Assert.Equal("/usr/bin/ffmpeg", reloaded.Settings.FfmpegPath);
-            Assert.Equal("/usr/bin/python3", reloaded.Settings.AnalysisPython);
-            Assert.Equal("/opt/mdplayer/assets", reloaded.Settings.AssetsDir);
-
-            ToolPaths paths = reloaded.Settings.ToToolPaths();
-            Assert.Equal("/opt/fmp/FMP.COM", paths.FmpComPath);
-            Assert.Equal("/opt/corrscope/corrscope", paths.CorrscopePath);
-            Assert.Equal("/usr/bin/ffmpeg", paths.FfmpegPath);
-            Assert.Equal("/usr/bin/python3", paths.AnalysisPython);
-            Assert.Equal("/opt/mdplayer/assets", paths.AssetsDir);
+            var item = new RecentFileItemViewModel(path, _ => Task.CompletedTask);
+            Assert.True(item.IsAvailable);
+            Assert.True(item.OpenCommand.CanExecute(null));
         }
         finally
         {
-            File.Delete(settingsPath);
+            File.Delete(path);
         }
     }
 
     [Fact]
-    public void ToolSettings_EmptyFieldsSaveAsNull()
+    public void GuiSettings_SavePersistsAndRoundTrips()
     {
-        string settingsPath = Path.Combine(Path.GetTempPath(), $"tool-settings-{Guid.NewGuid():N}.json");
+        string settingsPath = Path.Combine(Path.GetTempPath(), $"gui-settings-{Guid.NewGuid():N}.json");
         try
         {
             var store = new GuiSettingsStore(settingsPath);
-            store.Update(s => s.RenderCliPath = "/old/path");
-            var viewModel = new ToolSettingsViewModel(store);
-
-            viewModel.RenderCliPath = "   ";
-            viewModel.SaveCommand.Execute(null);
+            store.Update(s =>
+            {
+                s.RenderCliPath = "/opt/mdplayer/bin/mdplayer-render";
+                s.PreviewMaxWidth = 1280;
+                s.PreviewMaxHeight = 720;
+                s.ThemeVariant = "Dark";
+                s.RecentFiles.Add("/tmp/song.vgz");
+            });
+            store.Save();
 
             var reloaded = new GuiSettingsStore(settingsPath);
-            Assert.Null(reloaded.Settings.RenderCliPath);
+            Assert.Equal("/opt/mdplayer/bin/mdplayer-render", reloaded.Settings.RenderCliPath);
+            Assert.Equal(1280, reloaded.Settings.PreviewMaxWidth);
+            Assert.Equal(720, reloaded.Settings.PreviewMaxHeight);
+            Assert.Equal("Dark", reloaded.Settings.ThemeVariant);
+            Assert.Equal(["/tmp/song.vgz"], reloaded.Settings.RecentFiles);
         }
         finally
         {

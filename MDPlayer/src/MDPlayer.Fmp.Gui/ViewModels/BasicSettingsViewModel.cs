@@ -2,52 +2,41 @@ using Fmp.Application.Contracts;
 
 namespace Fmp.Gui.ViewModels;
 
-/// <summary>BASIC settings: composition, quality, resolution, frame rate.</summary>
+/// <summary>
+/// BASIC settings: composition (data-driven selector), output path, quality,
+/// resolution and frame rate.
+/// </summary>
 public sealed class BasicSettingsViewModel : ObservableObject
 {
     private readonly MainWindowViewModel _owner;
     private bool _suppress;
-    private bool _isExpanded = true;
     private string _selectedQuality = RenderQuality.Standard.ToString();
     private string _selectedResolution = "1920x1080";
     private bool _isCustomResolution;
     private decimal? _customWidth = 1920;
     private decimal? _customHeight = 1080;
     private string _selectedFps = "60";
+    private CompositionOptionViewModel? _selectedComposition;
 
     public BasicSettingsViewModel(MainWindowViewModel owner)
     {
         _owner = owner;
-        CompositionCards =
-        [
-            new CompositionCardViewModel(
-                "Diagnostic",
-                "Technical channel grid · best for inspection",
-                CompositionKind.Diagnostic,
-                SelectComposition),
-        ];
+        Compositions = SettingsViewModel.CreateCompositionOptions();
+        _selectedComposition = Compositions.FirstOrDefault();
     }
 
-    /// <summary>The single published composition, shown as a card. Future layouts extend this list.</summary>
-    public IReadOnlyList<CompositionCardViewModel> CompositionCards { get; }
+    /// <summary>Data-driven composition selector entries. Extends automatically with new kinds.</summary>
+    public IReadOnlyList<CompositionOptionViewModel> Compositions { get; }
 
-    private void SelectComposition(CompositionKind composition)
+    public CompositionOptionViewModel? SelectedComposition
     {
-        _owner.ApplySetting(nameof(VisualizationRequest.Composition),
-            r => r with { Composition = composition });
-        RefreshCardSelection(composition);
-    }
-
-    private void RefreshCardSelection(CompositionKind composition)
-    {
-        foreach (CompositionCardViewModel card in CompositionCards)
-            card.IsSelected = card.Composition == composition;
-    }
-
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
+        get => _selectedComposition;
+        set
+        {
+            if (!SetProperty(ref _selectedComposition, value) || _suppress || value is null)
+                return;
+            _owner.ApplyVisualSetting(r => r with { Composition = value.Value });
+        }
     }
 
     public IReadOnlyList<string> QualityOptions { get; } =
@@ -68,8 +57,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
             if (!SetProperty(ref _selectedQuality, value) || _suppress)
                 return;
             if (Enum.TryParse<RenderQuality>(value, out var quality))
-                _owner.ApplySetting(nameof(OutputSettings.Quality),
-                    r => r with { Output = r.Output with { Quality = quality } });
+                _owner.ApplyVisualSetting(r => r with { Output = r.Output with { Quality = quality } });
         }
     }
 
@@ -87,8 +75,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
             }
             if (TryParseResolution(value, out int width, out int height))
             {
-                _owner.ApplySetting(nameof(OutputSettings.Width),
-                    r => r with { Output = r.Output with { Width = width, Height = height } });
+                _owner.ApplyVisualSetting(r => r with { Output = r.Output with { Width = width, Height = height } });
             }
         }
     }
@@ -107,8 +94,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
             if (!SetProperty(ref _customWidth, value) || _suppress)
                 return;
             if (value is decimal width)
-                _owner.ApplySetting(nameof(OutputSettings.Width),
-                    r => r with { Output = r.Output with { Width = (int)width } });
+                _owner.ApplyVisualSetting(r => r with { Output = r.Output with { Width = (int)width } });
         }
     }
 
@@ -120,8 +106,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
             if (!SetProperty(ref _customHeight, value) || _suppress)
                 return;
             if (value is decimal height)
-                _owner.ApplySetting(nameof(OutputSettings.Height),
-                    r => r with { Output = r.Output with { Height = (int)height } });
+                _owner.ApplyVisualSetting(r => r with { Output = r.Output with { Height = (int)height } });
         }
     }
 
@@ -158,7 +143,7 @@ public sealed class BasicSettingsViewModel : ObservableObject
             }
 
             SelectedFps = FpsDisplay(request.Output.FpsNumerator, request.Output.FpsDenominator);
-            RefreshCardSelection(request.Composition);
+            SelectedComposition = Compositions.FirstOrDefault(c => c.Value == request.Composition) ?? _selectedComposition;
         }
         finally
         {
@@ -170,13 +155,11 @@ public sealed class BasicSettingsViewModel : ObservableObject
     {
         if (display == "59.94")
         {
-            _owner.ApplySetting(nameof(OutputSettings.FpsNumerator),
-                r => r with { Output = r.Output with { FpsNumerator = 60000, FpsDenominator = 1001 } });
+            _owner.ApplyVisualSetting(r => r with { Output = r.Output with { FpsNumerator = 60000, FpsDenominator = 1001 } });
         }
         else if (int.TryParse(display, out int fps))
         {
-            _owner.ApplySetting(nameof(OutputSettings.FpsNumerator),
-                r => r with { Output = r.Output with { FpsNumerator = fps, FpsDenominator = 1 } });
+            _owner.ApplyVisualSetting(r => r with { Output = r.Output with { FpsNumerator = fps, FpsDenominator = 1 } });
         }
     }
 
@@ -192,62 +175,4 @@ public sealed class BasicSettingsViewModel : ObservableObject
             && int.TryParse(parts[0], out width)
             && int.TryParse(parts[1], out height);
     }
-}
-
-/// <summary>
-/// A selectable composition card shown at the top of the BASIC settings.
-/// Clicking a card applies the matching composition and highlights the card.
-/// </summary>
-public sealed class CompositionCardViewModel : ObservableObject
-{
-    private readonly Action<CompositionKind> _select;
-    private bool _isSelected;
-
-    public CompositionCardViewModel(
-        string name,
-        string tagline,
-        CompositionKind composition,
-        Action<CompositionKind> select)
-    {
-        Name = name;
-        Tagline = tagline;
-        Composition = composition;
-        _select = select;
-        SelectCommand = new RelayCommand(() => _select(Composition));
-    }
-
-    public string Name { get; }
-    public string Tagline { get; }
-    public CompositionKind Composition { get; }
-
-    public bool IsSelected
-    {
-        get => _isSelected;
-        set
-        {
-            if (SetProperty(ref _isSelected, value))
-            {
-                OnPropertyChanged(nameof(SelectedBorderBrush));
-                OnPropertyChanged(nameof(SelectedBackground));
-            }
-        }
-    }
-
-    /// <summary>Accent border/background when this card is the active composition.</summary>
-    public Avalonia.Media.IBrush SelectedBorderBrush
-        => IsSelected ? AccentBrush : NormalBrush;
-
-    public Avalonia.Media.IBrush SelectedBackground
-        => IsSelected ? AccentFillBrush : TransparentBrush;
-
-    public RelayCommand SelectCommand { get; }
-
-    private static readonly Avalonia.Media.IBrush AccentBrush = new Avalonia.Media.SolidColorBrush(
-        Avalonia.Media.Color.FromRgb(0x5B, 0x9B, 0xD5));
-    private static readonly Avalonia.Media.IBrush NormalBrush = new Avalonia.Media.SolidColorBrush(
-        Avalonia.Media.Color.FromArgb(90, 0x80, 0x80, 0x80));
-    private static readonly Avalonia.Media.IBrush AccentFillBrush = new Avalonia.Media.SolidColorBrush(
-        Avalonia.Media.Color.FromArgb(36, 0x5B, 0x9B, 0xD5));
-    private static readonly Avalonia.Media.IBrush TransparentBrush = new Avalonia.Media.SolidColorBrush(
-        Avalonia.Media.Color.FromArgb(0, 0, 0, 0));
 }

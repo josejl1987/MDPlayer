@@ -18,7 +18,7 @@ public sealed class FileDialogService
 
         IReadOnlyList<IStorageFile> files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open music file or visualization project",
+            Title = "Open music file",
             AllowMultiple = false,
             FileTypeFilter = new[]
             {
@@ -27,31 +27,11 @@ public sealed class FileDialogService
                     Patterns = new[] { "*.ovi", "*.opi", "*.ozi", "*.mpi", "*.mvi", "*.mzi", "*.vgm", "*.vgz",
                         "*.xgm", "*.s98", "*.mdx", "*.mid", "*.midi", "*.spc", "*.wav", "*.mp3", "*.ogg", "*.flac" },
                 },
-                new FilePickerFileType("Visualization project") { Patterns = new[] { "*.mdpviz.json" } },
                 FilePickerFileTypes.All,
             },
         });
 
         return files.FirstOrDefault()?.TryGetLocalPath();
-    }
-
-    public async Task<string?> SaveFileAsync()
-    {
-        if (TopLevel is not { } top)
-            return null;
-
-        IStorageFile? file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
-        {
-            Title = "Save visualization project",
-            SuggestedFileName = "visualization.mdpviz.json",
-            DefaultExtension = "mdpviz.json",
-            FileTypeChoices = new[]
-            {
-                new FilePickerFileType("Visualization project") { Patterns = new[] { "*.mdpviz.json" } },
-            },
-        });
-
-        return file?.TryGetLocalPath();
     }
 
     public async Task<string?> SaveOutputFileAsync(string? currentPath)

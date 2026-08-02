@@ -14,9 +14,7 @@ public sealed class RecentFileItemViewModel : ObservableObject
 
     public string Path { get; }
     public string DisplayName => System.IO.Path.GetFileName(Path);
-    public string Kind => Path.EndsWith(".mdpviz.json", StringComparison.OrdinalIgnoreCase)
-        ? "Project"
-        : "Input";
+    public string Kind => "Input";
     public bool IsAvailable => File.Exists(Path);
     public AsyncRelayCommand OpenCommand { get; }
 }

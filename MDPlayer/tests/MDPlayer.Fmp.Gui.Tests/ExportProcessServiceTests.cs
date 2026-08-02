@@ -34,7 +34,7 @@ public class ExportProcessServiceTests
         Assert.Equal(ExportEventTypes.Completed, events[3].Type);
         Assert.Equal("/tmp/out.mp4", events[3].OutputPath);
         Assert.Equal(4.2, events[3].ElapsedSeconds);
-        Assert.True(Directory.Exists(workspace), "export workspace should be retained for logs");
+        Assert.False(Directory.Exists(workspace), "export workspace should be deleted after a successful render");
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public class ExportProcessServiceTests
             exitCode: 5);
 
         var events = new List<ExportProgressEvent>();
-        await RunExportAsync(fake.Path, events);
+        string workspace = await RunExportAsync(fake.Path, events);
 
         // The CLI emits the structured failure; the service also appends a
         // fallback failed event for the nonzero exit code.
@@ -56,6 +56,7 @@ public class ExportProcessServiceTests
             events.Where(evt => evt.Type == ExportEventTypes.Failed && evt.Code is not null));
         Assert.Equal(5, failed.ExitCode);
         Assert.Equal(ValidationCodes.CaptureFailed, failed.Code);
+        Assert.True(Directory.Exists(workspace), "export workspace should be retained after a failed render");
     }
 
     [Fact]

@@ -20,6 +20,10 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     private int _sampleRate = 48_000;
     private string _selectedEncoder = VideoEncoder.Auto.ToString();
     private bool _overwrite;
+    private double _ssgGainDb;
+    private string _selectedSpcPitch = SpcPitchInterpretation.Estimate.ToString();
+    private bool _showSsgGain;
+    private bool _showSpcPitch;
 
     public AdvancedSettingsViewModel(MainWindowViewModel owner)
     {
@@ -33,6 +37,46 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     }
 
     public IReadOnlyList<string> EncoderOptions { get; } = new[] { "Auto", "LibX264", "Nvenc" };
+    public IReadOnlyList<string> SpcPitchOptions { get; } = Enum.GetNames<SpcPitchInterpretation>();
+    public string SpcPitchNote => "Interprets the SPC pitch register to estimate the song's real tempo.";
+    public string SsgGainNote => "Master voice gain adjustment for FMP-family (FM) sources.";
+
+    public bool ShowSsgGain
+    {
+        get => _showSsgGain;
+        private set => SetProperty(ref _showSsgGain, value);
+    }
+
+    public bool ShowSpcPitch
+    {
+        get => _showSpcPitch;
+        private set => SetProperty(ref _showSpcPitch, value);
+    }
+
+    public double SsgGainDb
+    {
+        get => _ssgGainDb;
+        set
+        {
+            if (!SetProperty(ref _ssgGainDb, value) || _suppress)
+                return;
+            _owner.ApplyVisualSetting(
+                r => r with { Playback = r.Playback with { SsgGainDb = value } });
+        }
+    }
+
+    public string SelectedSpcPitch
+    {
+        get => _selectedSpcPitch;
+        set
+        {
+            if (!SetProperty(ref _selectedSpcPitch, value) || _suppress)
+                return;
+            if (Enum.TryParse<SpcPitchInterpretation>(value, out var pitch))
+                _owner.ApplyVisualSetting(
+                    r => r with { Playback = r.Playback with { SpcPitch = pitch } });
+        }
+    }
 
     public int LoopCount
     {
@@ -41,7 +85,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _loopCount, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PlaybackSettings.LoopCount),
+            _owner.ApplyVisualSetting(
                 r => r with { Playback = r.Playback with { LoopCount = value } });
         }
     }
@@ -53,7 +97,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _fadeSeconds, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PlaybackSettings.FadeSeconds),
+            _owner.ApplyVisualSetting(
                 r => r with { Playback = r.Playback with { FadeSeconds = (double)value } });
         }
     }
@@ -65,7 +109,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _tailSeconds, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PlaybackSettings.TailSeconds),
+            _owner.ApplyVisualSetting(
                 r => r with { Playback = r.Playback with { TailSeconds = (double)value } });
         }
     }
@@ -77,7 +121,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _maximumDurationSeconds, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PlaybackSettings.MaximumDurationSeconds),
+            _owner.ApplyVisualSetting(
                 r => r with { Playback = r.Playback with { MaximumDurationSeconds = value is decimal d ? (double)d : null } });
         }
     }
@@ -89,7 +133,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _sampleRate, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PlaybackSettings.SampleRate),
+            _owner.ApplyVisualSetting(
                 r => r with { Playback = r.Playback with { SampleRate = value } });
         }
     }
@@ -102,7 +146,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
             if (!SetProperty(ref _selectedEncoder, value) || _suppress)
                 return;
             if (Enum.TryParse<VideoEncoder>(value, out var encoder))
-                _owner.ApplySetting(nameof(OutputSettings.Encoder),
+                _owner.ApplyExportSetting(
                     r => r with { Output = r.Output with { Encoder = encoder } });
         }
     }
@@ -114,7 +158,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _overwrite, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(OutputSettings.Overwrite),
+            _owner.ApplyExportSetting(
                 r => r with { Output = r.Output with { Overwrite = value } });
         }
     }
@@ -131,10 +175,37 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
             SampleRate = request.Playback.SampleRate;
             SelectedEncoder = request.Output.Encoder.ToString();
             Overwrite = request.Output.Overwrite;
+            SsgGainDb = request.Playback.SsgGainDb;
+            SelectedSpcPitch = request.Playback.SpcPitch.ToString();
         }
         finally
         {
             _suppress = false;
         }
+    }
+
+    /// <summary>Shows backend-specific controls only when the active source uses them.</summary>
+    public void SynchronizePlan(VisualizationPlanResult? plan, VisualizationInputInfo? input)
+    {
+        _suppress = true;
+        try
+        {
+            string format = input?.Format ?? "";
+            ShowSsgGain = format.Contains("ovi", StringComparison.OrdinalIgnoreCase)
+                || format.Contains("mpi", StringComparison.OrdinalIgnoreCase)
+                || format.Contains("ozi", StringComparison.OrdinalIgnoreCase)
+                || IsFmpLike(format);
+            ShowSpcPitch = format.Equals(".spc", StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            _suppress = false;
+        }
+    }
+
+    private static bool IsFmpLike(string format)
+    {
+        string f = format.TrimStart('.').ToLowerInvariant();
+        return f is "opi" or "mvi" or "mzi" || f.StartsWith("ov");
     }
 }

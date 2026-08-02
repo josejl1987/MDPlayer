@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using Fmp.Application.Contracts;
 using Fmp.Gui.Services;
 
@@ -10,7 +9,6 @@ namespace Fmp.Gui.ViewModels;
 /// </summary>
 public sealed class ExportProgressViewModel : ObservableObject
 {
-    private readonly DiagnosticsViewModel _diagnostics;
     private string _currentStage = "";
     private double _stageProgress;
     private bool _isIndeterminate = true;
@@ -29,21 +27,15 @@ public sealed class ExportProgressViewModel : ObservableObject
     private string _logPath = "";
     private string _workspace = "";
 
-    public ExportProgressViewModel(ClipboardService clipboard, DiagnosticsViewModel diagnostics)
+    public ExportProgressViewModel(ClipboardService clipboard)
     {
-        _diagnostics = diagnostics;
         RetryCommand = new RelayCommand(() => RetryRequested?.Invoke());
-        OpenTerminalCommand = new RelayCommand(OpenTerminal);
     }
 
     /// <summary>Raised when the failure summary's Retry button is clicked.</summary>
     public event Action? RetryRequested;
 
     public RelayCommand RetryCommand { get; }
-    public RelayCommand OpenTerminalCommand { get; }
-
-    /// <summary>Shared log lines are also surfaced in the diagnostics panel.</summary>
-    public DiagnosticsViewModel Diagnostics => _diagnostics;
 
     /// <summary>True while an export run is active or its summary is showing.</summary>
     public bool IsActive => IsRunning || HasCompleted || HasFailed;
@@ -177,7 +169,6 @@ public sealed class ExportProgressViewModel : ObservableObject
         HasFailed = false;
         CompletionSummary = "";
         FailureSummary = "";
-        _diagnostics.Clear();
         OnPropertyChanged(nameof(IsActive), nameof(StageAndProgressText), nameof(MetricsText));
     }
 
@@ -197,10 +188,7 @@ public sealed class ExportProgressViewModel : ObservableObject
             IsIndeterminate = false;
         }
         if (evt.Message is { Length: > 0 } message)
-        {
             OverallMessage = message;
-            _diagnostics.AddLine($"[export] {message}");
-        }
         if (evt.ElapsedSeconds is double elapsed)
             ElapsedSeconds = elapsed;
         if (evt.FramesCompleted is long frames)
@@ -234,7 +222,6 @@ public sealed class ExportProgressViewModel : ObservableObject
                 SetFailed(evt, "cancelled");
                 break;
             case ExportEventTypes.Warning:
-                _diagnostics.AddLine("[warning] " + (evt.Message ?? evt.Code ?? ""));
                 break;
         }
 
@@ -246,7 +233,6 @@ public sealed class ExportProgressViewModel : ObservableObject
         IsRunning = false;
         HasFailed = true;
         FailureSummary = "Export was cancelled.";
-        _diagnostics.AddLine("Export cancelled.");
         OnPropertyChanged(nameof(IsActive));
     }
 
@@ -258,7 +244,6 @@ public sealed class ExportProgressViewModel : ObservableObject
 
         string outputPath = OutputPath;
         string fileSize = "";
-        string resolution = "";
         if (outputPath.Length > 0 && File.Exists(outputPath))
         {
             var file = new FileInfo(outputPath);
@@ -270,7 +255,6 @@ public sealed class ExportProgressViewModel : ObservableObject
             $"File size: {fileSize}\n" +
             $"Encoder: {Encoder}\n" +
             $"Total time: {FormatTime(ElapsedSeconds)}";
-        _diagnostics.AddLine("Export completed.");
         OnPropertyChanged(nameof(IsActive));
     }
 
@@ -289,15 +273,7 @@ public sealed class ExportProgressViewModel : ObservableObject
             FailureSummary += $"\nExit code: {c}";
         if (LogPath.Length > 0)
             FailureSummary += $"\nLog: {LogPath}";
-
-        _diagnostics.AddLine("Export failed: " + FailureSummary.Replace('\n', ' '));
         OnPropertyChanged(nameof(IsActive));
-    }
-
-    private void OpenTerminal()
-    {
-        if (Workspace.Length > 0)
-            DesktopProcessService.OpenTerminalAtDirectory(Workspace);
     }
 
     private static string FormatTime(double seconds)

@@ -101,7 +101,7 @@ public sealed class MainWindowHeadlessTests
     }
 
     [AvaloniaFact]
-    public async Task CompositionCards_ApplyLayoutAndHighlight()
+    public async Task LoadedInput_CompositionSelectionAppliesToRequest()
     {
         string inputPath = Path.Combine(Path.GetTempPath(), "mdplayer-gui-test-" + Guid.NewGuid() + ".vgz");
         await File.WriteAllBytesAsync(inputPath, new byte[] { 0 });
@@ -113,19 +113,13 @@ public sealed class MainWindowHeadlessTests
             await viewModel.OpenInputAsync(inputPath);
             Dispatcher.UIThread.RunJobs();
 
-            IReadOnlyList<CompositionCardViewModel> cards = viewModel.Settings.Basic.CompositionCards;
-            Assert.Single(cards);
+            IReadOnlyList<CompositionOptionViewModel> options = viewModel.Settings.Basic.Compositions;
+            Assert.NotEmpty(options);
+            CompositionOptionViewModel option = options[0];
+            viewModel.Settings.Basic.SelectedComposition = option;
+            await viewModel.WaitForPreviewRefreshAsync();
 
-            CompositionCardViewModel diagnostic = cards[0];
-            Assert.Equal(CompositionKind.Diagnostic, diagnostic.Composition);
-            diagnostic.SelectCommand.Execute(null);
-
-            Assert.True(diagnostic.IsSelected, "The clicked composition card must highlight.");
-
-            // The diagnostic composition is the default, so the compact
-            // command omits the explicit --composition flag.
-            await viewModel.UpdateCommandAsync();
-            Assert.DoesNotContain("--composition", viewModel.Command.DisplayText);
+            Assert.Equal(option.Value, viewModel.Request!.Composition);
         }
         finally
         {

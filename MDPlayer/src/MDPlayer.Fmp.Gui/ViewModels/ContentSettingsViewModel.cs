@@ -41,7 +41,7 @@ public sealed class ContentSettingsViewModel : ObservableObject
             if (!SetProperty(ref _selectedTrackSelection, value) || _suppress)
                 return;
             if (Enum.TryParse<TrackSelectionMode>(value, out var mode))
-                _owner.ApplySetting(nameof(TrackSettings.Selection), r => r with
+                _owner.ApplyVisualSetting( r => r with
                 {
                     Tracks = r.Tracks with { Selection = mode },
                 });
@@ -61,7 +61,7 @@ public sealed class ContentSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _includeInactiveDiagnostics, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(TrackSettings.IncludeInactiveDiagnosticTracks), r => r with
+            _owner.ApplyVisualSetting( r => r with
             {
                 Tracks = r.Tracks with { IncludeInactiveDiagnosticTracks = value },
             });
@@ -116,7 +116,7 @@ public sealed class ContentSettingsViewModel : ObservableObject
         if (_suppress)
             return;
         bool selected = item.IsSelected == true;
-        _owner.ApplySetting(nameof(TrackSettings.IncludedIds), request =>
+        _owner.ApplyVisualSetting( request =>
         {
             var included = request.Tracks.IncludedIds.ToHashSet();
             var excluded = request.Tracks.ExcludedIds.ToHashSet();

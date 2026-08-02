@@ -17,7 +17,6 @@ public sealed class TrackItemViewModel : ObservableObject
     public string? SemanticType { get; init; }
     public bool ScopeAvailable { get; init; }
     public bool ActivityDetected { get; init; }
-    public bool DataIncomplete { get; init; }
     public string? ColorHex { get; init; }
 
     public IBrush? ColorBrush
@@ -60,7 +59,6 @@ public sealed class TrackItemViewModel : ObservableObject
             SemanticType = track.SemanticType,
             ScopeAvailable = track.ScopeAvailable,
             ActivityDetected = track.ActivityDetected,
-            DataIncomplete = track.DataIncomplete,
             ColorHex = track.ColorHex,
             IsSelected = track.Selected,
         };

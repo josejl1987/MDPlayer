@@ -8,7 +8,7 @@ namespace Fmp.Gui.Tests;
 public class ExportProgressViewModelTests
 {
     private static ExportProgressViewModel Create()
-        => new(new ClipboardService(), new DiagnosticsViewModel(new ClipboardService()));
+        => new(new ClipboardService());
 
     [Fact]
     public void Started_SetsRunning()
@@ -99,18 +99,19 @@ public class ExportProgressViewModelTests
     }
 
     [Fact]
-    public void Warning_IsLoggedInDiagnostics()
+    public void Warning_IsIgnoredWithoutAffectingState()
     {
         ExportProgressViewModel viewModel = Create();
+        viewModel.OnEvent(Started());
         viewModel.OnEvent(new ExportProgressEvent
         {
             Type = ExportEventTypes.Warning,
             Message = "encoder fallback",
         });
 
-        Assert.Contains(
-            viewModel.Diagnostics.Log,
-            line => line.Contains("encoder fallback", StringComparison.Ordinal));
+        Assert.True(viewModel.IsRunning);
+        Assert.False(viewModel.HasFailed);
+        Assert.False(viewModel.HasCompleted);
     }
 
     private static ExportProgressEvent Started() => new()

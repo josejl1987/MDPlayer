@@ -9,9 +9,10 @@ namespace Fmp.Gui.Services;
 
 /// <summary>
 /// Launches the export pipeline: writes the request JSON to a per-run temp
-/// workspace, runs <c>mdplayer-render visualize --request-json &lt;path&gt;
-/// --progress jsonl</c>, streams each JSON-lines progress event to the caller
-/// and retains the workspace (logs) for diagnostics.
+/// workspace, runs <c>mdplayer-render render --request-json &lt;path&gt;
+/// --progress jsonl</c>, streams each JSON-lines progress event to the caller.
+/// The temporary workspace is deleted after a successful render and retained
+/// after a failure for log/scope inspection.
 /// </summary>
 public sealed class ExportProcessService
 {
@@ -26,7 +27,7 @@ public sealed class ExportProcessService
 
     /// <summary>
     /// Runs the export. Reports structured events through <paramref name="progress"/>.
-    /// Returns the temp workspace path (kept for log retention).
+    /// Returns the temp workspace path (retained only on failure for diagnostics).
     /// </summary>
     public async Task<string> StartAsync(
         VisualizationRequest request,
@@ -50,7 +51,7 @@ public sealed class ExportProcessService
 
         var psi = DesktopProcessService.CreateStartInfo(renderCli, new[]
         {
-            "visualize", "--request-json", requestJson, "--progress", "jsonl",
+            "render", "--request-json", requestJson, "--progress", "jsonl",
         });
         psi.WorkingDirectory = workspace;
 
@@ -91,7 +92,8 @@ public sealed class ExportProcessService
 
         await Task.WhenAll(readTask, stderrTask);
 
-        if (process.ExitCode != 0)
+        bool succeeded = process.ExitCode == 0;
+        if (!succeeded)
         {
             string detail = stderrBuilder.ToString().Trim();
             progress.Report(new ExportProgressEvent
@@ -102,6 +104,21 @@ public sealed class ExportProcessService
                     ? $"mdplayer-render exited with code {process.ExitCode}."
                     : detail,
             });
+        }
+
+        // The temp workspace is a per-run staging area. On success it holds no
+        // durable artifacts a user needs, so delete it. On failure (including
+        // cancellation) it is retained for log/scope inspection.
+        if (succeeded)
+        {
+            try
+            {
+                Directory.Delete(workspace, recursive: true);
+            }
+            catch
+            {
+                // Best effort; leftover temp files are harmless.
+            }
         }
 
         return workspace;

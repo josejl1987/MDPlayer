@@ -36,7 +36,7 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _title, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PresentationSettings.Title), r => r with
+            _owner.ApplyVisualSetting( r => r with
                 {
                     Presentation = r.Presentation with { Title = value },
                 });
@@ -50,7 +50,7 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _subtitle, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PresentationSettings.Subtitle), r => r with
+            _owner.ApplyVisualSetting( r => r with
                 {
                     Presentation = r.Presentation with { Subtitle = value },
                 });
@@ -64,7 +64,7 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _credits, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PresentationSettings.Credits), r => r with
+            _owner.ApplyVisualSetting( r => r with
                 {
                     Presentation = r.Presentation with { Credits = value },
                 });
@@ -78,7 +78,7 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         {
             if (!SetProperty(ref _fontPath, value) || _suppress)
                 return;
-            _owner.ApplySetting(nameof(PresentationSettings.FontPath), r => r with
+            _owner.ApplyVisualSetting( r => r with
                 {
                     Presentation = r.Presentation with { FontPath = value },
                 });
@@ -106,7 +106,7 @@ public sealed class MetadataSettingsViewModel : ObservableObject
         string? path = await _owner.ChooseFontFileAsync();
         if (path is null)
             return;
-        _owner.ApplySetting(nameof(PresentationSettings.FontPath), r => r with
+        _owner.ApplyVisualSetting( r => r with
             {
                 Presentation = r.Presentation with { FontPath = path },
             });
