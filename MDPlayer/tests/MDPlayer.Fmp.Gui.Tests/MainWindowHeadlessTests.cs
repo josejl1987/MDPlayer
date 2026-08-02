@@ -244,6 +244,20 @@ public sealed class MainWindowHeadlessTests
             return PreviewRequestImpact.None;
         }
 
+        public Task<ReusableCaptureLease> AcquireReusableCaptureAsync(
+            VisualizationRequest request,
+            CancellationToken cancellationToken)
+        {
+            string dir = Path.Combine(
+                Path.GetTempPath(), "mdplayer-lease-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var lease = new ReusableCaptureLease(
+                dir,
+                "headless-capture-key",
+                () => { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } });
+            return Task.FromResult(lease);
+        }
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

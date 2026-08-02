@@ -2,6 +2,7 @@ using Fmp.Application.Contracts;
 using Fmp.Application.Export;
 using Fmp.Application.Inspection;
 using Fmp.Application.Preview;
+using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 #nullable enable
@@ -106,6 +107,11 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     // stream.
     private readonly SemaphoreSlim _frameRenderGate = new(1, 1);
 
+    // ---- Reusable capture bundle accounting ----
+    private readonly object _leaseLock = new();
+    private int _activeLeaseCount;
+    private TaskCompletionSource? _zeroLeasesSignal;
+
     public InProcessVisualizationPreviewSession(
         VisualizationInputInfo input,
         RenderRuntimeOptions runtime,
@@ -171,6 +177,91 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
             previous,
             next,
             _runtime);
+    }
+
+    public async Task<ReusableCaptureLease> AcquireReusableCaptureAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        ValidateInput(request);
+
+        // Confirm the current timeline capture key still matches the request.
+        TimelineCaptureKey key = KeyFor(request);
+
+        // Await the prepared capture (also populates _capture) and read the
+        // published bundle from it.
+        await EnsurePreparedAsync(request, cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_timelineCaptureKey is not { } ownedKey || ownedKey != key)
+        {
+            throw new InvalidOperationException(
+                "capture was superseded before the bundle could be published.");
+        }
+
+        if (_capture is not { } capture)
+        {
+            throw new InvalidOperationException(
+                "prepared capture is unavailable for bundle publication.");
+        }
+
+        FileInfo input = new(Path.GetFullPath(request.InputPath));
+        if (!input.Exists)
+        {
+            throw new VisualizationRequestException(
+                $"Capture input no longer exists: {request.InputPath}");
+        }
+
+        string captureKey = VisualizationCaptureBundle.ComputeCaptureKey(ownedKey);
+
+        IReadOnlyList<ScopeRenderer.StemResult> successfulStems =
+            capture.Scope.Result.Stems
+                .Where(stem => stem.Success)
+                .ToList();
+
+        await VisualizationCaptureBundle.WriteManifestAsync(
+            _sessionRoot,
+            captureKey,
+            request,
+            input,
+            capture.BackendId,
+            _workspace.TimelinePath,
+            capture.MasterAudioPath,
+            _workspace.ScopeMetadataPath,
+            successfulStems,
+            capture.Scope.Result.SampleRate,
+            capture.Scope.Result.MasterSamples,
+            capture.Scope.Enabled,
+            capture.Scope.HasIsolatedStems,
+            cancellationToken);
+
+        lock (_leaseLock)
+        {
+            _activeLeaseCount++;
+            _zeroLeasesSignal ??= new TaskCompletionSource();
+        }
+
+        return new ReusableCaptureLease(
+            _sessionRoot,
+            captureKey,
+            ReleaseCaptureLease);
+    }
+
+    private void ReleaseCaptureLease()
+    {
+        TaskCompletionSource? toComplete = null;
+        lock (_leaseLock)
+        {
+            if (_activeLeaseCount > 0)
+                _activeLeaseCount--;
+            if (_activeLeaseCount == 0 && _zeroLeasesSignal is { } signal)
+            {
+                toComplete = signal;
+                _zeroLeasesSignal = null;
+            }
+        }
+        toComplete?.TrySetResult();
     }
 
     public async Task<PreviewFrameResult> RenderFrameAsync(

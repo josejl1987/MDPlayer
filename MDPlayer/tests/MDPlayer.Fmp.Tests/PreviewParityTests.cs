@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Fmp.Application.Contracts;
 using Fmp.Application.Preview;
 using Fmp.Cli;
@@ -436,6 +437,105 @@ public sealed class PreviewParityTests
         // Session workspace can be cleaned up once disposed.
         try { Directory.Delete(sessionRoot, recursive: true); }
         catch (IOException) { /* best-effort cleanup */ }
+    }
+
+    [Fact]
+    public void ReusableCaptureLease_DisposeRunsReleaseExactlyOnce()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "mdplayer-lease-once-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        int releases = 0;
+        var lease = new ReusableCaptureLease(dir, "key", () => releases++);
+
+        lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        // Concurrent dispose is also single-shot.
+        Task.WaitAll(
+            lease.DisposeAsync().AsTask(),
+            lease.DisposeAsync().AsTask());
+
+        Assert.Equal(1, releases);
+        try { Directory.Delete(dir, recursive: true); }
+        catch { /* best-effort */ }
+    }
+
+    [SkippableFact]
+    public async Task InProcessSession_AcquirePublishesReusableManifest()
+    {
+        bool hasPy = IsCommandAvailable("python3");
+        bool hasFf = IsCommandAvailable("ffmpeg");
+        Skip.IfNot(
+            hasPy && hasFf,
+            $"real .vgz acquire test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+
+        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        if (!File.Exists(input))
+            return;
+
+        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            VisualizationRequest request = new()
+            {
+                InputPath = input,
+                OutputPath = Path.Combine(root, "preview.mp4"),
+                Composition = CompositionKind.Diagnostic,
+                Output = new OutputSettings
+                {
+                    Width = 1280,
+                    Height = 720,
+                    FpsNumerator = 30,
+                    FpsDenominator = 1,
+                },
+                Presentation = new PresentationSettings { Title = "Acquire" },
+            };
+
+            var factory = new InProcessVisualizationPreviewSessionFactory();
+            await using (IVisualizationPreviewSession session =
+                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+            {
+                VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
+                Assert.NotNull(plan);
+
+                await using (ReusableCaptureLease lease =
+                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+                {
+                    string manifestPath = Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName);
+                    Assert.True(File.Exists(manifestPath), "acquire must write capture-manifest.json");
+
+                    string json = await File.ReadAllTextAsync(manifestPath);
+                    using var doc = JsonDocument.Parse(json);
+                    Assert.Equal(1, doc.RootElement.GetProperty("schemaVersion").GetInt32());
+                    Assert.Equal(lease.CaptureKey, doc.RootElement.GetProperty("captureKey").GetString());
+                    Assert.False(string.IsNullOrWhiteSpace(lease.CaptureKey));
+
+                    // Every path in the manifest must be bundle-relative (not rooted, no "..").
+                    string[] pathProps =
+                    {
+                        "timelinePath", "masterAudioPath", "scopeMetadataPath",
+                    };
+                    foreach (string prop in pathProps)
+                    {
+                        string value = doc.RootElement.GetProperty(prop).GetString()!;
+                        Assert.False(Path.IsPathRooted(value), $"manifest {prop} must be relative, got '{value}'");
+                        Assert.DoesNotContain("..", value);
+                    }
+
+                    // Stable key: acquiring again for the same timeline key yields the same key.
+                    await using (ReusableCaptureLease lease2 =
+                           await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+                    {
+                        Assert.Equal(lease.CaptureKey, lease2.CaptureKey);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { /* best-effort cleanup */ }
+        }
     }
 
     private static bool IsCommandAvailable(string name)

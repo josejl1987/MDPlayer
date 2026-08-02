@@ -51,6 +51,17 @@ public interface IVisualizationPreviewSession : IAsyncDisposable
     PreviewRequestImpact ClassifyChange(
         VisualizationRequest previous,
         VisualizationRequest next);
+
+    /// <summary>
+    /// Publishes the session's current timeline, master WAV, scope metadata and
+    /// successful stems as one validated, reusable bundle and hands back a lease
+    /// over it. Implementing sessions must validate that <paramref name="request"/>
+    /// belongs to the session, prepare the capture, then atomically write the
+    /// bundle manifest. Export may consume the returned lease.
+    /// </summary>
+    Task<ReusableCaptureLease> AcquireReusableCaptureAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>

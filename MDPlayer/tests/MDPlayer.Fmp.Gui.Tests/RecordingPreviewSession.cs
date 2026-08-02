@@ -184,6 +184,23 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
         return PreviewRequestImpact.None;
     }
 
+    public Task<ReusableCaptureLease> AcquireReusableCaptureAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        string dir = Path.Combine(
+            Path.GetTempPath(), "mdplayer-preview-lease-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(
+            Path.Combine(dir, "capture-manifest.json"),
+            "{}");
+        var lease = new ReusableCaptureLease(
+            dir,
+            "fake-capture-key",
+            () => { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } });
+        return Task.FromResult(lease);
+    }
+
     private async Task<VisualizationPlanResult> PlanGatedAsync(Task gate, CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken);
