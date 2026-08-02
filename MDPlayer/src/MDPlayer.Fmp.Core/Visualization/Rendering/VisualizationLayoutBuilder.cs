@@ -44,6 +44,55 @@ internal static class VisualizationLayoutBuilder
             settings.GroupBy);
         topology = ApplyTrackFiltering(topology, settings);
 
+        int panelCount = topology.Panels.Count;
+        int availableWidth = settings.Width;
+        int gridHeight = GridHeight(settings.Height);
+        int availableHeight = gridHeight;
+
+        // Search the full diagnostic grid first. Relying only on
+        // GridForPanelCount would leave twelve panels as a three-column grid
+        // no matter how narrow each panel becomes.
+        ResolvedPanelGrid? full = OverlayLayout.FindGrid(
+            panelCount,
+            availableWidth,
+            availableHeight,
+            minimumPanelWidth: 300,
+            minimumPanelHeight: 150);
+
+        if (full is not null)
+            return BuildFullDiagnostic(timeline, settings, topology, full.Value);
+
+        // Narrower: the compact per-channel overview keeps a readable panel
+        // (channel + accent + current state + compact waveform + activity).
+        ResolvedPanelGrid? overview = OverlayLayout.FindGrid(
+            panelCount,
+            availableWidth,
+            availableHeight,
+            minimumPanelWidth: 180,
+            minimumPanelHeight: 56);
+
+        if (overview is not null)
+            return BuildDiagnosticOverview(timeline, settings, topology, overview.Value);
+
+        // Last fallback: group by device rather than render illegible channel
+        // rows. Each device panel shows its label, active/total channel count,
+        // aggregate waveform and current activity.
+        return BuildDeviceOverview(timeline, settings, topology);
+    }
+
+    private static int GridHeight(int height)
+    {
+        int top = Math.Clamp((int)Math.Round(height * (OverlayLayout.DefaultTopBarHeight / 1080.0)), 32, 96);
+        int bottom = Math.Clamp((int)Math.Round(height * (OverlayLayout.DefaultBottomBarHeight / 1080.0)), 24, 64);
+        return height - top - bottom;
+    }
+
+    private static ResolvedVisualizationLayout BuildFullDiagnostic(
+        VisualizationTimeline timeline,
+        VisualizationLayoutSettings settings,
+        VisualizationTopology topology,
+        ResolvedPanelGrid grid)
+    {
         var geometry = new OverlayLayout(
             settings.Width,
             settings.Height,
@@ -51,23 +100,160 @@ internal static class VisualizationLayoutBuilder
             settings.FutureSeconds,
             topology.Panels.Count,
             VisualizationLayoutMode.Diagnostic,
+            grid.Columns,
+            grid.Rows,
+            VisualizationLayoutVariant.DiagnosticGrid,
             settings.ScopeHeight,
             settings.TimelineHeight,
             settings.RollZoom,
             settings.ScopeRatio,
             settings.ScopePosition);
 
-        // Low-level video-pipeline fixtures may intentionally use an empty
-        // timeline. Publishing paths reject those captures before rendering;
-        // keep the renderer-neutral fixture boundary constructible while
-        // validating every renderable layout here.
         if (VisualizationContentAvailability.HasRenderableContent(timeline))
             VisualizationLayoutValidator.Validate(geometry, topology);
 
         return new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
+            VisualizationLayoutVariant.DiagnosticGrid,
             topology,
             geometry);
+    }
+
+    private static ResolvedVisualizationLayout BuildDiagnosticOverview(
+        VisualizationTimeline timeline,
+        VisualizationLayoutSettings settings,
+        VisualizationTopology topology,
+        ResolvedPanelGrid grid)
+    {
+        var geometry = new OverlayLayout(
+            settings.Width,
+            settings.Height,
+            settings.PastSeconds,
+            settings.FutureSeconds,
+            topology.Panels.Count,
+            VisualizationLayoutMode.Diagnostic,
+            grid.Columns,
+            grid.Rows,
+            VisualizationLayoutVariant.DiagnosticOverview,
+            settings.ScopeHeight,
+            settings.TimelineHeight,
+            settings.RollZoom,
+            settings.ScopeRatio,
+            settings.ScopePosition);
+
+        return new ResolvedVisualizationLayout(
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationLayoutVariant.DiagnosticOverview,
+            topology,
+            geometry);
+    }
+
+    private static ResolvedVisualizationLayout BuildDeviceOverview(
+        VisualizationTimeline timeline,
+        VisualizationLayoutSettings settings,
+        VisualizationTopology topology)
+    {
+        // Collapse the topology to one panel per device. Each device panel
+        // aggregates all its channels; only devices with at least one selected
+        // channel are kept.
+        VisualizationTopology deviceTopology = GroupByDevice(topology, timeline);
+        int panelCount = deviceTopology.Panels.Count;
+
+        ResolvedPanelGrid? grid = OverlayLayout.FindGrid(
+            panelCount,
+            settings.Width,
+            GridHeight(settings.Height),
+            minimumPanelWidth: 180,
+            minimumPanelHeight: 56);
+        int columns = grid?.Columns ?? Math.Max(1, (int)Math.Round(Math.Sqrt(panelCount)));
+        int rows = grid?.Rows ?? (panelCount + columns - 1) / columns;
+
+        var geometry = new OverlayLayout(
+            settings.Width,
+            settings.Height,
+            settings.PastSeconds,
+            settings.FutureSeconds,
+            panelCount,
+            VisualizationLayoutMode.Diagnostic,
+            columns,
+            rows,
+            VisualizationLayoutVariant.DeviceOverview,
+            settings.ScopeHeight,
+            settings.TimelineHeight,
+            settings.RollZoom,
+            settings.ScopeRatio,
+            settings.ScopePosition);
+
+        return new ResolvedVisualizationLayout(
+            VisualizationLayoutMode.Diagnostic,
+            VisualizationLayoutVariant.DeviceOverview,
+            deviceTopology,
+            geometry);
+    }
+
+    private static VisualizationTopology GroupByDevice(
+        VisualizationTopology topology,
+        VisualizationTimeline timeline)
+    {
+        var voiceByDevice = new Dictionary<string, VoiceDescriptor>(StringComparer.Ordinal);
+        foreach (VoiceDescriptor voice in timeline.Voices)
+            voiceByDevice[voice.Id.ToString()] = voice;
+
+        return topology.Panels
+            .GroupBy(panel =>
+            {
+                string deviceId = null;
+                foreach (string id in panel.VoiceIds)
+                {
+                    if (voiceByDevice.TryGetValue(id, out VoiceDescriptor voice))
+                    {
+                        deviceId = voice.DeviceId.ToString();
+                        break;
+                    }
+                }
+                return deviceId ?? panel.Id;
+            }, StringComparer.Ordinal)
+            .OrderBy(group => group.Min(panel => panel.Order))
+            .Select((group, index) =>
+            {
+                VisualizationPanel first = group.First();
+                string[] voiceIds = group.SelectMany(p => p.VoiceIds)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                string[] operatorIds = group.SelectMany(p => p.OperatorVoiceIds)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                string label = DeviceLabel(timeline, first);
+                return new VisualizationPanel(
+                    $"device.{index + 1}",
+                    label,
+                    PreparedPanelKind.Aggregate,
+                    PanelContentKind.DeviceAggregate,
+                    index,
+                    voiceIds,
+                    operatorIds)
+                {
+                    Schema = PanelPresentationSchema.AggregateActivity,
+                    Rows = Array.Empty<PanelRowDefinition>(),
+                };
+            })
+            .ToArray()
+            is { Length: > 0 } panels
+                ? new VisualizationTopology(panels)
+                : throw new InvalidOperationException("Device overview requires at least one panel.");
+    }
+
+    private static string DeviceLabel(VisualizationTimeline timeline, VisualizationPanel panel)
+    {
+        var voiceById = timeline.Voices.ToDictionary(v => v.Id.ToString(), StringComparer.Ordinal);
+        foreach (string id in panel.VoiceIds)
+        {
+            if (voiceById.TryGetValue(id, out VoiceDescriptor voice))
+            {
+                return timeline.Devices
+                    .FirstOrDefault(device => device.Id == voice.DeviceId)?.DisplayName
+                    ?? voice.DeviceId.ToString();
+            }
+        }
+        return panel.Label;
     }
 
     private static VisualizationTopology ApplyTrackFiltering(

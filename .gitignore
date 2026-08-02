@@ -320,3 +320,4 @@ MDPlayer/test-video-output/
 
 # Build executables at project root
 *.exe
+.worktrees/

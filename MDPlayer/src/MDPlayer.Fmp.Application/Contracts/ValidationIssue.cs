@@ -36,4 +36,9 @@ public static class ValidationCodes
     public const string AnalysisEnvironmentMissing = "ANALYSIS_ENVIRONMENT_MISSING";
     public const string MissingStems = "MISSING_STEMS";
     public const string ToolNotFound = "TOOL_NOT_FOUND";
+
+    /// <summary>Full diagnostic panels could not fit; a simpler layout is used.</summary>
+    public const string DiagnosticOverviewFallback = "DIAGNOSTIC_OVERVIEW_FALLBACK";
+    /// <summary>Individual channel panels could not fit; channels are grouped by device.</summary>
+    public const string DeviceOverviewFallback = "DEVICE_OVERVIEW_FALLBACK";
 }

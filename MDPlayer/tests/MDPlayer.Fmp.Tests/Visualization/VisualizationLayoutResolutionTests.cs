@@ -58,6 +58,7 @@ public sealed class VisualizationLayoutResolutionTests
         ResolvedVisualizationLayout full = RendererTestLayout.Build(timeline);
         var onePanel = new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
+            VisualizationLayoutVariant.DiagnosticGrid,
             new VisualizationTopology([full.Topology.Panels[0]]),
             new OverlayLayout(960, 540, 0.75, 2.25, 1, VisualizationLayoutMode.Diagnostic));
 

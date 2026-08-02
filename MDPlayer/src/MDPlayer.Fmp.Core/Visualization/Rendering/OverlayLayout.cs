@@ -8,6 +8,14 @@ internal readonly record struct OverlayRect(int X, int Y, int Width, int Height)
 }
 
 /// <summary>
+/// A candidate panel grid chosen by the layout resolver. Columns and rows are
+/// inputs from resolution, not derived from the panel count on its own.
+/// </summary>
+internal readonly record struct ResolvedPanelGrid(
+    int Columns,
+    int Rows);
+
+/// <summary>
 /// Adaptive panel geometry shared by the musical overlay and the Corrscope
 /// compositor. The current single composition is the diagnostic full channel
 /// grid; the constructor keeps the layout-mode switch so future layouts can
@@ -63,6 +71,9 @@ internal sealed class OverlayLayout
         double futureSeconds,
         int panelCount,
         VisualizationLayoutMode mode,
+        int columns = 0,
+        int rows = 0,
+        VisualizationLayoutVariant variant = VisualizationLayoutVariant.DiagnosticGrid,
         int? scopeHeightOverride = null,
         int? timelineHeightOverride = null,
         double rollZoom = 1.0,
@@ -71,7 +82,8 @@ internal sealed class OverlayLayout
     {
         if (panelCount is < 1 or > 64)
             throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 64.");
-        (int columns, int rows) = GridForPanelCount(panelCount);
+        if (columns <= 0 || rows <= 0)
+            (columns, rows) = GridForPanelCount(panelCount);
         if (width <= 0)
             throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be positive.");
         if (!double.IsFinite(pastSeconds) || pastSeconds <= 0)
@@ -93,10 +105,14 @@ internal sealed class OverlayLayout
         PastSeconds = pastSeconds;
         FutureSeconds = futureSeconds;
         Mode = mode;
+        Variant = variant;
         RollZoom = rollZoom;
         ScopePosition = scopePosition;
+        // Only the full diagnostic grid renders the piano-roll/timeline semantic
+        // lane. The overview and device variants keep the scope region (used as
+        // a compact per-channel or aggregate waveform) but drop the pitch lane.
         HasScopes = true;
-        HasRoll = true;
+        HasRoll = variant == VisualizationLayoutVariant.DiagnosticGrid;
 
         // Reserve the top and bottom metadata bands. The bands scale
         // proportionally with the canvas height, clamped to sensible minimums,
@@ -121,10 +137,14 @@ internal sealed class OverlayLayout
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the metadata bands and panel grid.");
         if (gridHeight % RowCount != 0)
             throw new ArgumentException($"Grid height ({gridHeight}) must be divisible by {RowCount}.", nameof(height));
-        if (width < 480)
+        if (width < 480 && variant == VisualizationLayoutVariant.DiagnosticGrid)
             throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be at least 480 pixels.");
-        if (gridHeight < 240)
+        if (width < 240)
+            throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be at least 240 pixels.");
+        if (gridHeight < 240 && variant == VisualizationLayoutVariant.DiagnosticGrid)
             throw new ArgumentOutOfRangeException(nameof(height), "Overlay grid height must be at least 240 pixels.");
+        if (gridHeight < 40)
+            throw new ArgumentOutOfRangeException(nameof(height), "Overlay grid height must be at least 40 pixels.");
 
         TopBarHeight = nominalTop;
         BottomBarHeight = nominalBottom;
@@ -226,6 +246,7 @@ internal sealed class OverlayLayout
     public int PitchLabelInsetRight { get; }
     public int TimelineHeight { get; }
     public VisualizationLayoutMode Mode { get; }
+    public VisualizationLayoutVariant Variant { get; }
     public double RollZoom { get; }
     public VisualizationScopePosition ScopePosition { get; }
     public bool HasScopes { get; }
@@ -386,6 +407,75 @@ internal sealed class OverlayLayout
     private static int ClampBand(int value, int min, int max)
         => Math.Clamp(value, min, max);
 
+    /// <summary>
+    /// Searches candidate column counts and returns the panel grid whose every
+    /// panel meets the given minimum dimensions, preferring shapes close to the
+    /// target aspect ratio then fewer rows. Returns null when no grid can fit.
+    /// </summary>
+    internal static ResolvedPanelGrid? FindGrid(
+        int panelCount,
+        int availableWidth,
+        int availableHeight,
+        int minimumPanelWidth,
+        int minimumPanelHeight)
+    {
+        ResolvedPanelGrid? best = null;
+        double targetAspect = minimumPanelWidth / (double)minimumPanelHeight;
+
+        for (int columns = 1; columns <= panelCount; columns++)
+        {
+            int rows = (panelCount + columns - 1) / columns;
+            int panelWidth = availableWidth / columns;
+            int panelHeight = availableHeight / rows;
+
+            if (panelWidth < minimumPanelWidth
+                || panelHeight < minimumPanelHeight)
+            {
+                continue;
+            }
+
+            if (best is null || IsBetter(columns, rows, best.Value, targetAspect))
+                best = new ResolvedPanelGrid(columns, rows);
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// True when the nominal panel geometry for the given grid meets the full
+    /// diagnostic minimums (width &gt;= 300, height &gt;= 150).
+    /// </summary>
+    internal static bool FitsFullDiagnostic(
+        int width,
+        int height,
+        int columns,
+        int rows,
+        int topBarHeight,
+        int bottomBarHeight)
+    {
+        int gridHeight = height - topBarHeight - bottomBarHeight;
+        int panelWidth = width / columns;
+        int panelHeight = gridHeight / rows;
+        return panelWidth >= 300 && panelHeight >= 150;
+    }
+
+    private static bool IsBetter(
+        int columns,
+        int rows,
+        ResolvedPanelGrid current,
+        double targetAspect)
+    {
+        double candidateAspect = columns / (double)rows;
+        double currentAspect = current.Columns / (double)current.Rows;
+        double candidateSpread = Math.Abs(candidateAspect - targetAspect);
+        double currentSpread = Math.Abs(currentAspect - targetAspect);
+
+        // Prefer shapes close to the target aspect ratio, then fewer rows.
+        if (candidateSpread != currentSpread)
+            return candidateSpread < currentSpread;
+        return rows < current.Rows;
+    }
+
     private static (int Columns, int Rows) GridForPanelCount(int panelCount) => panelCount switch
     {
         1 => (1, 1),
@@ -403,4 +493,16 @@ internal sealed class OverlayLayout
         <= 64 => (8, 8),
         _ => throw new ArgumentOutOfRangeException(nameof(panelCount)),
     };
+
+    /// <summary>
+    /// The default balanced grid for a panel count, used by the legacy
+    /// diagnostic-grid geometry and by low-level renderer fixtures that must
+    /// exercise the full-grid rendering path regardless of the responsive
+    /// fallback decision.
+    /// </summary>
+    internal static ResolvedPanelGrid DefaultGrid(int panelCount)
+    {
+        (int columns, int rows) = GridForPanelCount(panelCount);
+        return new ResolvedPanelGrid(columns, rows);
+    }
 }

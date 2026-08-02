@@ -490,6 +490,35 @@ public sealed class MainWindowViewModelTests
         }
     }
 
+    [AvaloniaFact]
+    public async Task ViewportResize_SchedulesReplanAtViewportDimensions()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+
+            // A small viewport: the preview should be requested at (roughly) that
+            // logical size rather than the full configured maximum, so the layout
+            // resolver can pick overview/full grammar for the displayed size.
+            h.VM.SchedulePreviewResize(480, 270);
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+            Assert.True(h.Factory.LastSession.FrameSizes.Count > 0,
+                "RenderFrameAsync should receive concrete preview dimensions");
+            (int width, int height) = h.Factory.LastSession.FrameSizes[^1];
+            Assert.Equal(480, width);
+            Assert.Equal(270, height);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
     private sealed class Harness
     {
         public MainWindowViewModel VM { get; private set; } = null!;

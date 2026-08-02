@@ -34,6 +34,7 @@ internal sealed record VisualizationLayoutRegionPlan(
 internal sealed record VisualizationLayoutPlan(
     string RequestedLayout,
     string SelectedLayout,
+    string ResolvedVariant,
     string ChannelFilter,
     int Width,
     int Height,
@@ -177,6 +178,7 @@ internal sealed record VisualizationLayoutPlan(
         return new VisualizationLayoutPlan(
             VisualizationLayoutNames.ToCliName(resolvedLayout.Mode),
             VisualizationLayoutNames.ToCliName(resolvedLayout.Mode),
+            VisualizationLayoutNames.ToCliVariant(resolvedLayout.Variant),
             channelFilter.ToString(),
             layout.Width,
             layout.Height,
