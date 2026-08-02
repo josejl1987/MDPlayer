@@ -3,19 +3,17 @@ using Fmp.Core.Visualization;
 using MDPlayer.Fmp.Tests.Fixtures;
 using System.Text.Json;
 using Xunit;
-using Xunit.Sdk;
 
 namespace MDPlayer.Fmp.Tests;
 
 public sealed class AnalysisIntegrationTests
 {
-    [Fact]
+    [SkippableFact]
     public void AnalysisRunner_InvokesRealWorkerAndReusesValidCacheWithoutPython()
     {
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
-        if (!File.Exists(python))
-            throw Xunit.Sdk.SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
+        Skip.IfNot(File.Exists(python), $"analysis integration environment is unavailable: {python}");
 
         string root = Path.Combine(Path.GetTempPath(), "mdplayer-analysis-integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -85,15 +83,13 @@ public sealed class AnalysisIntegrationTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void AnalysisRunner_DoesNotOverwriteExistingResultWhenWorkerFails()
     {
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
-        if (!File.Exists(python))
-            throw Xunit.Sdk.SkipException.ForSkip($"analysis integration environment is unavailable: {python}");
-        if (!OperatingSystem.IsLinux())
-            throw Xunit.Sdk.SkipException.ForSkip("wrapper worker fixture requires Linux");
+        Skip.IfNot(File.Exists(python), $"analysis integration environment is unavailable: {python}");
+        Skip.If(!OperatingSystem.IsLinux(), "wrapper worker fixture requires Linux");
 
         string root = Path.Combine(Path.GetTempPath(), "mdplayer-analysis-worker-failure-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
