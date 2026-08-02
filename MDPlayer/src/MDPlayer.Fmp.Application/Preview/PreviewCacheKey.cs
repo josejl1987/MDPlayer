@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,9 +15,26 @@ namespace Fmp.Application.Preview;
 public static class PreviewCacheKey
 {
     /// <summary>
-    /// Capture-stage key: canonical input path + length + last-write time +
-    /// capture-affecting options. A cache hit MUST never bypass schema or
-    /// decoder-version validation (callers re-validate first).
+    /// Bumped manually whenever capture semantics change without a
+    /// request-schema change, so persisted artifacts from an older capture
+    /// implementation are never reused for a newer one.
+    /// </summary>
+    internal const int CaptureImplementationVersion = 1;
+
+    /// <summary>Version of the on-disk capture bundle layout and manifest schema.</summary>
+    internal const int CaptureBundleSchemaVersion = 1;
+
+    /// <summary>Directory-safe prefix for capture keys produced by this implementation.</summary>
+    internal const string CaptureKeyPrefix = "capture-v2-";
+
+    /// <summary>
+    /// Complete capture fingerprint: canonical full input path, input identity,
+    /// version identity, every playback/capture-affecting setting, and the
+    /// capture-affecting track settings. A bundle validated against this key is
+    /// guaranteed to reflect the exact playback + capture settings that produced
+    /// it; visual-only settings (composition, dimensions, fps, encoder, quality,
+    /// timing window, effects, palette, note color, presentation text) are
+    /// deliberately excluded so changing them never invalidates a capture.
     /// </summary>
     public static string CaptureKey(
         string inputPath,
@@ -24,17 +42,34 @@ public static class PreviewCacheKey
         DateTime lastWriteUtc,
         VisualizationRequest request)
     {
+        ArgumentNullException.ThrowIfNull(request);
+
         var builder = new StringBuilder();
-        builder.Append("capture|v1|");
+        builder.Append("capture|v2|");
         builder.Append(Path.GetFullPath(inputPath));
         builder.Append('|').Append(inputLength);
         builder.Append('|').Append(lastWriteUtc.Ticks);
-        builder.Append('|').Append(request.Playback.LoopCount);
-        builder.Append('|').Append(request.Playback.FadeSeconds.ToString("R"));
-        builder.Append('|').Append(request.Playback.TailSeconds.ToString("R"));
-        builder.Append('|').Append(request.Playback.MaximumDurationSeconds?.ToString("R") ?? "-");
-        builder.Append('|').Append(request.Playback.SampleRate);
-        return Sha1Hex(builder.ToString());
+        builder.Append('|').Append(CaptureBundleSchemaVersion);
+        builder.Append('|').Append(request.SchemaVersion);
+        builder.Append('|').Append(CaptureImplementationVersion);
+
+        PlaybackSettings playback = request.Playback;
+        builder.Append('|').Append(playback.LoopCount);
+        builder.Append('|').Append(playback.FadeSeconds.ToString("R", CultureInfo.InvariantCulture));
+        builder.Append('|').Append(playback.TailSeconds.ToString("R", CultureInfo.InvariantCulture));
+        builder.Append('|').Append(playback.MaximumDurationSeconds?.ToString("R", CultureInfo.InvariantCulture) ?? "-");
+        builder.Append('|').Append(playback.SampleRate);
+        builder.Append('|').Append(playback.SsgGainDb.ToString("R", CultureInfo.InvariantCulture));
+        builder.Append('|').Append(playback.SpcPitch);
+
+        TrackSettings tracks = request.Tracks;
+        builder.Append('|').Append(tracks.Selection);
+        builder.Append('|').Append(JoinOrdinal(tracks.IncludedIds));
+        builder.Append('|').Append(JoinOrdinal(tracks.ExcludedIds));
+        builder.Append('|').Append(tracks.IncludeInactiveDiagnosticTracks ? 1 : 0);
+
+        string hash = Sha256Hex(builder.ToString());
+        return CaptureKeyPrefix + hash;
     }
 
     /// <summary>Frame-stage key: request identity + time + dimensions + fidelity.</summary>
@@ -57,6 +92,25 @@ public static class PreviewCacheKey
     /// <summary>Stable content hash of the canonical request JSON.</summary>
     public static string RequestHash(VisualizationRequest request)
         => Sha1Hex(JsonSerializer.Serialize(request, RequestJson.Options));
+
+    /// <summary>Joins an ID collection by ordinal, sorted so reordering the
+    /// collection does not change the capture key.</summary>
+    private static string JoinOrdinal(IReadOnlyList<string> values)
+    {
+        if (values is null || values.Count == 0)
+            return "-";
+        string[] sorted = values
+            .Where(static v => !string.IsNullOrEmpty(v))
+            .OrderBy(static v => v, StringComparer.Ordinal)
+            .ToArray();
+        return string.Join(",", sorted);
+    }
+
+    private static string Sha256Hex(string value)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
 
     private static string Sha1Hex(string value)
     {

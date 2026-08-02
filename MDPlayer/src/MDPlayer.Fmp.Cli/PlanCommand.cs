@@ -18,6 +18,8 @@ public static class PlanCommand
         string requestJsonPath = null;
         string timelinePath = null;
         string timelineOutPath = null;
+        string captureDir = null;
+        string captureKey = null;
         bool json = false;
 
         var reader = new ArgumentReader(args ?? Array.Empty<string>());
@@ -32,6 +34,8 @@ public static class PlanCommand
                         case "--request-json": requestJsonPath = reader.RequireValue(name); break;
                         case "--timeline": timelinePath = reader.RequireValue(name); break;
                         case "--timeline-out": timelineOutPath = reader.RequireValue(name); break;
+                        case "--capture-dir": captureDir = reader.RequireValue(name); break;
+                        case "--capture-key": captureKey = reader.RequireValue(name); break;
                         case "--json" when value == null: json = true; break;
                         default: throw new ArgumentException($"unknown option '{name}'");
                     }
@@ -47,7 +51,7 @@ public static class PlanCommand
             if (string.IsNullOrWhiteSpace(requestJsonPath))
                 throw new ArgumentException("--request-json PATH is required");
 
-            return Run(requestJsonPath, timelinePath, timelineOutPath, json);
+            return Run(requestJsonPath, timelinePath, timelineOutPath, captureDir, captureKey, json);
         }
         catch (ArgumentException ex)
         {
@@ -81,7 +85,13 @@ public static class PlanCommand
         }
     }
 
-    private static int Run(string requestJsonPath, string timelinePath, string timelineOutPath, bool json)
+    private static int Run(
+        string requestJsonPath,
+        string timelinePath,
+        string timelineOutPath,
+        string? captureDir,
+        string? captureKey,
+        bool json)
     {
         VisualizationRequest request = VisualizationRequestSerializer.ReadFromFile(requestJsonPath);
         var runtime = new RenderRuntimeOptions();
@@ -100,6 +110,26 @@ public static class PlanCommand
         string? durableTimelineOut =
             string.IsNullOrWhiteSpace(timelineOutPath) ? null : timelineOutPath;
 
+        // --capture-dir reuse: when the supplied capture directory already
+        // holds a valid timeline.json, plan from that bundle (reuse) instead of
+        // re-capturing. Otherwise the fresh capture's timeline is written into
+        // the same directory so the caller can commit the bundle afterwards.
+        string? bundleTimeline =
+            !string.IsNullOrWhiteSpace(captureDir)
+                ? Path.Combine(captureDir, "timeline.json")
+                : null;
+        bool reuseBundle =
+            bundleTimeline != null && File.Exists(bundleTimeline);
+
+        string? effectiveSeed =
+            reuseBundle ? bundleTimeline
+            : string.IsNullOrWhiteSpace(timelinePath) ? null : timelinePath;
+
+        string? bundleOut =
+            !reuseBundle && !string.IsNullOrWhiteSpace(captureDir)
+                ? bundleTimeline
+                : durableTimelineOut;
+
         // The planning path is timeline/layout-only: it captures (or seeds) the
         // semantic timeline, resolves the layout and builds the pure plan. It
         // deliberately does NOT synthesize FMP stems, render scopes, run energy
@@ -110,8 +140,8 @@ public static class PlanCommand
             workspace,
             resolution,
             PrepareFmpTrack(resolution, runtime),
-            seedTimelinePath: string.IsNullOrWhiteSpace(timelinePath) ? null : timelinePath,
-            timelineOutPath: durableTimelineOut);
+            seedTimelinePath: effectiveSeed,
+            timelineOutPath: bundleOut);
 
         ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
             timeline.Timeline,

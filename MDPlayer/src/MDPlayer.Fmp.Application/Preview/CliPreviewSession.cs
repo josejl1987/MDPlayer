@@ -96,19 +96,34 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
     private readonly string _executablePath;
     private readonly string _workspace;
     private readonly string _requestJsonPath;
-    private readonly string _timelinePath;
+    private readonly IPreviewCliRunner _runner;
+    private readonly CaptureBundleStore _captureStore;
+    private readonly SemaphoreSlim _captureGate = new(1, 1);
+    private CaptureBundle? _activeCapture;
+    private string? _activeCaptureKey;
     private int _frameRevision;
     private int _motionRevision;
     private VisualizationSessionCapabilities _capabilities;
 
     public CliPreviewSession(string executablePath, string workspace, VisualizationInputInfo input)
+        : this(executablePath, workspace, input, new ProcessCliRunner(executablePath))
+    {
+    }
+
+    /// <summary>Test constructor injecting a fake CLI runner.</summary>
+    internal CliPreviewSession(
+        string executablePath,
+        string workspace,
+        VisualizationInputInfo input,
+        IPreviewCliRunner runner)
     {
         _executablePath = executablePath ?? throw new ArgumentNullException(nameof(executablePath));
         _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
         Input = input ?? throw new ArgumentNullException(nameof(input));
+        _runner = runner ?? throw new ArgumentNullException(nameof(runner));
 
         _requestJsonPath = Path.Combine(workspace, "request.json");
-        _timelinePath = Path.Combine(workspace, "timeline.json");
+        _captureStore = new CaptureBundleStore(workspace);
 
         _capabilities = new VisualizationSessionCapabilities
         {
@@ -130,13 +145,15 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
     {
         VisualizationRequestSerializer.WriteToFile(request, _requestJsonPath);
 
+        CaptureBundle bundle = await EnsureCaptureBundleAsync(request, cancellationToken);
+
         var args = new List<string>
         {
             "plan",
             "--request-json", _requestJsonPath,
             "--json",
         };
-        AddTimelineArgs(args);
+        AddCaptureArgs(args, bundle);
 
         ProcessOutput output = await RunCliAsync(args, cancellationToken);
         if (output.ExitCode != 0)
@@ -156,8 +173,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
         if (plan == null)
             throw new InvalidOperationException("mdplayer-render plan returned no result.");
 
-        bool timelineAvailable = !string.IsNullOrEmpty(plan.TimelinePath) || File.Exists(_timelinePath);
-        if (timelineAvailable)
+        if (_activeCapture is { HasTimeline: true })
             _capabilities = _capabilities with { HasCapturedTimeline = true };
 
         return plan;
@@ -175,6 +191,8 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
         int revision = ++_frameRevision;
         string pngPath = Path.Combine(_workspace, $"frame-{revision}.png");
 
+        CaptureBundle bundle = await EnsureCaptureBundleAsync(request, cancellationToken);
+
         var args = new List<string>
         {
             "preview",
@@ -190,7 +208,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
             args.Add("--fidelity");
             args.Add("layout");
         }
-        AddTimelineArgs(args);
+        AddCaptureArgs(args, bundle);
 
         ProcessOutput output = await RunCliAsync(args, cancellationToken);
         if (output.ExitCode != 0)
@@ -242,6 +260,8 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
         int revision = ++_motionRevision;
         string outputDir = Path.Combine(_workspace, $"motion-{revision}");
 
+        CaptureBundle bundle = await EnsureCaptureBundleAsync(request, cancellationToken);
+
         var args = new List<string>
         {
             "preview",
@@ -255,7 +275,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
             "--output-dir", outputDir,
             "--json",
         };
-        AddTimelineArgs(args);
+        AddCaptureArgs(args, bundle);
 
         progress?.Report(new PreviewProgress("rendering frames", 0, "Rendering motion preview"));
 
@@ -281,66 +301,149 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
         };
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
     // ---- Helpers ----
 
-    private void AddTimelineArgs(List<string> args)
+    private void AddCaptureArgs(List<string> args, CaptureBundle bundle)
     {
-        // Write the freshly captured timeline back to the session workspace so
-        // it can be inspected, but never *seed* a cached timeline into new
-        // plan/preview subprocesses:
-        //
-        //  1. The cached timeline is keyed only by the input path hash, so
-        //     playback changes (loop count, fade/tail, sample rate, SSG gain,
-        //     SPC pitch mode, backend) would silently reuse a stale timeline.
-        //  2. A seeded timeline skips semantic capture, so the fresh temporary
-        //     workspace never receives a master WAV — backends whose scope
-        //     strategy depends on the captured master then fail with "master
-        //     WAV was not produced by playback capture".
-        //
-        // Each plan/preview therefore re-captures. The durable optimization is
-        // a capture bundle (timeline + master + stems) keyed by the full
-        // CaptureKey, not a bare timeline file.
-        args.Add("--timeline-out");
-        args.Add(_timelinePath);
+        // Reuse a durable capture bundle instead of re-capturing per frame. The
+        // capture key already encodes every playback/capture-affecting setting,
+        // so a committed bundle is guaranteed to match the current request.
+        args.Add("--capture-dir");
+        args.Add(bundle.DirectoryPath);
+        args.Add("--capture-key");
+        args.Add(bundle.Key);
+    }
+
+    /// <summary>
+    /// Ensures a valid capture bundle exists for the request, reusing a
+    /// committed one whenever possible and performing exactly one new capture
+    /// otherwise. The capture gate prevents two concurrent preview requests
+    /// from starting duplicate captures.
+    /// </summary>
+    private async Task<CaptureBundle> EnsureCaptureBundleAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        FileInfo input = new(request.InputPath);
+        string captureKey = PreviewCacheKey.CaptureKey(
+            input.FullName,
+            input.Exists ? input.Length : 0,
+            input.Exists ? input.LastWriteTimeUtc : default,
+            request);
+
+        // Fast path: the active key matches and the bundle still validates.
+        if (_activeCaptureKey == captureKey
+            && _activeCapture is { } active
+            && _captureStore.TryOpenValid(
+                captureKey,
+                input.FullName,
+                input.Exists ? input.Length : 0,
+                input.Exists ? input.LastWriteTimeUtc : default) is { })
+        {
+            return active;
+        }
+
+        await _captureGate.WaitAsync(cancellationToken);
+        try
+        {
+            // Re-check after acquiring the gate: a concurrent request may have
+            // just committed a matching bundle.
+            if (_activeCaptureKey == captureKey && _activeCapture is { } recheck)
+            {
+                CaptureBundle? existing = _captureStore.TryOpenValid(
+                    captureKey,
+                    input.FullName,
+                    input.Exists ? input.Length : 0,
+                    input.Exists ? input.LastWriteTimeUtc : default);
+                if (existing is { })
+                {
+                    _activeCapture = existing;
+                    return existing;
+                }
+            }
+
+            // Ask the store for a previously committed valid bundle.
+            CaptureBundle? valid = _captureStore.TryOpenValid(
+                captureKey,
+                input.FullName,
+                input.Exists ? input.Length : 0,
+                input.Exists ? input.LastWriteTimeUtc : default);
+            if (valid is { })
+            {
+                _activeCapture = valid;
+                _activeCaptureKey = captureKey;
+                _capabilities = _capabilities with { HasCapturedTimeline = true };
+                return valid;
+            }
+
+            // No reusable bundle: create a temporary capture directory, drive a
+            // single CLI call to capture into it, then commit.
+            CaptureBundle temporary = _captureStore.CreatePaths(captureKey);
+            try
+            {
+                VisualizationRequestSerializer.WriteToFile(request, _requestJsonPath);
+                var args = new List<string>
+                {
+                    "plan",
+                    "--request-json", _requestJsonPath,
+                    "--json",
+                };
+                // Direct the CLI to write its capture into the temporary bundle
+                // directory (which is not yet a valid bundle, so it captures).
+                AddCaptureArgs(args, temporary);
+
+                ProcessOutput output = await RunCliAsync(args, cancellationToken);
+                if (output.ExitCode != 0)
+                    throw new InvalidOperationException(
+                        $"mdplayer-render capture failed (exit {output.ExitCode}): {TrimError(output.StandardError)}");
+
+                // The CLI wrote timeline.json (and master.wav for backends that
+                // produce one); the store validates and commits atomically.
+                CaptureBundle committed = _captureStore.Commit(
+                    temporary,
+                    CreateManifest(captureKey, input, temporary));
+                _activeCapture = committed;
+                _activeCaptureKey = captureKey;
+                _capabilities = _capabilities with { HasCapturedTimeline = true };
+                return committed;
+            }
+            catch (Exception)
+            {
+                // Never leave a partial temporary bundle behind.
+                _captureStore.DeleteIncomplete(temporary.DirectoryPath);
+                throw;
+            }
+        }
+        finally
+        {
+            _captureGate.Release();
+        }
+    }
+
+    private static CaptureBundleManifest CreateManifest(
+        string captureKey,
+        FileInfo input,
+        CaptureBundle temporary)
+    {
+        return new CaptureBundleManifest
+        {
+            CaptureKey = captureKey,
+            InputPath = input.FullName,
+            InputLength = input.Exists ? input.Length : 0,
+            InputLastWriteUtcTicks = input.Exists ? input.LastWriteTimeUtc.Ticks : 0,
+            CreatedUtc = DateTime.UtcNow,
+            TimelineFileName = "timeline.json",
+            MasterWaveFileName = File.Exists(Path.Combine(temporary.DirectoryPath, "master.wav"))
+                ? "master.wav"
+                : null,
+            StemsDirectoryName = Directory.Exists(Path.Combine(temporary.DirectoryPath, "stems"))
+                ? "stems"
+                : null,
+        };
     }
 
     private async Task<ProcessOutput> RunCliAsync(IReadOnlyList<string> args, CancellationToken ct)
-    {
-        var psi = new ProcessStartInfo(_executablePath)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (string arg in args)
-            psi.ArgumentList.Add(arg);
-
-        using var process = new Process { StartInfo = psi };
-        try
-        {
-            if (!process.Start())
-                throw new InvalidOperationException($"Failed to start '{_executablePath}'.");
-        }
-        catch (Exception ex) when (ex is not InvalidOperationException)
-        {
-            throw new InvalidOperationException($"Failed to start '{_executablePath}': {ex.Message}", ex);
-        }
-
-        using var killOnCancel = ct.Register(() =>
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-        });
-
-        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        Task<string> stderrTask = process.StandardError.ReadToEndAsync(ct);
-        string stdout = await stdoutTask;
-        string stderr = await stderrTask;
-        await process.WaitForExitAsync(ct);
-
-        return new ProcessOutput(process.ExitCode, stdout, stderr);
-    }
+        => await _runner.RunAsync(args, ct);
 
     private static T? ParseOptional<T>(string json) where T : class
     {
@@ -376,7 +479,12 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
             .Select(line => line.Trim())).Trim();
     }
 
-    private sealed record ProcessOutput(int ExitCode, string StandardOutput, string StandardError);
+    /// <summary>Per-method capture gate disposal via <see cref="System.IDisposable"/>.</summary>
+    public ValueTask DisposeAsync()
+    {
+        _captureGate.Dispose();
+        return ValueTask.CompletedTask;
+    }
 
     /// <summary>Permissive parse target for the <c>preview</c> JSON metadata.</summary>
     private sealed class PreviewFrameJson
@@ -406,5 +514,68 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
         public List<string>? Frames { get; set; }
         public bool HasApproximations { get; set; }
         public List<string>? ApproximationNotes { get; set; }
+    }
+}
+
+/// <summary>Captured result of one CLI subprocess invocation.</summary>
+internal sealed record ProcessOutput(int ExitCode, string StandardOutput, string StandardError);
+
+/// <summary>
+/// Narrow seam over the CLI subprocess so capture-reuse behaviour can be tested
+/// without the real renderer. The default implementation spawns
+/// <c>mdplayer-render</c>; tests inject a fake that records arguments and
+/// emulates artifact creation.
+/// </summary>
+internal interface IPreviewCliRunner
+{
+    Task<ProcessOutput> RunAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Default process-based runner for <see cref="IPreviewCliRunner"/>.</summary>
+internal sealed class ProcessCliRunner : IPreviewCliRunner
+{
+    private readonly string _executablePath;
+
+    public ProcessCliRunner(string executablePath)
+        => _executablePath = executablePath ?? throw new ArgumentNullException(nameof(executablePath));
+
+    public async Task<ProcessOutput> RunAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo(_executablePath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string arg in arguments)
+            psi.ArgumentList.Add(arg);
+
+        using var process = new Process { StartInfo = psi };
+        try
+        {
+            if (!process.Start())
+                throw new InvalidOperationException($"Failed to start '{_executablePath}'.");
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            throw new InvalidOperationException($"Failed to start '{_executablePath}': {ex.Message}", ex);
+        }
+
+        using var killOnCancel = ct.Register(() =>
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+        });
+
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync(ct);
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+        await process.WaitForExitAsync(ct);
+
+        return new ProcessOutput(process.ExitCode, stdout, stderr);
     }
 }
