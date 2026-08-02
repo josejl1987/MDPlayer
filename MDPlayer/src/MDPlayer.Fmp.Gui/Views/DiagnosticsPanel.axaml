@@ -1,0 +1,113 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:contracts="using:Fmp.Application.Contracts"
+             xmlns:vm="using:Fmp.Gui.ViewModels"
+             x:Class="Fmp.Gui.Views.DiagnosticsPanel"
+             x:DataType="vm:MainWindowViewModel">
+
+  <Grid RowDefinitions="Auto,*" Background="{StaticResource Brush.Surface1}">
+
+    <!-- Diagnostics header -->
+    <Border Grid.Row="0" Classes="toolbar" Padding="12,8" CornerRadius="0">
+      <TextBlock Text="DIAGNOSTICS" FontWeight="SemiBold" FontSize="12"/>
+    </Border>
+
+    <ScrollViewer Grid.Row="1">
+      <StackPanel Margin="12,10,12,14" Spacing="12">
+
+        <!-- Preview status -->
+        <StackPanel Spacing="6">
+          <TextBlock Classes="section-title" Text="PREVIEW"/>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+            <TextBlock Classes="caption" Text="Fidelity" Grid.Column="0"/>
+            <TextBlock Grid.Column="1" Text="{Binding Preview.BadgeText}" TextAlignment="Right"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+            <TextBlock Classes="caption" Text="Time" Grid.Column="0"/>
+            <TextBlock Grid.Column="1" Text="{Binding TimeText}" TextAlignment="Right"/>
+          </Grid>
+          <Border IsVisible="{Binding Preview.IsLoading}" Background="{StaticResource Brush.Surface2}"
+                  CornerRadius="4" Padding="8,4">
+            <TextBlock Classes="caption" Text="{Binding Preview.LoadingText}" TextWrapping="Wrap"/>
+          </Border>
+          <Border IsVisible="{Binding Preview.HasError}" Background="{StaticResource Brush.ErrorSurface}"
+                  BorderBrush="{StaticResource Brush.Error}" BorderThickness="1" CornerRadius="4" Padding="8,4">
+            <TextBlock Classes="caption" Text="{Binding Preview.ErrorText}"
+                       Foreground="{StaticResource Brush.Error}" TextWrapping="Wrap"
+                       FontSize="11"/>
+          </Border>
+        </StackPanel>
+
+        <Border Classes="separator"/>
+
+        <!-- Input -->
+        <StackPanel Spacing="6">
+          <TextBlock Classes="section-title" Text="INPUT"/>
+          <TextBlock Text="{Binding InputSummary}" TextWrapping="Wrap" FontSize="12"/>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+            <TextBlock Classes="caption" Text="Semantic" Grid.Column="0"/>
+            <TextBlock Grid.Column="1" Text="{Binding HasTimeline, StringFormat='{}{0}'}"
+                       TextAlignment="Right"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+            <TextBlock Classes="caption" Text="Scope source" Grid.Column="0"/>
+            <TextBlock Grid.Column="1" Text="{Binding Preview.BadgeText}" TextAlignment="Right"/>
+          </Grid>
+        </StackPanel>
+
+        <Border Classes="separator"/>
+
+        <!-- Render -->
+        <StackPanel Spacing="6">
+          <TextBlock Classes="section-title" Text="RENDER"/>
+          <TextBlock Text="{Binding RenderSpecText}" FontSize="12"/>
+          <TextBlock Classes="caption" Text="{Binding OutputStatusText}" TextWrapping="Wrap"/>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+            <TextBlock Classes="caption" Text="Validation issues" Grid.Column="0"/>
+            <TextBlock Grid.Column="1"
+                       Text="{Binding ValidationIssues.Count}"
+                       TextAlignment="Right"/>
+          </Grid>
+        </StackPanel>
+
+        <Border Classes="separator"/>
+
+        <!-- Composition -->
+        <StackPanel Spacing="6">
+          <TextBlock Classes="section-title" Text="COMPOSITION"/>
+          <TextBlock Text="{Binding Settings.Basic.SelectedComposition.Name}"
+                     FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <TextBlock Classes="caption" Text="{Binding Settings.Basic.SelectedComposition.Description}"
+                     TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Border Classes="separator"/>
+
+        <!-- Tracks (read-only diagnostics list) -->
+        <StackPanel Spacing="6">
+          <TextBlock Classes="section-title" Text="TRACKS"/>
+          <ItemsControl ItemsSource="{Binding Settings.Content.Tracks}" MaxHeight="240">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:TrackItemViewModel">
+                <Grid ColumnDefinitions="14,*,Auto,Auto" ColumnSpacing="6" Margin="0,2">
+                  <Rectangle Grid.Column="0" Width="10" Height="10" RadiusX="2" RadiusY="2"
+                             Fill="{Binding ColorBrush}" VerticalAlignment="Center"/>
+                  <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="12"
+                             TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding DisplayName}"/>
+                  <TextBlock Grid.Column="2" Classes="caption" FontSize="11"
+                             Text="{Binding SemanticType}"/>
+                  <Border Grid.Column="3" CornerRadius="3"
+                          Background="{StaticResource Brush.AccentSoft}" Padding="3,1" ToolTip.Tip="Scope">
+                    <TextBlock FontSize="10" Text="{Binding ScopeAvailable, StringFormat='{}S'}"/>
+                  </Border>
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+
+      </StackPanel>
+    </ScrollViewer>
+
+  </Grid>
+</UserControl>

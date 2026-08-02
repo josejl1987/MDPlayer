@@ -3,6 +3,7 @@
         xmlns:vm="using:Fmp.Gui.ViewModels"
         xmlns:contracts="using:Fmp.Application.Contracts"
         xmlns:sys="using:System"
+        xmlns:local="using:Fmp.Gui.Views"
         x:Class="Fmp.Gui.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="MDPlayer Visualizer"
@@ -79,14 +80,14 @@
       </StackPanel>
     </Border>
 
-    <!-- ── Main area: settings | preview+transport ─────────────────── -->
+    <!-- ── Main area: settings | preview+transport | diagnostics ────── -->
     <Grid x:Name="MainContent" Grid.Row="2">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="344"
-                          MinWidth="320"
-                          MaxWidth="400"/>
+        <ColumnDefinition Width="320"/>
         <ColumnDefinition Width="6"/>
         <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="6"/>
+        <ColumnDefinition Width="300"/>
       </Grid.ColumnDefinitions>
 
       <!-- Left: settings sections -->
@@ -351,8 +352,6 @@
                 </StackPanel>
               </Grid>
               <TextBlock Classes="caption" Text="{Binding OutputStatusText}" TextWrapping="Wrap"/>
-              <Button Classes="primary" Content="Render" Command="{Binding RenderCommand}"
-                      HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
             </StackPanel>
 
           </StackPanel>
@@ -368,8 +367,8 @@
 
           <!-- Preview header -->
           <Border Grid.Row="0" Classes="toolbar" CornerRadius="6,6,0,0" Padding="12,0">
-            <Grid>
-              <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="10"
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel Grid.Column="0" HorizontalAlignment="Left" Orientation="Horizontal" Spacing="10"
                           VerticalAlignment="Center">
                 <TextBlock Text="Preview" FontWeight="SemiBold" FontSize="14"/>
                 <Border CornerRadius="9" Background="{StaticResource Brush.AccentSoft}" Padding="8,2">
@@ -380,6 +379,16 @@
                   </StackPanel>
                 </Border>
               </StackPanel>
+
+              <!-- Compact-mode fallback: opens the shared diagnostics rail as a flyout -->
+              <Button Grid.Column="1" x:Name="DiagnosticsToggleButton" Classes="secondary"
+                      Content="Diagnostics" VerticalAlignment="Center" HorizontalAlignment="Right">
+                <Button.Flyout>
+                  <Flyout Placement="Bottom" ShowMode="Standard">
+                    <local:DiagnosticsPanel Width="300" MinWidth="300" MaxWidth="360" Height="440"/>
+                  </Flyout>
+                </Button.Flyout>
+              </Button>
             </Grid>
           </Border>
 
@@ -467,18 +476,30 @@
                       ToolTip.Tip="Next representative point">
                 <PathIcon Data="{DynamicResource Icon.Next}" Width="12" Height="12"/>
               </Button>
-              <TextBlock Grid.Column="4" Classes="timecode" Text="{Binding TimeText}"
+              <TextBlock Grid.Column="4" x:Name="PreviewTimecode" Classes="timecode"
+                         Text="{Binding TimeText}"
                          VerticalAlignment="Center" MinWidth="100" TextAlignment="Right"/>
             </Grid>
           </Border>
 
         </Grid>
       </Grid>
+
+      <!-- Diagnostics splitter (hidden in compact mode) -->
+      <GridSplitter x:Name="DiagnosticsSplitter" Grid.Column="3" Width="6" HorizontalAlignment="Stretch"
+                    Background="{StaticResource Brush.Canvas}"/>
+
+      <!-- Right: diagnostics rail (300px in wide mode, hidden in compact) -->
+      <Border x:Name="DiagnosticsColumn" Grid.Column="4" Margin="0,12,0,12"
+              BorderBrush="{StaticResource Brush.BorderSoft}" BorderThickness="1" CornerRadius="6"
+              ClipToBounds="True">
+        <local:DiagnosticsPanel x:Name="DiagnosticsPanel"/>
+      </Border>
     </Grid>
 
     <!-- ── Bottom status: error + status ───────────────────────────── -->
     <Border x:Name="StatusBar" Grid.Row="3" Classes="status" Padding="12,5">
-      <Grid ColumnDefinitions="*,Auto,2*,Auto" ColumnSpacing="12">
+      <Grid ColumnDefinitions="*,Auto,2*" ColumnSpacing="12">
         <TextBlock Grid.Column="0" Text="{Binding StatusText}" VerticalAlignment="Center"/>
 
         <Border Grid.Column="1" IsVisible="{Binding HasError}" Background="{StaticResource Brush.ErrorSurface}"
@@ -494,11 +515,6 @@
 
         <TextBlock Grid.Column="2" Classes="metric" Text="{Binding RenderSpecText}"
                    VerticalAlignment="Center" TextAlignment="Right"/>
-
-        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8" IsVisible="{Binding Export.HasCompleted}">
-          <Button Classes="secondary" Content="Open video" Command="{Binding OpenOutputCommand}"/>
-          <Button Classes="secondary" Content="Open folder" Command="{Binding OpenOutputFolderCommand}"/>
-        </StackPanel>
       </Grid>
     </Border>
 
