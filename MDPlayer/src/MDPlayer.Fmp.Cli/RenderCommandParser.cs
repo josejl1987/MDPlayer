@@ -38,6 +38,19 @@ internal static class RenderCommandParser
         return new RenderInvocation(parsed.Request, parsed.Runtime);
     }
 
+    public static RenderInvocation? ParseInvocation(string[] args)
+    {
+        try
+        {
+            return ParseInvocationCore(args);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>
     /// Parses the canonical command. <paramref name="requestJsonPath"/> is the
     /// optional <c>--request-json</c> seed; when present, the request is loaded
@@ -331,15 +344,18 @@ internal static class RenderCommandParser
 
     private static string? ReadOutputOverride(string[] args, string option = "--output")
     {
-        for (int i = 0; i < args.Length - 1; i++)
+        foreach (string candidate in new[] { "-o", "--output" })
         {
-            if (args[i] == option)
-                return args[i + 1];
-        }
-        foreach (string arg in args)
-        {
-            if (arg.StartsWith(option + "=", StringComparison.Ordinal))
-                return arg[(option.Length + 1)..];
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == candidate)
+                    return args[i + 1];
+            }
+            foreach (string arg in args)
+            {
+                if (arg.StartsWith(candidate + "=", StringComparison.Ordinal))
+                    return arg[(candidate.Length + 1)..];
+            }
         }
         return null;
     }

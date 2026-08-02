@@ -6,6 +6,8 @@ namespace Fmp.Cli;
 
 internal sealed record VisualizationBackendResolution(
     FileInfo Input,
+    IReadOnlyList<string> SearchPaths,
+    string? FmpComPath,
     PlaybackEnvironment Environment,
     IPlaybackBackend Backend,
     PlaybackProbeResult Probe);
@@ -76,7 +78,7 @@ internal static class VisualizationBackendResolver
                 "MDPlayer can play this track, but none of its active devices expose supported note data",
                 10);
 
-        return new VisualizationBackendResolution(input, environment, backend, probe);
+        return new VisualizationBackendResolution(input, searchPaths, fmpCom, environment, backend, probe);
     }
 
     internal static IReadOnlyList<string> BuildSearchPaths(

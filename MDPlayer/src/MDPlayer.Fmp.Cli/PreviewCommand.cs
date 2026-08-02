@@ -2,19 +2,16 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Fmp.Application.Contracts;
 using Fmp.Application.Export;
-using Fmp.Core.Visualization;
-using Fmp.Core.Visualization.Rendering;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using Fmp.Application.Preview;
 #nullable enable
 
 namespace Fmp.Cli;
 
 /// <summary>
 /// `mdplayer-render preview` — renders a still PNG or a short motion sequence
-/// from a request JSON. The musical overlay matches the published composition;
-/// scope walls and analysis overlays are approximated (noted in the output).
+/// from a request JSON through the shared in-process preview session. The
+/// accurate fidelity uses exactly the same frame renderer as final video
+/// composition and visual review, so preview, review and final all agree.
 /// </summary>
 public static class PreviewCommand
 {
@@ -163,157 +160,128 @@ public static class PreviewCommand
     private static int Run(PreviewSettings settings)
     {
         VisualizationRequest request = VisualizationRequestSerializer.ReadFromFile(settings.RequestJsonPath);
-        // Still/motion dimension overrides are request snapshots, never
-        // mutations of the request loaded from disk.
-        request = request with
-        {
-            Output = request.Output with
-            {
-                Width = settings.Width.HasValue
-                    ? Math.Min(settings.Width.Value, MaxPreviewDimension)
-                    : request.Output.Width,
-                Height = settings.Height.HasValue
-                    ? Math.Min(settings.Height.Value, MaxPreviewDimension)
-                    : request.Output.Height,
-            },
-        };
-        VisualizationPlanning.PlanOutput output = VisualizationPlanning.Prepare(
-            request,
-            new RenderRuntimeOptions(),
-            settings.TimelinePath,
-            settings.TimelineOutPath);
-
-        var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(request.InputPath));
-        (bool hasApproximations, string[] approximationNotes) = ComputeApproximationNotes(
-            output.Layout.Geometry);
-
-        if (settings.Motion)
-            return RunMotion(settings, request, output, presentation, hasApproximations, approximationNotes);
-        return RunStill(settings, request, output, presentation, hasApproximations, approximationNotes);
+        var runtime = new RenderRuntimeOptions();
+        return RunAsync(settings, request, runtime).GetAwaiter().GetResult();
     }
 
-    private static int RunStill(
+    private static async Task<int> RunAsync(
         PreviewSettings settings,
         VisualizationRequest request,
-        VisualizationPlanning.PlanOutput output,
-        Fmp.Core.Visualization.Rendering.VisualizationPresentation presentation,
-        bool hasApproximations,
-        string[] approximationNotes)
+        RenderRuntimeOptions runtime)
     {
-        PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
-            output.Timeline,
-            output.Layout,
-            VisualizationPlanning.CreatePreviewRendererOptions(request, presentation));
+        await using IVisualizationPreviewSession session =
+            await new InProcessVisualizationPreviewSessionFactory(runtime).OpenWithTimelineAsync(
+                request.InputPath, settings.TimelinePath, CancellationToken.None);
 
-        if (renderer.TotalFrames <= 0)
-            throw new InvalidOperationException("timeline contains no renderable frames");
-
-        if (settings.Fidelity == "layout")
+        if (settings.Motion)
         {
-            byte[] frame = new byte[renderer.FrameByteCount];
-            using (var stream = new MemoryStream(frame, writable: true))
-                renderer.WriteStaticFrame(stream);
-            WritePng(renderer.Width, renderer.Height, frame, settings.Output);
+            MotionPreviewResult result = await session.RenderMotionAsync(
+                request,
+                BuildMotionRequest(settings),
+                progress: null,
+                CancellationToken.None);
+
+            WriteMotionResult(settings, result);
         }
         else
         {
-            long frameIndex = (long)Math.Round(
-                settings.TimeSeconds * request.Output.FpsNumerator /
-                (double)request.Output.FpsDenominator);
-            frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
-            byte[] frame = renderer.RenderFrame(frameIndex);
-            WritePng(renderer.Width, renderer.Height, frame, settings.Output);
+            PreviewFrameResult result = await session.RenderFrameAsync(
+                request,
+                BuildFrameRequest(settings),
+                CancellationToken.None);
+
+            File.WriteAllBytes(settings.Output!, result.PngBytes);
+            WriteStillResult(settings, result);
         }
 
-        ValidationIssue warning = output.Plan.ValidationIssues
-            .FirstOrDefault(issue => issue.Severity == ValidationSeverity.Warning);
-        if (settings.Json)
-        {
-            var json = new
-            {
-                schemaVersion = 1,
-                timeSeconds = settings.TimeSeconds,
-                width = renderer.Width,
-                height = renderer.Height,
-                fidelity = settings.Fidelity,
-                hasApproximations,
-                approximationNotes,
-                warning = warning == null ? null : new
-                {
-                    code = warning.Code,
-                    severity = warning.Severity.ToString(),
-                    message = warning.Message,
-                    settingPath = warning.SettingPath,
-                    detail = warning.Detail,
-                    suggestedAction = warning.SuggestedAction,
-                },
-            };
-            Console.WriteLine(JsonSerializer.Serialize(json, JsonOptions));
-        }
         return 0;
     }
 
-    private static int RunMotion(
-        PreviewSettings settings,
-        VisualizationRequest request,
-        VisualizationPlanning.PlanOutput output,
-        Fmp.Core.Visualization.Rendering.VisualizationPresentation presentation,
-        bool hasApproximations,
-        string[] approximationNotes)
+    private static PreviewFrameRequest BuildFrameRequest(PreviewSettings settings)
     {
-        int frameCount = (int)Math.Ceiling(settings.DurationSeconds * settings.Fps);
-        if (frameCount <= 0)
-            throw new InvalidOperationException("motion preview produced no frames");
-
-        // Scale the request dimensions to fit the preview max box, preserving
-        // aspect ratio.
-        double scale = Math.Min(
-            settings.MaxWidth / (double)request.Output.Width,
-            settings.MaxHeight / (double)request.Output.Height);
-        int motionWidth = Math.Max(1, (int)Math.Round(request.Output.Width * scale));
-        int motionHeight = Math.Max(1, (int)Math.Round(request.Output.Height * scale));
-
-        PanelOverlayRenderer renderer = VisualizationPlanning.BuildPanelRenderer(
-            output.Timeline,
-            output.Layout,
-            VisualizationPlanning.CreatePreviewRendererOptions(request, presentation));
-
-        if (renderer.TotalFrames <= 0)
-            throw new InvalidOperationException("timeline contains no renderable frames");
-
-        Directory.CreateDirectory(settings.OutputDir);
-        var frames = new List<string>(frameCount);
-        for (int i = 0; i < frameCount; i++)
+        PreviewFidelity fidelity = settings.Fidelity switch
         {
-            double timeSeconds = settings.StartSeconds + i / (double)settings.Fps;
-            long frameIndex = (long)Math.Round(
-                timeSeconds * request.Output.FpsNumerator /
-                (double)request.Output.FpsDenominator);
-            frameIndex = Math.Clamp(frameIndex, 0, renderer.TotalFrames - 1);
-            byte[] frame = renderer.RenderFrame(frameIndex);
+            "layout" => PreviewFidelity.Layout,
+            _ => PreviewFidelity.AccurateStill,
+        };
+        return new PreviewFrameRequest
+        {
+            TimeSeconds = settings.TimeSeconds,
+            Fidelity = fidelity,
+            Width = settings.Width.HasValue
+                ? Math.Min(settings.Width.Value, MaxPreviewDimension)
+                : null,
+            Height = settings.Height.HasValue
+                ? Math.Min(settings.Height.Value, MaxPreviewDimension)
+                : null,
+        };
+    }
+
+    private static MotionPreviewRequest BuildMotionRequest(PreviewSettings settings)
+        => new()
+        {
+            StartSeconds = settings.StartSeconds,
+            DurationSeconds = settings.DurationSeconds,
+            Fps = settings.Fps,
+            MaxWidth = settings.MaxWidth,
+            MaxHeight = settings.MaxHeight,
+        };
+
+    private static void WriteStillResult(PreviewSettings settings, PreviewFrameResult result)
+    {
+        if (!settings.Json)
+            return;
+        var json = new
+        {
+            schemaVersion = 1,
+            timeSeconds = result.TimeSeconds,
+            width = result.Width,
+            height = result.Height,
+            fidelity = result.Fidelity.ToString(),
+            hasApproximations = result.HasApproximations,
+            approximationNotes = result.ApproximationNotes,
+            warning = result.Warning == null ? null : new
+            {
+                code = result.Warning.Code,
+                severity = result.Warning.Severity.ToString(),
+                message = result.Warning.Message,
+                settingPath = result.Warning.SettingPath,
+                detail = result.Warning.Detail,
+                suggestedAction = result.Warning.SuggestedAction,
+            },
+        };
+        Console.WriteLine(JsonSerializer.Serialize(json, JsonOptions));
+    }
+
+    private static void WriteMotionResult(PreviewSettings settings, MotionPreviewResult result)
+    {
+        Directory.CreateDirectory(settings.OutputDir!);
+        var frames = new List<string>(result.FrameCount);
+
+        // The session returns frame paths in its temp workspace; copy them to
+        // the requested output directory.
+        for (int i = 0; i < result.FramePaths.Count; i++)
+        {
             string fileName = $"frame-{i:D4}.png";
-            WriteScaledPng(
-                renderer.Width,
-                renderer.Height,
-                motionWidth,
-                motionHeight,
-                frame,
-                Path.Combine(settings.OutputDir, fileName));
+            string source = result.FramePaths[i];
+            string dest = Path.Combine(settings.OutputDir!, fileName);
+            if (File.Exists(source))
+                File.Copy(source, dest, overwrite: true);
             frames.Add(fileName);
         }
 
         var manifest = new
         {
-            frameCount,
-            fps = settings.Fps,
-            width = motionWidth,
-            height = motionHeight,
+            frameCount = result.FrameCount,
+            fps = result.Fps,
+            width = result.Width,
+            height = result.Height,
             frames,
-            hasApproximations,
-            approximationNotes,
+            hasApproximations = result.HasApproximations,
+            approximationNotes = result.ApproximationNotes,
         };
         File.WriteAllText(
-            Path.Combine(settings.OutputDir, "manifest.json"),
+            Path.Combine(settings.OutputDir!, "manifest.json"),
             JsonSerializer.Serialize(manifest, JsonOptions));
 
         if (settings.Json)
@@ -321,80 +289,17 @@ public static class PreviewCommand
             var json = new
             {
                 schemaVersion = 1,
-                frameCount,
-                fps = settings.Fps,
-                width = motionWidth,
-                height = motionHeight,
+                frameCount = result.FrameCount,
+                fps = result.Fps,
+                width = result.Width,
+                height = result.Height,
                 outputDir = settings.OutputDir,
                 frames,
-                hasApproximations,
-                approximationNotes,
+                hasApproximations = result.HasApproximations,
+                approximationNotes = result.ApproximationNotes,
             };
             Console.WriteLine(JsonSerializer.Serialize(json, JsonOptions));
         }
-        return 0;
-    }
-
-    private static (bool HasApproximations, string[] Notes) ComputeApproximationNotes(
-        OverlayLayout layout)
-    {
-        var notes = new List<string>();
-        bool hasScopes = layout.HasScopes;
-        if (hasScopes)
-            notes.Add("Scope wall omitted in preview");
-        return (notes.Count > 0, notes.ToArray());
-    }
-
-    private static void WritePng(int width, int height, byte[] rgba, string path)
-    {
-        string directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
-        using Image<Rgba32> image = CreateImage(width, height, rgba);
-        image.SaveAsPng(path);
-    }
-
-    private static void WriteScaledPng(
-        int sourceWidth,
-        int sourceHeight,
-        int width,
-        int height,
-        byte[] rgba,
-        string path)
-    {
-        string directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
-        using Image<Rgba32> image = CreateImage(sourceWidth, sourceHeight, rgba);
-        if (sourceWidth != width || sourceHeight != height)
-            image.Mutate(context => context.Resize(width, height));
-        image.SaveAsPng(path);
-    }
-
-    private static Image<Rgba32> CreateImage(int width, int height, byte[] rgba)
-    {
-        var image = new Image<Rgba32>(width, height);
-        // Load the RGBA frame buffer into the image. (CopyPixelDataTo would
-        // copy the empty image into the buffer; the row accessor is the
-        // supported ImageSharp 3.x write path.)
-        image.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < accessor.Height; y++)
-            {
-                Span<Rgba32> row = accessor.GetRowSpan(y);
-                int rowOffset = y * width * 4;
-                for (int x = 0; x < row.Length; x++)
-                {
-                    int offset = rowOffset + x * 4;
-                    row[x] = new Rgba32(
-                        rgba[offset],
-                        rgba[offset + 1],
-                        rgba[offset + 2],
-                        rgba[offset + 3]);
-                }
-            }
-        });
-        return image;
     }
 
     private static string ParseFidelity(string raw)

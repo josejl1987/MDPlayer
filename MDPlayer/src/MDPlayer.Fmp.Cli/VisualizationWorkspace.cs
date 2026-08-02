@@ -12,9 +12,10 @@ internal sealed record VisualizationWorkspace(
     string CorrscopeConfigPath,
     string VideoPath)
 {
-    public static VisualizationWorkspace Create(VisualizationRequest request, FileInfo input)
+    public static VisualizationWorkspace Create(VisualizationRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        FileInfo input = new(request.InputPath);
         ArgumentNullException.ThrowIfNull(input);
 
         string outputDir = Path.GetDirectoryName(Path.GetFullPath(request.OutputPath))
@@ -31,7 +32,7 @@ internal sealed record VisualizationWorkspace(
         string scopeDir = Path.Combine(outputDir, "scope");
         string scopeMetadataPath = Path.Combine(scopeDir, "metadata.json");
         string corrscopeConfigPath = Path.Combine(scopeDir, "corrscope-grid.yaml");
-        string videoPath = request.OutputPath;
+        string videoPath = Path.GetFullPath(request.OutputPath);
         return new VisualizationWorkspace(
             outputDir,
             timelinePath,

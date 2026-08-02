@@ -99,8 +99,11 @@ internal static class VisualizationLayoutBuilder
                 || panel.Id.Contains("master", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
-        return filtered.Length > 0
-            ? new VisualizationTopology(filtered)
-            : topology;
+        if (filtered.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "The selected track filters match no visualization panels.");
+        }
+        return new VisualizationTopology(filtered);
     }
 }

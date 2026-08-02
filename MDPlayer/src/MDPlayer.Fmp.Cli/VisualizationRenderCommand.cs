@@ -17,33 +17,10 @@ public static class VisualizationRenderCommand
 {
     public static int Handle(string[] args)
     {
-        (VisualizationRequest Request, RenderRuntimeOptions Runtime, string? RequestJsonPath)? parsed =
-            RenderCommandParser.Parse(args);
-        if (parsed is null)
+        RenderInvocation? invocation = RenderCommandParser.ParseInvocation(args);
+        if (invocation is null)
             return 2;
-
-        (VisualizationRequest request, RenderRuntimeOptions runtime, _) = parsed.Value;
-
-        if (string.IsNullOrEmpty(request.InputPath))
-        {
-            Console.Error.WriteLine("error: no input file specified");
-            return 2;
-        }
-
-        VisualizationBackendResolution resolution;
-        try
-        {
-            resolution = VisualizationBackendResolver.Resolve(request, runtime);
-        }
-        catch (VisualizationBackendResolutionException ex)
-        {
-            Console.Error.WriteLine($"error: {ex.Message}");
-            return ex.ExitCode;
-        }
-
-        return string.Equals(resolution.Backend.Id, "fmp", StringComparison.Ordinal)
-            ? VisualizationRunner.Run(request, runtime)
-            : VgmVisualizeCommand.Handle(request, runtime, resolution);
+        return VisualizationRunner.Run(invocation);
     }
 
     /// <summary>Parser seam for parity tests.</summary>

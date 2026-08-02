@@ -77,21 +77,42 @@ public static class PlanCommand
     private static int Run(string requestJsonPath, string timelinePath, string timelineOutPath, bool json)
     {
         VisualizationRequest request = VisualizationRequestSerializer.ReadFromFile(requestJsonPath);
-        VisualizationPlanning.PlanOutput output = VisualizationPlanning.Prepare(
-            request, new RenderRuntimeOptions(), timelinePath, timelineOutPath);
+        var runtime = new RenderRuntimeOptions();
+        VisualizationBackendResolution resolution =
+            VisualizationBackendResolver.Resolve(request, runtime);
+        VisualizationWorkspace workspace = VisualizationWorkspace.Create(request);
+        workspace.EnsureDirectories();
+
+        PreparedVisualizationSource prepared = VisualizationPrepareCoordinator.Prepare(
+            request,
+            runtime,
+            workspace,
+            resolution,
+            PrepareFmpTrack(resolution, runtime));
 
         if (json)
         {
-            Console.WriteLine(JsonSerializer.Serialize(output.Plan, JsonOptions));
+            Console.WriteLine(JsonSerializer.Serialize(prepared.Plan, JsonOptions));
         }
         else
         {
-            WriteHumanSummary(output.Plan);
+            WriteHumanSummary(prepared.Plan);
         }
         return 0;
     }
 
-    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static PreparedTrack? PrepareFmpTrack(
+        VisualizationBackendResolution resolution,
+        RenderRuntimeOptions runtime)
+    {
+        if (!string.Equals(resolution.Backend.Id, "fmp", StringComparison.Ordinal))
+            return null;
+        return TrackPreparation.Prepare(
+            resolution.Input.FullName,
+            resolution.FmpComPath,
+            runtime.AssetsDir,
+            resolution.SearchPaths);
+    }
 
     private static JsonSerializerOptions CreateJsonOptions()
     {
@@ -103,6 +124,8 @@ public static class PlanCommand
         options.Converters.Add(new JsonStringEnumConverter());
         return options;
     }
+
+    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
     private static void WriteHumanSummary(VisualizationPlanResult plan)
     {

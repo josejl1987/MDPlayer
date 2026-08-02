@@ -18,12 +18,14 @@ internal static class VisualizationLayoutSettingsExtensions
             null,
             null,
             VisualizationScopePosition.Bottom,
-            request.Tracks.Selection switch
-            {
-                TrackSelectionMode.All => VisualizationChannelFilter.All,
-                TrackSelectionMode.Custom => VisualizationChannelFilter.All,
-                _ => VisualizationChannelFilter.Active,
-            },
+            request.Tracks.IncludeInactiveDiagnosticTracks
+                ? VisualizationChannelFilter.All
+                : request.Tracks.Selection switch
+                {
+                    TrackSelectionMode.All => VisualizationChannelFilter.All,
+                    TrackSelectionMode.Custom => VisualizationChannelFilter.All,
+                    _ => VisualizationChannelFilter.Active,
+                },
             VisualizationGroupBy.None,
             request.Tracks.IncludedIds.ToList(),
             request.Tracks.ExcludedIds.ToList());

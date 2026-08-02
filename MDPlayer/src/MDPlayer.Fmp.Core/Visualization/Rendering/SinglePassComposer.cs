@@ -422,6 +422,140 @@ internal sealed class SinglePassComposer
         }
     }
 
+    /// <summary>
+    /// Composes the final video by asking the shared
+    /// <see cref="VisualizationFrameRenderer"/> for every frame and writing the
+    /// resulting RGBA straight into a single FFmpeg encode. The frame renderer
+    /// already composes scopes + overlay in memory (exactly as preview and
+    /// review do), so this is the production path that makes final, preview and
+    /// review share one frame renderer.
+    ///
+    /// <paramref name="includeWaveform"/> defers the waveform to FFmpeg (used
+    /// when no isolated scope source is available and the caller wants the
+    /// internal-master fallback drawn as an FFmpeg overlay).
+    /// </summary>
+    public string Compose(
+        string masterAudioPath,
+        string outputVideoPath,
+        VisualizationFrameRenderer frameRenderer,
+        bool includeWaveform = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(frameRenderer);
+        ArgumentException.ThrowIfNullOrWhiteSpace(masterAudioPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputVideoPath);
+
+        if (!IsAvailable)
+            throw new InvalidOperationException("ffmpeg not found on PATH");
+        if (!File.Exists(masterAudioPath))
+            throw new FileNotFoundException("Master WAV not found.", masterAudioPath);
+
+        string outputDirectory = Path.GetDirectoryName(outputVideoPath) ?? ".";
+        Directory.CreateDirectory(outputDirectory);
+        string extension = Path.GetExtension(outputVideoPath);
+        if (string.IsNullOrEmpty(extension))
+            extension = ".mp4";
+        string tempPath = Path.Combine(
+            outputDirectory,
+            Path.GetFileNameWithoutExtension(outputVideoPath) + ".partial" + extension);
+        if (File.Exists(tempPath))
+            File.Delete(tempPath);
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = _ffmpegPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string argument in BuildMasterOnlyArguments(
+            masterAudioPath,
+            tempPath,
+            frameRenderer.Width,
+            frameRenderer.Height,
+            frameRenderer.TotalFrames > 0 ? frameRenderer.OverlayFpsNumerator : 0,
+            frameRenderer.OverlayFpsDenominator,
+            includeWaveform,
+            _options))
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        var process = new Process { StartInfo = startInfo };
+        try
+        {
+            process.Start();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+            Stream input = process.StandardInput.BaseStream;
+            byte[] frame = new byte[frameRenderer.FrameByteCount];
+            long total = frameRenderer.TotalFrames;
+            var metrics = new PipelineMetrics();
+            long wallStart = Stopwatch.GetTimestamp();
+            try
+            {
+                for (long index = 0; index < total; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    long stageStart = Stopwatch.GetTimestamp();
+                    frameRenderer.RenderFrame(index, frame);
+                    metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
+
+                    stageStart = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        input.Write(frame, 0, frame.Length);
+                    }
+                    catch (IOException)
+                    {
+                        // FFmpeg exit status/stderr below are authoritative.
+                        break;
+                    }
+                    metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
+                    metrics.FrameCount++;
+                }
+                LastMetrics = metrics.ToComposeMetrics(false, wallStart, 1);
+            }
+            finally
+            {
+                try { process.StandardInput.Close(); } catch { }
+            }
+
+            bool exited = process.WaitForExit(
+                (int)TimeSpan.FromMinutes(_options.TimeoutMinutes).TotalMilliseconds);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                throw new TimeoutException(
+                    $"ffmpeg exceeded the {_options.TimeoutMinutes}-minute timeout");
+            }
+
+            string stderr = stderrTask.GetAwaiter().GetResult();
+            if (process.ExitCode != 0 || !File.Exists(tempPath))
+            {
+                if (stderr.Length > 4000)
+                    stderr = stderr[..4000] + "... (truncated)";
+                throw new InvalidOperationException(
+                    $"ffmpeg failed (exit {process.ExitCode}):\n{stderr}");
+            }
+
+            if (File.Exists(outputVideoPath))
+                File.Delete(outputVideoPath);
+            File.Move(tempPath, outputVideoPath);
+            return outputVideoPath;
+        }
+        catch
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw;
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
     private sealed class PipelineMetrics
     {
         public long QueueWaitTicks;

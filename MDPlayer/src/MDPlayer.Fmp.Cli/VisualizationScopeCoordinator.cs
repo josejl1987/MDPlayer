@@ -1,10 +1,11 @@
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
+using Fmp.Core.Audio;
 using Fmp.Application.Contracts;
 
 namespace Fmp.Cli;
 
-internal sealed record GenericScopeArtifacts(
+internal sealed record VisualizationScopeArtifacts(
     StemPlan Plan,
     ScopeRenderer.ScopeResult Result,
     bool Enabled,
@@ -23,7 +24,31 @@ internal sealed class VisualizationScopeException : Exception
 
 internal static class VisualizationScopeCoordinator
 {
-    public static GenericScopeArtifacts Render(
+    private static VisualizationScopeArtifacts RenderFmp(
+        StemPlan plan,
+        PreparedTrack track,
+        VisualizationRequest request,
+        VisualizationWorkspace workspace,
+        bool scopesRequired)
+    {
+        PlaybackSettings playback = request.Playback;
+        StemPass[] stems = scopesRequired ? DefaultStems.All : [DefaultStems.All[0]];
+        ScopeRenderer.ScopeResult result = new ScopeRenderer(
+            track.Assets, track.FileSystem, playback.SampleRate,
+            playback.LoopCount, playback.FadeSeconds, playback.TailSeconds,
+            playback.MaximumDurationSeconds ?? 300, playback.SsgGainDb).Render(
+                track.Data, track.Input.FullName, workspace.ScopeDir, stems,
+                progress: null, skipSilentStems: false,
+                audioDir: workspace.AudioDir,
+                metadataPath: workspace.ScopeMetadataPath);
+        if (!result.Success)
+            throw new VisualizationScopeException(
+                $"scope render failed: {result.LastError}", 7);
+        bool isolated = result.Stems.Any(stem => stem.Name != "master" && stem.Success);
+        return new VisualizationScopeArtifacts(plan, result, scopesRequired, isolated);
+    }
+
+    public static VisualizationScopeArtifacts Render(
         string backendId,
         FileInfo input,
         VisualizationWorkspace workspace,
@@ -31,7 +56,9 @@ internal static class VisualizationScopeCoordinator
         RenderRuntimeOptions runtime,
         IReadOnlyList<DeviceDescriptor> devices,
         IReadOnlyList<VoiceDescriptor> voices,
-        long masterSamples)
+        long masterSamples,
+        PreparedTrack? preparedFmpTrack = null,
+        bool scopesRequired = true)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(workspace);
@@ -43,8 +70,8 @@ internal static class VisualizationScopeCoordinator
             backendId,
             devices,
             voices,
-            "auto");
-        if (!plan.Supported)
+            scopesRequired ? "auto" : "off");
+        if (!plan.Supported && plan.Strategy != StemStrategy.FmpParallelSynthesis)
         {
             throw new VisualizationScopeException(
                 $"requested scope mode 'auto' is unavailable: {plan.Reason}",
@@ -63,9 +90,11 @@ internal static class VisualizationScopeCoordinator
                 playback.TailSeconds,
                 playback.MaximumDurationSeconds ?? 300),
             StemStrategy.MasterCaptured or StemStrategy.None => null,
-            StemStrategy.FmpParallelSynthesis => throw new VisualizationScopeException(
-                "FMP channel scopes must use the FMP visualization runner",
-                7),
+            StemStrategy.FmpParallelSynthesis => RenderFmp(
+                plan,
+                preparedFmpTrack ?? throw new InvalidOperationException(
+                    "FMP track was not prepared"),
+                request, workspace, scopesRequired).Result,
             _ => throw new VisualizationScopeException(
                 $"scope strategy '{plan.Strategy}' has no executor",
                 7),
@@ -73,16 +102,9 @@ internal static class VisualizationScopeCoordinator
 
         bool isolated = result?.Success == true
             && result.Stems.Any(stem => stem.Name != "master" && stem.Success);
-        if (plan.Strategy == StemStrategy.VgmRenderedStems && !isolated
-            && request.Tracks.Selection != TrackSelectionMode.All)
-        {
-            string detail = string.IsNullOrWhiteSpace(result?.LastError)
-                ? "no isolated stems were produced"
-                : result.LastError;
-            throw new VisualizationScopeException(
-                $"channel scope rendering failed: {detail}",
-                7);
-        }
+        // Isolated stems are preferred but not mandatory: when VGM stem
+        // extraction produces no isolated stems, the master-waveform fallback
+        // below applies rather than failing the whole render.
 
         if (!isolated)
         {
@@ -102,7 +124,7 @@ internal static class VisualizationScopeCoordinator
                     : "master_fallback");
         }
 
-        return new GenericScopeArtifacts(
+        return new VisualizationScopeArtifacts(
             plan,
             result,
             plan.Strategy != StemStrategy.None,

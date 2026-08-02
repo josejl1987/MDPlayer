@@ -800,6 +800,54 @@ public sealed class VgmPlaybackBackendTests
         }
     }
 
+    [Fact]
+    public void CanonicalRender_UsesUnifiedRunnerForGeneratedVgm()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-unified-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-unified-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgm(
+                0x52, 0xA0, 0x35,
+                0x52, 0xA4, 0x21,
+                0x52, 0x28, 0xF0,
+                0x61, 0x10, 0x00,
+                0x52, 0x28, 0x00,
+                0x66));
+
+            int exitCode = VisualizationRenderCommand.Handle(
+            [
+                path,
+                "--output", output,
+                "--width", "480",
+                "--height", "360",
+                "--fps", "10",
+                "--loops", "1",
+                "--fade", "0",
+                "--tail", "0",
+                "--max-duration", "1",
+                "--overwrite",
+                "--quiet",
+                "--ffmpeg", "/usr/bin/ffmpeg",
+                "--corrscope", "/nonexistent/corrscope",
+            ]);
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(output));
+            Assert.True(File.Exists(Path.Combine(
+                Path.GetDirectoryName(output)!, "timeline.json")));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(output)) File.Delete(output);
+            string outputDir = Path.Combine(
+                Path.GetDirectoryName(output)!,
+                Path.GetFileNameWithoutExtension(output));
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, recursive: true);
+        }
+    }
+
     private static JsonDocument ProbeVideo(string videoPath)
     {
         using var process = new Process

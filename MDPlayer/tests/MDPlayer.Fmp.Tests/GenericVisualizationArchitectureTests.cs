@@ -1,13 +1,50 @@
+using Fmp.Application.Contracts;
 using Fmp.Core.Audio;
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
+using Fmp.Cli;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
 public sealed class GenericVisualizationArchitectureTests
 {
+    [Fact]
+    public void DefaultRequestUsesActiveUngroupedLayout()
+    {
+        var request = new VisualizationRequest
+        {
+            InputPath = "fixture.ovi",
+            OutputPath = "output.mp4",
+        };
+
+        VisualizationLayoutSettings settings = request.ToLayoutSettings();
+
+        Assert.Equal(VisualizationChannelFilter.Active, settings.Channels);
+        Assert.Equal(VisualizationGroupBy.None, settings.GroupBy);
+    }
+
+    [Fact]
+    public void VisualizationCliUsesOneBackendAgnosticExecutionSurface()
+    {
+        string projectRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        string cliRoot = Path.Combine(projectRoot, "src", "MDPlayer.Fmp.Cli");
+        string runner = File.ReadAllText(Path.Combine(cliRoot, "VisualizationRunner.cs"));
+
+        Assert.DoesNotContain("VgmVisualizeCommand", runner, StringComparison.Ordinal);
+        Assert.DoesNotContain("RunFmp", runner, StringComparison.Ordinal);
+        Assert.Contains("RunCore", runner, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(cliRoot, "VgmVisualizeCommand.cs")));
+
+        string[] production = Directory.EnumerateFiles(cliRoot, "*.cs").ToArray();
+        Assert.Single(production.SelectMany(file =>
+            File.ReadLines(file).Where(line => line.Contains("new SinglePassComposer(", StringComparison.Ordinal))));
+        Assert.Single(production.SelectMany(file =>
+            File.ReadLines(file).Where(line => line.Contains("new PanelOverlayRenderer(", StringComparison.Ordinal))));
+    }
+
     [Fact]
     public void GenericRenderingNamespaceDoesNotReferenceChipSpecificFormats()
     {
