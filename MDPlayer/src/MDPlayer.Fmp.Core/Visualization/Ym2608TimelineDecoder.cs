@@ -9,12 +9,13 @@ namespace Fmp.Core.Visualization;
 internal sealed class Ym2608TimelineDecoder
 {
     private const int RegisterBankSize = 0x100;
-    private const int MasterClock = 7_987_200;
+    private const int DefaultMasterClock = 7_987_200;
 
     private static readonly int[] OperatorOffsets = [0, 8, 4, 12];
     private static readonly string[] RhythmVoiceNames = ["bd", "sd", "top", "hh", "tom", "rim"];
 
     private readonly byte[] _registers = new byte[RegisterBankSize * 2];
+    private readonly long _masterClock;
     private readonly MutableNote?[] _fmNotes = new MutableNote?[6];
     private readonly MutableNote?[] _fm3OperatorNotes = new MutableNote?[4];
     private readonly MutableNote?[] _ssgNotes = new MutableNote?[3];
@@ -31,6 +32,11 @@ internal sealed class Ym2608TimelineDecoder
     private bool _fm3SpecialMode;
     private int _fm3KeyMask;
     private bool _completed;
+
+    public Ym2608TimelineDecoder(long masterClock = DefaultMasterClock)
+    {
+        _masterClock = masterClock > 0 ? masterClock : DefaultMasterClock;
+    }
 
     public void ApplyYm2608(int chipId, int port, int address, int value, long samplePosition)
     {
@@ -131,7 +137,7 @@ internal sealed class Ym2608TimelineDecoder
             EndSample = finalSample,
             Devices =
             [
-                VisualizationDeviceCatalog.Ym2608(),
+                VisualizationDeviceCatalog.Ym2608(clockHz: _masterClock),
                 VisualizationDeviceCatalog.Ppz8(),
             ],
             Voices = VisualizationDeviceCatalog.Ym2608Voices(),
@@ -305,7 +311,7 @@ internal sealed class Ym2608TimelineDecoder
 
     private void ApplyFm3Mode(long samplePosition, int value)
     {
-        bool newMode = (value & 0xC0) != 0;
+        bool newMode = (value & 0x40) != 0;
         if (newMode == _fm3SpecialMode)
             return;
 
@@ -503,7 +509,7 @@ internal sealed class Ym2608TimelineDecoder
     {
         if (fNumber <= 0)
             return Pitch.Unpitched;
-        double frequency = fNumber * (double)MasterClock * (1 << block)
+        double frequency = fNumber * (double)_masterClock * (1 << block)
             / ((1 << 20) * 24.0 * _fmDivider);
         return Pitch.FromFrequency(frequency);
     }
@@ -578,7 +584,7 @@ internal sealed class Ym2608TimelineDecoder
     {
         if (period <= 0)
             return Pitch.Unpitched;
-        double frequency = MasterClock / (64.0 * period) * _ssgMultiplier;
+        double frequency = _masterClock / (64.0 * period) * _ssgMultiplier;
         return Pitch.FromFrequency(frequency);
     }
 

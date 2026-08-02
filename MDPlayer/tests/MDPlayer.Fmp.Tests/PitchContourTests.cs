@@ -5,19 +5,17 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// PR 2: continuous pitch ribbons — linear pitch interpolation and the
-/// §8.3 step-preservation rule, evaluated through the deterministic
-/// <see cref="PitchContour"/> helper used by the renderer's hot path.
+/// Register and MIDI pitch points are timestamped state changes. The renderer
+/// must never invent a ramp before the write occurs.
 /// </summary>
 public sealed class PitchContourTests
 {
-    private const double SamplesPerFrame = 50; // 1000 Hz / 20 fps
+    private const double SamplesPerFrame = 50; // deliberately irrelevant to pitch state
 
     private static PreparedNote Note(
         long start,
         long end,
         double initial,
-        bool retrigger = false,
         params (long Sample, double Midi)[] pitch)
     {
         var points = new PreparedPitchPoint[pitch.Length];
@@ -30,7 +28,6 @@ public sealed class PitchContourTests
             InitialMidiNote = initial,
             Mode = VisualizationNoteMode.Fm,
             InstrumentId = "inst:1",
-            IsRetrigger = retrigger,
             Fill = new OverlayColor(200, 200, 200),
             ActiveFill = new OverlayColor(255, 255, 255),
             Accent = new OverlayColor(220, 220, 220),
@@ -48,48 +45,40 @@ public sealed class PitchContourTests
     }
 
     [Fact]
-    public void InterpolatesLinearly_BetweenPitchPoints()
+    public void HoldsPreviousValue_UntilTimestampedPitchWrite()
     {
-        var note = Note(500, 3200, 60, false, (1700, 61), (2300, 62));
+        var note = Note(500, 3200, 60, (1700, 61), (2300, 62));
         Assert.Equal(60, PitchContour.PitchAtSample(note, 500, SamplesPerFrame));
-        Assert.Equal(60.5, PitchContour.PitchAtSample(note, 1100, SamplesPerFrame)); // bend from initial
+        Assert.Equal(60, PitchContour.PitchAtSample(note, 1699, SamplesPerFrame));
         Assert.Equal(61, PitchContour.PitchAtSample(note, 1700, SamplesPerFrame));
-        Assert.Equal(61.5, PitchContour.PitchAtSample(note, 2000, SamplesPerFrame));
+        Assert.Equal(61, PitchContour.PitchAtSample(note, 2299, SamplesPerFrame));
         Assert.Equal(62, PitchContour.PitchAtSample(note, 2300, SamplesPerFrame));
-        Assert.Equal(62, PitchContour.PitchAtSample(note, 3000, SamplesPerFrame)); // holds to the end
+        Assert.Equal(62, PitchContour.PitchAtSample(note, 3000, SamplesPerFrame));
     }
 
     [Fact]
-    public void ContinuousValues_AreNotQuantizedToSemitones()
+    public void FractionalPitchValues_ArePreservedWithoutQuantization()
     {
-        var note = Note(0, 4000, 60, false, (1000, 60.42), (2000, 61.17));
+        var note = Note(0, 4000, 60, (1000, 60.42), (2000, 61.17));
         Assert.Equal(60.42, PitchContour.PitchAtSample(note, 1000, SamplesPerFrame));
-        double halfway = PitchContour.PitchAtSample(note, 1500, SamplesPerFrame);
-        Assert.InRange(halfway, 60.42, 61.17);
-        Assert.NotEqual(Math.Round(halfway), halfway);
+        Assert.Equal(60.42, PitchContour.PitchAtSample(note, 1500, SamplesPerFrame));
+        Assert.Equal(61.17, PitchContour.PitchAtSample(note, 2000, SamplesPerFrame));
     }
 
     [Fact]
-    public void RetriggerStep_IsPreservedAsStep()
+    public void MonotonicCursor_MatchesBinarySearchAtEveryBoundary()
     {
-        // Fast (< 1 frame), large (>= 0.75 semitones), marked retrigger → hold.
-        var note = Note(1000, 3000, 60, retrigger: true, (1010, 62));
-        Assert.Equal(60, PitchContour.PitchAtSample(note, 1005, SamplesPerFrame));
-        Assert.Equal(62, PitchContour.PitchAtSample(note, 1010, SamplesPerFrame));
-    }
-
-    [Fact]
-    public void SameStep_WithoutRetrigger_IsInterpolated()
-    {
-        var note = Note(1000, 3000, 60, retrigger: false, (1010, 62));
-        Assert.Equal(61, PitchContour.PitchAtSample(note, 1005, SamplesPerFrame));
-    }
-
-    [Fact]
-    public void SlowRetriggerStep_IsInterpolated()
-    {
-        // Interval > 1 output frame → continuous even for a retrigger.
-        var note = Note(1000, 3000, 60, retrigger: true, (1600, 62));
-        Assert.Equal(61, PitchContour.PitchAtSample(note, 1300, SamplesPerFrame));
+        var note = Note(100, 1000, 60, (250, 60.25), (500, 61), (750, 59.75));
+        int cursor = -1;
+        for (long sample = 100; sample < 1000; sample++)
+        {
+            double expected = PitchContour.PitchAtSample(note, sample, SamplesPerFrame);
+            double actual = PitchContour.PitchAtSampleMonotonic(
+                note,
+                sample,
+                SamplesPerFrame,
+                ref cursor);
+            Assert.Equal(expected, actual);
+        }
     }
 }

@@ -44,18 +44,15 @@ internal sealed class MidiTimelineDecoder : IMidiTimelineDecoder
             case MidiMessageType.NoteOff:
                 Release(channel, message.Channel, message.Data1, message.SamplePosition);
                 break;
-            case MidiMessageType.ControlChange when message.Data1 == 64:
-                channel.Sustain = message.Data2 >= 64;
-                if (!channel.Sustain)
-                    ReleaseSustained(channel, message.Channel, message.SamplePosition);
+            case MidiMessageType.ControlChange:
+                ApplyControlChange(channel, message.Channel, message.Data1, message.Data2, message.SamplePosition);
                 break;
             case MidiMessageType.ProgramChange:
                 channel.Program = Math.Clamp(message.Data1, 0, 127);
                 break;
             case MidiMessageType.PitchBend:
-                channel.BendSemitones = ((message.Data2 << 7) | message.Data1) - 8192;
-                foreach (ActiveNote note in channel.Active)
-                    note.AddPitch(message.SamplePosition, Pitch(note.MidiNote + Bend(channel)));
+                if (channel.PitchState.ApplyPitchBend(message.Data1, message.Data2))
+                    UpdateActivePitch(channel, message.SamplePosition);
                 break;
         }
     }
@@ -93,7 +90,7 @@ internal sealed class MidiTimelineDecoder : IMidiTimelineDecoder
             null,
             Array.Empty<FmOperatorDefinition>()));
 
-        double currentMidi = midiNote + Bend(channel);
+        double currentMidi = midiNote + channel.PitchState.PitchOffsetSemitones;
         var active = new ActiveNote(midiNote, velocity, sample, instrumentId, currentMidi);
         channel.Active.Add(active);
     }
@@ -116,6 +113,52 @@ internal sealed class MidiTimelineDecoder : IMidiTimelineDecoder
             Close(channel, note, channelIndex, sample, retrigger: false);
     }
 
+    private void ApplyControlChange(
+        ChannelState channel,
+        int channelIndex,
+        int controller,
+        int value,
+        long sample)
+    {
+        switch (controller)
+        {
+            case 64: // Hold 1
+                channel.Sustain = value >= 64;
+                if (!channel.Sustain)
+                    ReleaseSustained(channel, channelIndex, sample);
+                break;
+
+            case 120: // All Sound Off
+                foreach (ActiveNote note in channel.Active.ToArray())
+                    Close(channel, note, channelIndex, sample, retrigger: false);
+                break;
+
+            case 121: // Reset All Controllers
+                channel.Sustain = false;
+                ReleaseSustained(channel, channelIndex, sample);
+                break;
+
+            case 123: // All Notes Off
+                foreach (ActiveNote note in channel.Active.ToArray())
+                {
+                    note.KeyDown = false;
+                    if (!channel.Sustain)
+                        Close(channel, note, channelIndex, sample, retrigger: false);
+                }
+                break;
+        }
+
+        if (channel.PitchState.ApplyControlChange(controller, value))
+            UpdateActivePitch(channel, sample);
+    }
+
+    private static void UpdateActivePitch(ChannelState channel, long sample)
+    {
+        double offset = channel.PitchState.PitchOffsetSemitones;
+        foreach (ActiveNote note in channel.Active)
+            note.AddPitch(sample, Pitch(note.MidiNote + offset));
+    }
+
     private void Close(ChannelState channel, ActiveNote note, int channelIndex, long sample, bool retrigger)
     {
         channel.Active.Remove(note);
@@ -135,8 +178,6 @@ internal sealed class MidiTimelineDecoder : IMidiTimelineDecoder
     private static string InstrumentId(int channel, int program) =>
         $"midi:channel-{channel + 1}:program-{program}";
 
-    private static double Bend(ChannelState channel) => channel.BendSemitones * 2.0 / 8192.0;
-
     private static (double FrequencyHz, double MidiNote) Pitch(double midiNote) =>
         (Frequency(midiNote), midiNote);
 
@@ -146,7 +187,7 @@ internal sealed class MidiTimelineDecoder : IMidiTimelineDecoder
     private sealed class ChannelState
     {
         public int Program;
-        public int BendSemitones;
+        public MidiChannelPitchState PitchState { get; } = new();
         public bool Sustain;
         public List<ActiveNote> Active { get; } = [];
     }

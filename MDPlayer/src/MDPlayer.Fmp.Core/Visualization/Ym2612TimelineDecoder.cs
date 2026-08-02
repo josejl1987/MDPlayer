@@ -254,7 +254,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 
     private void ApplyFm3Mode(long sample, int value)
     {
-        bool enabled = (value & 0xC0) == 0x40;
+        bool enabled = (value & 0x40) != 0;
         if (enabled == _fm3SpecialMode)
             return;
 

@@ -189,6 +189,12 @@ int render_instrumented(const std::vector<unsigned char>& spc, short* out,
             rc = MDP_SPC_ERR_INTERNAL;
             break;
         }
+        if (result.event_overflow)
+        {
+            fprintf(stderr, "PITCH FAIL: event buffer overflowed\n");
+            rc = MDP_SPC_ERR_INTERNAL;
+            break;
+        }
         seen += result.events_written;
 
         /* The events array is rewritten from index 0 by each mdp_spc_render
@@ -292,7 +298,8 @@ int main()
 
     std::vector<short> reference((size_t)frames * 2);
     std::vector<short> instrumented((size_t)frames * 2);
-    std::vector<mdp_spc_event> events(256);
+    std::vector<mdp_spc_event> events(
+        MDP_SPC_DEFAULT_BLOCK_FRAMES * MDP_SPC_VOICE_COUNT * 8 + 1024);
 
     if (render_reference(spc, reference.data(), frames) != 0)
     {

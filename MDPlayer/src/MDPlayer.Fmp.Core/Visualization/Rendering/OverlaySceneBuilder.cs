@@ -731,7 +731,8 @@ internal static class OverlaySceneBuilder
     /// <summary>
     /// Builds the prepared pitch contour for a note: keeps valid (finite,
     /// pitched) points, sorts by sample position, collapses same-sample
-    /// duplicates, then simplifies with a bounded vertical error (§8.4).
+    /// duplicates, then applies zero-order-hold-aware bounded-error
+    /// simplification. It never replaces state changes with a linear ramp.
     /// </summary>
     private static PreparedPitchPoint[] BuildPitchPoints(NoteEvent note, double toleranceSemitones)
     {
@@ -758,109 +759,35 @@ internal static class OverlaySceneBuilder
                 deduplicated.Add(point);
         }
 
-        return SimplifyPitch(deduplicated.ToArray(), toleranceSemitones);
+        return SimplifyStepPitch(deduplicated.ToArray(), toleranceSemitones);
     }
 
     /// <summary>
-    /// Ramer–Douglas–Peucker-style simplification with a vertical (pitch)
-    /// error bound. Points that may never be discarded (§8.4) act as hard
-    /// anchors: the first and last points, local pitch extrema, and points
-    /// adjacent to a change larger than 0.1 semitone. Between anchors the
-    /// contour is simplified so no original point deviates from the retained
-    /// polyline by more than <paramref name="toleranceSemitones"/>.
+    /// Simplifies a zero-order-hold contour without changing its interpolation
+    /// model. An omitted point is guaranteed to differ from the currently held
+    /// retained value by at most <paramref name="toleranceSemitones"/>. The
+    /// final point is always retained so the note's terminal pitch is exact.
     /// </summary>
-    private static PreparedPitchPoint[] SimplifyPitch(PreparedPitchPoint[] points, double toleranceSemitones)
+    private static PreparedPitchPoint[] SimplifyStepPitch(
+        PreparedPitchPoint[] points,
+        double toleranceSemitones)
     {
         if (points.Length <= 2 || toleranceSemitones <= 0)
             return points;
 
-        var keep = new bool[points.Length];
-        keep[0] = true;
-        keep[^1] = true;
+        var result = new List<PreparedPitchPoint>(points.Length);
+        result.Add(points[0]);
+        double held = points[0].MidiNote;
         for (int i = 1; i < points.Length - 1; i++)
         {
-            if (IsProtected(points, i))
-                keep[i] = true;
-        }
-
-        // Recursive RDP over each run between consecutive protected anchors,
-        // using an explicit stack (preparation time; no per-frame cost).
-        var stack = new Stack<(int First, int Last)>();
-        int runStart = 0;
-        for (int i = 1; i < points.Length; i++)
-        {
-            if (keep[i])
+            if (Math.Abs(points[i].MidiNote - held) > toleranceSemitones)
             {
-                if (i - runStart > 1)
-                    stack.Push((runStart, i));
-                runStart = i;
-            }
-        }
-
-        while (stack.Count > 0)
-        {
-            var (first, last) = stack.Pop();
-            if (last - first < 2)
-                continue;
-
-            long spanSamples = points[last].SamplePosition - points[first].SamplePosition;
-            if (spanSamples <= 0)
-                continue;
-
-            double slope = (points[last].MidiNote - points[first].MidiNote) / spanSamples;
-            double maxDeviation = 0;
-            int maxIndex = -1;
-            for (int i = first + 1; i < last; i++)
-            {
-                double chordMidi = points[first].MidiNote
-                    + slope * (points[i].SamplePosition - points[first].SamplePosition);
-                double deviation = Math.Abs(points[i].MidiNote - chordMidi);
-                if (deviation > maxDeviation)
-                {
-                    maxDeviation = deviation;
-                    maxIndex = i;
-                }
-            }
-
-            if (maxIndex >= 0 && maxDeviation > toleranceSemitones)
-            {
-                keep[maxIndex] = true;
-                stack.Push((first, maxIndex));
-                stack.Push((maxIndex, last));
-            }
-        }
-
-        var result = new List<PreparedPitchPoint>(points.Length);
-        for (int i = 0; i < points.Length; i++)
-        {
-            if (keep[i])
                 result.Add(points[i]);
+                held = points[i].MidiNote;
+            }
         }
+        result.Add(points[^1]);
         return result.ToArray();
-    }
-
-    /// <summary>
-    /// Points that the simplification must never discard (§8.4).
-    /// </summary>
-    private static bool IsProtected(PreparedPitchPoint[] points, int i)
-    {
-        double previous = points[i - 1].MidiNote;
-        double current = points[i].MidiNote;
-        double next = points[i + 1].MidiNote;
-
-        // Local pitch extremum (keeps vibrato peaks and valleys intact).
-        if (current > previous && current > next)
-            return true;
-        if (current < previous && current < next)
-            return true;
-
-        // Adjacent to a change larger than 0.1 semitone.
-        if (Math.Abs(current - previous) > 0.1)
-            return true;
-        if (Math.Abs(next - current) > 0.1)
-            return true;
-
-        return false;
     }
 
     /// <summary>

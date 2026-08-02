@@ -246,6 +246,52 @@ public sealed class Ym2608TimelineDecoderTests
         Assert.Contains(notes, note => note.ChannelId == "ym2608.0.fm3.op.3");
     }
 
+    [Fact]
+    public void CsmBitAlone_DoesNotEnableThreeSlotMode()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        WriteFmPitch(decoder, 2, 0, 0x135, 4);
+        decoder.ApplyYm2608(0, 0, 0x27, 0x80, 50);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x42, 100);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x02, 300);
+
+        NoteEvent note = Assert.Single(decoder.Complete(400, 44_100, "test").Notes);
+        Assert.Equal("ym2608.0.fm.3", note.ChannelId);
+    }
+
+    [Fact]
+    public void CombinedCsmAndThreeSlotBits_EnableThreeSlotMode()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        WriteFmPitch(decoder, 2, 0, 0x135, 4);
+        decoder.ApplyYm2608(0, 0, 0x27, 0xC0, 50);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x42, 100);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x02, 300);
+
+        NoteEvent note = Assert.Single(decoder.Complete(400, 44_100, "test").Notes);
+        Assert.Equal("ym2608.0.fm3.op.3", note.ChannelId);
+    }
+
+    [Fact]
+    public void DeviceClock_ScalesDecodedFrequency()
+    {
+        const long standardClock = 7_987_200;
+        const long alternateClock = 8_000_000;
+        var standard = new Ym2608TimelineDecoder(standardClock);
+        var alternate = new Ym2608TimelineDecoder(alternateClock);
+
+        WriteFmPitch(standard, 0, 0, 0x135, 4);
+        WriteFmPitch(alternate, 0, 0, 0x135, 4);
+        standard.ApplyYm2608(0, 0, 0x28, 0xF0, 10);
+        alternate.ApplyYm2608(0, 0, 0x28, 0xF0, 10);
+        standard.ApplyYm2608(0, 0, 0x28, 0x00, 100);
+        alternate.ApplyYm2608(0, 0, 0x28, 0x00, 100);
+
+        double standardHz = Assert.Single(standard.Complete(120, 44_100, "test").Notes).InitialFrequencyHz;
+        double alternateHz = Assert.Single(alternate.Complete(120, 44_100, "test").Notes).InitialFrequencyHz;
+        Assert.Equal(alternateClock / (double)standardClock, alternateHz / standardHz, 12);
+    }
+
     private static void WriteFmPitch(
         Ym2608TimelineDecoder decoder,
         int channel,

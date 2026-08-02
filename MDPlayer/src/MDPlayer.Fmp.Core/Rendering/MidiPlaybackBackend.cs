@@ -390,6 +390,10 @@ internal sealed class MidiAudioRenderer : IDisposable
 {
     private readonly List<ActiveTone> _tones = [];
     private readonly int _sampleRate;
+    private readonly MidiChannelPitchState[] _pitch = Enumerable.Range(0, 16)
+        .Select(_ => new MidiChannelPitchState())
+        .ToArray();
+    private readonly bool[] _sustain = new bool[16];
 
     public MidiAudioRenderer(int sampleRate)
     {
@@ -400,7 +404,13 @@ internal sealed class MidiAudioRenderer : IDisposable
     {
         if (message.Type == MidiMessageType.NoteOn && message.Data2 > 0)
         {
-            _tones.Add(new ActiveTone(message.Channel, message.Data1, message.Data2, _sampleRate));
+            _tones.Add(new ActiveTone(
+                message.Channel,
+                message.Data1,
+                message.Data2,
+                _sampleRate,
+                _pitch[message.Channel].PitchOffsetSemitones,
+                _sustain[message.Channel]));
             return;
         }
         if (message.Type == MidiMessageType.NoteOff
@@ -417,17 +427,67 @@ internal sealed class MidiAudioRenderer : IDisposable
             }
             return;
         }
-        if (message.Type == MidiMessageType.ControlChange && message.Data1 == 64)
+
+        if (message.Type == MidiMessageType.PitchBend)
         {
-            bool sustain = message.Data2 >= 64;
-            int channel = message.Channel;
-            foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
-            {
-                tone.Sustain = sustain;
-                if (!sustain && !tone.KeyDown)
-                    tone.Audible = false;
-            }
+            MidiChannelPitchState state = _pitch[message.Channel];
+            if (state.ApplyPitchBend(message.Data1, message.Data2))
+                Retune(message.Channel, state.PitchOffsetSemitones);
+            return;
         }
+
+        if (message.Type == MidiMessageType.ControlChange)
+        {
+            int channel = message.Channel;
+            switch (message.Data1)
+            {
+                case 64:
+                {
+                    bool sustain = message.Data2 >= 64;
+                    _sustain[channel] = sustain;
+                    foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
+                    {
+                        tone.Sustain = sustain;
+                        if (!sustain && !tone.KeyDown)
+                            tone.Audible = false;
+                    }
+                    break;
+                }
+                case 120:
+                    foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
+                    {
+                        tone.KeyDown = false;
+                        tone.Audible = false;
+                    }
+                    break;
+                case 121:
+                    _sustain[channel] = false;
+                    foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
+                    {
+                        tone.Sustain = false;
+                        if (!tone.KeyDown)
+                            tone.Audible = false;
+                    }
+                    break;
+                case 123:
+                    foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
+                    {
+                        tone.KeyDown = false;
+                        tone.Audible = tone.Sustain;
+                    }
+                    break;
+            }
+
+            MidiChannelPitchState state = _pitch[channel];
+            if (state.ApplyControlChange(message.Data1, message.Data2))
+                Retune(channel, state.PitchOffsetSemitones);
+        }
+    }
+
+    private void Retune(int channel, double pitchOffsetSemitones)
+    {
+        foreach (ActiveTone tone in _tones.Where(value => value.Channel == channel))
+            tone.SetPitchOffset(pitchOffsetSemitones);
     }
 
     public short[] Render(int samples, long startSample, long fadeStart, long baseEnd)
@@ -462,22 +522,40 @@ internal sealed class MidiAudioRenderer : IDisposable
 
     private sealed class ActiveTone
     {
-        public ActiveTone(int channel, int note, int velocity, int sampleRate)
+        private readonly int _sampleRate;
+
+        public ActiveTone(
+            int channel,
+            int note,
+            int velocity,
+            int sampleRate,
+            double pitchOffsetSemitones,
+            bool sustain)
         {
             Channel = channel;
             Note = note;
+            _sampleRate = sampleRate;
+            Sustain = sustain;
             Amplitude = 0.10 * velocity / 127.0;
-            Increment = 2 * Math.PI * 440.0 * Math.Pow(2, (note - 69) / 12.0) / sampleRate;
+            SetPitchOffset(pitchOffsetSemitones);
         }
 
         public int Channel { get; }
         public int Note { get; }
         public double Amplitude { get; }
-        public double Increment { get; }
+        public double Increment { get; private set; }
         public double Phase { get; set; }
         public bool KeyDown { get; set; } = true;
         public bool Sustain { get; set; }
         public bool Audible { get; set; } = true;
+
+        public void SetPitchOffset(double pitchOffsetSemitones)
+        {
+            double midi = Note + pitchOffsetSemitones;
+            Increment = 2 * Math.PI * 440.0
+                * Math.Pow(2, (midi - 69) / 12.0)
+                / _sampleRate;
+        }
     }
 }
 

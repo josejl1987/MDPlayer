@@ -46,7 +46,7 @@
  			// KON phases
  			if ( --kon_delay >= 0 )
  			{
-@@ -383,12 +415,29 @@
+@@ -383,12 +415,28 @@
  				// KON
  				if ( m.kon & vbit )
  				{
@@ -62,11 +62,10 @@
  				}
  			}
  
-+			if ( m.event_capture && m.capture_sample > 0 &&
-+				(m.capture_sample & 7) == 0 )
++			if ( m.event_capture )
 +			{
 +				int voice = int(v - m.voices);
-+				if ( abs(capture_pitch - m.capture_pitch [voice]) > 1 )
++				if ( capture_pitch != m.capture_pitch [voice] )
 +				{
 +					this->emit_event( 5, voice, capture_pitch, m.capture_pitch [voice] );
 +					m.capture_pitch [voice] = capture_pitch;

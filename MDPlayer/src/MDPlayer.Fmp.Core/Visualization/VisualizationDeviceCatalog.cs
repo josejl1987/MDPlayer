@@ -216,10 +216,10 @@ internal static class VisualizationDeviceCatalog
         return voices;
     }
 
-    public static DeviceDescriptor Ym2608(int instance = 0) => new(
+    public static DeviceDescriptor Ym2608(int instance = 0, long clockHz = 7_987_200) => new(
         new DeviceId(ChipType.Ym2608, instance),
         $"YM2608 #{instance}",
-        7_987_200,
+        clockHz,
         DeviceCapabilities.Notes
             | DeviceCapabilities.ContinuousPitch
             | DeviceCapabilities.Instruments

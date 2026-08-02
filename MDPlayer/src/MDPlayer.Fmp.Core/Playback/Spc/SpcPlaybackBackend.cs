@@ -91,7 +91,9 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
         using (SpcNativeSession native = SpcNativeSession.Open(data, StemOptions(writeStems)))
         {
             var stereo = new short[SpcNativeSession.DefaultBlockFrames * 2];
-            var eventBuffer = new SpcNativeSession.SpcEvent[4096];
+            var eventBuffer = new SpcNativeSession.SpcEvent[
+                SpcNativeSession.DefaultBlockFrames * SpcNativeSession.VoiceCount * 8
+                + 1024];
             if (!string.IsNullOrEmpty(options.OutputAudioPath))
             {
                 string? dir = Path.GetDirectoryName(Path.GetFullPath(options.OutputAudioPath));
@@ -188,6 +190,10 @@ internal sealed class SpcPlaybackBackend : IPlaybackBackend
             int got = rr.FramesRendered;
             if (got <= 0)
                 break;
+            if (rr.EventOverflow != 0)
+                throw new SpcFormatException(
+                    "SPC effective-pitch event capture overflowed; refusing to emit an inaccurate timeline.");
+
             int keep = (int)Math.Min(got, remaining);
 
             // Forward native S-DSP events to the timeline decoder (§9.2).

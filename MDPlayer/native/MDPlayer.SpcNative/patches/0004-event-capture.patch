@@ -1,6 +1,6 @@
 --- a/Spc_Dsp.h
 +++ b/Spc_Dsp.h
-@@ -139,6 +139,59 @@
+@@ -139,6 +139,60 @@
  		if ( (unsigned) voice < voice_count )
  			m.effective_pitch_out [voice] = out;
  	}
@@ -22,8 +22,9 @@
 +			m.capture_keyed [i] = m.voices [i].enabled != 0 && m.voices [i].env > 0;
 +			m.capture_mode [i] = m.voices [i].env_mode;
 +			m.capture_source [i] = m.regs [base + v_srcn];
-+			m.capture_pitch [i] = (m.regs [base + v_pitchl] |
-+				((m.regs [base + v_pitchh] & 0x3F) << 8)) & 0x3FFF;
++			if ( initial_capture )
++				m.capture_pitch [i] = (m.regs [base + v_pitchl] |
++					((m.regs [base + v_pitchh] & 0x3F) << 8)) & 0x3FFF;
 +			m.capture_volume_l [i] = m.regs [base + v_voll];
 +			m.capture_volume_r [i] = m.regs [base + v_volr];
 +			m.capture_flags [i] = ((m.regs [r_non]  >> i) & 1) |

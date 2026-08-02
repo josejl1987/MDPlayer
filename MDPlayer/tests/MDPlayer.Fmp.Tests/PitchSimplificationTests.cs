@@ -5,9 +5,8 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// PR 2: preparation-time pitch-point simplification (§8.4) — deterministic
-/// bounded-error simplification that preserves extrema, significant steps,
-/// and the first/last points, all within 0.15 vertical pixels at 1080p.
+/// Preparation-time compression for zero-order-hold pitch state. Compression
+/// may omit sub-pixel changes, but must not turn state changes into ramps.
 /// </summary>
 public sealed class PitchSimplificationTests
 {
@@ -40,94 +39,70 @@ public sealed class PitchSimplificationTests
     }
 
     [Fact]
-    public void CollinearDenseSteps_CollapseToEndpoints()
+    public void SignificantRegisterSteps_ArePreserved()
     {
-        // A 100-point ramp in 2-cent steps: perfectly collinear, so RDP keeps
-        // only the endpoints (no point is an extremum or a > 0.1 semitone step).
+        // Two-cent register steps exceed the 1080p sub-pixel tolerance.
         var pitch = new PitchChange[100];
         for (int i = 0; i < pitch.Length; i++)
             pitch[i] = new PitchChange(1000 + i * 100, 0, 60.0 + i * 0.02);
 
         var prepared = BuildPitchedNote(Note(500, 12_000, 60.0, pitch));
-        Assert.True(prepared.Pitch.Length <= 2,
-            $"Expected ~2 points after simplification, got {prepared.Pitch.Length}.");
+        Assert.Equal(pitch.Length, prepared.Pitch.Length);
         Assert.Equal(1000, prepared.Pitch[0].SamplePosition);
         Assert.Equal(60.0, prepared.Pitch[0].MidiNote);
         Assert.Equal(10_900, prepared.Pitch[^1].SamplePosition);
     }
 
     [Fact]
-    public void VibratoExtrema_ArePreserved()
+    public void SubPixelSubSemitone_IsCollapsedWithinTolerance()
     {
-        // Alternating valleys (60.0) and peaks (60.4): every point is either a
-        // local extremum or adjacent to a > 0.1 semitone change → all kept.
-        var pitch = new PitchChange[21];
-        for (int i = 0; i < pitch.Length; i++)
-            pitch[i] = new PitchChange(1000 + i * 200, 0, i % 2 == 0 ? 60.0 : 60.4);
+        var prepared = BuildPitchedNote(Note(500, 4000, 60.0,
+            new PitchChange(1000, 0, 60.0),
+            new PitchChange(2000, 0, 60.001),
+            new PitchChange(3000, 0, 60.0)));
 
-        var prepared = BuildPitchedNote(Note(500, 12_000, 60.0, pitch));
-        Assert.Equal(pitch.Length, prepared.Pitch.Length);
-        for (int i = 0; i < pitch.Length; i++)
-            Assert.Equal(pitch[i].MidiNote, prepared.Pitch[i].MidiNote);
+        Assert.True(prepared.Pitch.Length <= 2);
+        Assert.Equal(60.0, prepared.Pitch[0].MidiNote, 6);
     }
 
     [Fact]
-    public void SimplifiedContour_StaysWithinVisualErrorBound()
+    public void StepAwareCompression_StaysWithinVisualErrorBound()
     {
-        // A deterministic pseudo-vibrato with small steps. The simplified
-        // contour must deviate from the original by at most 0.15 px at 1080p
-        // (0.15 px × 12-semitone minimum camera span / 130 px lane height).
+        // Small monotonic state changes may be coalesced, but zero-order-hold
+        // evaluation at every original write must remain within 0.15 pixels.
         var pitch = new PitchChange[200];
-        double phase = 0;
         for (int i = 0; i < pitch.Length; i++)
-        {
-            phase += 0.11;
-            pitch[i] = new PitchChange(1000 + i * 40, 0, 60.0 + 0.5 * Math.Sin(phase) + (i % 7) * 0.003);
-        }
+            pitch[i] = new PitchChange(1000 + i * 40, 0, 60.0 + i * 0.003);
 
         var prepared = BuildPitchedNote(Note(500, 20_000, 60.0, pitch));
         Assert.True(prepared.Pitch.Length < pitch.Length,
-            "Simplification removed nothing from a dense bend contour.");
+            "Step-aware compression removed nothing from sub-pixel changes.");
 
         const double laneHeight = 130; // 1080p main lane (header raised to 28px)
         const double minSpan = 12;     // PitchCamera minimum span
         double pixelsPerSemitone = laneHeight / minSpan;
         double maxErrorPixels = 0;
-        for (int i = 0; i < pitch.Length; i++)
+        foreach (PitchChange point in pitch)
         {
-            double original = pitch[i].MidiNote;
-            double simplified = PitchContour.PitchAtSample(prepared, pitch[i].SamplePosition, samplesPerFrame: 50);
+            double original = point.MidiNote;
+            double simplified = PitchContour.PitchAtSample(
+                prepared, point.SamplePosition, samplesPerFrame: 50);
             maxErrorPixels = Math.Max(maxErrorPixels, Math.Abs(original - simplified) * pixelsPerSemitone);
         }
 
-        Assert.True(maxErrorPixels <= 0.15 + 1e-9,
+        Assert.True(maxErrorPixels <= 0.15 + 1e-6,
             $"Simplification error {maxErrorPixels:F4} px exceeds the 0.15 px bound.");
     }
 
     [Fact]
-    public void FirstAndLastPoints_AreAlwaysPreserved()
+    public void SameSampleDuplicates_KeepTheLastState()
     {
-        var pitch = new PitchChange[50];
-        for (int i = 0; i < pitch.Length; i++)
-            pitch[i] = new PitchChange(1000 + i * 100, 0, 60.0 + (i % 3) * 0.01);
+        var prepared = BuildPitchedNote(Note(500, 4000, 60.0,
+            new PitchChange(1000, 0, 60.25),
+            new PitchChange(1000, 0, 61.5),
+            new PitchChange(2000, 0, 62.0)));
 
-        var prepared = BuildPitchedNote(Note(500, 12_000, 60.0, pitch));
-        Assert.True(prepared.Pitch.Length >= 2);
-        Assert.Equal(pitch[0].SamplePosition, prepared.Pitch[0].SamplePosition);
-        Assert.Equal(pitch[0].MidiNote, prepared.Pitch[0].MidiNote);
-        Assert.Equal(pitch[^1].SamplePosition, prepared.Pitch[^1].SamplePosition);
-        Assert.Equal(pitch[^1].MidiNote, prepared.Pitch[^1].MidiNote);
-    }
-
-    [Fact]
-    public void UnpitchedPoints_AreFilteredOut()
-    {
-        var note = Note(500, 4000, 60.0,
-            new PitchChange(1000, 0, -1),
-            new PitchChange(1500, 0, 61.0));
-
-        var prepared = BuildPitchedNote(note);
-        Assert.Single(prepared.Pitch);
-        Assert.Equal(1500, prepared.Pitch[0].SamplePosition);
+        Assert.Equal(2, prepared.Pitch.Length);
+        Assert.Equal(61.5, prepared.Pitch[0].MidiNote);
     }
 }

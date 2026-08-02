@@ -119,7 +119,7 @@ internal sealed class Ym2608TimelineDecoderAdapter : IChipTimelineDecoder
 
         _device = device;
         _timeline = timeline;
-        _decoder = new Ym2608TimelineDecoder();
+        _decoder = new Ym2608TimelineDecoder(device.ClockHz);
         timeline.AddDevice(device);
         foreach (VoiceDescriptor voice in VisualizationDeviceCatalog.Ym2608Voices(device.Id.Instance))
             timeline.AddVoice(voice);
