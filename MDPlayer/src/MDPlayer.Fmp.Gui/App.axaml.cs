@@ -1,7 +1,6 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
-using Avalonia.Styling;
 // Pin the Avalonia type: `using Fmp.Application.*` otherwise makes
 // `Application` resolve to the Fmp.Application namespace.
 using Application = Avalonia.Application;
@@ -24,7 +23,6 @@ public partial class App : global::Avalonia.Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var settings = new GuiSettingsStore();
-            ApplyTheme(settings.Settings.ThemeVariant);
 
             var dialogs = new FileDialogService();
             var clipboard = new ClipboardService();
@@ -46,15 +44,5 @@ public partial class App : global::Avalonia.Application
         }
 
         base.OnFrameworkInitializationCompleted();
-    }
-
-    private void ApplyTheme(string variant)
-    {
-        RequestedThemeVariant = variant switch
-        {
-            "Light" => ThemeVariant.Light,
-            "Dark" => ThemeVariant.Dark,
-            _ => ThemeVariant.Default,
-        };
     }
 }

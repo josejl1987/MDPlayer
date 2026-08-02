@@ -4,7 +4,6 @@ using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
-using Avalonia.Styling;
 using Avalonia.Threading;
 using Fmp.Application.Contracts;
 using Fmp.Application.Preview;
@@ -31,7 +30,7 @@ public sealed class MainWindowHeadlessTests
 
         Assert.True(window.FindControl<Button>("OpenInputButton")!.IsEffectivelyEnabled);
         Assert.False(window.FindControl<Button>("RenderButton")!.IsEffectivelyEnabled);
-        Assert.False(window.FindControl<Control>("InspectorPanel")!.IsEffectivelyEnabled);
+        Assert.False(window.FindControl<Control>("SettingsSidebar")!.IsEffectivelyEnabled);
         Assert.False(window.FindControl<Control>("TimelineTransport")!.IsEffectivelyEnabled);
         Assert.True(window.FindControl<Control>("EmptyState")!.IsVisible);
 
@@ -44,13 +43,9 @@ public sealed class MainWindowHeadlessTests
         File.Delete(settingsPath);
     }
 
-    [AvaloniaTheory]
-    [InlineData("Light")]
-    [InlineData("Dark")]
-    public async Task EmptyState_RendersInBothThemeVariants(string variant)
+    [AvaloniaFact]
+    public async Task EmptyState_RendersInDarkTheme()
     {
-        Avalonia.Application.Current!.RequestedThemeVariant =
-            variant == "Light" ? ThemeVariant.Light : ThemeVariant.Dark;
         string settingsPath = Path.Combine(Path.GetTempPath(), "mdplayer-gui-settings-" + Guid.NewGuid() + ".json");
         (MainWindow window, MainWindowViewModel viewModel) = CreateWindow(new EmptyPreviewFactory(), settingsPath);
         window.Show();
@@ -80,7 +75,7 @@ public sealed class MainWindowHeadlessTests
             await viewModel.OpenInputAsync(inputPath);
             Dispatcher.UIThread.RunJobs();
 
-            Assert.True(window.FindControl<Control>("InspectorPanel")!.IsEffectivelyEnabled);
+            Assert.True(window.FindControl<Control>("SettingsSidebar")!.IsEffectivelyEnabled);
             Assert.True(window.FindControl<Control>("TimelineTransport")!.IsEffectivelyEnabled);
             Assert.False(window.FindControl<Control>("EmptyState")!.IsVisible);
             Assert.True(viewModel.HasInput);
