@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
@@ -68,12 +69,12 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    // The timeline slider binds Value to PreviewScrubTime (no preview while
-    // dragging); a preview is scheduled exactly once when the drag completes
-    // (pointer release) or after a discrete keyboard jump (key up).
-    private void OnPreviewSliderReleased(object? sender, PointerReleasedEventArgs e)
-        => _vm.CommitScrub();
-
-    private void OnPreviewSliderKeyUp(object? sender, KeyEventArgs e)
+    // The timeline slider binds Value to PreviewScrubTime. Seeking is
+    // committed from the value-change event rather than PointerReleased: the
+    // Fluent template's thumb/track can consume the pointer-release and mark it
+    // handled, so release-driven commits never fired and dragging the scrubber
+    // did nothing. Value-change commits are debounced and coalesced by the VM
+    // (QueuePreviewRefresh), so rapid drag updates collapse into one frame.
+    private void OnPreviewSliderValueChanged(object? sender, RangeBaseValueChangedEventArgs e)
         => _vm.CommitScrub();
 }

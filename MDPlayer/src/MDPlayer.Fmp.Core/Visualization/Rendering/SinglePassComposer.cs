@@ -441,7 +441,8 @@ internal sealed class SinglePassComposer
         string outputVideoPath,
         VisualizationFrameRenderer frameRenderer,
         bool includeWaveform = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<float>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(frameRenderer);
         ArgumentException.ThrowIfNullOrWhiteSpace(masterAudioPath);
@@ -502,9 +503,10 @@ internal sealed class SinglePassComposer
                     gridFrameBytes: 0,
                     outFrameBytes: frameRenderer.FrameByteCount,
                     totalFrames: frameRenderer.TotalFrames,
-                    (slot, _) =>
+                    (slot, frameIndex) =>
                     {
                         slot.HasGrid = false;
+                        ReportProgress(progress, frameIndex, frameRenderer.TotalFrames);
                         return true;
                     },
                     (slot, frameIndex, metrics) =>
@@ -597,6 +599,22 @@ internal sealed class SinglePassComposer
                 FrameCount,
                 queueCapacity);
         }
+    }
+
+    /// <summary>
+    /// Reports frame-render progress as a 0..1 fraction, throttled to ~10Hz to
+    /// avoid flooding the progress stream on long renders. Consumers (and the
+    /// JSONL writer) read the fraction; missing updates simply show the last
+    /// reported progress until the stage completes at 1.
+    /// </summary>
+    private static void ReportProgress(Action<float>? progress, long frameIndex, long total)
+    {
+        if (progress is null || total <= 0)
+            return;
+        // Emit at most every ~0.1s (coarse: every 64 frames for 600fps files,
+        // denser for short renders) plus the final 1.
+        if (frameIndex % 64 == 0 || frameIndex == total - 1)
+            progress((float)Math.Clamp((double)frameIndex / total, 0, 1));
     }
 
     private static ComposeMetrics RunFramePipeline(

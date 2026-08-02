@@ -462,8 +462,7 @@
                        VerticalAlignment="Center" ToolTip.Tip="Current position"/>
               <Slider x:Name="PreviewSlider" Grid.Column="2" Classes="transport" Minimum="0"
                       Maximum="{Binding DurationSeconds}" Value="{Binding PreviewScrubTime}"
-                      PointerReleased="OnPreviewSliderReleased"
-                      KeyUp="OnPreviewSliderKeyUp"/>
+                      ValueChanged="OnPreviewSliderValueChanged"/>
               <Button Grid.Column="3" Classes="icon" Command="{Binding NextPointCommand}"
                       ToolTip.Tip="Next representative point">
                 <PathIcon Data="{DynamicResource Icon.Next}" Width="12" Height="12"/>

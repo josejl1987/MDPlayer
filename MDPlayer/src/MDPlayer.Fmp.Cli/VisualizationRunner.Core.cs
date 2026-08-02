@@ -21,6 +21,21 @@ namespace Fmp.Cli;
 /// </summary>
 internal static partial class VisualizationRunner
 {
+    /// <summary>
+    /// Wraps a fraction callback into a JSONL StageProgress reporter for the
+    /// given export stage. No-ops when structured progress is disabled.
+    /// </summary>
+    private static Action<float>? FractionReporter(
+        ProgressJsonlWriter? progress,
+        ExportStage stage)
+        => progress is null
+            ? null
+            : fraction =>
+            {
+                double safe = fraction is >= 0 and <= 1 ? fraction : 0;
+                progress.StageProgress(ProgressJsonlWriter.StageName(stage), safe);
+            };
+
     private static int RunCore(
         VisualizationRequest request,
         RenderRuntimeOptions runtime,
@@ -152,7 +167,8 @@ internal static partial class VisualizationRunner
                 {
                     composer.Compose(
                         audioPath, videoPath, frameRenderer,
-                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource);
+                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource,
+                        progress: FractionReporter(progress, ExportStage.ComposingFrames));
                 }
                 catch (Exception ex) when (encoderFallback.ShouldRetry(requestedEncoder, ex))
                 {
@@ -165,7 +181,8 @@ internal static partial class VisualizationRunner
                         output.Quality == RenderQuality.Final ? "18" : "20");
                     composer.Compose(
                         audioPath, videoPath, frameRenderer,
-                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource);
+                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource,
+                        progress: FractionReporter(progress, ExportStage.ComposingFrames));
                 }
                 compositionWatch.Stop();
                 compositionSeconds = compositionWatch.Elapsed.TotalSeconds;
