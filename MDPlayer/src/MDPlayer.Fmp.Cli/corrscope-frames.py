@@ -33,14 +33,43 @@ class RawFramesOutputConfig(FFmpegOutputConfig):
 
 
 class RawFramesOutput(Output):
-    """Writes raw frame bytes to stdout with no encoding step."""
+    """Writes raw frame bytes to stdout with no encoding step.
+
+    The consumer (mdplayer-render) reads exactly `width*height*4` bytes per
+    frame from the pipe. A frame whose byte count differs silently misaligns
+    every later read, so each frame is validated against the config-declared
+    size and the bridge fails fast instead of streaming corruption.
+    """
 
     def __init__(self, corr_cfg, cfg):
         super().__init__(corr_cfg, cfg)
         self._stream = sys.stdout.buffer
         self._closed = False
+        self._expected = None
 
     def write_frame(self, frame):
+        if self._expected is None:
+            # Corrscope forces res_divisor to 1 before recording, so the
+            # rendered frame is exactly width x height RGBA.
+            render = self.corr_cfg.render
+            width = render.divided_width
+            height = render.divided_height
+            self._expected = width * height * 4
+            print(
+                f"raw frame: {width}x{height}, rgba, packed stride {width * 4}, "
+                f"{self._expected} bytes/frame",
+                file=sys.stderr,
+                flush=True,
+            )
+        actual = len(frame)
+        if actual != self._expected:
+            print(
+                f"corrscope-frames error: frame contains {actual} bytes; "
+                f"mdplayer-render expects exactly {self._expected}.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return Stop
         try:
             self._stream.write(frame)
             return None

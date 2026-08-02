@@ -75,6 +75,75 @@ public sealed class SinglePassComposerTests
     }
 
     [Fact]
+    public void Compose_RejectsRawFrameBoundaryDrift_WhenProducerFrameSizeMismatches()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"single-pass-drift-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string audioPath = Path.Combine(root, "master.wav");
+        string videoPath = Path.Combine(root, "visualization.mp4");
+        try
+        {
+            var timeline = new VisualizationTimeline
+            {
+                SampleRate = 1_000,
+                StartSample = 0,
+                EndSample = 1_000,
+            };
+            var renderer = new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline, 480, 360),
+                new PanelOverlayRenderer.Options
+                {
+                    FpsNumerator = 10,
+                    FpsDenominator = 1,
+                    Presentation = new VisualizationPresentation("SYNTHETIC", "", ""),
+                });
+
+            using (var wav = new WavWriter(audioPath, 1_000, 2))
+            {
+                wav.Write(new short[2_000]);
+                wav.Close();
+            }
+
+            int gridBytes = renderer.Width * renderer.Layout.CorrscopeGridHeight * 4;
+            // Stream 4 bytes fewer than the producer contract requires: the final
+            // frame read ends partway through — the raw-video drift signature.
+            int driftedBytes = checked(gridBytes * (int)renderer.TotalFrames) - 4;
+            using var corr = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "/bin/bash",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                },
+            };
+            corr.StartInfo.ArgumentList.Add("-c");
+            corr.StartInfo.ArgumentList.Add($"head -c {driftedBytes} /dev/zero");
+            corr.Start();
+
+            var composer = new SinglePassComposer("/usr/bin/ffmpeg", new SinglePassComposer.Options
+            {
+                TimeoutMinutes = 1,
+                VideoPreset = "ultrafast",
+                VideoCrf = "20",
+            });
+
+            InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+                () => composer.Compose(corr, audioPath, videoPath, renderer));
+            Assert.Contains("mid-frame", error.Message);
+            Assert.Contains("frame boundaries", error.Message);
+            Assert.False(File.Exists(videoPath));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ComposeMasterOnly_ReportsFrameAndPipelineMetrics()
     {
         string root = Path.Combine(Path.GetTempPath(), $"single-pass-master-{Guid.NewGuid():N}");

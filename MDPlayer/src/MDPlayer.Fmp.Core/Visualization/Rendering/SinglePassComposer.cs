@@ -687,44 +687,55 @@ internal sealed class SinglePassComposer
                     // frame, Take returns immediately without examining the
                     // token, so without this check a cancellation would be
                     // ignored for the entire remainder of the encode.
-                    linkedCancellation.Token.ThrowIfCancellationRequested();
-                    FrameSlot slot;
-                    long waitStart = Stopwatch.GetTimestamp();
                     try
                     {
-                        slot = ready.Take(linkedCancellation.Token);
-                    }
-                    catch (Exception error)
-                    {
-                        consumerError = error;
-                        break;
-                    }
-
-                    if (includeQueueWaitInCorrscopeMetrics)
-                        metrics.QueueWaitTicks += Stopwatch.GetTimestamp() - waitStart;
-                    metrics.MaxQueueDepth = Math.Max(metrics.MaxQueueDepth, ready.Count);
-                    try
-                    {
-                        if (!consumeFrame(slot, index, metrics))
+                        linkedCancellation.Token.ThrowIfCancellationRequested();
+                        FrameSlot slot;
+                        long waitStart = Stopwatch.GetTimestamp();
+                        try
                         {
-                            stopped = true;
-                            linkedCancellation.Cancel();
+                            slot = ready.Take(linkedCancellation.Token);
+                        }
+                        catch (Exception error)
+                        {
+                            consumerError = error;
                             break;
                         }
 
-                        metrics.FrameCount++;
+                        if (includeQueueWaitInCorrscopeMetrics)
+                            metrics.QueueWaitTicks += Stopwatch.GetTimestamp() - waitStart;
+                        metrics.MaxQueueDepth = Math.Max(metrics.MaxQueueDepth, ready.Count);
+                        try
+                        {
+                            if (!consumeFrame(slot, index, metrics))
+                            {
+                                stopped = true;
+                                linkedCancellation.Cancel();
+                                break;
+                            }
+
+                            metrics.FrameCount++;
+                        }
+                        catch (Exception error)
+                        {
+                            consumerError = error;
+                            linkedCancellation.Cancel();
+                            break;
+                        }
+                        finally
+                        {
+                            // The slot remains pooled for the complete run and is
+                            // returned to ArrayPool only after the producer joins.
+                            free.Add(slot, CancellationToken.None);
+                        }
                     }
                     catch (Exception error)
                     {
+                        // A cancellation raised by the producer's failure must not
+                        // escape before the producer task is joined; that join
+                        // rethrows the root cause (e.g. frame-boundary drift).
                         consumerError = error;
-                        linkedCancellation.Cancel();
                         break;
-                    }
-                    finally
-                    {
-                        // The slot remains pooled for the complete run and is
-                        // returned to ArrayPool only after the producer joins.
-                        free.Add(slot, CancellationToken.None);
                     }
                 }
             }
@@ -899,7 +910,12 @@ internal sealed class SinglePassComposer
 
     /// <summary>
     /// Reads exactly <paramref name="count"/> bytes from <paramref name="stream"/>.
-    /// Returns false when the stream ends before all bytes are read.
+    /// Returns false only when the stream ends cleanly at a frame boundary
+    /// (corrscope's documented one-extra-frame tail, drained by the caller).
+    /// A stream that ends partway through a frame throws: the producer wrote a
+    /// different number of bytes per frame than the renderer expects, which is
+    /// raw-video frame-boundary drift (FFmpeg would consume the next frame's
+    /// bytes and the image scrolls and wraps).
     /// </summary>
     private static bool ReadExactly(Stream stream, byte[] buffer, int count)
     {
@@ -908,7 +924,17 @@ internal sealed class SinglePassComposer
         {
             int n = stream.Read(buffer, read, count - read);
             if (n <= 0)
+            {
+                if (read > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Raw frame stream ended mid-frame after {read} of {count} bytes. " +
+                        "The producer wrote a different frame size than the renderer " +
+                        "expects (packed width × height × 4); FFmpeg frame boundaries " +
+                        "would drift and the video would scroll and wrap.");
+                }
                 return false;
+            }
             read += n;
         }
         return true;
