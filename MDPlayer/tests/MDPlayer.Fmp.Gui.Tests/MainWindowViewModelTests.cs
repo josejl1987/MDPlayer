@@ -1,4 +1,5 @@
 using Fmp.Application.Contracts;
+using Fmp.Application.Contracts;
 using Fmp.Gui.Services;
 using Fmp.Gui.ViewModels;
 using Avalonia;
@@ -28,6 +29,39 @@ public sealed class MainWindowViewModelTests
             Assert.True(h.FrameCalls >= 1);
             Assert.NotNull(h.VM.Preview.CurrentImage);
             Assert.Equal(GuiState.Ready, h.VM.State);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task OpenInputAsync_RunsSinglePlanThenInitialFrameAndRetainsImage()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            RecordingPreviewSession session = h.Factory.LastSession;
+
+            // Call order: a single plan, followed by a single timeline-only
+            // initial still. Plan is not called twice.
+            Assert.Equal(1, session.PlanCalls);
+            Assert.Equal(PreviewFidelity.TimelineStill, session.FrameFidelities[0]);
+            Assert.Equal(1,
+                session.FrameFidelities.Count(f => f == PreviewFidelity.TimelineStill));
+            Assert.True(session.FrameFidelities.Count >= 1);
+
+            // CurrentImage is populated by the initial frame.
+            Assert.NotNull(h.VM.Preview.CurrentImage);
+
+            // A later normal refresh (scrub/visual) must not clear the existing
+            // preview image.
+            h.VM.CommitScrub();
+            await h.VM.WaitForPreviewRefreshAsync();
+            Assert.NotNull(h.VM.Preview.CurrentImage);
+            Assert.False(h.VM.HasError);
         }
         finally
         {

@@ -35,7 +35,7 @@ internal static class RenderCommandParser
     internal static RenderInvocation ParseInvocationCore(string[] args)
     {
         var parsed = ParseCore(args);
-        return new RenderInvocation(parsed.Request, parsed.Runtime);
+        return new RenderInvocation(parsed.Request, parsed.Runtime, FindCaptureDirectory(args));
     }
 
     public static RenderInvocation? ParseInvocation(string[] args)
@@ -341,6 +341,15 @@ internal static class RenderCommandParser
                 return args[i + 1];
         return args.FirstOrDefault(a => a.StartsWith("--request-json=", StringComparison.Ordinal))?
             ["--request-json=".Length..];
+    }
+
+    private static string? FindCaptureDirectory(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "--capture-dir")
+                return args[i + 1];
+        return args.FirstOrDefault(a => a.StartsWith("--capture-dir=", StringComparison.Ordinal))?
+            ["--capture-dir=".Length..];
     }
 
     private static VisualizationRequest ReadSeed(string path)

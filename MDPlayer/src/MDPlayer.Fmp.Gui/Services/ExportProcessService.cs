@@ -47,7 +47,8 @@ public sealed class ExportProcessService
         VisualizationRequest request,
         IProgress<ExportProgressEvent> progress,
         Action<string>? workspaceReady = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? captureDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -81,10 +82,18 @@ public sealed class ExportProcessService
         // a cancellation or failure can still point the user at the log.
         workspaceReady?.Invoke(workspace);
 
-        var psi = DesktopProcessService.CreateStartInfo(renderCli, new[]
+        var renderArgs = new List<string>
         {
             "render", "--request-json", requestJson, "--progress", "jsonl",
-        });
+        };
+        // Reuse the active capture bundle when the caller has a valid one;
+        // the render CLI then skips playback/semantic capture entirely.
+        if (!string.IsNullOrWhiteSpace(captureDirectory))
+        {
+            renderArgs.Add("--capture-dir");
+            renderArgs.Add(captureDirectory);
+        }
+        var psi = DesktopProcessService.CreateStartInfo(renderCli, renderArgs);
         psi.WorkingDirectory = workspace;
 
         using var process = new Process { StartInfo = psi };

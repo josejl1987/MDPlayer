@@ -86,6 +86,32 @@ public sealed class CliPreviewSessionFactory : IVisualizationPreviewSessionFacto
 }
 
 /// <summary>
+/// Structured diagnostic for a capture lifecycle event: a capture was started
+/// anew (<see cref="CaptureTraceKind.Started"/>), an existing valid bundle was
+/// reused (<see cref="CaptureTraceKind.Reused"/>), or a new capture completed
+/// (<see cref="CaptureTraceKind.Completed"/>). Carries only the capture key and
+/// bundle directory — never the full request snapshot. Tests and users use this
+/// to tell whether timeline navigation or style changes caused recapture.
+/// </summary>
+internal enum CaptureTraceKind
+{
+    Started,
+    Reused,
+    Completed,
+}
+
+/// <summary>
+/// A single capture lifecycle event with the associated capture key and bundle
+/// directory. <see cref="Reused"/> is a convenience for the reuse decision.
+/// </summary>
+internal sealed record CaptureTrace(
+    string CaptureKey,
+    string? CaptureDirectory,
+    bool Reused,
+    CaptureTraceKind Kind,
+    DateTime OccurredUtc);
+
+/// <summary>
 /// Process-based preview session. Each call serializes the current request to
 /// <c>request.json</c> in the session workspace and invokes mdplayer-render
 /// with <c>plan</c> or <c>preview</c>. The session workspace is retained for
@@ -138,6 +164,31 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
     public VisualizationInputInfo Input { get; }
 
     public VisualizationSessionCapabilities Capabilities => _capabilities;
+
+    /// <summary>
+    /// Absolute directory of the active reusable capture bundle, or null when
+    /// no capture has been produced yet. Export can hand this to the render CLI
+    /// via <c>--capture-dir</c> to reuse the same timeline instead of
+    /// re-capturing.
+    /// </summary>
+    public string? ActiveCaptureDirectory => _activeCapture?.DirectoryPath;
+
+    /// <summary>
+    /// Lightweight diagnostic channel so callers/tests can tell whether a
+    /// preview/plan/export call reused an existing capture or started a new
+    /// one. Carries only the capture key/directory and reuse flag — never the
+    /// full request JSON.
+    /// </summary>
+    internal event Action<CaptureTrace>? CaptureTraceOccurred;
+
+    private void EmitCapture(string captureKey, string? captureDirectory, CaptureTraceKind kind)
+        => CaptureTraceOccurred?.Invoke(
+            new CaptureTrace(
+                captureKey,
+                captureDirectory,
+                kind == CaptureTraceKind.Reused,
+                kind,
+                DateTime.UtcNow));
 
     public async Task<VisualizationPlanResult> PlanAsync(
         VisualizationRequest request,
@@ -340,6 +391,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
                 input.Exists ? input.Length : 0,
                 input.Exists ? input.LastWriteTimeUtc : default) is { })
         {
+            EmitCapture(captureKey, active.DirectoryPath, CaptureTraceKind.Reused);
             return active;
         }
 
@@ -358,6 +410,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
                 if (existing is { })
                 {
                     _activeCapture = existing;
+                    EmitCapture(captureKey, existing.DirectoryPath, CaptureTraceKind.Reused);
                     return existing;
                 }
             }
@@ -373,12 +426,14 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
                 _activeCapture = valid;
                 _activeCaptureKey = captureKey;
                 _capabilities = _capabilities with { HasCapturedTimeline = true };
+                EmitCapture(captureKey, valid.DirectoryPath, CaptureTraceKind.Reused);
                 return valid;
             }
 
             // No reusable bundle: create a temporary capture directory, drive a
             // single CLI call to capture into it, then commit.
             CaptureBundle temporary = _captureStore.CreatePaths(captureKey);
+            EmitCapture(captureKey, temporary.DirectoryPath, CaptureTraceKind.Started);
             try
             {
                 VisualizationRequestSerializer.WriteToFile(request, _requestJsonPath);
@@ -405,6 +460,7 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
                 _activeCapture = committed;
                 _activeCaptureKey = captureKey;
                 _capabilities = _capabilities with { HasCapturedTimeline = true };
+                EmitCapture(captureKey, committed.DirectoryPath, CaptureTraceKind.Completed);
                 return committed;
             }
             catch (Exception)

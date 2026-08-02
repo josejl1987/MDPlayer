@@ -23,6 +23,7 @@ public sealed class CliPreviewSessionCaptureReuseTests
         public int CaptureCount { get; private set; }
         public List<string> Commands { get; } = new();
         public List<string?> CaptureKeys { get; } = new();
+        public List<string?> RenderCaptureDirectories { get; } = new();
 
         public Task<ProcessOutput> RunAsync(
             IReadOnlyList<string> arguments,
@@ -39,6 +40,11 @@ public sealed class CliPreviewSessionCaptureReuseTests
                 if (arguments[i] == "--capture-dir") captureDir = arguments[i + 1];
                 if (arguments[i] == "--capture-key") captureKey = arguments[i + 1];
             }
+
+            // Record which capture directory an export-style render was pointed
+            // at, so the integration test can assert export reuse.
+            if (command == "render")
+                RenderCaptureDirectories.Add(captureDir);
 
             string? dir = captureDir ?? throw new InvalidOperationException("no --capture-dir");
             string timelinePath = Path.Combine(dir, "timeline.json");
@@ -231,5 +237,135 @@ public sealed class CliPreviewSessionCaptureReuseTests
                 .ToArray()
             : Array.Empty<string>();
         Assert.Empty(finalDirs);
+    }
+
+    // ── Patch 4: full preview workflow with export reuse ───────────────
+
+    private static Task ExportRenderAsync(
+        FakeRunner runner,
+        string? captureDirectory,
+        string captureKey,
+        VisualizationRequest request)
+    {
+        var args = new List<string>
+        {
+            "render",
+            "--request-json", Path.Combine(Path.GetTempPath(), "export-request.json"),
+            "--capture-key", captureKey,
+        };
+        if (!string.IsNullOrWhiteSpace(captureDirectory))
+        {
+            args.Add("--capture-dir");
+            args.Add(captureDirectory);
+        }
+        return runner.RunAsync(args, CancellationToken.None);
+    }
+
+    /// <summary>The exact Patch 4 §2 sequence: one capture across plan, many
+    /// frames and visual-only settings, reused by a simulated export; then a
+    /// sample-rate change produces exactly one additional capture with a new
+    /// key/directory reused by the next export.</summary>
+    [Fact]
+    public async Task FullWorkflow_ReusesOneCapture_ThenOneMoreOnSampleRateChange()
+    {
+        var (session, runner, _) = Build();
+        var traces = new List<CaptureTrace>();
+        session.CaptureTraceOccurred += traces.Add;
+
+        VisualizationRequest request = Request(session.Input.FullPath);
+
+        // 1. Open input / plan.
+        await session.PlanAsync(request, CancellationToken.None);
+
+        // 2-5. Frames at 0, 10, 20 seconds.
+        await session.RenderFrameAsync(request, FrameRequest(0), CancellationToken.None);
+        await session.RenderFrameAsync(request, FrameRequest(10), CancellationToken.None);
+        VisualizationRequest at20 = request;
+        await session.RenderFrameAsync(at20, FrameRequest(20), CancellationToken.None);
+
+        // 6. Palette change (visual-only) → frame at 20s.
+        VisualizationRequest palette = at20 with
+        {
+            Style = at20.Style with { Palette = PaletteKind.Accessible },
+        };
+        await session.RenderFrameAsync(palette, FrameRequest(20), CancellationToken.None);
+
+        // 7. Title change (visual-only) → frame at 20s.
+        VisualizationRequest titled = palette with
+        {
+            Presentation = palette.Presentation with { Title = "Workflow title" },
+        };
+        await session.RenderFrameAsync(titled, FrameRequest(20), CancellationToken.None);
+
+        // 8. Resolution change (visual-only) → frame at 20s.
+        VisualizationRequest resized = titled with
+        {
+            Output = titled.Output with { Width = 1280, Height = 720 },
+        };
+        await session.RenderFrameAsync(resized, FrameRequest(20), CancellationToken.None);
+
+        // 9. Exactly one capture so far; all decisions share one capture key.
+        Assert.Equal(1, runner.CaptureCount);
+        string firstKey = traces.Single(t => t.Kind == CaptureTraceKind.Started).CaptureKey;
+        Assert.True(traces.Where(t => t.Reused).All(t => t.CaptureKey == firstKey),
+            "all preview reuses use the same capture key");
+
+        // 10. Export render reuses the session's active capture directory.
+        Assert.False(string.IsNullOrWhiteSpace(session.ActiveCaptureDirectory));
+        await ExportRenderAsync(runner, session.ActiveCaptureDirectory, firstKey, resized);
+        Assert.Equal(1, runner.CaptureCount);
+        Assert.All(runner.RenderCaptureDirectories,
+            d => Assert.Equal(session.ActiveCaptureDirectory, d));
+
+        // 11. Change sample rate → exactly one additional capture.
+        VisualizationRequest newRate = resized with
+        {
+            Playback = resized.Playback with { SampleRate = 44_100 },
+        };
+        await session.RenderFrameAsync(newRate, FrameRequest(20), CancellationToken.None);
+        Assert.Equal(2, runner.CaptureCount);
+
+        string secondKey = traces.Where(t => t.Kind == CaptureTraceKind.Started)
+            .Select(t => t.CaptureKey).Distinct().ElementAt(1);
+        Assert.NotEqual(firstKey, secondKey);
+        Assert.False(string.IsNullOrWhiteSpace(session.ActiveCaptureDirectory));
+
+        // 12. Next export uses the new capture directory/key.
+        await ExportRenderAsync(runner, session.ActiveCaptureDirectory, secondKey, newRate);
+        Assert.Equal(2, runner.CaptureCount);
+        Assert.Equal(session.ActiveCaptureDirectory, runner.RenderCaptureDirectories.Last());
+
+        session.CaptureTraceOccurred -= traces.Add;
+    }
+
+    [Fact]
+    public async Task CaptureTrace_ReportsStartedReusedCompletedWithKeys()
+    {
+        var (session, runner, _) = Build();
+        var traces = new List<CaptureTrace>();
+        session.CaptureTraceOccurred += traces.Add;
+
+        VisualizationRequest request = Request(session.Input.FullPath);
+        await session.PlanAsync(request, CancellationToken.None);
+        await session.RenderFrameAsync(request, FrameRequest(10), CancellationToken.None);
+
+        // First capture: Started then Completed, same key, not reused.
+        Assert.Contains(traces, t => t.Kind == CaptureTraceKind.Started && !t.Reused);
+        Assert.Contains(traces, t => t.Kind == CaptureTraceKind.Completed && !t.Reused);
+        string startedKey = traces.Single(t => t.Kind == CaptureTraceKind.Started).CaptureKey;
+        string completedKey = traces.Single(t => t.Kind == CaptureTraceKind.Completed).CaptureKey;
+        Assert.Equal(startedKey, completedKey);
+        Assert.False(string.IsNullOrWhiteSpace(startedKey));
+        Assert.Contains("capture-v2-", startedKey);
+
+        // The second preview reused the same bundle: at least one Reused trace
+        // with the same key and non-empty capture directory.
+        Assert.Contains(traces,
+            t => t.Kind == CaptureTraceKind.Reused
+                && t.Reused
+                && t.CaptureKey == startedKey
+                && !string.IsNullOrWhiteSpace(t.CaptureDirectory));
+
+        session.CaptureTraceOccurred -= traces.Add;
     }
 }

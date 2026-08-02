@@ -18,7 +18,20 @@ internal static partial class VisualizationRunner
         {
             VisualizationBackendResolution resolution =
                 VisualizationBackendResolver.Resolve(request, runtime);
-            return RunCore(request, runtime, resolution);
+
+            // When the caller supplied a captured bundle directory, seed the
+            // semantic timeline from it (reuse) instead of re-capturing. The
+            // scope/stem artifacts are still projected per request in the
+            // render workspace; only the playback/semantic capture is skipped.
+            string? seedTimelinePath = null;
+            if (!string.IsNullOrWhiteSpace(invocation.CaptureDirectory))
+            {
+                string bundleTimeline = Path.Combine(invocation.CaptureDirectory, "timeline.json");
+                if (File.Exists(bundleTimeline))
+                    seedTimelinePath = bundleTimeline;
+            }
+
+            return RunCore(request, runtime, resolution, seedTimelinePath);
         }
         catch (VisualizationBackendResolutionException ex)
         {

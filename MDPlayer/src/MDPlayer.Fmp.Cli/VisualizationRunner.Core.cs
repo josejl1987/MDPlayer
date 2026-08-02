@@ -39,7 +39,8 @@ internal static partial class VisualizationRunner
     private static int RunCore(
         VisualizationRequest request,
         RenderRuntimeOptions runtime,
-        VisualizationBackendResolution resolution)
+        VisualizationBackendResolution resolution,
+        string? seedTimelinePath = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(runtime);
@@ -98,9 +99,11 @@ internal static partial class VisualizationRunner
             progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
             Stopwatch captureWatch = Stopwatch.StartNew();
 
-            // Semantic capture (timeline only) — the pure planning half.
+            // Semantic capture (timeline only) — the pure planning half. When a
+            // bundle timeline was supplied it is seeded (reuse) not re-captured.
             PreparedTimeline preparedTimeline = VisualizationPrepareCoordinator.CaptureTimeline(
-                request, runtime, workspace, resolution, preparedFmpTrack);
+                request, runtime, workspace, resolution, preparedFmpTrack,
+                seedTimelinePath: seedTimelinePath);
             captureWatch.Stop();
             captureSeconds = captureWatch.Elapsed.TotalSeconds;
             progress?.StageCompleted(
