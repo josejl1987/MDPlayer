@@ -1,4 +1,5 @@
 using Fmp.Application.Contracts;
+using Fmp.Application.Preview;
 
 namespace Fmp.Cli;
 
@@ -7,15 +8,6 @@ namespace Fmp.Cli;
 /// staged preview work, so the caller can run the cheapest valid operation.
 /// Only the highest affected stage is returned, not a flags combination.
 /// </summary>
-internal enum VisualizationRequestImpact
-{
-    None = 0,
-    ExportOnly = 1,
-    Frame = 2,
-    Plan = 3,
-    TimelineCapture = 4,
-}
-
 internal static class VisualizationRequestImpactClassifier
 {
     private static readonly FileInfo MissingFileSentinel = new("/__missing__");
@@ -25,13 +17,13 @@ internal static class VisualizationRequestImpactClassifier
     /// implied by the difference. The stages are ordered so that a change to an
     /// earlier stage also invalidates every derived later stage.
     /// </summary>
-    public static VisualizationRequestImpact Classify(
+    public static PreviewRequestImpact Classify(
         VisualizationRequest previous,
         VisualizationRequest next,
         RenderRuntimeOptions runtime)
     {
         if (ReferenceEquals(previous, next))
-            return VisualizationRequestImpact.None;
+            return PreviewRequestImpact.None;
 
         // Snapshot the input file identity so the key comparison is cheap and
         // deterministic; a missing input is represented via the sentinel so the
@@ -46,7 +38,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (previousTimeline != nextTimeline)
         {
-            return VisualizationRequestImpact.TimelineCapture;
+            return PreviewRequestImpact.TimelineCapture;
         }
 
         ScopeAssetKey previousScope = ScopeAssetKey.From(previous, previousTimeline);
@@ -54,7 +46,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (!previousScope.Equals(nextScope))
         {
-            return VisualizationRequestImpact.Plan;
+            return PreviewRequestImpact.Plan;
         }
 
         PlanKey previousPlan = PlanKey.From(previous, previousScope);
@@ -62,7 +54,7 @@ internal static class VisualizationRequestImpactClassifier
 
         if (previousPlan != nextPlan)
         {
-            return VisualizationRequestImpact.Plan;
+            return PreviewRequestImpact.Plan;
         }
 
         FrameStyleKey previousFrame = FrameStyleKey.From(previous, previousPlan);
@@ -70,14 +62,14 @@ internal static class VisualizationRequestImpactClassifier
 
         if (previousFrame != nextFrame)
         {
-            return VisualizationRequestImpact.Frame;
+            return PreviewRequestImpact.Frame;
         }
 
         // Only output path, encoder or overwrite differ.
         if (HasExportOnlyChange(previous, next))
-            return VisualizationRequestImpact.ExportOnly;
+            return PreviewRequestImpact.ExportOnly;
 
-        return VisualizationRequestImpact.None;
+        return PreviewRequestImpact.None;
     }
 
     private static FileInfo DescribeInput(string inputPath)

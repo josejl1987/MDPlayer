@@ -1,4 +1,5 @@
 using Fmp.Application.Contracts;
+using Fmp.Application.Preview;
 using Fmp.Cli;
 using Xunit;
 
@@ -7,15 +8,15 @@ namespace MDPlayer.Fmp.Tests.Preview;
 /// <summary>
 /// Request-difference classification precedence. A change to an earlier staged
 /// key must classify as that single highest stage (not a flag combination), an
-/// export-only change as <see cref="VisualizationRequestImpact.ExportOnly"/>, and an
-/// identical request as <see cref="VisualizationRequestImpact.None"/>.
+/// export-only change as <see cref="PreviewRequestImpact.ExportOnly"/>, and an
+/// identical request as <see cref="PreviewRequestImpact.None"/>.
 /// </summary>
-public sealed class VisualizationRequestImpactTests : IDisposable
+public sealed class PreviewRequestImpactTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly string _inputPath;
 
-    public VisualizationRequestImpactTests()
+    public PreviewRequestImpactTests()
     {
         _tempDir = Path.Combine(Path.GetTempPath(), "MDPlayerImpactTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
@@ -77,7 +78,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         return TimelineCaptureKey.From(request, new FileInfo(_inputPath), runtime);
     }
 
-    private static VisualizationRequestImpact Classify(
+    private static PreviewRequestImpact Classify(
         VisualizationRequest a,
         VisualizationRequest b)
         => VisualizationRequestImpactClassifier.Classify(a, b, new RenderRuntimeOptions());
@@ -86,7 +87,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     public void IdenticalRequests_AreNone()
     {
         VisualizationRequest request = BaseRequest();
-        Assert.Equal(VisualizationRequestImpact.None, Classify(request, request));
+        Assert.Equal(PreviewRequestImpact.None, Classify(request, request));
     }
 
     [Fact]
@@ -94,7 +95,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Playback = a.Playback with { SampleRate = 22050 } };
-        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.TimelineCapture, Classify(a, b));
     }
 
     [Fact]
@@ -102,7 +103,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Playback = a.Playback with { SsgGainDb = -9 } };
-        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.TimelineCapture, Classify(a, b));
     }
 
     [Fact]
@@ -111,9 +112,9 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Tracks = a.Tracks with { Selection = TrackSelectionMode.Active } };
 
-        VisualizationRequestImpact impact = Classify(a, b);
-        Assert.NotEqual(VisualizationRequestImpact.TimelineCapture, impact);
-        Assert.Equal(VisualizationRequestImpact.Plan, impact);
+        PreviewRequestImpact impact = Classify(a, b);
+        Assert.NotEqual(PreviewRequestImpact.TimelineCapture, impact);
+        Assert.Equal(PreviewRequestImpact.Plan, impact);
     }
 
     [Fact]
@@ -127,7 +128,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         {
             Tracks = BaseRequest().Tracks with { IncludedIds = ["a", "b"] },
         };
-        Assert.Equal(VisualizationRequestImpact.None, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.None, Classify(a, b));
     }
 
     [Fact]
@@ -135,7 +136,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Output = a.Output with { Width = 1280, Height = 720 } };
-        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -143,7 +144,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { View = a.View with { PastSeconds = 3.0 } };
-        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -151,7 +152,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { View = a.View with { TimeGrid = TimeGridMode.Authoritative } };
-        Assert.Equal(VisualizationRequestImpact.Plan, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.Plan, Classify(a, b));
     }
 
     [Fact]
@@ -159,7 +160,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Presentation = a.Presentation with { Title = "New" } };
-        Assert.Equal(VisualizationRequestImpact.Frame, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.Frame, Classify(a, b));
     }
 
     [Fact]
@@ -167,7 +168,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Style = a.Style with { Palette = PaletteKind.Monochrome } };
-        Assert.Equal(VisualizationRequestImpact.Frame, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.Frame, Classify(a, b));
     }
 
     [Fact]
@@ -175,7 +176,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest() with { OutputPath = "/a/out.mp4" };
         VisualizationRequest b = a with { OutputPath = "/b/out.mp4" };
-        Assert.Equal(VisualizationRequestImpact.ExportOnly, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.ExportOnly, Classify(a, b));
     }
 
     [Fact]
@@ -183,7 +184,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
     {
         VisualizationRequest a = BaseRequest();
         VisualizationRequest b = a with { Output = a.Output with { Encoder = VideoEncoder.Nvenc, Overwrite = true } };
-        Assert.Equal(VisualizationRequestImpact.ExportOnly, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.ExportOnly, Classify(a, b));
     }
 
     // ---- Classification/key corrections for this commit ----
@@ -199,7 +200,7 @@ public sealed class VisualizationRequestImpactTests : IDisposable
         {
             Tracks = BaseRequest().Tracks with { IncludedIds = ["a", "b"] },
         };
-        Assert.Equal(VisualizationRequestImpact.None, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.None, Classify(a, b));
     }
 
     [Fact]
@@ -244,6 +245,6 @@ public sealed class VisualizationRequestImpactTests : IDisposable
             Playback = BaseRequest().Playback with { SampleRate = 22050 },
         };
 
-        Assert.Equal(VisualizationRequestImpact.TimelineCapture, Classify(a, b));
+        Assert.Equal(PreviewRequestImpact.TimelineCapture, Classify(a, b));
     }
 }

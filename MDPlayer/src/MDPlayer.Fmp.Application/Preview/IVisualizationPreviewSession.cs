@@ -6,6 +6,19 @@ namespace Fmp.Application.Preview;
 public sealed record PreviewProgress(string? Stage, double? Fraction, string? Message);
 
 /// <summary>
+/// Highest preview stage that a change between two request snapshots affects.
+/// Used by the GUI to choose whether to run frame-only or plan-and-frame work.
+/// </summary>
+public enum PreviewRequestImpact
+{
+    None = 0,
+    ExportOnly = 1,
+    Frame = 2,
+    Plan = 3,
+    TimelineCapture = 4,
+}
+
+/// <summary>
 /// A preview session bound to one input. Retains reusable capture/analysis
 /// data for the session lifetime and produces plans, still frames and motion
 /// sequences from immutable request snapshots.
@@ -29,6 +42,15 @@ public interface IVisualizationPreviewSession : IAsyncDisposable
         MotionPreviewRequest preview,
         IProgress<PreviewProgress>? progress,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Classifies the highest preview stage affected by a change from
+    /// <paramref name="previous"/> to <paramref name="next"/>. The GUI uses this
+    /// to schedule frame-only versus plan-and-frame work.
+    /// </summary>
+    PreviewRequestImpact ClassifyChange(
+        VisualizationRequest previous,
+        VisualizationRequest next);
 }
 
 /// <summary>

@@ -449,40 +449,40 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             _previewGeneration++;
 
-            if (CaptureSettingsChanged(previous, _request))
-            {
-                // Capture-affecting change: the session will invalidate the old
-                // capture key, perform a new timeline capture and start a new
-                // asset task. The next refresh renders a fresh timeline frame
-                // and restarts refinement.
-                _interactivePreviewReady = false;
-                CancelRefinement();
-            }
-            else
-            {
-                // Render-only change: keep the session-owned raw asset task
-                // alive; rebuild only the timeline source/renderer. The refresh
-                // renders a new timeline frame immediately and restarts the
-                // interactive waiter with the latest request.
-                CancelRefinement();
-            }
+            PreviewRequestImpact impact =
+                _session!.ClassifyChange(previous, _request);
 
-            SchedulePreviewRefresh();
+            switch (impact)
+            {
+                case PreviewRequestImpact.None:
+                case PreviewRequestImpact.ExportOnly:
+                    // No preview work required.
+                    return;
+
+                case PreviewRequestImpact.Frame:
+                    // Style/presentation change: keep the session-owned raw
+                    // asset task alive; rebuild only the timeline source and
+                    // render a fresh frame.
+                    CancelRefinement();
+                    QueuePreviewRefresh(PreviewRefreshKind.FrameOnly, VisualRefreshDelay);
+                    break;
+
+                case PreviewRequestImpact.Plan:
+                    // Track/projection/layout change: re-plan and re-render a
+                    // frame without invalidating the interactive preview.
+                    CancelRefinement();
+                    QueuePreviewRefresh(PreviewRefreshKind.PlanAndFrame, VisualRefreshDelay);
+                    break;
+
+                case PreviewRequestImpact.TimelineCapture:
+                    // Capture-affecting change: mark the interactive preview
+                    // stale, cancel refinement, then re-plan and re-render.
+                    _interactivePreviewReady = false;
+                    CancelRefinement();
+                    QueuePreviewRefresh(PreviewRefreshKind.PlanAndFrame, VisualRefreshDelay);
+                    break;
+            }
         }
-    }
-
-    /// <summary>
-    /// True when the change alters audio/timeline capture (playback settings
-    /// such as sample rate, loop count, fade/tail, SSG gain, SPC pitch). The
-    /// session remains the authoritative invalidation layer; this only lets the
-    /// GUI mark the interactive preview stale so it re-renders a timeline frame
-    /// and restarts refinement after such a change.
-    /// </summary>
-    private static bool CaptureSettingsChanged(
-        VisualizationRequest previous,
-        VisualizationRequest next)
-    {
-        return previous.Playback != next.Playback;
     }
 
     /// <summary>Applies an output-only request delta without refreshing the preview.</summary>
@@ -638,16 +638,6 @@ public sealed class MainWindowViewModel : ObservableObject
         // Also let any in-flight background refinement settle so tests (and
         // callers) observe a stable preview image and fidelity.
         await _refinementTask;
-    }
-
-    /// <summary>
-    /// Queues a plan+frame refresh (full rebuild) debounced for visual-settings
-    /// changes: style, layout, dimensions, playback-affecting settings, and any
-    /// other change that can alter the plan.
-    /// </summary>
-    private void SchedulePreviewRefresh()
-    {
-        QueuePreviewRefresh(PreviewRefreshKind.PlanAndFrame, VisualRefreshDelay);
     }
 
     /// <summary>

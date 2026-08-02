@@ -511,9 +511,10 @@ public sealed class MainWindowViewModelTests
 
             await h.VM.WaitForPreviewRefreshAsync();
 
-            // Render-only change re-planes (the fake re-plans) and re-renders an
-            // interactive still because the preview is already interactive.
-            Assert.Equal(1, h.Factory.LastSession.PlanCalls);
+            // Palette is a frame-style change: no re-plan; the interactive still
+            // renders a fresh frame because the preview is already interactive.
+            Assert.Equal(0, h.Factory.LastSession.PlanCalls);
+            Assert.True(h.Factory.LastSession.FrameCalls >= 1);
             Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
             Assert.True(h.VM.Preview.IsRefined);
         }
@@ -628,6 +629,113 @@ public sealed class MainWindowViewModelTests
             Assert.All(
                 h.Factory.LastSession.FrameFidelities,
                 f => Assert.NotEqual(PreviewFidelity.AccurateStill, f));
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task StyleAndPresentationChange_OneFrameZeroPlans()
+    {
+        // Palette and title are frame-style changes: they render one fresh frame
+        // and never rebuild the plan.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Style = r.Style with { Palette = PaletteKind.Monochrome },
+                Presentation = r.Presentation with { Title = "New Title" },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(0, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+            Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task ResizeViewChange_OnePlanOneFrame()
+    {
+        // View-window change alters the plan, so it re-plans and renders one frame.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                View = r.View with { PastSeconds = 3.0 },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task TrackSelectionChange_OnePlanOneFrame()
+    {
+        // Track selection changes scope/projection identity: one plan and one frame.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Tracks = r.Tracks with { IncludedIds = ["track-1"] },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task PlaybackChange_OnePlanOneFrameAndImmediateTimelineStill()
+    {
+        // A playback change is a timeline-capture change: the interactive preview
+        // is marked stale, so the immediately rendered frame is a TimelineStill.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Playback = r.Playback with { LoopCount = 3 },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.True(h.Factory.LastSession.FrameFidelities.Count >= 1);
+            Assert.Equal(
+                PreviewFidelity.TimelineStill,
+                h.Factory.LastSession.FrameFidelities[0]);
         }
         finally
         {

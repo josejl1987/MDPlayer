@@ -163,6 +163,16 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         return source.Plan;
     }
 
+    public PreviewRequestImpact ClassifyChange(
+        VisualizationRequest previous,
+        VisualizationRequest next)
+    {
+        return VisualizationRequestImpactClassifier.Classify(
+            previous,
+            next,
+            _runtime);
+    }
+
     public async Task<PreviewFrameResult> RenderFrameAsync(
         VisualizationRequest request,
         PreviewFrameRequest preview,

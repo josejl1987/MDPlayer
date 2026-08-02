@@ -218,6 +218,32 @@ public sealed class MainWindowHeadlessTests
                 FramesDirectory = Path.GetTempPath(),
             });
 
+        public PreviewRequestImpact ClassifyChange(
+            VisualizationRequest previous,
+            VisualizationRequest next)
+        {
+            if (previous.InputPath != next.InputPath
+                || previous.Playback != next.Playback)
+                return PreviewRequestImpact.TimelineCapture;
+            if (previous.Tracks != next.Tracks
+                || previous.Composition != next.Composition
+                || previous.View != next.View
+                || previous.Output.Width != next.Output.Width
+                || previous.Output.Height != next.Output.Height
+                || previous.Output.FpsNumerator != next.Output.FpsNumerator
+                || previous.Output.FpsDenominator != next.Output.FpsDenominator)
+                return PreviewRequestImpact.Plan;
+            if (previous.Output.Quality != next.Output.Quality
+                || previous.Style != next.Style
+                || previous.Presentation != next.Presentation)
+                return PreviewRequestImpact.Frame;
+            if (previous.OutputPath != next.OutputPath
+                || previous.Output.Encoder != next.Output.Encoder
+                || previous.Output.Overwrite != next.Output.Overwrite)
+                return PreviewRequestImpact.ExportOnly;
+            return PreviewRequestImpact.None;
+        }
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
