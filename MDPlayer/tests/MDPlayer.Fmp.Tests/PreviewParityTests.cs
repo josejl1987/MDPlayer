@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using Fmp.Application.Contracts;
 using Fmp.Cli;
+using Fmp.Core.Analysis;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
+using MDPlayer.Fmp.Tests.Fixtures;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -67,6 +69,34 @@ public sealed class PreviewParityTests
         };
 
         Assert.Equal(CaptureKey.From(first, runtime), CaptureKey.From(second, runtime));
+    }
+
+    // ---- J. RenderKey ignores frame-nullifying output fields ----
+
+    [Fact]
+    public void RenderKey_IgnoresEncoderAndOverwrite()
+    {
+        VisualizationRequest first = FixtureRequest();
+        VisualizationRequest second = first with
+        {
+            Output = first.Output with { Encoder = global::Fmp.Application.Contracts.VideoEncoder.Nvenc, Overwrite = true },
+        };
+
+        // Changing only encoder/overwrite must not rebuild the renderer: the
+        // resulting frames are byte-identical, so the key must be equal.
+        Assert.Equal(RenderKey.From(first), RenderKey.From(second));
+    }
+
+    [Fact]
+    public void RenderKey_ChangesWhenFrameAffectingOutputChanges()
+    {
+        VisualizationRequest first = FixtureRequest();
+        VisualizationRequest second = first with
+        {
+            Output = first.Output with { Width = 1280, Height = 720 },
+        };
+
+        Assert.NotEqual(RenderKey.From(first), RenderKey.From(second));
     }
 
     [Fact]
@@ -258,5 +288,107 @@ public sealed class PreviewParityTests
         string path = Path.Combine(root, fileName);
         Assert.True(File.Exists(path), $"expected source at {path}");
         return File.ReadAllText(path);
+    }
+
+    // ---- I. Production frame == accurate preview frame (PR5 contract) ----
+
+    /// <summary>
+    /// The accurate preview renderer is configured with the SAME production
+    /// intro/outro presentation as final rendering (both use introOutro: true),
+    /// so a production frame equals an accurate preview frame even during the
+    /// intro fade, mid-song, and the outro fade — the exact boundaries where the
+    /// pre-fix preview (introOutro: false) used to diverge.
+    /// </summary>
+    [Fact]
+    public void ProductionAndAccuratePreview_FramesAreIdenticalAtAllBoundaries()
+    {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        VisualizationRequest request = FixtureRequest();
+        // Use a shorter fade so an outro is present within the fixture's duration.
+        request = request with
+        {
+            Playback = request.Playback with { TailSeconds = 0.6 },
+        };
+
+        var presentation = new VisualizationPresentation("TITLE", "SUB", "CRED");
+        var production = new PanelOverlayRenderer(
+            timeline,
+            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
+            VisualizationRendererOptions.Build(request, presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>()));
+        var accuratePreview = new PanelOverlayRenderer(
+            timeline,
+            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
+            VisualizationRendererOptions.Build(request, presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>()));
+
+        Assert.True(production.TotalFrames > 4);
+
+        double[] probeTimes =
+        {
+            0.0,
+            0.4,
+            8.0,
+            Math.Max(0, production.TotalFrames / (double)request.Output.FpsNumerator - 0.2),
+        };
+
+        foreach (double time in probeTimes)
+        {
+            long index = (long)Math.Round(time * request.Output.FpsNumerator);
+            index = Math.Clamp(index, 0, Math.Max(0, production.TotalFrames - 1));
+
+            byte[] prod = production.RenderFrame(index);
+            byte[] preview = accuratePreview.RenderFrame(index);
+
+            Assert.Equal(prod.Length, preview.Length);
+            Assert.True(SpanEquals(prod, preview),
+                $"accurate preview frame differs from production frame at t={time} (frame {index})");
+        }
+
+        // The intro/outro transition must actually be active in the shared path:
+        // at t=0 the intro fade makes the preview frame differ from a
+        // content-inspection (no intro/outro) frame, proving introOutro: true is
+        // honored rather than being a silent no-op.
+        var contentInspection = new PanelOverlayRenderer(
+            timeline,
+            RendererTestLayout.Build(timeline, request.Output.Width, request.Output.Height),
+            VisualizationRendererOptions.Build(request, presentation, introOutro: false, energy: Array.Empty<ChannelEnergyEnvelope>()));
+
+        byte[] introFrame = accuratePreview.RenderFrame(0);
+        byte[] introInspection = contentInspection.RenderFrame(0);
+        Assert.False(SpanEquals(introFrame, introInspection),
+            "accurate preview intro frame unexpectedly matches a no-intro renderer; introOutro is not being honored");
+    }
+
+    // ---- K. Inert-setting cleanup ----
+
+    [Fact]
+    public void AccessiblePalette_IsMappedAndDiffersFromDefault()
+    {
+        VisualizationRequest request = FixtureRequest();
+        request = request with
+        {
+            Style = request.Style with { Palette = PaletteKind.Accessible },
+        };
+        var presentation = new VisualizationPresentation("TITLE", "SUB", "CRED");
+
+        var accessible = VisualizationRendererOptions.Build(
+            request, presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>());
+        var baseline = VisualizationRendererOptions.Build(
+            FixtureRequest(), presentation, introOutro: true, energy: Array.Empty<ChannelEnergyEnvelope>());
+
+        // PaletteKind.Accessible is no longer an inert no-op: it must resolve to
+        // the colorblind-safe palette and differ from the default.
+        Assert.Same(VisualizationPalette.Accessible, accessible.Palette);
+        Assert.NotSame(baseline.Palette, accessible.Palette);
+        Assert.NotEqual(VisualizationPalette.Default.CanvasBackground, accessible.Palette.CanvasBackground);
+    }
+
+    private static bool SpanEquals(byte[] a, byte[] b)
+    {
+        if (a.Length != b.Length)
+            return false;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i] != b[i])
+                return false;
+        return true;
     }
 }

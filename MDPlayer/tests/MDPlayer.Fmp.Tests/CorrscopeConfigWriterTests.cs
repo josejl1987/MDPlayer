@@ -140,6 +140,27 @@ public class CorrscopeConfigWriterTests
     }
 
     [Fact]
+    public void Write_FractionalFps_IsRenderedInvariantly()
+    {
+        string dir = Directory.CreateTempSubdirectory("fmp-corrscope-fps-").FullName;
+        try
+        {
+            string yamlPath = Path.Combine(dir, "corrscope.yaml");
+            var result = MakeSampleResult();
+            CorrscopeConfigWriter.Write(
+                yamlPath, dir, result,
+                overrides: new CorrscopeOverrides { Fps = 60000.0 / 1001 });
+
+            string yaml = File.ReadAllText(yamlPath);
+            Assert.Contains("fps: 59.94006", yaml);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Write_FmChannel_UsesDefaultWidths()
     {
         string dir = Directory.CreateTempSubdirectory("fmp-corrscope-").FullName;

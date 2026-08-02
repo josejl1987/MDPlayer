@@ -1,5 +1,6 @@
 using Fmp.Application.Contracts;
 using Fmp.Core.Analysis;
+using Fmp.Core.Audio;
 using Fmp.Core.Rendering;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
@@ -20,6 +21,16 @@ internal sealed record PreparedCapture(
     string MasterAudioPath);
 
 /// <summary>
+/// Lightweight result of the semantic capture stage only: the captured timeline,
+/// backend identity and the durable master-audio path. Used by the planning path
+/// which does not need scope/stem artifacts.
+/// </summary>
+internal sealed record PreparedTimeline(
+    VisualizationTimeline Timeline,
+    string BackendId,
+    string MasterAudioPath);
+
+/// <summary>
 /// Shared PR4 preparation stages for the render pipeline. It centralizes
 /// backend resolution, semantic capture, scope/stem generation, layout
 /// resolution, presentation and energy analysis.
@@ -35,28 +46,13 @@ internal sealed record PreparedCapture(
 /// </summary>
 internal static class VisualizationPrepareCoordinator
 {
-    /// <summary>Captures then projects a fully resolved source in one call.</summary>
-    public static PreparedVisualizationSource Prepare(
-        VisualizationRequest request,
-        RenderRuntimeOptions runtime,
-        VisualizationWorkspace workspace,
-        VisualizationBackendResolution resolution,
-        PreparedTrack? preparedFmpTrack,
-        string? seedTimelinePath = null,
-        string? timelineOutPath = null)
-    {
-        PreparedCapture capture = Capture(
-            request, runtime, workspace, resolution, preparedFmpTrack,
-            seedTimelinePath, timelineOutPath);
-        return BuildSource(capture, request, workspace);
-    }
-
     /// <summary>
-    /// Resolves the backend input, captures (or seeds) the semantic timeline and
-    /// renders the scope/stem artifacts into the durable workspace. Returns the
-    /// immutable capture result retained for the session lifetime.
+    /// Captures (or seeds) the semantic timeline and persists the canonical
+    /// timeline to the workspace. Lightweight: it performs no scope/stem
+    /// synthesis, no energy analysis and no layout construction, so a planning
+    /// path can consume it without pulling audio capabilities in.
     /// </summary>
-    public static PreparedCapture Capture(
+    public static PreparedTimeline CaptureTimeline(
         VisualizationRequest request,
         RenderRuntimeOptions runtime,
         VisualizationWorkspace workspace,
@@ -85,18 +81,82 @@ internal static class VisualizationPrepareCoordinator
                 throw new VisualizationExecutionException(
                     "visualization capture contains neither semantic events nor waveform activity",
                     10);
-            if (timelineOutPath != null)
-                VisualizationJsonWriter.Write(timelineOutPath, timeline);
         }
 
-        // Layout is resolved once to decide scope geometry; the request-specific
-        // projected source derives its own layout in BuildSource.
-        ResolvedVisualizationLayout probeLayout = VisualizationLayoutBuilder.Build(
-            timeline,
-            VisualizationLayoutModeMapper.FromComposition(request.Composition),
-            request.ToLayoutSettings());
+        // The workspace owns its canonical timeline; it is always persisted.
+        VisualizationJsonWriter.Write(workspace.TimelinePath, timeline);
+        if (timelineOutPath is not null
+            && !Path.GetFullPath(timelineOutPath)
+                .Equals(
+                    Path.GetFullPath(workspace.TimelinePath),
+                    StringComparison.Ordinal))
+        {
+            VisualizationJsonWriter.Write(timelineOutPath, timeline);
+        }
+
+        return new PreparedTimeline(
+            timeline, resolution.Backend.Id, workspace.MasterAudioPath);
+    }
+
+    /// <summary>
+    /// Resolves the scope/stem artifacts for the captured timeline and projects
+    /// them (with energy, layout, plan) into a fully prepared source. This is
+    /// the heavier half of preparation — it is needed by final rendering and
+    /// preview, but never by the pure planning path.
+    /// </summary>
+    public static PreparedVisualizationSource PrepareRenderAssets(
+        PreparedTimeline timeline,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
+        VisualizationWorkspace workspace,
+        VisualizationBackendResolution resolution,
+        PreparedTrack? preparedFmpTrack)
+    {
+        PreparedCapture capture = RenderScopeArtifacts(timeline, request, runtime, workspace, resolution, preparedFmpTrack);
+        return BuildSource(capture, request, workspace);
+    }
+
+    /// <summary>
+    /// Resolves the backend input, captures (or seeds) the semantic timeline and
+    /// renders the scope/stem artifacts into the durable workspace. Returns the
+    /// immutable capture result retained for the session lifetime.
+    /// </summary>
+    public static PreparedCapture Capture(
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
+        VisualizationWorkspace workspace,
+        VisualizationBackendResolution resolution,
+        PreparedTrack? preparedFmpTrack,
+        string? seedTimelinePath = null,
+        string? timelineOutPath = null)
+    {
+        PreparedTimeline timeline = CaptureTimeline(
+            request, runtime, workspace, resolution, preparedFmpTrack,
+            seedTimelinePath, timelineOutPath);
+        return RenderScopeArtifacts(timeline, request, runtime, workspace, resolution, preparedFmpTrack);
+    }
+
+    /// <summary>
+    /// Renders the scope/stem artifacts for an already-captured timeline. Kept
+    /// separate so the planning path can skip it entirely.
+    /// </summary>
+    private static PreparedCapture RenderScopeArtifacts(
+        PreparedTimeline timeline,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
+        VisualizationWorkspace workspace,
+        VisualizationBackendResolution resolution,
+        PreparedTrack? preparedFmpTrack)
+    {
+        VisualizationTimeline semanticTimeline = timeline.Timeline;
 
         // ---- Scope / stem generation ----
+        // Capture renders the full stem set the backend can produce so the raw
+        // reusable assets (isolated stems + master) are independent of any one
+        // composition. The request-specific projection to the resolved layout
+        // (filtering, ordering, master fallback expansion) happens in
+        // <see cref="BuildSource"/> so later layout changes do not reuse a scope
+        // result that was baked to the first composition.
         VisualizationScopeArtifacts scopeArtifacts;
         try
         {
@@ -106,31 +166,22 @@ internal static class VisualizationPrepareCoordinator
                 workspace,
                 request,
                 runtime,
-                timeline.Devices,
-                timeline.Voices,
-                Math.Max(1, timeline.EndSample - timeline.StartSample),
+                semanticTimeline.Devices,
+                semanticTimeline.Voices,
+                Math.Max(1, semanticTimeline.EndSample - semanticTimeline.StartSample),
                 preparedFmpTrack,
-                scopesRequired: probeLayout.Geometry.HasScopes);
+                scopesRequired: true);
         }
         catch (VisualizationScopeException)
         {
             throw;
         }
 
-        if (scopeArtifacts.Enabled && !scopeArtifacts.HasIsolatedStems)
-        {
-            scopeArtifacts = scopeArtifacts with
-            {
-                Result = ExpandMasterToPanels(
-                    workspace, scopeArtifacts.Result, probeLayout.Geometry.PanelCount),
-            };
-        }
-
         return new PreparedCapture(
-            timeline,
+            semanticTimeline,
             scopeArtifacts,
-            resolution.Backend.Id,
-            workspace.MasterAudioPath);
+            timeline.BackendId,
+            timeline.MasterAudioPath);
     }
 
     /// <summary>
@@ -159,17 +210,25 @@ internal static class VisualizationPrepareCoordinator
         VisualizationPresentation presentation =
             VisualizationSupport.ResolvePresentation(request, new FileInfo(request.InputPath));
 
+        // Project the reusable captured scope assets to the resolved layout:
+        // filter/order isolated stems by the current topology's panel order and
+        // expand the master fallback to the current panel count. This keeps the
+        // capture reusable across compositions/track selections instead of
+        // baking it to the first resolved layout.
+        ScopeRenderer.ScopeResult projectedScope =
+            ProjectScopes(scopeResult, layout, workspace);
+
         // Align the semantic timeline to the actual audio length.
         VisualizationTimeline videoTimeline = VisualizationSupport.AlignTimelineToAudio(
-            capture.Timeline, scopeResult.MasterSamples);
+            capture.Timeline, projectedScope.MasterSamples);
 
         // ---- Energy analysis ----
-        int totalFrames = (int)Math.Ceiling(scopeResult.MasterSamples
-            * (double)output.FpsNumerator / scopeResult.SampleRate);
+        int totalFrames = (int)Math.Ceiling(projectedScope.MasterSamples
+            * (double)output.FpsNumerator / projectedScope.SampleRate);
         ChannelEnergyEnvelope[] energy = ChannelEnergyAnalyzer.Analyze(
-            scopeResult.Stems.Where(stem => stem.Success)
+            projectedScope.Stems.Where(stem => stem.Success)
                 .Select(stem => (stem.Name, stem.WavPath)).ToArray(),
-            totalFrames, scopeResult.SampleRate,
+            totalFrames, projectedScope.SampleRate,
             output.FpsNumerator, output.FpsDenominator);
 
         VisualizationPlanResult plan = VisualizationPlanBuilder.Build(
@@ -182,11 +241,88 @@ internal static class VisualizationPrepareCoordinator
             Presentation: presentation,
             Analysis: AnalysisOverlayScene.Empty,
             Energy: energy,
-            Scope: capture.Scope,
+            Scope: capture.Scope with { Result = projectedScope },
             Plan: plan,
             MasterAudioPath: capture.MasterAudioPath,
             BackendId: capture.BackendId,
             TimelinePath: workspace.TimelinePath);
+    }
+
+    /// <summary>
+    /// Projects reusable captured scope assets onto the resolved layout. It
+    /// filters and orders isolated stems to follow the current topology's panel
+    /// order (master first), and when no isolated stem survives the projection
+    /// it fills the grid with one master channel per panel at the current panel
+    /// count. Moving this projection here instead of baking it into capture
+    /// means later layout/track-selection changes reuse the raw stems and re-derive
+    /// the request-specific scope channel set.
+    /// </summary>
+    private static ScopeRenderer.ScopeResult ProjectScopes(
+        ScopeRenderer.ScopeResult captured,
+        ResolvedVisualizationLayout layout,
+        VisualizationWorkspace workspace)
+    {
+        if (!layout.Geometry.HasScopes)
+            return captured;
+
+        // Name -> presentation track id from the canonical stem catalog, so a
+        // STEM result can be matched to the topology panels that carry that voice.
+        var stemTrackId = DefaultStems.All.ToDictionary(
+            stem => stem.Name, stem => stem.PresentationTrackId,
+            StringComparer.Ordinal);
+
+        var master = captured.Stems.FirstOrDefault(s => s.Name == "master");
+        var isolated = captured.Stems
+            .Where(s => s.Name != "master" && s.Success)
+            .ToList();
+
+        // Ordered panels of the current topology.
+        IReadOnlyList<VisualizationPanel> panels = layout.Topology.Panels;
+        var panelIndexOf = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < panels.Count; i++)
+        {
+            foreach (string voiceId in panels[i].VoiceIds)
+                panelIndexOf.TryAdd(voiceId, i);
+            panelIndexOf.TryAdd(panels[i].Id, i);
+        }
+
+        var projected = new ScopeRenderer.ScopeResult
+        {
+            Success = true,
+            InputPath = captured.InputPath,
+            OutputDir = captured.OutputDir,
+            MasterSamples = captured.MasterSamples,
+            SampleRate = captured.SampleRate,
+            CompletionReason = captured.CompletionReason,
+        };
+
+        if (master is not null)
+            projected.Stems.Add(master);
+
+        if (isolated.Count == 0)
+        {
+            // No isolated stem was rendered at all: fall back to one master
+            // channel per panel, expanded to the current panel count.
+            return ExpandMasterToPanels(workspace, captured, panels.Count);
+        }
+
+        // Order isolated stems to follow the current topology's panel order
+        // (stable order as a tie-break). The full synchronized stem set is
+        // retained — final/scoped backends validate all synchronized stems, and
+        // Corrscope maps the channel list onto the current grid geometry.
+        var ordered = isolated.Select(stem =>
+        {
+            string trackId = stemTrackId.TryGetValue(stem.Name, out string? id) ? id : stem.Name;
+            int panelOrder = panelIndexOf.TryGetValue(trackId, out int p) ? p : int.MaxValue;
+            return (Stem: stem, PanelOrder: panelOrder);
+        })
+        .OrderBy(pair => pair.PanelOrder)
+        .ThenBy(pair => pair.Stem.StableOrder)
+        .Select(pair => pair.Stem)
+        .ToList();
+
+        projected.Stems.AddRange(ordered);
+        return projected;
     }
 
     /// <summary>

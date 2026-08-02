@@ -33,7 +33,7 @@ internal class CorrscopeConfigWriter
     /// </summary>
     public static class Defaults
     {
-        public const int Fps = 60;
+        public const double Fps = 60;
         public const double Amplification = 1.0;
         public const int TriggerMs = 30;
         public const int RenderMs = 16;
@@ -79,7 +79,7 @@ internal class CorrscopeConfigWriter
         // Master audio (relative path from YAML dir)
         string masterRel = GetRelativeWavPath(outputDir, result, audioDir, "master");
         sb.AppendLine($"master_audio: {EscapeYamlValue(masterRel)}");
-        sb.AppendLine($"fps: {overrides.Fps ?? Defaults.Fps}");
+        sb.AppendLine($"fps: {FormatFps(overrides.Fps ?? Defaults.Fps)}");
         sb.AppendLine($"amplification: {overrides.Amplification ?? Defaults.Amplification}");
         sb.AppendLine($"trigger_ms: {overrides.TriggerMs ?? Defaults.TriggerMs}");
         sb.AppendLine($"render_ms: {overrides.RenderMs ?? Defaults.RenderMs}");
@@ -492,6 +492,14 @@ internal class CorrscopeConfigWriter
     }
 
     private static string BoolStr(bool value) => value ? "true" : "false";
+
+    /// <summary>
+    /// Formats the frame rate for the Corrscope YAML. Corrscope accepts a real
+    /// number, which matters for NTSC-family sources whose nominal FPS is
+    /// fractional (e.g. 60000/1001 ≈ 59.94) rather than an integer 60.
+    /// </summary>
+    private static string FormatFps(double fps)
+        => fps.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture);
 }
 
 /// <summary>
@@ -500,7 +508,7 @@ internal class CorrscopeConfigWriter
 /// </summary>
 internal class CorrscopeOverrides
 {
-    public int? Fps { get; set; }
+    public double? Fps { get; set; }
     public double? Amplification { get; set; }
     public int? TriggerMs { get; set; }
     public int? RenderMs { get; set; }

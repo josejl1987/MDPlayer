@@ -48,7 +48,7 @@ internal static class VisualizationComposition
             audioDir: "../audio",
             overrides: new CorrscopeOverrides
             {
-                Fps = request.Output.FpsNumerator,
+                Fps = request.Output.FpsNumerator / (double)request.Output.FpsDenominator,
                 TriggerMs = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 20,
                 RenderMs = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 12,
                 EdgeStrength = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 0.35,

@@ -41,6 +41,16 @@ internal static class VisualizationFrameRendererFactory
                 runtime,
                 overlay);
 
+        if (scope is null
+            && prepared.Scope.Enabled
+            && prepared.Layout.Geometry.HasScopes)
+        {
+            Console.Error.WriteLine(
+                "warning: scope source unavailable (Corrscope/Python/bridge missing); " +
+                "scope regions will fall back to the internal master waveform, so " +
+                "preview does not equal final frames in those regions");
+        }
+
         return new VisualizationFrameRenderer(overlay, scope);
     }
 

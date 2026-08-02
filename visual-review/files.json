@@ -1,66 +1,67 @@
 {
   "files": [
     {
+      "path": "Popple Mail - Destiny.OVI",
+      "moments": [
+        { "name": "early", "time": 1.5 },
+        { "name": "dense", "time": 24.0 },
+        { "name": "late", "time": 70.0 }
+      ]
+    },
+    {
       "path": "02 Stranger ~ Wandering Swordsman.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 2.0 },
+        { "name": "dense", "time": 30.0 },
+        { "name": "late", "time": 75.0 }
       ]
     },
     {
       "path": "05 - Twilight Express.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 2.5 },
+        { "name": "representative", "time": 8.0 },
+        { "name": "late", "time": 60.0 }
       ]
     },
     {
       "path": "120 Smash Up.spc",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 1.0 },
+        { "name": "dense", "time": 20.0 },
+        { "name": "late", "time": 50.0 }
       ]
     },
     {
       "path": "18 U.S.A. (Ken) I.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 2.0 },
+        { "name": "representative", "time": 8.0 },
+        { "name": "late", "time": 90.0 }
       ]
     },
     {
       "path": "21 Master Ninja.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 1.5 },
+        { "name": "representative", "time": 8.0 },
+        { "name": "late", "time": 55.0 }
       ]
     },
     {
       "path": "26 - Robotnik.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 2.0 },
+        { "name": "representative", "time": 8.0 },
+        { "name": "late", "time": 40.0 }
       ]
     },
     {
       "path": "32 Arctic Wind.vgz",
       "moments": [
-        {
-          "name": "representative",
-          "time": 8.0
-        }
+        { "name": "early", "time": 2.0 },
+        { "name": "representative", "time": 8.0 },
+        { "name": "late", "time": 45.0 }
       ]
     }
   ]

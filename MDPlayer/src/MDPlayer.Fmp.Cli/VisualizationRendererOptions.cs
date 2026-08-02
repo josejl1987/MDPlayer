@@ -36,7 +36,7 @@ internal static class VisualizationRendererOptions
             PreferAntialiasedText = output.Quality != RenderQuality.Draft,
             Effects = MapEffects(style.Effects),
             NoteColor = MapNoteColor(style.NoteColor),
-            Palette = VisualizationPalette.Default,
+            Palette = MapPalette(style.Palette),
             MotionBlurSamples = 1,
             IntroSeconds = introOutro ? 0.75 : 0,
             OutroSeconds = introOutro ? Math.Min(0.45, playback.TailSeconds) : 0,
@@ -68,5 +68,11 @@ internal static class VisualizationRendererOptions
         Fmp.Application.Contracts.NoteColorMode.PitchClass =>
             Fmp.Core.Visualization.Rendering.NoteColorMode.Pitch,
         _ => Fmp.Core.Visualization.Rendering.NoteColorMode.Instrument,
+    };
+
+    private static VisualizationPalette MapPalette(PaletteKind palette) => palette switch
+    {
+        PaletteKind.Accessible => VisualizationPalette.Accessible,
+        _ => VisualizationPalette.Default,
     };
 }

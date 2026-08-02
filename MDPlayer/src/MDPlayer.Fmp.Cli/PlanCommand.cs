@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Fmp.Application.Contracts;
 using Fmp.Application.Export;
+using Fmp.Core.Visualization;
+using Fmp.Core.Visualization.Rendering;
 
 namespace Fmp.Cli;
 
@@ -67,6 +69,11 @@ public static class PlanCommand
             Console.Error.WriteLine($"error: {ex.Message}");
             return ex.ExitCode;
         }
+        catch (VisualizationExecutionException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return ex.ExitCode;
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"error: {ex.Message}");
@@ -83,20 +90,37 @@ public static class PlanCommand
         VisualizationWorkspace workspace = VisualizationWorkspace.Create(request);
         workspace.EnsureDirectories();
 
-        PreparedVisualizationSource prepared = VisualizationPrepareCoordinator.Prepare(
+        // The planning path is timeline/layout-only: it captures (or seeds) the
+        // semantic timeline, resolves the layout and builds the pure plan. It
+        // deliberately does NOT synthesize FMP stems, render scopes, run energy
+        // analysis, or write scope/master artifacts.
+        PreparedTimeline timeline = VisualizationPrepareCoordinator.CaptureTimeline(
             request,
             runtime,
             workspace,
             resolution,
-            PrepareFmpTrack(resolution, runtime));
+            PrepareFmpTrack(resolution, runtime),
+            seedTimelinePath: string.IsNullOrWhiteSpace(timelinePath) ? null : timelinePath,
+            timelineOutPath: string.IsNullOrWhiteSpace(timelineOutPath) ? null : timelineOutPath);
+
+        ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
+            timeline.Timeline,
+            VisualizationLayoutModeMapper.FromComposition(request.Composition),
+            request.ToLayoutSettings());
+
+        VisualizationPlanResult plan = VisualizationPlanBuilder.Build(
+            request,
+            timeline.Timeline,
+            layout,
+            workspace.TimelinePath);
 
         if (json)
         {
-            Console.WriteLine(JsonSerializer.Serialize(prepared.Plan, JsonOptions));
+            Console.WriteLine(JsonSerializer.Serialize(plan, JsonOptions));
         }
         else
         {
-            WriteHumanSummary(prepared.Plan);
+            WriteHumanSummary(plan);
         }
         return 0;
     }

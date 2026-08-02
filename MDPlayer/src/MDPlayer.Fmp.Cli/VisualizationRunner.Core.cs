@@ -83,13 +83,25 @@ internal static partial class VisualizationRunner
             progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
             Stopwatch captureWatch = Stopwatch.StartNew();
 
-            // Shared preparation: capture → layout → scope → energy → plan.
-            PreparedVisualizationSource prepared = VisualizationPrepareCoordinator.Prepare(
+            // Semantic capture (timeline only) — the pure planning half.
+            PreparedTimeline preparedTimeline = VisualizationPrepareCoordinator.CaptureTimeline(
                 request, runtime, workspace, resolution, preparedFmpTrack);
             captureWatch.Stop();
             captureSeconds = captureWatch.Elapsed.TotalSeconds;
             progress?.StageCompleted(
                 ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), captureSeconds);
+
+            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy));
+            Stopwatch assetWatch = Stopwatch.StartNew();
+
+            // Heavier half: scope/stem synthesis, projection, energy, plan.
+            PreparedVisualizationSource prepared =
+                VisualizationPrepareCoordinator.PrepareRenderAssets(
+                    preparedTimeline, request, runtime, workspace, resolution, preparedFmpTrack);
+            assetWatch.Stop();
+            stemRenderSeconds = assetWatch.Elapsed.TotalSeconds;
+            progress?.StageCompleted(
+                ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy), stemRenderSeconds);
 
             VisualizationTimeline timeline = prepared.Timeline;
             ResolvedVisualizationLayout resolvedLayout = prepared.Layout;
@@ -124,15 +136,6 @@ internal static partial class VisualizationRunner
                 }
             }
 
-            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy));
-            Stopwatch energyWatch = Stopwatch.StartNew();
-            // Energy analysis already ran inside the shared coordinator; report
-            // the stage for parity with the previous explicit analysis.
-            energyWatch.Stop();
-            progress?.StageCompleted(
-                ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy),
-                energyWatch.Elapsed.TotalSeconds);
-
             using (VisualizationFrameRenderer frameRenderer =
                 VisualizationFrameRendererFactory.Create(
                     prepared, workspace, runtime, introOutro: true))
@@ -166,7 +169,9 @@ internal static partial class VisualizationRunner
                 Stopwatch compositionWatch = Stopwatch.StartNew();
                 try
                 {
-                    composer.Compose(audioPath, videoPath, frameRenderer);
+                    composer.Compose(
+                        audioPath, videoPath, frameRenderer,
+                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource);
                 }
                 catch (Exception ex) when (encoderFallback.ShouldRetry(requestedEncoder, ex))
                 {
@@ -177,7 +182,9 @@ internal static partial class VisualizationRunner
                         runtime, VideoEncoder.LibX264,
                         output.Quality == RenderQuality.Final ? "veryfast" : "ultrafast",
                         output.Quality == RenderQuality.Final ? "18" : "20");
-                    composer.Compose(audioPath, videoPath, frameRenderer);
+                    composer.Compose(
+                        audioPath, videoPath, frameRenderer,
+                        includeWaveform: prepared.Scope.Enabled && !frameRenderer.HasScopeSource);
                 }
                 compositionWatch.Stop();
                 compositionSeconds = compositionWatch.Elapsed.TotalSeconds;
@@ -210,6 +217,12 @@ internal static partial class VisualizationRunner
         }
         catch (VisualizationScopeException ex)
         {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return ex.ExitCode;
+        }
+        catch (VisualizationExecutionException ex)
+        {
+            progress?.Failed(ex.Message, ex.Code, ex.ExitCode);
             Console.Error.WriteLine($"error: {ex.Message}");
             return ex.ExitCode;
         }

@@ -41,6 +41,14 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     public int OverlayFpsDenominator => _overlay.FpsDenominator;
 
     /// <summary>
+    /// True when an external scope frame source (Corrscope) is present. When
+    /// false, scope viewports are left transparent by the overlay; the caller
+    /// should fall back to the internal master-waveform waveform for those
+    /// regions.
+    /// </summary>
+    public bool HasScopeSource => _scopeFrames is not null;
+
+    /// <summary>
     /// Produces the finished RGBA frame for <paramref name="frameIndex"/>:
     /// semantic panels, layout background, scopes (or the transparent scope
     /// holes when no isolated scope source exists), title/credits, analysis

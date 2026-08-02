@@ -32,6 +32,32 @@ internal sealed record VisualizationPalette(
         Array.Empty<OverlayColor>(),
         Array.Empty<OverlayColor>());
 
+    /// <summary>
+    /// High-contrast, colorblind-safe palette. Text and grid lines are brighter
+    /// against a deeper background for WCAG-style readability, and note/accent
+    /// colours use a blue/orange ramp that remains distinguishable for the most
+    /// common forms of colour-vision deficiency (protanopia/deuteranopia).
+    /// </summary>
+    public static VisualizationPalette Accessible { get; } = new(
+        new OverlayColor(4, 5, 8),
+        new OverlayColor(14, 16, 24),
+        new OverlayColor(10, 12, 18),
+        new OverlayColor(6, 8, 14),
+        new OverlayColor(140, 148, 168, 210),
+        new OverlayColor(150, 158, 178, 255),
+        new OverlayColor(196, 202, 218),
+        new OverlayColor(246, 248, 252),
+        new OverlayColor(255, 214, 84, 160),
+        Array.Empty<OverlayColor>(),
+        new[]
+        {
+            new OverlayColor(0, 114, 189),   // blue
+            new OverlayColor(230, 159, 0),   // orange
+            new OverlayColor(86, 180, 233),  // sky
+            new OverlayColor(240, 228, 66),  // yellow
+            new OverlayColor(204, 121, 167), // amethyst
+        });
+
     public OverlayColor ResolveAccent(string stableId, int fallbackIndex)
     {
         if (AccentColors.Count == 0)

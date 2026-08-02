@@ -130,6 +130,11 @@ public static class PreviewCommand
             Console.Error.WriteLine($"error: {ex.Message}");
             return ex.ExitCode;
         }
+        catch (VisualizationExecutionException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return ex.ExitCode;
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"error: preview failed — {ex.Message}");
@@ -171,7 +176,8 @@ public static class PreviewCommand
     {
         await using IVisualizationPreviewSession session =
             await new InProcessVisualizationPreviewSessionFactory(runtime).OpenWithTimelineAsync(
-                request.InputPath, settings.TimelinePath, CancellationToken.None);
+                request.InputPath, settings.TimelinePath, CancellationToken.None,
+                timelineOutPath: settings.TimelineOutPath);
 
         if (settings.Motion)
         {

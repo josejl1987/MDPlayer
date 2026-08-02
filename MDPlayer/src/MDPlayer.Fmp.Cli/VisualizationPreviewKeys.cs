@@ -43,7 +43,11 @@ internal readonly record struct CaptureKey(
 
 internal sealed record RenderKey(
     CompositionKind Composition,
-    OutputSettings Output,
+    RenderQuality Quality,
+    int Width,
+    int Height,
+    int FpsNumerator,
+    int FpsDenominator,
     TrackSettings Tracks,
     ViewSettings View,
     StyleSettings Style,
@@ -52,7 +56,11 @@ internal sealed record RenderKey(
     public static RenderKey From(VisualizationRequest request)
         => new(
             request.Composition,
-            request.Output,
+            request.Output.Quality,
+            request.Output.Width,
+            request.Output.Height,
+            request.Output.FpsNumerator,
+            request.Output.FpsDenominator,
             request.Tracks,
             request.View,
             request.Style,

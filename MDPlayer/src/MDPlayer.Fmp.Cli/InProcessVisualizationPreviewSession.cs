@@ -29,16 +29,19 @@ internal sealed class InProcessVisualizationPreviewSessionFactory : IVisualizati
     /// <summary>
     /// Opens a session optionally seeded from an existing captured timeline
     /// (<c>--timeline</c>). The captured timeline is written to the session
-    /// workspace each capture.
+    /// workspace each capture. When <paramref name="timelineOutPath"/> is
+    /// supplied it receives an extra durable copy (surviving the temporary
+    /// session directory).
     /// </summary>
     public async Task<IVisualizationPreviewSession> OpenWithTimelineAsync(
         string inputPath,
         string? seedTimelinePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? timelineOutPath = null)
     {
         VisualizationInputInfo input = await VisualizationInputInspector.InspectAsync(
             inputPath, cancellationToken);
-        return new InProcessVisualizationPreviewSession(input, _runtime, seedTimelinePath);
+        return new InProcessVisualizationPreviewSession(input, _runtime, seedTimelinePath, timelineOutPath);
     }
 }
 
@@ -55,6 +58,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     private readonly string _sessionRoot;
     private readonly VisualizationWorkspace _workspace;
     private readonly string? _seedTimelinePath;
+    private readonly string? _timelineOutPath;
 
     private CaptureKey? _captureKey;
     private PreparedCapture? _capture;
@@ -65,11 +69,13 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     public InProcessVisualizationPreviewSession(
         VisualizationInputInfo input,
         RenderRuntimeOptions runtime,
-        string? seedTimelinePath = null)
+        string? seedTimelinePath = null,
+        string? timelineOutPath = null)
     {
         Input = input ?? throw new ArgumentNullException(nameof(input));
         _runtime = runtime ?? new RenderRuntimeOptions();
         _seedTimelinePath = seedTimelinePath;
+        _timelineOutPath = timelineOutPath;
 
         _sessionRoot = Path.Combine(
             Path.GetTempPath(), "MDPlayer", "Preview", Guid.NewGuid().ToString("N"));
@@ -360,7 +366,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 prepared,
                 _workspace,
                 _runtime,
-                introOutro: false);
+                introOutro: true);
         }
 
         return new PreparedFrameContext(prepared, _renderer!);
@@ -408,7 +414,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                     resolution,
                     track,
                     seedTimelinePath: _seedTimelinePath,
-                    timelineOutPath: _workspace.TimelinePath);
+                    timelineOutPath: _timelineOutPath);
                 Capabilities = Capabilities with { HasCapturedTimeline = true };
             }, cancellationToken);
 
