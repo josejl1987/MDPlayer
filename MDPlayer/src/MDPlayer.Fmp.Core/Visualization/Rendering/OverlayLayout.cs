@@ -78,7 +78,9 @@ internal sealed class OverlayLayout
         int? timelineHeightOverride = null,
         double rollZoom = 1.0,
         double? scopeRatioOverride = null,
-        VisualizationScopePosition scopePosition = VisualizationScopePosition.Top)
+        VisualizationScopePosition scopePosition = VisualizationScopePosition.Top,
+        bool? showScopes = null,
+        bool? showRoll = null)
     {
         if (panelCount is < 1 or > 64)
             throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 64.");
@@ -111,8 +113,11 @@ internal sealed class OverlayLayout
         // Only the full diagnostic grid renders the piano-roll/timeline semantic
         // lane. The overview and device variants keep the scope region (used as
         // a compact per-channel or aggregate waveform) but drop the pitch lane.
-        HasScopes = true;
-        HasRoll = variant == VisualizationLayoutVariant.DiagnosticGrid;
+        // An explicit showScopes/showRoll override (from the layout resolver's
+        // capability decision) wins over the variant-derived default so a
+        // density fallback can hand the space to the remaining content.
+        HasScopes = showScopes ?? true;
+        HasRoll = showRoll ?? (variant == VisualizationLayoutVariant.DiagnosticGrid);
 
         // Reserve the top and bottom metadata bands. The bands scale
         // proportionally with the canvas height, clamped to sensible minimums,
@@ -182,17 +187,43 @@ internal sealed class OverlayLayout
         if (scopeHeightOverride is null && scopeRatioOverride is not null)
             defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * scopeRatioOverride.Value));
 
-        ScopeHeight = scopeHeightOverride
-            ?? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2));
-        DividerHeight = Math.Max(1,
-            (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight)));
-        int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
-        TimelineHeight = timelineHeightOverride ?? derivedTimeline;
+        if (HasScopes)
+        {
+            ScopeHeight = scopeHeightOverride
+                ?? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2));
+            DividerHeight = Math.Max(1,
+                (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight)));
+            int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
+            TimelineHeight = timelineHeightOverride ?? derivedTimeline;
+        }
+        else
+        {
+            // No scope region: hand the whole content height to the roll so no
+            // invisible scope-sized gap remains.
+            ScopeHeight = 0;
+            DividerHeight = 0;
+            TimelineHeight = timelineHeightOverride ?? availableContentHeight;
+        }
+
+        // When the roll is disabled, give its space back to the scope/content so
+        // the panel never leaves a reserved-but-empty lane.
+        if (!HasRoll)
+        {
+            TimelineHeight = 0;
+            if (HasScopes)
+            {
+                ScopeHeight = scopeHeightOverride
+                    ?? Math.Max(16, availableContentHeight);
+                DividerHeight = 0;
+            }
+        }
 
         if (ScopeHeight < 0 || TimelineHeight < 0
             || PanelHeaderHeight + ScopeHeight + DividerHeight + TimelineHeight > PanelHeight)
             throw new ArgumentOutOfRangeException(nameof(height), "Panel regions exceed the available panel height.");
         if (HasRoll && TimelineHeight < 16)
+            // The resolver must avoid selecting a configuration whose roll cannot
+            // hold at least 16px; only an impossible caller geometry should throw.
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the panel timeline area.");
         if (HasScopes && ScopeHeight < 1)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the scope area.");

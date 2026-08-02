@@ -631,7 +631,9 @@ public sealed class VisualizationV3ContractTests
                     VisualizationLayoutMode.Diagnostic,
                     VisualizationLayoutVariant.DiagnosticGrid,
                     topology,
-                    layout),
+                    layout,
+                    VisualizationLayoutDensity.Full,
+                    NewFullCapabilities()),
                 VisualizationChannelFilter.Active,
                 fpsNumerator: 30);
             VisualizationLayoutTrackPlan[] pageTracks = Enumerable.Range(0, 13)
@@ -1046,4 +1048,11 @@ public sealed class VisualizationV3ContractTests
             plan.Tracks, track => track.TrackId == "ym2608.0.rhythm");
         Assert.True(rhythmTrack.ActivityDetected);
     }
+
+    private static VisualizationLayoutCapabilities NewFullCapabilities() => new(
+        ShowScopes: true,
+        ShowRoll: true,
+        ShowPitchLabels: true,
+        ShowDetailedHeaders: true,
+        ShowInstrumentText: true);
 }

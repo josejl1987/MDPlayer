@@ -112,11 +112,17 @@ internal static class VisualizationLayoutBuilder
         if (VisualizationContentAvailability.HasRenderableContent(timeline))
             VisualizationLayoutValidator.Validate(geometry, topology);
 
+        int panelWidth = settings.Width / Math.Max(1, grid.Columns);
+        int panelHeight = GridHeight(settings.Height) / Math.Max(1, grid.Rows);
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            VisualizationLayoutResolver.Decide(panelWidth, panelHeight, geometry.ScopeHeight, rollPossible: true);
         return new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutVariant.DiagnosticGrid,
             topology,
-            geometry);
+            geometry,
+            density,
+            caps);
     }
 
     private static ResolvedVisualizationLayout BuildDiagnosticOverview(
@@ -141,11 +147,19 @@ internal static class VisualizationLayoutBuilder
             settings.ScopeRatio,
             settings.ScopePosition);
 
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            VisualizationLayoutResolver.Decide(
+                settings.Width / Math.Max(1, grid.Columns),
+                GridHeight(settings.Height) / Math.Max(1, grid.Rows),
+                geometry.ScopeHeight,
+                rollPossible: true);
         return new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutVariant.DiagnosticOverview,
             topology,
-            geometry);
+            geometry,
+            density,
+            caps);
     }
 
     private static ResolvedVisualizationLayout BuildDeviceOverview(
@@ -184,11 +198,19 @@ internal static class VisualizationLayoutBuilder
             settings.ScopeRatio,
             settings.ScopePosition);
 
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            VisualizationLayoutResolver.Decide(
+                settings.Width / Math.Max(1, columns),
+                GridHeight(settings.Height) / Math.Max(1, rows),
+                geometry.ScopeHeight,
+                rollPossible: false);
         return new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutVariant.DeviceOverview,
             deviceTopology,
-            geometry);
+            geometry,
+            density,
+            caps);
     }
 
     private static VisualizationTopology GroupByDevice(

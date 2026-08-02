@@ -56,11 +56,17 @@ public sealed class VisualizationLayoutResolutionTests
     {
         VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
         ResolvedVisualizationLayout full = RendererTestLayout.Build(timeline);
+        VisualizationTopology oneTopology = new([full.Topology.Panels[0]]);
+        var oneGeometry = new OverlayLayout(960, 540, 0.75, 2.25, 1, VisualizationLayoutMode.Diagnostic);
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            VisualizationLayoutResolver.Decide(960, 540, oneGeometry.ScopeHeight, rollPossible: true);
         var onePanel = new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutVariant.DiagnosticGrid,
-            new VisualizationTopology([full.Topology.Panels[0]]),
-            new OverlayLayout(960, 540, 0.75, 2.25, 1, VisualizationLayoutMode.Diagnostic));
+            oneTopology,
+            oneGeometry,
+            density,
+            caps);
 
         using var renderer = new PanelOverlayRenderer(
             timeline,

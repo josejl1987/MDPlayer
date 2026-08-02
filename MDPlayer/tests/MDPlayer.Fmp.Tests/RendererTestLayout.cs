@@ -51,10 +51,18 @@ internal static class RendererTestLayout
         if (VisualizationContentAvailability.HasRenderableContent(timeline))
             VisualizationLayoutValidator.Validate(geometry, topology);
 
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            VisualizationLayoutResolver.Decide(
+                width / Math.Max(1, grid.Columns),
+                height / Math.Max(1, grid.Rows),
+                geometry.ScopeHeight,
+                rollPossible: true);
         return new ResolvedVisualizationLayout(
             VisualizationLayoutMode.Diagnostic,
             VisualizationLayoutVariant.DiagnosticGrid,
             topology,
-            geometry);
+            geometry,
+            density,
+            caps);
     }
 }
