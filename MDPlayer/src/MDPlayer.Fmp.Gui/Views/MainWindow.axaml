@@ -381,14 +381,20 @@
               </StackPanel>
 
               <!-- Compact-mode fallback: opens the shared diagnostics rail as a flyout -->
-              <Button Grid.Column="1" x:Name="DiagnosticsToggleButton" Classes="secondary"
-                      Content="Diagnostics" VerticalAlignment="Center" HorizontalAlignment="Right">
-                <Button.Flyout>
-                  <Flyout Placement="Bottom" ShowMode="Standard">
-                    <local:DiagnosticsPanel Width="300" MinWidth="300" MaxWidth="360" Height="440"/>
-                  </Flyout>
-                </Button.Flyout>
-              </Button>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                          VerticalAlignment="Center" HorizontalAlignment="Right">
+                <Button Classes="secondary" Content="Accurate frame"
+                        Command="{Binding RenderAccuratePreviewCommand}"
+                        IsEnabled="{Binding !IsAccuratePreviewRunning}"/>
+                <Button x:Name="DiagnosticsToggleButton" Classes="secondary"
+                        Content="Diagnostics">
+                  <Button.Flyout>
+                    <Flyout Placement="Bottom" ShowMode="Standard">
+                      <local:DiagnosticsPanel Width="300" MinWidth="300" MaxWidth="360" Height="440"/>
+                    </Flyout>
+                  </Button.Flyout>
+                </Button>
+              </StackPanel>
             </Grid>
           </Border>
 

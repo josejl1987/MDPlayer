@@ -57,6 +57,7 @@ public sealed class MainWindowViewModel : ObservableObject
     // immediate timeline-only frame and an independent refinement that
     // replaces it with interactive output once stems are prepared.
     private bool _interactivePreviewReady;
+    private bool _accuratePreviewRunning;
     private CancellationTokenSource _refinementCts = new();
     private Task _refinementTask = Task.CompletedTask;
     private int _refinementGeneration;
@@ -133,6 +134,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public RelayCommand SeekRelativeCommand { get; private set; } = null!;
     public RelayCommand SeekStartCommand { get; private set; } = null!;
     public RelayCommand SeekEndCommand { get; private set; } = null!;
+    public AsyncRelayCommand RenderAccuratePreviewCommand { get; private set; } = null!;
     public RelayCommand PreviousPointCommand { get; private set; } = null!;
     public RelayCommand NextPointCommand { get; private set; } = null!;
     public AsyncRelayCommand ChooseOutputPathCommand { get; private set; } = null!;
@@ -154,6 +156,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public bool HasInput => _request is not null;
     public bool IsBusy => _state is GuiState.LoadingInput or GuiState.Rendering;
     public bool CanEdit => HasInput && _state == GuiState.Ready;
+    public bool IsAccuratePreviewRunning => _accuratePreviewRunning;
     public bool CanRender => HasInput
         && _state == GuiState.Ready
         && !HasFatalValidationIssues
@@ -694,7 +697,12 @@ public sealed class MainWindowViewModel : ObservableObject
     /// planning and renders a frame at the current time, reusing the cached plan
     /// dimensions.
     /// </summary>
-    private async Task RefreshPreviewAsync(PreviewRefreshKind kind)
+    private Task RefreshPreviewAsync(PreviewRefreshKind kind)
+        => RefreshPreviewAsync(kind, fidelityOverride: null);
+
+    private async Task RefreshPreviewAsync(
+        PreviewRefreshKind kind,
+        PreviewFidelity? fidelityOverride)
     {
         if (_request is null || _session is null)
             return;
@@ -705,6 +713,9 @@ public sealed class MainWindowViewModel : ObservableObject
         VisualizationRequest request = _request;
         IVisualizationPreviewSession session = _session;
         double requestedTime = PreviewTimeSeconds;
+
+        PreviewFidelity fidelity =
+            fidelityOverride ?? CurrentInteractiveFidelity;
 
         CancelPreview();
         _previewCts.Dispose();
@@ -720,7 +731,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 VisualizationPlanResult plan =
                     await session.PlanAsync(request, ct);
 
-                if (IsObsolete(generation, refreshSeq, ct))
+                if (IsObsolete(generation, refreshSeq, session, ct))
                     return;
 
                 _plan = plan;
@@ -737,7 +748,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 GetPreviewDimensions(request.Output);
 
             PreviewFrameRequest frameRequest = BuildFrameRequest(
-                CurrentInteractiveFidelity,
+                fidelity,
                 requestedTime,
                 width,
                 height);
@@ -747,7 +758,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 frameRequest,
                 ct);
 
-            if (IsObsolete(generation, refreshSeq, ct))
+            if (IsObsolete(generation, refreshSeq, session, ct))
                 return;
 
             Preview.ApplyFrame(frame);
@@ -756,8 +767,11 @@ public sealed class MainWindowViewModel : ObservableObject
             // When refinement is still running the applied frame is a
             // timeline-only approximation; restart the interactive waiter at
             // the latest timeline position so a fresh request/time is used.
-            if (!_interactivePreviewReady)
+            if (!_interactivePreviewReady
+                && fidelity != PreviewFidelity.AccurateStill)
+            {
                 StartPreviewRefinement();
+            }
         }
         catch (OperationCanceledException)
         {
@@ -766,7 +780,7 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            if (!IsObsolete(generation, refreshSeq, ct))
+            if (!IsObsolete(generation, refreshSeq, session, ct))
                 Preview.SetError(ex.Message);
         }
         finally
@@ -788,6 +802,42 @@ public sealed class MainWindowViewModel : ObservableObject
         _pendingPreviewRefresh = null;
 
         return RefreshPreviewAsync(PreviewRefreshKind.PlanAndFrame);
+    }
+
+    /// <summary>
+    /// Renders a single accurate still for the current request/time. Applies to
+    /// one frame request only and never becomes persistent refresh state: after
+    /// it completes, subsequent seeks and edits resume the interactive fidelity.
+    /// </summary>
+    public async Task RenderAccuratePreviewAsync()
+    {
+        if (_request is null
+            || _session is null
+            || _accuratePreviewRunning)
+        {
+            return;
+        }
+
+        _accuratePreviewRunning = true;
+        OnPropertyChanged(nameof(IsAccuratePreviewRunning));
+        RenderAccuratePreviewCommand.RaiseCanExecuteChanged();
+
+        _previewDebounce.Stop();
+        _pendingPreviewRefresh = null;
+        CancelRefinement();
+
+        try
+        {
+            await RefreshPreviewAsync(
+                PreviewRefreshKind.FrameOnly,
+                PreviewFidelity.AccurateStill);
+        }
+        finally
+        {
+            _accuratePreviewRunning = false;
+            OnPropertyChanged(nameof(IsAccuratePreviewRunning));
+            RenderAccuratePreviewCommand.RaiseCanExecuteChanged();
+        }
     }
 
     // ---- Progressive refinement ----
@@ -884,10 +934,12 @@ public sealed class MainWindowViewModel : ObservableObject
     private bool IsObsolete(
         int generation,
         int refreshSeq,
+        IVisualizationPreviewSession session,
         CancellationToken cancellationToken)
         => cancellationToken.IsCancellationRequested
             || generation != _previewGeneration
-            || refreshSeq != _refreshSeq;
+            || refreshSeq != _refreshSeq
+            || !ReferenceEquals(session, _session);
 
     /// <summary>
     /// Fits the request output dimensions inside the preview dimension caps,
@@ -1004,6 +1056,10 @@ public sealed class MainWindowViewModel : ObservableObject
         OpenInputCommand = new AsyncRelayCommand(OpenInputDialogAsync);
         RenderCommand = new RelayCommand(() => _ = StartRenderAsync(), () => CanRender);
         RefreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewManuallyAsync, () => CanEdit);
+        RenderAccuratePreviewCommand =
+            new AsyncRelayCommand(
+                RenderAccuratePreviewAsync,
+                () => CanEdit && !_accuratePreviewRunning);
         CancelCurrentCommand = new RelayCommand(CancelCurrent);
         CancelExportCommand = new RelayCommand(() => _exportCts.Cancel());
         SeekRelativeCommand = new RelayCommand(SeekRelative, _ => HasInput);
@@ -1108,6 +1164,7 @@ public sealed class MainWindowViewModel : ObservableObject
             nameof(OutputStatusText), nameof(HasOutputConflict), nameof(CanOpenOutput));
         RenderCommand.RaiseCanExecuteChanged();
         RefreshPreviewCommand.RaiseCanExecuteChanged();
+        RenderAccuratePreviewCommand.RaiseCanExecuteChanged();
         ChooseOutputPathCommand.RaiseCanExecuteChanged();
         OpenOutputFolderCommand.RaiseCanExecuteChanged();
         OpenOutputCommand.RaiseCanExecuteChanged();

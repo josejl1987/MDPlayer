@@ -1,5 +1,4 @@
 using Fmp.Application.Contracts;
-using Fmp.Application.Contracts;
 using Fmp.Gui.Services;
 using Fmp.Gui.ViewModels;
 using Avalonia;
@@ -546,6 +545,89 @@ public sealed class MainWindowViewModelTests
             (int width, int height) = h.Factory.LastSession.FrameSizes[^1];
             Assert.Equal(480, width);
             Assert.Equal(270, height);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task AccurateFrameCommand_AppliesAccurateStill()
+    {
+        // One-shot accurate frame: the command renders exactly one AccurateStill
+        // frame, and the displayed frame reflects it.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            await h.VM.RenderAccuratePreviewAsync();
+
+            Assert.Contains(
+                PreviewFidelity.AccurateStill,
+                h.Factory.LastSession.FrameFidelities);
+            Assert.Equal(PreviewFidelity.AccurateStill, h.VM.Preview.CurrentFidelity);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task SeekAfterAccurate_UsesInteractiveStill()
+    {
+        // The accurate frame is one-shot: after it applies, a seek requests the
+        // normal interactive still because refinement is already ready.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            await h.VM.RenderAccuratePreviewAsync();
+            Assert.Equal(PreviewFidelity.AccurateStill, h.VM.Preview.CurrentFidelity);
+
+            h.ResetCalls();
+            h.VM.PreviewScrubTime = 12;
+            h.VM.CommitScrub();
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
+            Assert.True(h.Factory.LastSession.FrameFidelities.Count > 0);
+            Assert.All(
+                h.Factory.LastSession.FrameFidelities,
+                f => Assert.NotEqual(PreviewFidelity.AccurateStill, f));
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task VisualEditAfterAccurate_DoesNotReuseAccurateStill()
+    {
+        // An accurate frame is never sticky: a subsequent visual edit re-plans and
+        // requests the interactive still, not another accurate frame.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            await h.VM.RenderAccuratePreviewAsync();
+            Assert.Equal(PreviewFidelity.AccurateStill, h.VM.Preview.CurrentFidelity);
+
+            h.ResetCalls();
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Style = r.Style with { Palette = PaletteKind.Monochrome },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
+            Assert.All(
+                h.Factory.LastSession.FrameFidelities,
+                f => Assert.NotEqual(PreviewFidelity.AccurateStill, f));
         }
         finally
         {
