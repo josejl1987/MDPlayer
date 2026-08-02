@@ -511,11 +511,7 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             var progress = new Progress<ExportProgressEvent>(Export.OnEvent);
-            ExportResult result = await _exportProcess.StartAsync(
-                request,
-                progress,
-                Export.SetWorkspace,
-                _exportCts.Token);
+            ExportResult result = await RunWithCapturedLeaseAsync(request, progress);
             SetState(GuiState.Ready);
             if (result.Succeeded)
             {
@@ -549,6 +545,38 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         CancelPreview();
         _exportCts.Cancel();
+    }
+
+    private async Task<ExportResult> RunWithCapturedLeaseAsync(
+        VisualizationRequest request,
+        Progress<ExportProgressEvent> progress)
+    {
+        // Acquire a reusable capture lease and hold it for the duration of
+        // StartAsync so the session keeps the published bundle alive during
+        // export. The lease is kept in an await-using scope (never stored in a
+        // field). If acquisition fails, surface the error and do not start the
+        // CLI.
+        if (_session is null)
+        {
+            return await _exportProcess.StartAsync(
+                request,
+                progress,
+                Export.SetWorkspace,
+                _exportCts.Token);
+        }
+
+        VisualizationRequest pending = _request ?? request;
+        await using (ReusableCaptureLease lease =
+               await _session.AcquireReusableCaptureAsync(pending, _exportCts.Token))
+        {
+            return await _exportProcess.StartAsync(
+                request,
+                progress,
+                Export.SetWorkspace,
+                _exportCts.Token,
+                lease.DirectoryPath,
+                lease.CaptureKey);
+        }
     }
 
     public void CancelPreview() => _previewCts.Cancel();

@@ -538,6 +538,75 @@ public sealed class PreviewParityTests
         }
     }
 
+    [SkippableFact]
+    public async Task PublishedBundle_LoadsPreparedCaptureForReuse()
+    {
+        bool hasPy = IsCommandAvailable("python3");
+        bool hasFf = IsCommandAvailable("ffmpeg");
+        Skip.IfNot(
+            hasPy && hasFf,
+            $"real .vgz reuse test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+
+        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        if (!File.Exists(input))
+            return;
+
+        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            VisualizationRequest request = new()
+            {
+                InputPath = input,
+                OutputPath = Path.Combine(root, "preview.mp4"),
+                Composition = CompositionKind.Diagnostic,
+                Output = new OutputSettings
+                {
+                    Width = 1280,
+                    Height = 720,
+                    FpsNumerator = 30,
+                    FpsDenominator = 1,
+                },
+                Presentation = new PresentationSettings { Title = "Reuse" },
+            };
+
+            var factory = new InProcessVisualizationPreviewSessionFactory();
+            await using (IVisualizationPreviewSession session =
+                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+            {
+                _ = await session.PlanAsync(request, CancellationToken.None);
+
+                await using (ReusableCaptureLease lease =
+                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+                {
+                    string manifestJson = await File.ReadAllTextAsync(
+                        Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
+                    using var manifestDoc = JsonDocument.Parse(manifestJson);
+                    string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
+
+                    PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        lease.DirectoryPath,
+                        lease.CaptureKey,
+                        request,
+                        backendId,
+                        CancellationToken.None);
+
+                    Assert.NotNull(reuse.Timeline);
+                    Assert.True(
+                        reuse.Timeline.Devices.Any() || reuse.Timeline.Voices.Any(),
+                        "reused timeline must carry at least one device or voice");
+                    Assert.False(string.IsNullOrWhiteSpace(reuse.MasterAudioPath));
+                    Assert.True(File.Exists(reuse.MasterAudioPath));
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { /* best-effort cleanup */ }
+        }
+    }
+
     private static bool IsCommandAvailable(string name)
     {
         try

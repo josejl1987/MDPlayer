@@ -220,6 +220,15 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 .Where(stem => stem.Success)
                 .ToList();
 
+        // A capture only publishes reusable scope/stem artifacts when the
+        // backend actually produced them on disk. Master-fallback captures
+        // render the scope from the master waveform at projection time, so they
+        // have no bundled scope metadata or isolated stems and are published as
+        // timeline + master-audio only (the loader must not require a scope
+        // metadata artifact the strategy never wrote).
+        bool hasIsolatedStems = successfulStems.Any(stem => stem.Name != "master");
+        bool scopeEnabled = hasIsolatedStems && File.Exists(_workspace.ScopeMetadataPath);
+
         await VisualizationCaptureBundle.WriteManifestAsync(
             _sessionRoot,
             captureKey,
@@ -232,8 +241,8 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
             successfulStems,
             capture.Scope.Result.SampleRate,
             capture.Scope.Result.MasterSamples,
-            capture.Scope.Enabled,
-            capture.Scope.HasIsolatedStems,
+            scopeEnabled,
+            hasIsolatedStems,
             cancellationToken);
 
         lock (_leaseLock)

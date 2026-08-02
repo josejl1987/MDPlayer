@@ -281,9 +281,13 @@ internal static class RenderCommandParser
 
                     // ---- internal capture reuse (runtime-only) ----
                     case "--capture-dir":
+                        if (captureDirectory != null)
+                            throw new ArgumentException("--capture-dir may be specified only once");
                         captureDirectory = reader.RequireValue(name);
                         break;
                     case "--capture-key":
+                        if (captureKey != null)
+                            throw new ArgumentException("--capture-key may be specified only once");
                         captureKey = reader.RequireValue(name);
                         break;
 

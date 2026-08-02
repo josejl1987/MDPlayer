@@ -48,9 +48,18 @@ public sealed class ExportProcessService
         IProgress<ExportProgressEvent> progress,
         Action<string>? workspaceReady = null,
         CancellationToken ct = default,
-        string? captureDirectory = null)
+        string? captureDirectory = null,
+        string? captureKey = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+
+        bool hasCaptureDir = !string.IsNullOrWhiteSpace(captureDirectory);
+        bool hasCaptureKey = !string.IsNullOrWhiteSpace(captureKey);
+        if (hasCaptureDir != hasCaptureKey)
+        {
+            throw new ArgumentException(
+                "captureDirectory and captureKey must be supplied together (or both omitted).");
+        }
 
         string workspace = Path.Combine(
             Path.GetTempPath(), "MDPlayer", "Visualizer",
@@ -88,10 +97,12 @@ public sealed class ExportProcessService
         };
         // Reuse the active capture bundle when the caller has a valid one;
         // the render CLI then skips playback/semantic capture entirely.
-        if (!string.IsNullOrWhiteSpace(captureDirectory))
+        if (hasCaptureDir && hasCaptureKey)
         {
             renderArgs.Add("--capture-dir");
-            renderArgs.Add(captureDirectory);
+            renderArgs.Add(captureDirectory!);
+            renderArgs.Add("--capture-key");
+            renderArgs.Add(captureKey!);
         }
         var psi = DesktopProcessService.CreateStartInfo(renderCli, renderArgs);
         psi.WorkingDirectory = workspace;

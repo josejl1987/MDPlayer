@@ -40,7 +40,8 @@ internal static partial class VisualizationRunner
         VisualizationRequest request,
         RenderRuntimeOptions runtime,
         VisualizationBackendResolution resolution,
-        string? seedTimelinePath = null)
+        string? seedTimelinePath = null,
+        PreparedCapture? reusableCapture = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(runtime);
@@ -96,36 +97,75 @@ internal static partial class VisualizationRunner
 
         try
         {
-            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
-            Stopwatch captureWatch = Stopwatch.StartNew();
+            VisualizationTimeline timeline;
+            ResolvedVisualizationLayout resolvedLayout;
+            OverlayLayout layout;
+            VisualizationScopeArtifacts scopeArtifacts;
+            ScopeRenderer.ScopeResult scopeResult;
+            PreparedVisualizationSource prepared;
 
-            // Semantic capture (timeline only) — the pure planning half. When a
-            // bundle timeline was supplied it is seeded (reuse) not re-captured.
-            PreparedTimeline preparedTimeline = VisualizationPrepareCoordinator.CaptureTimeline(
-                request, runtime, workspace, resolution, preparedFmpTrack,
-                seedTimelinePath: seedTimelinePath);
-            captureWatch.Stop();
-            captureSeconds = captureWatch.Elapsed.TotalSeconds;
-            progress?.StageCompleted(
-                ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), captureSeconds);
+            if (reusableCapture is not null)
+            {
+                // Reuse path: semantic capture and scope/stem generation are
+                // skipped entirely. Reconstruct the prepared source directly
+                // from the published bundle and persist the reused timeline into
+                // the output workspace.
+                progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
+                prepared =
+                    VisualizationPrepareCoordinator.BuildSource(
+                        reusableCapture, request, workspace);
+                Directory.CreateDirectory(Path.GetDirectoryName(workspace.TimelinePath)!);
+                VisualizationJsonWriter.Write(workspace.TimelinePath, reusableCapture.Timeline);
 
-            progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy));
-            Stopwatch assetWatch = Stopwatch.StartNew();
+                timeline = prepared.Timeline;
+                resolvedLayout = prepared.Layout;
+                layout = resolvedLayout.Geometry;
+                scopeArtifacts = prepared.Scope;
+                scopeResult = scopeArtifacts.Result;
+                captureSeconds = 0;
+                stemRenderSeconds = 0;
 
-            // Heavier half: scope/stem synthesis, projection, energy, plan.
-            PreparedVisualizationSource prepared =
-                VisualizationPrepareCoordinator.PrepareRenderAssets(
-                    preparedTimeline, request, runtime, workspace, resolution, preparedFmpTrack);
-            assetWatch.Stop();
-            stemRenderSeconds = assetWatch.Elapsed.TotalSeconds;
-            progress?.StageCompleted(
-                ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy), stemRenderSeconds);
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), 0);
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy), 0);
+            }
+            else
+            {
+                progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline));
+                Stopwatch captureWatch = Stopwatch.StartNew();
 
-            VisualizationTimeline timeline = prepared.Timeline;
-            ResolvedVisualizationLayout resolvedLayout = prepared.Layout;
-            OverlayLayout layout = resolvedLayout.Geometry;
-            VisualizationScopeArtifacts scopeArtifacts = prepared.Scope;
-            ScopeRenderer.ScopeResult scopeResult = scopeArtifacts.Result;
+                // Semantic capture (timeline only) — the pure planning half.
+                PreparedTimeline preparedTimeline = VisualizationPrepareCoordinator.CaptureTimeline(
+                    request, runtime, workspace, resolution, preparedFmpTrack,
+                    seedTimelinePath: seedTimelinePath);
+                captureWatch.Stop();
+                captureSeconds = captureWatch.Elapsed.TotalSeconds;
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.CapturingSemanticTimeline), captureSeconds);
+
+                progress?.StageStarted(ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy));
+                Stopwatch assetWatch = Stopwatch.StartNew();
+
+                // Heavier half: scope/stem synthesis, projection, energy, plan.
+                prepared =
+                    VisualizationPrepareCoordinator.PrepareRenderAssets(
+                        preparedTimeline, request, runtime, workspace, resolution, preparedFmpTrack);
+                assetWatch.Stop();
+                stemRenderSeconds = assetWatch.Elapsed.TotalSeconds;
+                progress?.StageCompleted(
+                    ProgressJsonlWriter.StageName(ExportStage.AnalyzingEnergy), stemRenderSeconds);
+
+                timeline = prepared.Timeline;
+                resolvedLayout = prepared.Layout;
+                layout = resolvedLayout.Geometry;
+                scopeArtifacts = prepared.Scope;
+                scopeResult = scopeArtifacts.Result;
+            }
+
+            // On the reuse path the composer audio comes from the published bundle.
+            if (reusableCapture is not null)
+                audioPath = reusableCapture.MasterAudioPath;
 
             if (string.Equals(backend.Id, "fmp", StringComparison.Ordinal)
                 && scopeResult.SampleRate != timeline.SampleRate)

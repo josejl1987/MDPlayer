@@ -19,21 +19,36 @@ internal static partial class VisualizationRunner
             VisualizationBackendResolution resolution =
                 VisualizationBackendResolver.Resolve(request, runtime);
 
-            // When the caller supplied a captured bundle directory, seed the
-            // semantic timeline from it (reuse) instead of re-capturing. The
-            // scope/stem artifacts are still projected per request in the
-            // render workspace; only the playback/semantic capture is skipped.
+            // When the caller supplied a captured bundle directory, load and
+            // validate the published capture and reuse it for the render
+            // (semantic timeline, scope/stem synthesis, and master audio are all
+            // taken from the bundle instead of being recomputed).
             string? seedTimelinePath = null;
-            if (!string.IsNullOrWhiteSpace(invocation.CaptureDirectory))
+            PreparedCapture? reusableCapture = null;
+            if (!string.IsNullOrWhiteSpace(invocation.CaptureDirectory)
+                && File.Exists(VisualizationCaptureBundle.ManifestPath(invocation.CaptureDirectory)))
             {
+                var inputFile = new FileInfo(Path.GetFullPath(request.InputPath));
+                TimelineCaptureKey key = TimelineCaptureKey.From(request, inputFile, runtime);
+                reusableCapture = VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                    invocation.CaptureDirectory,
+                    VisualizationCaptureBundle.ComputeCaptureKey(key),
+                    request,
+                    resolution.Backend.Id,
+                    CancellationToken.None).GetAwaiter().GetResult();
                 string bundleTimeline = Path.Combine(invocation.CaptureDirectory, "timeline.json");
                 if (File.Exists(bundleTimeline))
                     seedTimelinePath = bundleTimeline;
             }
 
-            return RunCore(request, runtime, resolution, seedTimelinePath);
+            return RunCore(request, runtime, resolution, seedTimelinePath, reusableCapture);
         }
         catch (VisualizationBackendResolutionException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return ex.ExitCode;
+        }
+        catch (VisualizationExecutionException ex)
         {
             Console.Error.WriteLine($"error: {ex.Message}");
             return ex.ExitCode;
