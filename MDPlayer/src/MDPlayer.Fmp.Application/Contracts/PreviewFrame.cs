@@ -11,6 +11,27 @@ public sealed record PreviewFrameRequest
     public int? Height { get; init; }
 }
 
+/// <summary>
+/// Scope-source class that produced the displayed frame. The preview badge is
+/// bound to this, so "Refined" (per-channel interactive scopes) is never shown
+/// just because background preparation completed — it reflects what was
+/// actually rendered into the frame.
+/// </summary>
+public enum PreviewScopeKind
+{
+    /// <summary>No scope content rendered (timeline-only frame).</summary>
+    None,
+
+    /// <summary>Master waveform fallback repeated across panels.</summary>
+    MasterFallback,
+
+    /// <summary>Isolated per-channel interactive scopes.</summary>
+    PerChannel,
+
+    /// <summary>Production Corrscope frame.</summary>
+    Corrscope,
+}
+
 /// <summary>Result of rendering a still preview frame (PNG bytes).</summary>
 public sealed record PreviewFrameResult
 {
@@ -21,6 +42,13 @@ public sealed record PreviewFrameResult
 
     /// <summary>PNG-encoded frame.</summary>
     public required byte[] PngBytes { get; init; }
+
+    /// <summary>
+    /// The scope-source kind that produced the frame. Defaults to
+    /// <see cref="PreviewScopeKind.None"/> and is set by the render path that
+    /// built the frame.
+    /// </summary>
+    public PreviewScopeKind ScopeKind { get; init; }
 
     /// <summary>True when any layer was approximated or omitted vs final output.</summary>
     public bool HasApproximations { get; init; }

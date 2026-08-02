@@ -12,8 +12,11 @@ internal sealed partial class PanelOverlayRenderer
             {
                 int y = timeline.Y + row * rowHeight;
                 DrawHorizontalLine(frame, timeline.X + _layout.PitchLabelWidth, timeline.Right - 1, y, GridLine);
-                DrawText(frame, timeline.X + 2, y + Math.Max(1, (rowHeight - 7) / 2),
-                    panel.Prepared.Rows[row].Label, MutedText, 1, timeline.X + _layout.PitchLabelWidth - 2);
+                DrawGutterLabelRightAligned(
+                    frame,
+                    timeline,
+                    panel.Prepared.Rows[row].Label,
+                    y + Math.Max(1, (rowHeight - 7) / 2));
             }
         }
     }

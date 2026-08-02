@@ -57,12 +57,16 @@
     <!-- Tabular/monospace mode for time, FPS, dimensions and metrics only. -->
     <FontFamily x:Key="FontFamily.Mono">DejaVu Sans Mono, Liberation Mono, Consolas, monospace</FontFamily>
 
+    <!-- ── Transport icon geometry (previous / next triangles) ──────── -->
+    <StreamGeometry x:Key="Icon.Previous">M 10 0 L 4 5 L 10 10 Z</StreamGeometry>
+    <StreamGeometry x:Key="Icon.Next">M 4 0 L 10 5 L 4 10 Z</StreamGeometry>
+
   </Styles.Resources>
 
   <!-- ── Base: density and surface defaults ────────────────────────── -->
 
   <Style Selector="Button">
-    <Setter Property="MinHeight" Value="30"/>
+    <Setter Property="MinHeight" Value="34"/>
     <Setter Property="FontSize" Value="13"/>
   </Style>
 
@@ -74,7 +78,7 @@
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Padding" Value="16,8"/>
     <Setter Property="FontWeight" Value="SemiBold"/>
-    <Setter Property="MinHeight" Value="32"/>
+    <Setter Property="MinHeight" Value="34"/>
   </Style>
   <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{StaticResource Brush.AccentHover}"/>
@@ -168,25 +172,25 @@
 
   <Style Selector="TextBlock.section-title">
     <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
-    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="FontSize" Value="12"/>
     <Setter Property="FontWeight" Value="SemiBold"/>
     <Setter Property="LetterSpacing" Value="1"/>
   </Style>
 
   <Style Selector="TextBlock.secondary">
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontSize" Value="13"/>
     <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
   </Style>
 
   <Style Selector="TextBlock.caption">
-    <Setter Property="FontSize" Value="11"/>
-    <Setter Property="Foreground" Value="{StaticResource Brush.TextMuted}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
   </Style>
 
   <!-- Metric readouts (time, FPS, dimensions, positions) — mono. -->
   <Style Selector="TextBlock.metric">
     <Setter Property="FontFamily" Value="{StaticResource FontFamily.Mono}"/>
-    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="FontSize" Value="12"/>
     <Setter Property="Foreground" Value="{StaticResource Brush.TextSecondary}"/>
   </Style>
 
@@ -195,6 +199,16 @@
     <Setter Property="FontFamily" Value="{StaticResource FontFamily.Mono}"/>
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+  </Style>
+
+  <!-- Sidebar field labels (adjacent to a compact control, fixed column).
+       Right-aligned so every label shares one right edge at the label-column
+       boundary, and the adjacent control starts at the same X for every row. -->
+  <Style Selector="TextBlock.field-label">
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
+    <Setter Property="HorizontalAlignment" Value="Right"/>
+    <Setter Property="Margin" Value="0,0,0,0"/>
   </Style>
 
   <!-- ── Compact controls for the dense sidebar ────────────────────── -->
@@ -211,8 +225,8 @@
 
   <!-- ComboBox: field + muted arrow, restrained hover. -->
   <Style Selector="ComboBox.compact">
-    <Setter Property="Height" Value="28"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="FontSize" Value="13"/>
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
     <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
@@ -255,8 +269,8 @@
 
   <!-- NumericUpDown: quiet field, slim spinner buttons. -->
   <Style Selector="NumericUpDown.compact">
-    <Setter Property="Height" Value="28"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="FontSize" Value="13"/>
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
     <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
@@ -282,8 +296,8 @@
 
   <!-- TextBox: quiet field. -->
   <Style Selector="TextBox.compact">
-    <Setter Property="Height" Value="28"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="FontSize" Value="13"/>
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Background" Value="{StaticResource Brush.Surface2}"/>
     <Setter Property="BorderBrush" Value="{StaticResource Brush.BorderSoft}"/>
@@ -303,8 +317,8 @@
 
   <!-- CheckBox: compact box with an accent tick. -->
   <Style Selector="CheckBox.compact">
-    <Setter Property="FontSize" Value="12"/>
-    <Setter Property="MinHeight" Value="24"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="MinHeight" Value="28"/>
     <Setter Property="Foreground" Value="{StaticResource Brush.TextPrimary}"/>
   </Style>
   <Style Selector="CheckBox.compact /template/ Border#NormalRectangle">

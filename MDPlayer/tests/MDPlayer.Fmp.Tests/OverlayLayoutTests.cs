@@ -139,10 +139,10 @@ public sealed class OverlayLayoutTests
     {
         var layout = CreateLayout(1920, 1080);
         Assert.Equal(244, layout.PanelHeight);
-        Assert.Equal(20, layout.PanelHeaderHeight);
+        Assert.Equal(28, layout.PanelHeaderHeight);
         Assert.Equal(84, layout.ScopeHeight);
         Assert.Equal(2, layout.DividerHeight);
-        Assert.Equal(138, layout.TimelineHeight);
+        Assert.Equal(130, layout.TimelineHeight);
     }
 
     [Fact]
@@ -180,10 +180,10 @@ public sealed class OverlayLayoutTests
     public void Geometry_1080p_ScopeRowDestinationsAreCorrect()
     {
         var layout = CreateLayout(1920, 1080);
-        Assert.Equal(84, layout.GetScopeRowDestinationY(0));
-        Assert.Equal(328, layout.GetScopeRowDestinationY(1));
-        Assert.Equal(572, layout.GetScopeRowDestinationY(2));
-        Assert.Equal(816, layout.GetScopeRowDestinationY(3));
+        Assert.Equal(92, layout.GetScopeRowDestinationY(0));
+        Assert.Equal(336, layout.GetScopeRowDestinationY(1));
+        Assert.Equal(580, layout.GetScopeRowDestinationY(2));
+        Assert.Equal(824, layout.GetScopeRowDestinationY(3));
     }
 
     [Fact]

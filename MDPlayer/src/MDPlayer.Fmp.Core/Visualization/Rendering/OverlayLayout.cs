@@ -24,7 +24,7 @@ internal sealed class OverlayLayout
     /// <summary>Reference scope height at 1080p.</summary>
     public const int DefaultScopeHeight = 84;
     /// <summary>Reference panel header height at 1080p.</summary>
-    public const int DefaultPanelHeaderHeight = 20;
+    public const int DefaultPanelHeaderHeight = 28;
     /// <summary>Reference divider height at 1080p.</summary>
     public const int DefaultDividerHeight = 2;
     /// <summary>Reference timeline height at 1080p (244 - 20 - 84 - 2).</summary>
@@ -143,12 +143,18 @@ internal sealed class OverlayLayout
         SafeVerticalMargin = Math.Clamp((int)Math.Round(height * (24.0 / 1080.0)), 12, 24);
 
         // Panel sub-regions scale with the panel height, anchored to the
-        // reference 1080p proportions (header 20, scope 84, divider 2,
-        // timeline 138 out of 244).
-        PanelHeaderHeight = Math.Clamp(
-            (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight)),
-            height >= 720 ? 20 : 12,
-            32);
+        // reference 1080p proportions (header 28, scope 84, divider 2,
+        // timeline 130 out of 244).
+        // The 28px reference lands exactly on the default 1080p panel. On tight
+        // high-channel-count grids the header yields down to a 12px floor so the
+        // scope keeps its validator minimum (56@>=720, scaled below).
+        PanelHeaderHeight = (int)Math.Round(PanelHeight * (DefaultPanelHeaderHeight / (double)DefaultPanelHeight));
+        int minimumScopeHeight = Height >= 720 ? 56 : Math.Max(24, (int)Math.Round(56 * Height / 720.0));
+        // Scope = min(default, availableContent / 2); keep that upper bound at
+        // least the scope floor so a tall header can't starve the scope.
+        int maxHeaderForScope = PanelHeight - 2 * minimumScopeHeight;
+        PanelHeaderHeight = Math.Clamp(PanelHeaderHeight, 12, Math.Max(12, maxHeaderForScope));
+        PanelHeaderHeight = Math.Min(PanelHeaderHeight, 40);
 
         int availableContentHeight = PanelHeight - PanelHeaderHeight;
         int defaultScopeHeight = (int)Math.Round(
@@ -170,7 +176,21 @@ internal sealed class OverlayLayout
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the panel timeline area.");
         if (HasScopes && ScopeHeight < 1)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the scope area.");
-        PitchLabelWidth = Math.Max(20, width / 80);
+        // Pitch-label gutter scales with width from a 28px reference at 1920
+        // wide, floored at 20 so narrow canvases keep legible labels.
+        PitchLabelWidth = Math.Min(
+            56,
+            Math.Max(20, (int)Math.Round(width * (28.0 / 1920.0))));
+        // Internal padding for the pitch gutter: labels right-align within the
+        // gutter, keeping 6px clear of the panel boundary and 4px clear of the
+        // lane grid line.
+        PitchLabelInsetLeft = Math.Max(3, PitchLabelWidth / 5);
+        PitchLabelInsetRight = Math.Max(3, PitchLabelWidth / 7);
+        if (PitchLabelInsetLeft + PitchLabelInsetRight > PitchLabelWidth)
+        {
+            PitchLabelInsetLeft = PitchLabelWidth / 2;
+            PitchLabelInsetRight = PitchLabelWidth / 2;
+        }
         PlayheadFraction = pastSeconds / (pastSeconds + futureSeconds);
     }
 
@@ -200,6 +220,10 @@ internal sealed class OverlayLayout
     public double PastSeconds { get; }
     public double FutureSeconds { get; }
     public int PitchLabelWidth { get; }
+    /// <summary>Left clear inset inside the pitch-label gutter.</summary>
+    public int PitchLabelInsetLeft { get; }
+    /// <summary>Right clear inset inside the pitch-label gutter.</summary>
+    public int PitchLabelInsetRight { get; }
     public int TimelineHeight { get; }
     public VisualizationLayoutMode Mode { get; }
     public double RollZoom { get; }
@@ -264,6 +288,38 @@ internal sealed class OverlayLayout
             ? panel.Bottom - ScopeHeight
             : panel.Y + PanelHeaderHeight;
         return new OverlayRect(panel.X, y, panel.Width, ScopeHeight);
+    }
+
+    /// <summary>
+    /// Fixed three-slot layout for a panel header: channel name, live pitch /
+    /// state, then patch/algorithm. Slots share the header rectangle and fill
+    /// the usable width (10px left/right insets, 4px accent bar excluded), so
+    /// all three strings hold identical vertical bounds and can never collide
+    /// or cross the panel boundary.
+    /// </summary>
+    public PanelHeaderLayout HeaderSlots(int panelIndex)
+    {
+        OverlayRect header = GetHeaderRect(panelIndex);
+        const int accentBar = 4;
+        const int leftInset = 10;
+        const int rightInset = 10;
+
+        int usableLeft = header.X + accentBar + leftInset;
+        int rightLimit = header.Right - rightInset;
+        int usable = Math.Max(0, rightLimit - usableLeft);
+        if (usable <= 0)
+            return new PanelHeaderLayout(header, header, header);
+
+        // Name 22%, state 23%, patch remaining 55%. The last slot absorbs any
+        // rounding so the three widths always sum to the usable width.
+        int nameWidth = (int)Math.Round(usable * 0.22);
+        int stateWidth = (int)Math.Round(usable * 0.23);
+        int patchWidth = Math.Max(0, usable - nameWidth - stateWidth);
+
+        return new PanelHeaderLayout(
+            new OverlayRect(usableLeft, header.Y, nameWidth, header.Height),
+            new OverlayRect(usableLeft + nameWidth, header.Y, stateWidth, header.Height),
+            new OverlayRect(usableLeft + nameWidth + stateWidth, header.Y, patchWidth, header.Height));
     }
 
     public OverlayRect GetTimelineRect(int panelIndex)

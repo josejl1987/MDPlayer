@@ -76,7 +76,7 @@ public sealed class PitchSimplificationTests
     {
         // A deterministic pseudo-vibrato with small steps. The simplified
         // contour must deviate from the original by at most 0.15 px at 1080p
-        // (0.15 px × 12-semitone minimum camera span / 138 px lane height).
+        // (0.15 px × 12-semitone minimum camera span / 130 px lane height).
         var pitch = new PitchChange[200];
         double phase = 0;
         for (int i = 0; i < pitch.Length; i++)
@@ -89,7 +89,7 @@ public sealed class PitchSimplificationTests
         Assert.True(prepared.Pitch.Length < pitch.Length,
             "Simplification removed nothing from a dense bend contour.");
 
-        const double laneHeight = 138; // 1080p main lane
+        const double laneHeight = 130; // 1080p main lane (header raised to 28px)
         const double minSpan = 12;     // PitchCamera minimum span
         double pixelsPerSemitone = laneHeight / minSpan;
         double maxErrorPixels = 0;

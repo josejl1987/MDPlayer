@@ -279,8 +279,13 @@ public sealed class MainWindowViewModelTests
         try
         {
             // No ResetCalls here: the per-frame PNG identity is derived from the
-            // session's monotonic frame-call index, so opening=0, refresh A=1,
-            // refresh B=2.
+            // session's monotonic frame-call index. Opening produces the
+            // timeline still (index 0 = 1x1), then the initial refinement
+            // replaces it (index 1 = 2x2) so the displayed image is 2x2.
+            // refresh A = index 2, refresh B = index 3 (both 3x1).
+            Assert.True(h.VM.Preview.IsRefined, "the initial refinement should have completed during open");
+            Assert.Equal(new PixelSize(2, 2), h.VM.Preview.CurrentImage!.PixelSize);
+
             h.Factory.LastSession.GateFrames = true;
 
             Task refreshA = h.VM.RefreshPreviewManuallyAsync();
@@ -289,11 +294,11 @@ public sealed class MainWindowViewModelTests
             Task refreshB = h.VM.RefreshPreviewManuallyAsync();
             Assert.Equal(2, h.Factory.LastSession.FrameGates.Count);
 
-            // Release A's gate first; A is superseded so its 2x2 frame must not
-            // replace the 1x1 frame displayed from opening.
+            // Release A's gate first; A is superseded by B so its frame must not
+            // replace the refined image currently displayed.
             h.Factory.LastSession.FrameGates[0].SetResult();
             await refreshA;
-            Assert.Equal(new PixelSize(1, 1), h.VM.Preview.CurrentImage!.PixelSize);
+            Assert.Equal(new PixelSize(2, 2), h.VM.Preview.CurrentImage!.PixelSize);
 
             // Release B's gate; only B's 3x1 frame becomes CurrentImage.
             h.Factory.LastSession.FrameGates[1].SetResult();
@@ -396,6 +401,88 @@ public sealed class MainWindowViewModelTests
 
             Assert.False(h.VM.Preview.IsLoading, "an export-only change must not leave the preview spinner stuck");
             Assert.Equal("/tmp/in-flight-output.mp4", h.VM.Request!.OutputPath);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task OpeningInputProducesTimelineStillThenRefinedFrame()
+    {
+        // Progressive first paint: opening captures the semantic timeline and
+        // renders a timeline-only still first, then the background refinement
+        // replaces it with the interactive still.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+
+            Assert.Equal(
+                new[] { PreviewFidelity.TimelineStill, PreviewFidelity.InteractiveStill },
+                h.Factory.LastSession.FrameFidelities);
+            Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
+            Assert.True(h.VM.Preview.IsRefined);
+            Assert.Equal("Refined", h.VM.Preview.BadgeText);
+            Assert.NotNull(h.VM.Preview.CurrentImage);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task TimelineStillFidelityIsBadgedAsQuickPreview()
+    {
+        // While refinement is pending (interactive frames fail), the displayed
+        // frame stays a TimelineStill and is badged "Quick" — never a
+        // hard error dialog, never a cleared first frame.
+        Harness h = Harness.Create();
+        try
+        {
+            h.Factory.ConfigureSession = s => s.FailInteractiveFrames = true;
+            await h.OpenAsync();
+
+            Assert.Equal(PreviewFidelity.TimelineStill, h.VM.Preview.CurrentFidelity);
+            Assert.False(h.VM.Preview.IsRefined);
+            Assert.Equal("Quick", h.VM.Preview.BadgeText);
+            Assert.True(h.VM.Preview.HasWarning);
+            Assert.False(h.VM.Preview.HasError);
+            Assert.NotNull(h.VM.Preview.CurrentImage);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task RenderOnlyChangeDuringRefinement_StartsNewInteractiveWaiterWithoutHardFailing()
+    {
+        // A palette change while interactive preparation is pending must cancel
+        // only the obsolete waiter, keep the session-owned stem task alive, and
+        // eventually replace the image with a refined frame. Here the fake
+        // succeeds, so the refinement completes.
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Style = r.Style with { Palette = PaletteKind.Monochrome },
+            });
+
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            // Render-only change re-planes (the fake re-plans) and re-renders an
+            // interactive still because the preview is already interactive.
+            Assert.Equal(1, h.Factory.LastSession.PlanCalls);
+            Assert.Equal(PreviewFidelity.InteractiveStill, h.VM.Preview.CurrentFidelity);
+            Assert.True(h.VM.Preview.IsRefined);
         }
         finally
         {

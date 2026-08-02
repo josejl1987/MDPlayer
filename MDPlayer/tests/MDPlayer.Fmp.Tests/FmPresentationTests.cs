@@ -78,10 +78,11 @@ public sealed class FmPresentationTests
         // The overlay text "ALG 2" should appear somewhere in the header.
         // Since we can't easily check text rendering pixel-by-pixel, verify
         // that the header has more bright pixels than a non-change frame
-        // (the operator bars add brightness).
+        // (the change badge and operator bars add brightness).
         byte[] frameNormal = renderer.RenderFrame(FrameForSample(3000));
         int overlayBrightness = CountBrightPixels(frame, renderer.Width, header);
         int normalBrightness = CountBrightPixels(frameNormal, renderer.Width, header);
+
         Assert.True(overlayBrightness > normalBrightness,
             $"Instrument-change overlay should add brightness: overlay={overlayBrightness}, normal={normalBrightness}.");
     }

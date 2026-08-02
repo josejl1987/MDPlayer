@@ -84,20 +84,30 @@ internal static class UnicodeStaticTextRenderer
 
             if (!string.IsNullOrWhiteSpace(presentation.Title))
             {
+                // Reserve the clock region on the right first, then trim the
+                // title into the remaining width so the two can never overlap.
+                int clockReserve = Math.Min(
+                    Math.Max(120, (int)(top.Width * 0.22)),
+                    top.Width / 3);
+                float titleRightLimit = top.Right - layout.SafeHorizontalMargin - clockReserve;
+                string title = FitWidth(presentation.Title, titleFont, titleRightLimit - (top.X + layout.SafeHorizontalMargin));
                 context.DrawText(
-                    presentation.Title,
+                    title,
                     titleFont,
-                    Color.FromRgb(222, 226, 238),
-                    new PointF(top.X + layout.SafeHorizontalMargin, top.Y + 6));
+                    Color.FromRgb(246, 248, 252),
+                    new PointF(top.X + layout.SafeHorizontalMargin, TopBarCenterY(top, titleFont)));
             }
 
             if (!string.IsNullOrWhiteSpace(presentation.Subtitle))
             {
+                float subtitleY = TopBarCenterY(top, secondaryFont) + secondaryFont.Size + 4;
+                if (subtitleY + secondaryFont.Size > top.Bottom - 2)
+                    subtitleY = top.Bottom - secondaryFont.Size - 2;
                 context.DrawText(
                     presentation.Subtitle,
                     secondaryFont,
-                    Color.FromRgb(139, 146, 167),
-                    new PointF(top.X + layout.SafeHorizontalMargin, top.Y + 39));
+                    Color.FromRgb(196, 202, 218),
+                    new PointF(top.X + layout.SafeHorizontalMargin, subtitleY));
             }
 
             if (!string.IsNullOrWhiteSpace(presentation.Credits))
@@ -105,7 +115,7 @@ internal static class UnicodeStaticTextRenderer
                 context.DrawText(
                     presentation.Credits,
                     secondaryFont,
-                    Color.FromRgb(139, 146, 167),
+                    Color.FromRgb(196, 202, 218),
                     new PointF(bottom.X + layout.SafeHorizontalMargin, bottom.Y + 8));
             }
 
@@ -117,11 +127,15 @@ internal static class UnicodeStaticTextRenderer
                     if (string.IsNullOrWhiteSpace(label) || index >= layout.PanelCount)
                         continue;
                     OverlayRect header = layout.GetHeaderRect(index);
+                    // The antialiased channel name shares the same Name slot as
+                    // the bitmap fallback so both paths never overlap the live
+                    // state / patch columns.
+                    OverlayRect nameSlot = layout.HeaderSlots(index).Name;
                     context.DrawText(
-                        label,
+                        FitWidth(label, trackFont, nameSlot.Width),
                         trackFont,
-                        Color.FromRgb(222, 226, 238),
-                        new PointF(header.X + 10, header.Y + Math.Max(1, (header.Height - trackFont.Size) / 2)));
+                        Color.FromRgb(246, 248, 252),
+                        new PointF(nameSlot.X, header.Y + Math.Max(1, (header.Height - trackFont.Size) / 2)));
                 }
             }
         });
@@ -153,6 +167,38 @@ internal static class UnicodeStaticTextRenderer
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Trims <paramref name="text"/> so it fits <paramref name="maxWidth"/>
+    /// pixels at <paramref name="font"/>, appending an ellipsis when cut. Uses
+    /// the font's precise per-glyph advance rather than a character count.
+    /// </summary>
+    private static string FitWidth(string text, Font font, float maxWidth)
+    {
+        if (string.IsNullOrEmpty(text) || maxWidth <= 0)
+            return "";
+        TextOptions options = new(font);
+        float full = TextMeasurer.MeasureSize(text, options).Width;
+        if (full <= maxWidth)
+            return text;
+
+        const char ellipsis = '\u2026';
+        string suffix = ellipsis.ToString();
+        for (int len = text.Length; len > 0; len--)
+        {
+            string candidate = text[..len] + suffix;
+            if (TextMeasurer.MeasureSize(candidate, options).Width <= maxWidth)
+                return candidate;
+        }
+        return text.Length == 1 ? text : ellipsis.ToString();
+    }
+
+    /// <summary>Centres a line of <paramref name="font"/> text within the top bar.</summary>
+    private static float TopBarCenterY(OverlayRect bar, Font font)
+    {
+        float lineHeight = TextMeasurer.MeasureSize("Ag", new TextOptions(font)).Height;
+        return bar.Y + (bar.Height - lineHeight) / 2f;
     }
 
     private static List<Rune> CollectRunes(

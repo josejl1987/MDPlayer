@@ -219,6 +219,12 @@ public sealed class CliPreviewSession : IVisualizationPreviewSession
             Width = width,
             Height = height,
             PngBytes = pngBytes,
+            ScopeKind = preview.Fidelity switch
+            {
+                PreviewFidelity.AccurateStill => PreviewScopeKind.Corrscope,
+                PreviewFidelity.InteractiveStill => PreviewScopeKind.PerChannel,
+                _ => PreviewScopeKind.None,
+            },
             HasApproximations = json?.HasApproximations ?? false,
             ApproximationNotes = (IReadOnlyList<string>?)json?.ApproximationNotes ?? Array.Empty<string>(),
             Warning = json?.Warning == null ? null : ToValidationIssue(json.Warning),

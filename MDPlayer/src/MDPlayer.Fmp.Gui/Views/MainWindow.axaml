@@ -24,11 +24,11 @@
     <KeyBinding Gesture="End" Command="{Binding SeekEndCommand}"/>
   </Window.KeyBindings>
 
-  <Grid x:Name="MainLayout" RowDefinitions="Auto,Auto,*,Auto,Auto">
+  <Grid x:Name="MainLayout" RowDefinitions="48,Auto,*,36,Auto">
 
     <!-- ── Top toolbar ─────────────────────────────────────────────── -->
-    <Border x:Name="TopToolbar" Grid.Row="0" Classes="toolbar" Padding="12,8">
-      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16">
+    <Border x:Name="TopToolbar" Grid.Row="0" Classes="toolbar" Padding="12,0">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16" VerticalAlignment="Center">
         <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
           <TextBlock Text="MDPlayer" FontSize="14" FontWeight="Bold"
                      Foreground="{StaticResource Brush.Accent}" VerticalAlignment="Center"/>
@@ -39,8 +39,6 @@
                     IsVisible="{Binding HasInput}">
           <TextBlock Text="{Binding InputTitle}" FontWeight="SemiBold"
                      TextTrimming="CharacterEllipsis" MaxWidth="420" VerticalAlignment="Center"/>
-          <TextBlock Classes="caption" Text="{Binding InputSummary}"
-                     TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
           <Button x:Name="RenderButton" Classes="primary" Content="Render"
@@ -84,8 +82,8 @@
     <!-- ── Main area: settings | preview+transport ─────────────────── -->
     <Grid x:Name="MainContent" Grid.Row="2">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="320"
-                          MinWidth="280"
+        <ColumnDefinition Width="344"
+                          MinWidth="320"
                           MaxWidth="400"/>
         <ColumnDefinition Width="6"/>
         <ColumnDefinition Width="*"/>
@@ -138,17 +136,22 @@
               <ItemsControl x:Name="TrackList" ItemsSource="{Binding Settings.Content.Tracks}" MaxHeight="220">
                 <ItemsControl.ItemTemplate>
                   <DataTemplate x:DataType="vm:TrackItemViewModel">
-                    <Grid ColumnDefinitions="Auto,Auto,*" Margin="0,2">
-                      <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected}" VerticalAlignment="Center"/>
-                      <Ellipse Grid.Column="1" Width="8" Height="8" Margin="6,0,6,0" VerticalAlignment="Center"
-                               Fill="{Binding ColorBrush}"/>
-                      <StackPanel Grid.Column="2">
-                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"
+                    <Grid ColumnDefinitions="Auto,3,8,*" MinHeight="42" Margin="0,0,0,0">
+                      <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected}"
+                                VerticalAlignment="Center"/>
+                      <Border Grid.Column="1" Width="3" HorizontalAlignment="Left"
+                              VerticalAlignment="Center" CornerRadius="1"
+                              Background="{Binding ColorBrush}"/>
+                      <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="6,0,0,0" Spacing="2">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="13"
                                    TextTrimming="CharacterEllipsis"/>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
                           <TextBlock Classes="caption" Text="{Binding DeviceFamily}"/>
+                          <TextBlock Classes="caption" Text="·"/>
                           <TextBlock Classes="caption" Text="{Binding SemanticType}"/>
+                          <TextBlock Classes="caption" Text="·" IsVisible="{Binding ScopeAvailable}"/>
                           <TextBlock Classes="caption" Text="scope" IsVisible="{Binding ScopeAvailable}"/>
+                          <TextBlock Classes="caption" Text="·" IsVisible="{Binding ActivityDetected}"/>
                           <TextBlock Classes="caption" Text="activity" IsVisible="{Binding ActivityDetected}"/>
                         </StackPanel>
                       </StackPanel>
@@ -163,44 +166,57 @@
             <!-- PLAYBACK -->
             <StackPanel Spacing="6">
               <TextBlock Classes="section-title" Text="PLAYBACK"/>
-              <Grid ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="8">
-                <TextBlock Classes="caption" Grid.Column="0" Text="Loops" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="1" VerticalAlignment="Center"
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Loops"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Advanced.LoopCount}" Minimum="1" Maximum="99"
                                Increment="1" FormatString="0"/>
-                <TextBlock Classes="caption" Grid.Column="2" Text="Fade s" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="3" VerticalAlignment="Center"
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Fade"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="1" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Advanced.FadeSeconds}" Minimum="0" Maximum="60"
                                Increment="0.5" FormatString="0.0"/>
-              </Grid>
-              <Grid ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="8">
-                <TextBlock Classes="caption" Grid.Column="0" Text="Tail s" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="1" VerticalAlignment="Center"
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="field-label" Text="Tail"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="2" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Advanced.TailSeconds}" Minimum="0" Maximum="60"
                                Increment="0.1" FormatString="0.0"/>
-                <TextBlock Classes="caption" Grid.Column="2" Text="Max s" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="3" VerticalAlignment="Center"
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Classes="field-label" Text="Max duration"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="3" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Advanced.MaximumDurationSeconds}" Minimum="1"
                                Maximum="86400" Increment="10" FormatString="0"/>
               </Grid>
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
-                <TextBlock Classes="caption" Grid.Column="0" Text="Sample rate" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="1" VerticalAlignment="Center"
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Sample rate"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Advanced.SampleRate}" Minimum="8000" Maximum="192000"
                                Increment="1000" FormatString="0"/>
-              </Grid>
-              <StackPanel IsVisible="{Binding Settings.Advanced.ShowSsgGain}" Spacing="4">
-                <TextBlock Classes="caption" Text="SSG gain (dB)"/>
-                <NumericUpDown Classes="compact" Value="{Binding Settings.Advanced.SsgGainDb}"
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="SSG gain (dB)"
+                           VerticalAlignment="Center" IsVisible="{Binding Settings.Advanced.ShowSsgGain}"/>
+                <NumericUpDown Grid.Row="1" Grid.Column="1" Classes="compact"
+                               IsVisible="{Binding Settings.Advanced.ShowSsgGain}"
+                               Value="{Binding Settings.Advanced.SsgGainDb}"
                                Minimum="-60" Maximum="12" Increment="0.5" FormatString="0.0"/>
-                <TextBlock Classes="caption" Text="{Binding Settings.Advanced.SsgGainNote}" TextWrapping="Wrap"/>
-              </StackPanel>
-              <StackPanel IsVisible="{Binding Settings.Advanced.ShowSpcPitch}" Spacing="4">
-                <TextBlock Classes="caption" Text="SPC pitch interpretation"/>
-                <ComboBox Classes="compact" ItemsSource="{Binding Settings.Advanced.SpcPitchOptions}"
+                <TextBlock Grid.Row="2" Grid.Column="1" Classes="caption"
+                           Text="{Binding Settings.Advanced.SsgGainNote}" TextWrapping="Wrap"
+                           IsVisible="{Binding Settings.Advanced.ShowSsgGain}"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Classes="field-label" Text="SPC pitch"
+                           VerticalAlignment="Center" IsVisible="{Binding Settings.Advanced.ShowSpcPitch}"/>
+                <ComboBox Grid.Row="3" Grid.Column="1" Classes="compact"
+                          IsVisible="{Binding Settings.Advanced.ShowSpcPitch}"
+                          ItemsSource="{Binding Settings.Advanced.SpcPitchOptions}"
                           SelectedItem="{Binding Settings.Advanced.SelectedSpcPitch}"/>
-                <TextBlock Classes="caption" Text="{Binding Settings.Advanced.SpcPitchNote}" TextWrapping="Wrap"/>
-              </StackPanel>
+              </Grid>
             </StackPanel>
 
             <Border Classes="separator"/>
@@ -208,22 +224,38 @@
             <!-- STYLE -->
             <StackPanel Spacing="6">
               <TextBlock Classes="section-title" Text="STYLE"/>
-              <Grid ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="8">
-                <TextBlock Classes="caption" Grid.Column="0" Text="Past" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="1" VerticalAlignment="Center"
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Past"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Style.PastSeconds}" Minimum="0.1" Maximum="15"
                                Increment="0.1" FormatString="0.0"/>
-                <TextBlock Classes="caption" Grid.Column="2" Text="Future" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Grid.Column="3" VerticalAlignment="Center"
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Future"
+                           VerticalAlignment="Center"/>
+                <NumericUpDown Grid.Row="1" Grid.Column="1" Classes="compact"
                                Value="{Binding Settings.Style.FutureSeconds}" Minimum="0.1" Maximum="15"
                                Increment="0.1" FormatString="0.0"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="field-label" Text="Effects"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="2" Grid.Column="1" Classes="compact"
+                          ItemsSource="{Binding Settings.Style.EffectsOptions}"
+                          SelectedItem="{Binding Settings.Style.SelectedEffects}"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Classes="field-label" Text="Note colors"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="3" Grid.Column="1" Classes="compact"
+                          ItemsSource="{Binding Settings.Style.NoteColorOptions}"
+                          SelectedItem="{Binding Settings.Style.SelectedNoteColor}"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Classes="field-label" Text="Palette"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="4" Grid.Column="1" Classes="compact"
+                          ItemsSource="{Binding Settings.Style.PaletteOptions}"
+                          SelectedItem="{Binding Settings.Style.SelectedPalette}"/>
               </Grid>
-              <ComboBox Classes="compact" ItemsSource="{Binding Settings.Style.EffectsOptions}"
-                        SelectedItem="{Binding Settings.Style.SelectedEffects}"/>
-              <ComboBox Classes="compact" ItemsSource="{Binding Settings.Style.NoteColorOptions}"
-                        SelectedItem="{Binding Settings.Style.SelectedNoteColor}"/>
-              <ComboBox Classes="compact" ItemsSource="{Binding Settings.Style.PaletteOptions}"
-                        SelectedItem="{Binding Settings.Style.SelectedPalette}"/>
             </StackPanel>
 
             <Border Classes="separator"/>
@@ -231,15 +263,34 @@
             <!-- TITLE & CREDITS -->
             <StackPanel Spacing="6">
               <TextBlock Classes="section-title" Text="TITLE &amp; CREDITS"/>
-              <TextBox Classes="compact" Watermark="Title" Text="{Binding Settings.Metadata.Title}"/>
-              <TextBox Classes="compact" Watermark="Subtitle" Text="{Binding Settings.Metadata.Subtitle}"/>
-              <TextBox Classes="compact" Watermark="Credits" Text="{Binding Settings.Metadata.Credits}"/>
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Title"
+                           VerticalAlignment="Center"/>
+                <TextBox Grid.Row="0" Grid.Column="1" Classes="compact" Watermark="Title"
+                         Text="{Binding Settings.Metadata.Title}"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Subtitle"
+                           VerticalAlignment="Center"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Classes="compact" Watermark="Subtitle"
+                         Text="{Binding Settings.Metadata.Subtitle}"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="field-label" Text="Credits"
+                           VerticalAlignment="Center"/>
+                <TextBox Grid.Row="2" Grid.Column="1" Classes="compact" Watermark="Credits"
+                         Text="{Binding Settings.Metadata.Credits}"/>
+              </Grid>
               <Button Classes="secondary" Content="Restore detected metadata"
                       Command="{Binding Settings.Metadata.RestoreDetectedCommand}" HorizontalAlignment="Left"/>
-              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                <TextBox Classes="compact" Grid.Column="0" Watermark="Font path" Text="{Binding Settings.Metadata.FontPath}"/>
-                <Button Grid.Column="1" Classes="secondary" Content="Browse…"
-                        Command="{Binding Settings.Metadata.BrowseFontCommand}"/>
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12">
+                <TextBlock Grid.Column="0" Classes="field-label" Text="Font path"
+                           VerticalAlignment="Center"/>
+                <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                  <TextBox Classes="compact" Grid.Column="0" Watermark="Font path"
+                           Text="{Binding Settings.Metadata.FontPath}"/>
+                  <Button Grid.Column="1" Classes="secondary" Content="Browse…"
+                          Command="{Binding Settings.Metadata.BrowseFontCommand}"/>
+                </Grid>
               </Grid>
             </StackPanel>
 
@@ -248,37 +299,57 @@
             <!-- OUTPUT -->
             <StackPanel x:Name="SidebarLastSection" Spacing="6">
               <TextBlock Classes="section-title" Text="OUTPUT"/>
-              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                <TextBox x:Name="OutputPathBox" Classes="compact" Grid.Column="0" Text="{Binding OutputPath}" IsReadOnly="True"
-                         ToolTip.Tip="{Binding OutputPath}"/>
-                <Button Grid.Column="1" Classes="secondary" Content="Browse…"
-                        Command="{Binding ChooseOutputPathCommand}"/>
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12">
+                <TextBlock Grid.Column="0" Classes="field-label" Text="Output path"
+                           VerticalAlignment="Center"/>
+                <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                  <TextBox x:Name="OutputPathBox" Classes="compact" Grid.Column="0" Text="{Binding OutputPath}"
+                           IsReadOnly="True" ToolTip.Tip="{Binding OutputPath}"/>
+                  <Button Grid.Column="1" Classes="secondary" Content="Browse…"
+                          Command="{Binding ChooseOutputPathCommand}"/>
+                </Grid>
               </Grid>
               <CheckBox Content="Overwrite existing output"
                         IsChecked="{Binding Settings.Advanced.Overwrite}"/>
-              <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                <ComboBox Classes="compact" Grid.Column="0"
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Encoder"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" Classes="compact"
                           ItemsSource="{Binding Settings.Advanced.EncoderOptions}"
                           SelectedItem="{Binding Settings.Advanced.SelectedEncoder}"/>
-                <ComboBox Classes="compact" Grid.Column="1"
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Quality"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="1" Grid.Column="1" Classes="compact"
                           ItemsSource="{Binding Settings.Basic.QualityOptions}"
                           SelectedItem="{Binding Settings.Basic.SelectedQuality}"/>
-              </Grid>
-              <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                <ComboBox Classes="compact" Grid.Column="0"
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="field-label" Text="Frame rate"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="2" Grid.Column="1" Classes="compact"
                           ItemsSource="{Binding Settings.Basic.FpsOptions}"
                           SelectedItem="{Binding Settings.Basic.SelectedFps}"/>
-                <ComboBox Classes="compact" Grid.Column="1"
+              </Grid>
+              <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
+                    RowDefinitions="Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Resolution"
+                           VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" Classes="compact"
                           ItemsSource="{Binding Settings.Basic.ResolutionOptions}"
                           SelectedItem="{Binding Settings.Basic.SelectedResolution}"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Custom W × H"
+                           VerticalAlignment="Center" IsVisible="{Binding Settings.Basic.IsCustomResolution}"/>
+                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="6"
+                            IsVisible="{Binding Settings.Basic.IsCustomResolution}">
+                  <NumericUpDown Classes="compact" Width="150" Value="{Binding Settings.Basic.CustomWidth}"
+                                 Minimum="480" Maximum="7680" Increment="160"/>
+                  <TextBlock Text="×" VerticalAlignment="Center"/>
+                  <NumericUpDown Classes="compact" Width="150" Value="{Binding Settings.Basic.CustomHeight}"
+                                 Minimum="270" Maximum="4320" Increment="90"/>
+                </StackPanel>
               </Grid>
-              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding Settings.Basic.IsCustomResolution}">
-                <NumericUpDown Classes="compact" Value="{Binding Settings.Basic.CustomWidth}"
-                               Minimum="480" Maximum="7680" Increment="160"/>
-                <TextBlock Text="×" VerticalAlignment="Center"/>
-                <NumericUpDown Classes="compact" Value="{Binding Settings.Basic.CustomHeight}"
-                               Minimum="270" Maximum="4320" Increment="90"/>
-              </StackPanel>
               <TextBlock Classes="caption" Text="{Binding OutputStatusText}" TextWrapping="Wrap"/>
               <Button Classes="primary" Content="Render" Command="{Binding RenderCommand}"
                       HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
@@ -293,22 +364,22 @@
 
       <!-- Center: studio preview frame + attached transport -->
       <Grid x:Name="PreviewPanel" Grid.Column="2" Margin="0,12,12,12">
-        <Grid RowDefinitions="Auto,*,Auto">
+        <Grid RowDefinitions="40,*,44">
 
           <!-- Preview header -->
-          <Border Grid.Row="0" Classes="toolbar" CornerRadius="6,6,0,0" Padding="12,8">
-            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
-              <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                <TextBlock Text="Preview" FontWeight="SemiBold"/>
+          <Border Grid.Row="0" Classes="toolbar" CornerRadius="6,6,0,0" Padding="12,0">
+            <Grid>
+              <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="10"
+                          VerticalAlignment="Center">
+                <TextBlock Text="Preview" FontWeight="SemiBold" FontSize="14"/>
                 <Border CornerRadius="9" Background="{StaticResource Brush.AccentSoft}" Padding="8,2">
-                  <StackPanel Orientation="Horizontal" Spacing="6">
+                  <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <Ellipse Width="6" Height="6" Fill="{StaticResource Brush.Accent}" VerticalAlignment="Center"/>
-                    <TextBlock Text="Accurate" FontSize="11"
+                    <TextBlock Text="{Binding Preview.BadgeText}" FontSize="11"
                                Foreground="{StaticResource Brush.TextSecondary}" VerticalAlignment="Center"/>
                   </StackPanel>
                 </Border>
               </StackPanel>
-              <TextBlock Grid.Column="2" Classes="timecode" Text="{Binding TimeText}" VerticalAlignment="Center"/>
             </Grid>
           </Border>
 
@@ -351,10 +422,18 @@
                         HorizontalAlignment="Center" VerticalAlignment="Center">
                   <StackPanel Orientation="Horizontal" Spacing="12">
                     <ProgressBar IsIndeterminate="True" Width="120" Height="6" VerticalAlignment="Center"/>
-                    <TextBlock Classes="caption" Text="Rendering frame…" VerticalAlignment="Center"/>
+                    <TextBlock Classes="caption" Text="{Binding Preview.LoadingText}" VerticalAlignment="Center"/>
                   </StackPanel>
                 </Border>
               </Panel>
+
+              <!-- Non-blocking refinement warning (first frame remains visible) -->
+              <Border IsVisible="{Binding Preview.HasWarning}" Background="{StaticResource Brush.Surface}"
+                      BorderBrush="{StaticResource Brush.Warning}" BorderThickness="1" CornerRadius="6"
+                      Padding="10,6" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="10">
+                <TextBlock Text="{Binding Preview.WarningText}" FontSize="11" TextWrapping="Wrap"
+                           MaxWidth="640" Foreground="{StaticResource Brush.TextPrimary}"/>
+              </Border>
 
               <Border IsVisible="{Binding Preview.HasError}" Background="{StaticResource Brush.ErrorSurface}"
                       BorderBrush="{StaticResource Brush.Error}" BorderThickness="1" CornerRadius="6"
@@ -372,19 +451,23 @@
 
           <!-- Transport (attached to the viewport) -->
           <Border x:Name="TimelineTransport" Grid.Row="2" Classes="toolbar"
-                  BorderThickness="1,1,1,0" CornerRadius="0,0,6,6" Padding="12,8"
+                  BorderThickness="1,1,1,0" CornerRadius="0,0,6,6" Padding="12,0"
                   IsEnabled="{Binding HasInput}">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="10" VerticalAlignment="Center">
-              <Button Grid.Column="0" Classes="icon" Content="◀" Command="{Binding PreviousPointCommand}"
-                      ToolTip.Tip="Previous representative point"/>
+              <Button Grid.Column="0" Classes="icon" Command="{Binding PreviousPointCommand}"
+                      ToolTip.Tip="Previous representative point">
+                <PathIcon Data="{DynamicResource Icon.Previous}" Width="12" Height="12"/>
+              </Button>
               <Ellipse Grid.Column="1" Width="8" Height="8" Fill="{StaticResource Brush.Accent}"
                        VerticalAlignment="Center" ToolTip.Tip="Current position"/>
               <Slider x:Name="PreviewSlider" Grid.Column="2" Classes="transport" Minimum="0"
                       Maximum="{Binding DurationSeconds}" Value="{Binding PreviewScrubTime}"
                       PointerReleased="OnPreviewSliderReleased"
                       KeyUp="OnPreviewSliderKeyUp"/>
-              <Button Grid.Column="3" Classes="icon" Content="▶" Command="{Binding NextPointCommand}"
-                      ToolTip.Tip="Next representative point"/>
+              <Button Grid.Column="3" Classes="icon" Command="{Binding NextPointCommand}"
+                      ToolTip.Tip="Next representative point">
+                <PathIcon Data="{DynamicResource Icon.Next}" Width="12" Height="12"/>
+              </Button>
               <TextBlock Grid.Column="4" Classes="timecode" Text="{Binding TimeText}"
                          VerticalAlignment="Center" MinWidth="100" TextAlignment="Right"/>
             </Grid>

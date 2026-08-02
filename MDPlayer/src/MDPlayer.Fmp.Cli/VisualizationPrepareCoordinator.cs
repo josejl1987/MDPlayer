@@ -22,13 +22,16 @@ internal sealed record PreparedCapture(
 
 /// <summary>
 /// Lightweight result of the semantic capture stage only: the captured timeline,
-/// backend identity and the durable master-audio path. Used by the planning path
-/// which does not need scope/stem artifacts.
+/// backend identity, the durable master-audio path and the master-audio capture
+/// metadata. Used by the planning path which does not need scope/stem artifacts.
 /// </summary>
 internal sealed record PreparedTimeline(
     VisualizationTimeline Timeline,
     string BackendId,
-    string MasterAudioPath);
+    string MasterAudioPath,
+    long MasterSamples,
+    int SampleRate,
+    bool MasterAudioProduced);
 
 /// <summary>
 /// Shared PR4 preparation stages for the render pipeline. It centralizes
@@ -68,9 +71,19 @@ internal static class VisualizationPrepareCoordinator
 
         // ---- Semantic capture ----
         VisualizationTimeline timeline;
+        long masterSamples;
+        int sampleRate;
+        bool masterAudioProduced;
+
         if (seedTimelinePath != null && File.Exists(seedTimelinePath))
         {
             timeline = VisualizationJsonWriter.Read(seedTimelinePath);
+            masterSamples = Math.Max(
+                0,
+                timeline.EndSample - timeline.StartSample);
+            sampleRate = timeline.SampleRate;
+            masterAudioProduced =
+                File.Exists(workspace.MasterAudioPath);
         }
         else
         {
@@ -81,6 +94,9 @@ internal static class VisualizationPrepareCoordinator
                 throw new VisualizationExecutionException(
                     "visualization capture contains neither semantic events nor waveform activity",
                     10);
+            masterSamples = capture.MasterSamples;
+            sampleRate = capture.SampleRate;
+            masterAudioProduced = capture.MasterAudioProduced;
         }
 
         // The workspace owns its canonical timeline; it is always persisted.
@@ -95,7 +111,12 @@ internal static class VisualizationPrepareCoordinator
         }
 
         return new PreparedTimeline(
-            timeline, resolution.Backend.Id, workspace.MasterAudioPath);
+            timeline,
+            resolution.Backend.Id,
+            workspace.MasterAudioPath,
+            masterSamples,
+            sampleRate,
+            masterAudioProduced);
     }
 
     /// <summary>
@@ -112,8 +133,80 @@ internal static class VisualizationPrepareCoordinator
         VisualizationBackendResolution resolution,
         PreparedTrack? preparedFmpTrack)
     {
-        PreparedCapture capture = RenderScopeArtifacts(timeline, request, runtime, workspace, resolution, preparedFmpTrack);
+        PreparedCapture capture = CompleteCapture(timeline, request, runtime, workspace, resolution, preparedFmpTrack);
         return BuildSource(capture, request, workspace);
+    }
+
+    /// <summary>
+    /// Renders the scope/stem artifacts for an already-captured timeline —
+    /// the second half of capture. Kept public so a session can return a
+    /// timeline-only frame first and complete the scope/stem generation in the
+    /// background on the retained capture context.
+    /// </summary>
+    public static PreparedCapture CompleteCapture(
+        PreparedTimeline timeline,
+        VisualizationRequest request,
+        RenderRuntimeOptions runtime,
+        VisualizationWorkspace workspace,
+        VisualizationBackendResolution resolution,
+        PreparedTrack? preparedFmpTrack)
+    {
+        return RenderScopeArtifacts(timeline, request, runtime, workspace, resolution, preparedFmpTrack);
+    }
+
+    /// <summary>
+    /// Builds a lightweight timeline-only source from a semantic capture. It
+    /// resolves the layout, presentation, aligned timeline and plan, but never
+    /// touches stems, energy, Corrscope or anything that depends on rendered
+    /// audio, so it is cheap enough to run as soon as semantic capture returns.
+    /// </summary>
+    public static PreparedTimelineSource BuildTimelineSource(
+        PreparedTimeline capture,
+        VisualizationRequest request,
+        VisualizationWorkspace workspace)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(workspace);
+
+        ResolvedVisualizationLayout layout =
+            VisualizationLayoutBuilder.Build(
+                capture.Timeline,
+                VisualizationLayoutModeMapper.FromComposition(
+                    request.Composition),
+                request.ToLayoutSettings());
+
+        VisualizationPresentation presentation =
+            VisualizationSupport.ResolvePresentation(
+                request,
+                new FileInfo(request.InputPath));
+
+        VisualizationTimeline timeline =
+            capture.MasterSamples > 0
+                ? VisualizationSupport.AlignTimelineToAudio(
+                    capture.Timeline,
+                    capture.MasterSamples)
+                : capture.Timeline;
+
+        VisualizationPlanResult plan =
+            VisualizationPlanBuilder.Build(
+                request,
+                capture.Timeline,
+                layout,
+                workspace.TimelinePath);
+
+        return new PreparedTimelineSource(
+            Request: request,
+            Timeline: timeline,
+            Layout: layout,
+            Presentation: presentation,
+            Plan: plan,
+            MasterAudioPath: capture.MasterAudioPath,
+            MasterAudioProduced:
+                capture.MasterAudioProduced
+                && File.Exists(capture.MasterAudioPath),
+            BackendId: capture.BackendId,
+            TimelinePath: workspace.TimelinePath);
     }
 
     /// <summary>

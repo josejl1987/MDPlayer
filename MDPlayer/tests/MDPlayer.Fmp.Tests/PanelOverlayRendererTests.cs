@@ -703,11 +703,12 @@ public sealed class PanelOverlayRendererTests
         byte[] frame = renderer.RenderFrame(40);
         OverlayRect topBar = renderer.Layout.TopBarRect;
 
-        // The ellipsis "..." is three dots; verify three consecutive bright
-        // pixel groups exist in the title row (scale 3, y=9 → ~y=9..29).
-        // We just verify the title row has content that ends before the clock.
+        // The ellipsis "..." is three dots; verify the bright pixel groups exist
+        // in the title row. The fallback title is vertically centred (scale 3,
+        // ~21px tall) sharing the top bar's midline with the clock, so scan a
+        // row through its middle.
         int titleEndX = -1;
-        int y = topBar.Y + 9;
+        int y = topBar.Y + Math.Max(2, (topBar.Height - 21) / 2) + 10;
         for (int x = topBar.Right - 200; x >= topBar.X + 24; x--)
         {
             ReadPixel(frame, renderer.Width, x, y, out byte r, out byte g, out byte b, out byte a);

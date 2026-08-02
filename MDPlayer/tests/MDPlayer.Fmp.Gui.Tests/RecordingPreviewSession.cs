@@ -20,6 +20,10 @@ internal sealed class RecordingPreviewFactory : IVisualizationPreviewSessionFact
     /// <summary>When set, the next OpenAsync call throws before any session is created.</summary>
     public Exception? FailNextOpen { get; set; }
 
+    /// <summary>Optional hook invoked on a freshly created session so a test can
+    /// configure failure/gating before the open flow runs any frame render.</summary>
+    public Action<RecordingPreviewSession>? ConfigureSession { get; set; }
+
     public VisualizationRequest? LastRequest => _sessions
         .SelectMany(s => s.Requests)
         .LastOrDefault();
@@ -33,6 +37,7 @@ internal sealed class RecordingPreviewFactory : IVisualizationPreviewSessionFact
         }
 
         var session = new RecordingPreviewSession(inputPath);
+        ConfigureSession?.Invoke(session);
         _sessions.Add(session);
         return Task.FromResult<IVisualizationPreviewSession>(session);
     }
@@ -55,6 +60,10 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
 
     private readonly List<double> _frameTimes = new();
     private readonly List<TaskCompletionSource> _frameGates = new();
+    private readonly List<PreviewFidelity> _frameFidelities = new();
+
+    /// <summary>Fidelities of every frame request, in call order.</summary>
+    public IReadOnlyList<PreviewFidelity> FrameFidelities => _frameFidelities;
 
     public RecordingPreviewSession(string inputPath)
     {
@@ -75,12 +84,17 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     /// <summary>When set, PlanAsync blocks until the gate completes (simulates an in-flight refresh).</summary>
     public TaskCompletionSource? PlanGate { get; set; }
 
-    /// <summary>
-    /// When set, each RenderFrameAsync blocks on a fresh per-call gate (see
+    /// <summary>When set, each RenderFrameAsync blocks on a fresh per-call gate (see
     /// <see cref="FrameGates"/>) so a test can hold a frame in flight and release
     /// it later, in a chosen order.
     /// </summary>
     public bool GateFrames { get; set; }
+
+    /// <summary>When set, interactive-still frames throw (simulates stem/energy preparation failure).</summary>
+    public bool FailInteractiveFrames { get; set; }
+
+    /// <summary>Message reported when <see cref="FailInteractiveFrames"/> is active.</summary>
+    public string FailInteractiveFramesMessage { get; set; } = "scope preparation failed";
 
     /// <summary>Per-call completion gates, in call order, used with <see cref="GateFrames"/>.</summary>
     public IReadOnlyList<TaskCompletionSource> FrameGates => _frameGates;
@@ -116,6 +130,7 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
         Requests.Clear();
         _frameTimes.Clear();
         _frameGates.Clear();
+        _frameFidelities.Clear();
     }
 
     public Task<VisualizationPlanResult> PlanAsync(VisualizationRequest request, CancellationToken cancellationToken)
@@ -155,10 +170,14 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     {
         FrameCalls++;
         _frameTimes.Add(preview.TimeSeconds);
+        _frameFidelities.Add(preview.Fidelity);
 
         // Capture the call index before any await so the returned PNG is
         // stable regardless of gating/release ordering.
         int callIndex = FrameCalls - 1;
+
+        if (FailInteractiveFrames && preview.Fidelity == PreviewFidelity.InteractiveStill)
+            throw new InvalidOperationException(FailInteractiveFramesMessage);
 
         if (GateFrames)
         {
@@ -188,6 +207,12 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
         Width = 1,
         Height = 1,
         PngBytes = png,
+        ScopeKind = preview.Fidelity switch
+        {
+            PreviewFidelity.AccurateStill => PreviewScopeKind.Corrscope,
+            PreviewFidelity.InteractiveStill => PreviewScopeKind.PerChannel,
+            _ => PreviewScopeKind.None,
+        },
     };
 
     public Task<MotionPreviewResult> RenderMotionAsync(

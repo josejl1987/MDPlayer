@@ -12,7 +12,7 @@ internal sealed partial class PanelOverlayRenderer
         {
             int y = ribbons.Y + op * rowHeight;
             DrawHorizontalLine(frame, ribbons.X, ribbons.Right - 1, y, GridLine);
-            DrawText(frame, ribbons.X + 2, y + 1, $"OP{op + 1}", MutedText, 1, ribbons.X + 20);
+            DrawText(frame, ribbons.X + 2, y + 1, $"OP{op + 1}", TertiaryText, 1, ribbons.X + 20);
         }
     }
 
@@ -29,8 +29,28 @@ internal sealed partial class PanelOverlayRenderer
         {
             int y = timeline.Y + row * rowHeight;
             DrawHorizontalLine(frame, timeline.X + labelWidth, timeline.Right - 1, y, GridLine);
-            DrawText(frame, timeline.X + 2, y + Math.Max(1, (rowHeight - 7) / 2), rows[row].Label, MutedText, 1, timeline.X + labelWidth - 2);
+            DrawGutterLabelRightAligned(
+                frame,
+                timeline,
+                rows[row].Label,
+                y + Math.Max(1, (rowHeight - 7) / 2));
         }
+    }
+
+    /// <summary>
+    /// Draws a gutter label (rhythm row / PCM lane) right-aligned within the
+    /// pitch gutter, mirroring the pitch-label inset.
+    /// </summary>
+    private void DrawGutterLabelRightAligned(Span<byte> frame, OverlayRect timeline, string label, int y)
+    {
+        int gutter = _layout.PitchLabelWidth;
+        int minX = timeline.X + _layout.PitchLabelInsetLeft;
+        int maxX = timeline.X + gutter - _layout.PitchLabelInsetRight;
+        int labelWidth = BitmapFont.MeasureText(label, 1);
+        int x = maxX - labelWidth;
+        if (x < minX)
+            x = minX;
+        DrawText(frame, x, y, label, TertiaryText, 1, maxX);
     }
 
     private void DrawClock(Span<byte> frame, long currentSample)
@@ -40,7 +60,7 @@ internal sealed partial class PanelOverlayRenderer
         int clockWidth = BitmapFont.MeasureText(clock, 2);
         int clockX = bar.Right - _layout.SafeHorizontalMargin - clockWidth;
         int clockY = bar.Y + Math.Max(2, (bar.Height - 14) / 2);
-        DrawText(frame, clockX, clockY, clock, BrightText, 2, bar.Right - _layout.SafeHorizontalMargin);
+        DrawText(frame, clockX, clockY, clock, PrimaryText, 2, bar.Right - _layout.SafeHorizontalMargin);
     }
 
     private void DrawLoopLabel(Span<byte> frame, long frameIndex)
@@ -190,52 +210,69 @@ internal sealed partial class PanelOverlayRenderer
         OverlayColor headerAccent = panel.Prepared.Accent
             .Lighten((headerWeight - 0.40) * 0.30)
             .WithAlpha((byte)Math.Clamp(Math.Round(80 + headerWeight * 90), 0, 255));
-        DrawHorizontalLine(frame, header.X + 78, header.Right - 5, header.Bottom - 1, headerAccent);
+        // The underline spans the usable header width, left of the patch slot,
+        // so it never crosses the three header text rectangles.
+        PanelHeaderLayout slots = _layout.HeaderSlots(panel.Index);
+        int underlineLeft = Math.Min(slots.Name.X, slots.State.X);
+        DrawHorizontalLine(frame, underlineLeft, slots.Patch.Right - 1, header.Bottom - 1, headerAccent);
 
-        // Panel headers contain only channel-local information; the global
-        // clock now lives in the dedicated top bar.
-        // Keep a quiet right gutter so the compact panel hierarchy cannot be
-        // mistaken for the global clock area.
-        int rightLimit = header.Right - 64;
-        int valueLeft = header.X + 82;
+        // Lead the state (higher contrast) in its own slot; it must never be
+        // dropped when space is tight.
         int primaryScale = Height >= 720 ? 2 : 1;
-        int primaryHeight = 7 * primaryScale;
-        int textY = header.Y + Math.Max(2, (header.Height - primaryHeight) / 2);
-        int patchX = rightLimit;
-        if (!string.IsNullOrEmpty(patch))
-        {
-            string compactPatch = Ellipsize(patch, primaryScale, Math.Max(0, header.Width / 3));
-            int width = BitmapFont.MeasureText(compactPatch, primaryScale);
-            patchX = rightLimit - width;
-            if (patchX > valueLeft)
-                DrawText(frame, patchX, textY, compactPatch, BrightText, primaryScale, rightLimit);
-            else
-                patchX = rightLimit;
-        }
-
-        int badgeX = patchX;
-        if (!string.IsNullOrEmpty(badges))
-        {
-            int badgeWidth = BitmapFont.MeasureText(badges, 1);
-            badgeX = patchX - badgeWidth - 8;
-            if (badgeX > valueLeft)
-                DrawText(frame, badgeX, header.Y + Math.Max(2, (header.Height - 7) / 2), badges, MutedText, 1, patchX - 4);
-            else
-                badgeX = patchX;
-        }
-
         if (!string.IsNullOrEmpty(state))
         {
-            int stateRight = Math.Max(valueLeft, badgeX - 8);
-            string primary = Ellipsize(state, primaryScale, Math.Max(0, stateRight - valueLeft));
+            string primary = Ellipsize(state, primaryScale, Math.Max(0, slots.State.Width));
             if (!string.IsNullOrEmpty(primary))
-                DrawText(frame, valueLeft, textY, primary, BrightText, primaryScale, stateRight);
+                DrawText(frame, slots.State.X, TextCenterY(slots.State, primaryScale), primary, SecondaryText, primaryScale, slots.State.Right);
+        }
+
+        // Patch/algorithm + optional badges share the right 55% slot. Badges
+        // are a trailing detail: if operator/algorithm text overflows, the
+        // badges are dropped first, then the patch identifier is trimmed.
+        if (slots.Patch.Width > 0)
+        {
+            int contentRight = slots.Patch.Right;
+
+            // Patch text is left-aligned within the patch slot; badges trail
+            // after it (or lead the slot when the patch is empty, e.g. during
+            // an instrument-change overlay).
+            int badgeWidth = badges.Length > 0 ? BitmapFont.MeasureText(badges, 1) : 0;
+            const int badgeGap = 8;
+            string compactPatch = Ellipsize(
+                patch,
+                primaryScale,
+                Math.Max(0, contentRight - slots.Patch.X - (badgeWidth > 0 ? badgeWidth + badgeGap : 0)));
+
+            if (!string.IsNullOrEmpty(compactPatch))
+            {
+                DrawText(frame, slots.Patch.X, TextCenterY(slots.Patch, primaryScale),
+                    compactPatch, SecondaryText, primaryScale, contentRight);
+            }
+
+            if (badgeWidth > 0)
+            {
+                int badgeX = slots.Patch.X
+                    + BitmapFont.MeasureText(compactPatch, primaryScale)
+                    + (compactPatch.Length > 0 ? badgeGap : 0);
+                if (badgeX + badgeWidth <= contentRight)
+                {
+                    DrawText(frame, badgeX,
+                        header.Y + Math.Max(2, (header.Height - 7) / 2),
+                        badges, SecondaryText, 1, contentRight);
+                }
+            }
         }
 
         // §13.3: four compact operator bars during the instrument-change overlay.
         if (showOverlay && _instrumentById.TryGetValue(changeNote.InstrumentId, out var def) && def.Operators.Count > 0)
-            DrawOperatorBars(frame, header, def, rightLimit, panel.Index);
+        {
+            DrawOperatorBars(frame, header, def, slots.Patch.Right, panel.Index);
+        }
     }
+
+    /// <summary>Centres mono text of a given scale within a header rect.</summary>
+    private int TextCenterY(OverlayRect rect, int scale)
+        => rect.Y + Math.Max(0, (rect.Height - 7 * scale) / 2);
 
     private static string SsgModeToken(VisualizationNoteMode mode) => mode switch
     {

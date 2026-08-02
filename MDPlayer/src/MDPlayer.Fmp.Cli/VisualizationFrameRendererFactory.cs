@@ -15,6 +15,47 @@ namespace Fmp.Cli;
 /// </summary>
 internal static class VisualizationFrameRendererFactory
 {
+    /// <summary>
+    /// Builds a timeline-only rendering of the captured semantic timeline:
+    /// full overlay (notes, rhythm events, titles, layout) plus the master
+    /// waveform when the initial capture produced one, but never touching
+    /// isolated stems, Channel-energy analysis, Corrscope, Python or FFmpeg.
+    /// This is the first usable frame shown before scope/stem preparation
+    /// completes.
+    /// </summary>
+    public static VisualizationFrameRenderer CreateTimelinePreview(
+        PreparedTimelineSource prepared,
+        bool introOutro)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+
+        PanelOverlayRenderer overlay =
+            VisualizationComposition.CreateRenderer(
+                prepared.Timeline,
+                prepared.Layout,
+                VisualizationRendererOptions.Build(
+                    prepared.Request,
+                    prepared.Presentation,
+                    introOutro,
+                    Array.Empty<ChannelEnergyEnvelope>()));
+
+        IScopeFrameSource? scope = null;
+
+        if (prepared.MasterAudioProduced
+            && prepared.Layout.Geometry.HasScopes)
+        {
+            scope = MasterWaveformFrameSource.TryCreate(
+                overlay,
+                prepared.MasterAudioPath,
+                overlay.FpsNumerator,
+                overlay.FpsDenominator);
+        }
+
+        return new VisualizationFrameRenderer(
+            overlay,
+            scope);
+    }
+
     public static VisualizationFrameRenderer Create(
         PreparedVisualizationSource prepared,
         VisualizationWorkspace workspace,

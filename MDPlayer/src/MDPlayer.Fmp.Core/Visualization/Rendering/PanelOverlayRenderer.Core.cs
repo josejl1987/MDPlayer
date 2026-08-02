@@ -89,6 +89,45 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private OverlayColor BrightText => Palette.BrightText;
     private OverlayColor Playhead => Palette.Playhead;
 
+    // Three-level text contrast hierarchy against the panel/bar background.
+    // Primary ~90%, Secondary ~72%, Tertiary ~55% opacity on a near-white tint.
+    private OverlayColor _primaryText;
+    private OverlayColor _secondaryText;
+    private OverlayColor _tertiaryText;
+
+    /// <summary>Near-white reference for text hierarchy (all channels equal).</summary>
+    private static readonly byte[] TextHierarchyAlphas = [230, 184, 140];
+
+    private void BuildTextHierarchy()
+    {
+        byte baseValue = Math.Max(HeaderBackground.R, Math.Max(HeaderBackground.G, HeaderBackground.B));
+        // Lifted near-white so even the secondary/tertiary levels stay legible
+        // and the primary reads as crisp white against the panel background.
+        baseValue = (byte)Math.Max(238, Math.Min(250, baseValue + 60));
+        _primaryText = new OverlayColor(baseValue, baseValue, baseValue, TextHierarchyAlphas[0]);
+        _secondaryText = new OverlayColor(baseValue, baseValue, baseValue, TextHierarchyAlphas[1]);
+        _tertiaryText = new OverlayColor(baseValue, baseValue, baseValue, TextHierarchyAlphas[2]);
+    }
+
+    /// <summary>Primary text: channel names, title, clock (~90% alpha).</summary>
+    private OverlayColor PrimaryText => _primaryText;
+    /// <summary>Secondary text: live pitch, patch, instrument (~72% alpha).</summary>
+    private OverlayColor SecondaryText => _secondaryText;
+    /// <summary>Tertiary text: lane labels and supplementary state (~55% alpha).</summary>
+    private OverlayColor TertiaryText => _tertiaryText;
+
+    /// <summary>
+    /// Leftmost X of the clock region in the top bar. The fallback title is
+    /// trimmed to <see cref="TopBarFallbackTitleMaxX"/> so it can never reach
+    /// this column.
+    /// </summary>
+    internal int TopBarClockLeft =>
+        _layout.TopBarRect.Right - _layout.SafeHorizontalMargin - _fullFallbackClockWidth;
+
+    /// <summary>Trimmed right-hand limit of the fallback top-bar title.</summary>
+    internal int TopBarFallbackTitleMaxX =>
+        _layout.TopBarRect.Right - _layout.SafeHorizontalMargin - _fullFallbackClockWidth - 40;
+
     /// <summary>
     /// Notes are born with an enlarged onset cap for this many milliseconds
     /// (§8.5: 80–140 ms — 110 is the deterministic midpoint).
@@ -175,6 +214,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     // never inserts into a dictionary or allocates a string.
     private readonly string[] _clockBySecond;
     private readonly string _totalClockString;
+    private readonly int _fullFallbackClockWidth;
     private readonly string[] _loopLabelByFrame;
     private readonly VisualizationTimeGridLine[] _timeGrid;
     private readonly object _motionBlurGate = new();
@@ -236,6 +276,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _totalClockString = FormatTime(
             Math.Max(0, _timeline.EndSample - _timeline.StartSample) / (double)_timeline.SampleRate);
         _clockBySecond = BuildClockStrings(_totalClockString);
+        _fullFallbackClockWidth = BitmapFont.MeasureText($"00:00 / {_totalClockString}", 2);
         _loopLabelByFrame = BuildLoopLabels();
         _dynamicRestoreRects = BuildDynamicRestoreRects();
 
@@ -259,6 +300,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             trackLabels,
             _options.PreferAntialiasedText);
 
+        BuildTextHierarchy();
         BuildStaticFrame(_staticFrame, drawFallbackText: !_unicodePresentationRendered);
 
         if (_unicodePresentationRendered)
@@ -1155,14 +1197,17 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             FillRect(frame, new OverlayRect(header.X, header.Y, 4, header.Height), accent);
             if (header.Height > 0)
             {
+                // Channel name is clipped to its dedicated header slot so it
+                // can never collide with the live state or patch columns.
+                OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
                 DrawText(
                     frame,
-                    header.X + 10,
-                    header.Y + Math.Max(2, (header.Height - 14) / 2),
-                    _panels[index].Label,
-                    BrightText,
+                    nameSlot.X,
+                    nameSlot.Y + Math.Max(2, (nameSlot.Height - 14) / 2),
+                    Ellipsize(_panels[index].Label, 2, Math.Max(0, nameSlot.Width)),
+                    PrimaryText,
                     2,
-                    header.Right - 8);
+                    nameSlot.Right);
             }
 
             switch (_panels[index].TrackKind)
@@ -1231,18 +1276,25 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // overwrites these regions with anti-aliased glyphs.
             // The clock string is constant-width ("MM:SS / MM:SS"), so the
             // right edge of the clock — and therefore the title limit — is fixed.
-            int fullClockWidth = BitmapFont.MeasureText($"00:00 / {_totalClockString}", 2);
+            // The clock is reserved first; the title is trimmed into whatever
+            // remains so the two can never overlap.
+            int fullClockWidth = _fullFallbackClockWidth;
             int titleMaxX = topBar.Right - _layout.SafeHorizontalMargin - fullClockWidth - 40;
 
             if (titleMaxX > topBar.X + _layout.SafeHorizontalMargin)
             {
+                // Title (scale 3, 21px tall) and clock share the bar's vertical
+                // centre so they read as one baseline-anchored metadata line.
+                int titleCenterY = topBar.Y + Math.Max(2, (topBar.Height - 21) / 2);
                 string title = Ellipsize(_presentation.Title, 3, titleMaxX - (topBar.X + _layout.SafeHorizontalMargin));
-                DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, topBar.Y + 9, title, BrightText, 3, titleMaxX);
+                DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, titleCenterY, title, PrimaryText, 3, titleMaxX);
 
                 if (!string.IsNullOrEmpty(_presentation.Subtitle))
                 {
+                    // Subtitle rides one glyph-height line below the title.
+                    int subtitleCenterY = topBar.Y + Math.Max(2, (topBar.Height - 21) / 2) + 24;
                     string subtitle = Ellipsize(_presentation.Subtitle, 2, titleMaxX - (topBar.X + _layout.SafeHorizontalMargin));
-                    DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, topBar.Y + 39, subtitle, MutedText, 2, titleMaxX);
+                    DrawText(frame, topBar.X + _layout.SafeHorizontalMargin, subtitleCenterY, subtitle, SecondaryText, 2, titleMaxX);
                 }
             }
 
@@ -1272,6 +1324,30 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         var (minMidi, maxMidi) = camera.GetPreciseRange(currentSample);
         DrawPitchGridRange(frame, lane, timeline, minMidi, maxMidi);
     }
+
+    /// <summary>
+    /// Draws a pitch label right-aligned inside the pitch gutter, keeping
+    /// <see cref="OverlayLayout.PitchLabelInsetLeft"/> clear of the panel and
+    /// <see cref="OverlayLayout.PitchLabelInsetRight"/> clear of the lane grid
+    /// line.
+    /// </summary>
+    private void DrawPitchLabelRightAligned(
+        Span<byte> frame,
+        OverlayRect timeline,
+        OverlayRect lane,
+        string label,
+        int labelY)
+    {
+        int gutter = _layout.PitchLabelWidth;
+        int minX = timeline.X + _layout.PitchLabelInsetLeft;
+        int maxX = timeline.X + gutter - _layout.PitchLabelInsetRight;
+        int labelWidth = BitmapFont.MeasureText(label, 1);
+        int x = maxX - labelWidth;
+        if (x < minX)
+            x = minX;
+        DrawText(frame, x, labelY, label, TertiaryText, 1, maxX);
+    }
+
     private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi)
     {
         if (lane.Width <= 0 || lane.Height <= 0)
@@ -1304,7 +1380,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     // the next panel header and leave stale pixels after a
                     // seek or frame transition.
                     if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
-                        DrawText(frame, timeline.X + 2, labelY, label, MutedText, 1, lane.X - 2);
+                        DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
                 }
             }
         }

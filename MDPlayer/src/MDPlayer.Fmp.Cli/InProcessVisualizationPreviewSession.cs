@@ -68,11 +68,26 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     private readonly string? _timelineOutPath;
 
     private CaptureKey? _captureKey;
+    private CaptureContext? _timelineCapture;
+
+    private RenderKey? _timelineRenderKey;
+    private PreparedTimelineSource? _timelineSource;
+    private VisualizationFrameRenderer? _timelineRenderer;
+
+    private Task<PreparedCapture>? _renderAssetsTask;
     private PreparedCapture? _capture;
-    private RenderKey? _renderKey;
+
+    private RenderKey? _fullRenderKey;
     private PreparedVisualizationSource? _prepared;
     private VisualizationFrameRenderer? _interactiveRenderer;
     private VisualizationFrameRenderer? _productionRenderer;
+
+    private readonly CancellationTokenSource _sessionLifetimeCts = new();
+
+    // Serializes capture-affecting work (semantic capture and scope/stem
+    // generation) so an obsolete pass can never write into the workspace at the
+    // same time as a new capture for a changed playback setting.
+    private readonly SemaphoreSlim _captureWorkGate = new(1, 1);
 
     // The seekable WAV readers hold mutable stream positions and scratch
     // buffers, so a single interactive renderer must not render two frames
@@ -133,8 +148,8 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         CancellationToken cancellationToken)
     {
         ValidateInput(request);
-        PreparedVisualizationSource source =
-            await EnsurePreparedAsync(request, cancellationToken);
+        PreparedTimelineSource source =
+            await EnsureTimelineSourceAsync(request, cancellationToken);
         return source.Plan;
     }
 
@@ -148,61 +163,140 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         VisualizationRequest previewRequest = WithPreviewDimensions(
             request, preview.Width, preview.Height);
 
-        PreparedFrameContext context =
-            await EnsureFrameContextAsync(previewRequest, preview.Fidelity, cancellationToken);
+        return preview.Fidelity switch
+        {
+            PreviewFidelity.Layout
+                or PreviewFidelity.TimelineStill =>
+                await RenderTimelineFrameAsync(
+                    previewRequest,
+                    preview,
+                    cancellationToken),
+
+            PreviewFidelity.InteractiveStill
+                or PreviewFidelity.AccurateStill =>
+                await RenderPreparedFrameAsync(
+                    previewRequest,
+                    preview,
+                    cancellationToken),
+
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(preview.Fidelity)),
+        };
+    }
+
+    /// <summary>
+    /// Timeline-path frame: built only from the captured timeline (plus the
+    /// master waveform when the initial capture produced one). Never performs
+    /// stem generation, energy analysis, Corrscope startup or full renderer
+    /// construction, so it is the first frame the GUI can display.
+    /// </summary>
+    private async Task<PreviewFrameResult> RenderTimelineFrameAsync(
+        VisualizationRequest request,
+        PreviewFrameRequest preview,
+        CancellationToken cancellationToken)
+    {
+        PreparedTimelineSource source =
+            await EnsureTimelineSourceAsync(
+                request,
+                cancellationToken);
+
+        _timelineRenderer ??=
+            VisualizationFrameRendererFactory
+                .CreateTimelinePreview(
+                    source,
+                    introOutro: true);
 
         long frameIndex = FrameIndexAt(
             preview.TimeSeconds,
-            previewRequest.Output,
-            context.Renderer.TotalFrames);
+            request.Output,
+            _timelineRenderer.TotalFrames);
 
-        // Interactive still rendering is gated so a single renderer's shared
-        // stream positions and scratch buffers are never touched concurrently.
-        // Patch-1-style obsolescence already prevents stale frames from
-        // reaching the UI; the gate protects the renderer internals themselves.
+        byte[] rgba = preview.Fidelity == PreviewFidelity.Layout
+            ? _timelineRenderer.RenderStaticFrame()
+            : _timelineRenderer.RenderFrame(frameIndex);
+
+        return BuildTimelineFrameResult(
+            source,
+            _timelineRenderer,
+            preview,
+            rgba);
+    }
+
+    /// <summary>
+    /// Full-path frame: waits for the prepared scope/stem assets, then renders
+    /// through the interactive (random-access) or production (Corrscope-path)
+    /// renderer depending on fidelity.
+    /// </summary>
+    private async Task<PreviewFrameResult> RenderPreparedFrameAsync(
+        VisualizationRequest request,
+        PreviewFrameRequest preview,
+        CancellationToken cancellationToken)
+    {
+        PreparedVisualizationSource prepared =
+            await EnsurePreparedAsync(request, cancellationToken);
+
+        VisualizationFrameRenderer renderer =
+            EnsureRenderer(prepared, preview.Fidelity);
+
+        long frameIndex = FrameIndexAt(
+            preview.TimeSeconds,
+            request.Output,
+            renderer.TotalFrames);
+
+        await _frameRenderGate.WaitAsync(cancellationToken);
         byte[] rgba;
-        switch (preview.Fidelity)
+        try
         {
-            case PreviewFidelity.Layout:
-                rgba = context.Renderer.RenderStaticFrame();
-                break;
-
-            case PreviewFidelity.InteractiveStill:
-            case PreviewFidelity.AccurateStill:
-                await _frameRenderGate.WaitAsync(cancellationToken);
-                try
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    rgba = context.Renderer.RenderFrame(frameIndex);
-                    cancellationToken.ThrowIfCancellationRequested();
-                }
-                finally
-                {
-                    _frameRenderGate.Release();
-                }
-                break;
-
-            default:
-                throw new ArgumentOutOfRangeException(nameof(preview.Fidelity));
+            cancellationToken.ThrowIfCancellationRequested();
+            rgba = renderer.RenderFrame(frameIndex);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        finally
+        {
+            _frameRenderGate.Release();
         }
 
+        return BuildPreparedFrameResult(
+            prepared,
+            renderer,
+            preview,
+            rgba);
+    }
+
+    /// <summary>
+    /// Builds the frame result for the full prepared-path renderer. Applies the
+    /// same approximation metadata as before (<see cref="DescribeApproximations"/>),
+    /// plus surfaces a plan validation warning when present.
+    /// </summary>
+    private static PreviewFrameResult BuildPreparedFrameResult(
+        PreparedVisualizationSource prepared,
+        VisualizationFrameRenderer renderer,
+        PreviewFrameRequest preview,
+        byte[] rgba)
+    {
         (bool approximatedScope, string[] approximationNotes) =
-            DescribeApproximations(context, preview.Fidelity);
+            DescribeApproximations(prepared, renderer, preview.Fidelity);
 
         return new PreviewFrameResult
         {
             Fidelity = preview.Fidelity,
             TimeSeconds = preview.TimeSeconds,
-            Width = context.Renderer.Width,
-            Height = context.Renderer.Height,
+            Width = renderer.Width,
+            Height = renderer.Height,
             PngBytes = PngFrameEncoder.Encode(
-                context.Renderer.Width,
-                context.Renderer.Height,
+                renderer.Width,
+                renderer.Height,
                 rgba),
+            ScopeKind = preview.Fidelity switch
+            {
+                PreviewFidelity.InteractiveStill => PreviewScopeKind.PerChannel,
+                PreviewFidelity.AccurateStill => PreviewScopeKind.Corrscope,
+                _ => PreviewScopeKind.None,
+            },
             HasApproximations = approximatedScope,
             ApproximationNotes = approximationNotes,
             Warning =
-                context.Prepared.Plan.ValidationIssues
+                prepared.Plan.ValidationIssues
                     .FirstOrDefault(
                         issue =>
                             issue.Severity
@@ -211,25 +305,86 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     }
 
     /// <summary>
-    /// Computes the approximation metadata for a delivered frame. Interactive
-    /// stills with live scopes are explicitly flagged as approximate (the
-    /// scope triggering is derived from random-access channel waveforms, not
-    /// Corrscope's stateful correlation). Layout previews and production
-    /// stills are never whole-frame approximate.
+    /// Builds the frame result for a timeline-only frame. The approximation
+    /// metadata reflects the incomplete-but-not-failed nature of a quick
+    /// preview: channel scopes are still being prepared and channel-energy
+    /// effects have not run yet. Semantic lanes are never flagged approximate.
     /// </summary>
-    private static (bool Approximated, string[] Notes) DescribeApproximations(
-        PreparedFrameContext context,
-        PreviewFidelity fidelity)
+    private static PreviewFrameResult BuildTimelineFrameResult(
+        PreparedTimelineSource source,
+        VisualizationFrameRenderer renderer,
+        PreviewFrameRequest preview,
+        byte[] rgba)
     {
-        if (fidelity == PreviewFidelity.Layout)
+        IReadOnlyList<string> notes =
+            TimelineApproximationNotes(source);
+
+        return new PreviewFrameResult
         {
-            return (true, ["Static layout preview; dynamic scopes and events are omitted."]);
+            Fidelity = preview.Fidelity,
+            TimeSeconds = preview.TimeSeconds,
+            Width = renderer.Width,
+            Height = renderer.Height,
+            PngBytes = PngFrameEncoder.Encode(
+                renderer.Width,
+                renderer.Height,
+                rgba),
+            ScopeKind = source.MasterAudioProduced
+                ? PreviewScopeKind.MasterFallback
+                : PreviewScopeKind.None,
+            HasApproximations = notes.Count > 0,
+            ApproximationNotes = notes,
+        };
+    }
+
+    /// <summary>
+    /// Approximation notes for a timeline-only frame. The timeline, layout,
+    /// event positions, colors, titles and track selection use the same
+    /// production overlay implementation, so only scope and energy layers are
+    /// described as approximate/pending.
+    /// </summary>
+    private static IReadOnlyList<string> TimelineApproximationNotes(
+        PreparedTimelineSource source)
+    {
+        var notes = new List<string>();
+
+        if (source.Layout.Geometry.HasScopes)
+        {
+            notes.Add(
+                source.MasterAudioProduced
+                    ? "Channel scopes are still being prepared; "
+                      + "scope panels temporarily show the master waveform."
+                    : "Channel scopes are still being prepared; "
+                      + "scope panels are temporarily empty.");
         }
 
+        if (source.Request.Style.Effects
+            != VisualEffects.Off)
+        {
+            notes.Add(
+                "Channel-energy effects will appear "
+                + "when preview preparation completes.");
+        }
+
+        return notes;
+    }
+
+    /// <summary>
+    /// Computes the approximation metadata for a delivered full-path frame.
+    /// Interactive stills with live scopes are explicitly flagged as
+    /// approximate (the scope triggering is derived from random-access channel
+    /// waveforms, not Corrscope's stateful correlation). Production stills are
+    /// never whole-frame approximate.
+    /// </summary>
+    private static (bool Approximated, string[] Notes) DescribeApproximations(
+        PreparedVisualizationSource prepared,
+        VisualizationFrameRenderer renderer,
+        PreviewFidelity fidelity)
+    {
         if (fidelity == PreviewFidelity.InteractiveStill
-            && context.Prepared.Scope.Enabled
-            && context.Prepared.Layout.Geometry.HasScopes
-            && context.Renderer.UsesApproximatedScopeSource)
+            && prepared.Scope.Enabled
+            && prepared.Layout.Geometry.HasScopes
+            && renderer.UsesApproximatedScopeSource)
         {
             var notes = new List<string>
             {
@@ -237,14 +392,14 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 + "with local gain normalization. Final output uses Corrscope's "
                 + "stateful correlation triggering.",
             };
-            if (context.Renderer.InteractiveScopeUnavailableChannelCount > 0)
+            if (renderer.InteractiveScopeUnavailableChannelCount > 0)
                 notes.Add("Some channel scope WAVs were unavailable; affected scope cells are empty.");
             return (true, notes.ToArray());
         }
 
-        if (context.Prepared.Scope.Enabled
-            && context.Prepared.Layout.Geometry.HasScopes
-            && !context.Renderer.HasScopeSource)
+        if (prepared.Scope.Enabled
+            && prepared.Layout.Geometry.HasScopes
+            && !renderer.HasScopeSource)
         {
             return (true, ["Scope source unavailable; scope regions render transparent."]);
         }
@@ -351,6 +506,10 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
 
     public async ValueTask DisposeAsync()
     {
+        // Stop the background scope/stem asset task so it cannot keep writing
+        // into the workspace while we tear it down.
+        _sessionLifetimeCts.Cancel();
+
         // Let any in-flight still/motion render finish before tearing down the
         // renderer streams and the gate itself; otherwise a render already
         // inside the gate could touch a disposed reader.
@@ -366,6 +525,21 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
 
         try
         {
+            _renderAssetsTask?.Wait(TimeSpan.FromMilliseconds(200));
+        }
+        catch
+        {
+            // Best effort; the lifetime token already cancelled any running pass.
+        }
+        finally
+        {
+            _renderAssetsTask?.ContinueWith(
+                t => _ = t.Exception,
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
+
+        try
+        {
             DisposeAllRenderers();
         }
         catch
@@ -376,6 +550,24 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         try
         {
             _frameRenderGate.Dispose();
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        try
+        {
+            _captureWorkGate.Dispose();
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        try
+        {
+            _sessionLifetimeCts.Dispose();
         }
         catch
         {
@@ -471,12 +663,11 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     }
 
     /// <summary>
-    /// Returns the renderer for a fidelity, constructing the interactive
-    /// (random-access, fully in-process) or production (Corrscope-path) renderer
-    /// lazily and keeping both cached across frames. Layout and interactive
-    /// stills share the in-process renderer (never launching Corrscope for a
-    /// static or quick scrub); motion preview and accurate stills use the
-    /// production renderer so they stay byte-identical to final video.
+    /// Returns the renderer for a prepared fidelity, constructing the
+    /// interactive (random-access, fully in-process) or production
+    /// (Corrscope-path) renderer lazily and keeping both cached across frames.
+    /// Motion preview and accurate stills use the production renderer so they
+    /// stay byte-identical to final video.
     /// </summary>
     private VisualizationFrameRenderer EnsureRenderer(
         PreparedVisualizationSource prepared,
@@ -484,7 +675,6 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     {
         switch (fidelity)
         {
-            case PreviewFidelity.Layout:
             case PreviewFidelity.InteractiveStill:
                 return _interactiveRenderer ??=
                     VisualizationFrameRendererFactory.Create(
@@ -509,68 +699,245 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         }
     }
 
-    private void DisposeAllRenderers()
+    private void DisposeFullRenderers()
     {
         _interactiveRenderer?.Dispose();
         _interactiveRenderer = null;
 
         _productionRenderer?.Dispose();
         _productionRenderer = null;
+
+        _timelineRenderer?.Dispose();
+        _timelineRenderer = null;
     }
 
+    private void DisposeAllRenderers() => DisposeFullRenderers();
+
+    /// <summary>
+    /// Returns the timeline capture context for the request's capture key,
+    /// performing backend resolution, FMP track preparation and semantic
+    /// capture once per capture key and retaining the backend resolution and
+    /// prepared FMP track so the later scope/stem stage can reuse them.
+    /// </summary>
+    private async Task<CaptureContext> EnsureTimelineCaptureAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        CaptureKey key = CaptureKey.From(request, _runtime);
+
+        if (_timelineCapture is not null && _captureKey == key)
+        {
+            return _timelineCapture;
+        }
+
+        InvalidateAllPreviewState();
+
+        CaptureContext context = await Task.Run(
+            async () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                await _captureWorkGate.WaitAsync(cancellationToken);
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    VisualizationBackendResolution resolution =
+                        VisualizationBackendResolver.Resolve(request, _runtime);
+
+                    PreparedTrack? track = null;
+
+                    if (string.Equals(
+                            resolution.Backend.Id,
+                            "fmp",
+                            StringComparison.Ordinal))
+                    {
+                        track = TrackPreparation.Prepare(
+                            request.InputPath,
+                            resolution.FmpComPath,
+                            _runtime.AssetsDir,
+                            resolution.SearchPaths);
+                    }
+
+                    PreparedTimeline timeline =
+                        VisualizationPrepareCoordinator.CaptureTimeline(
+                            request,
+                            _runtime,
+                            _workspace,
+                            resolution,
+                            track,
+                            _seedTimelinePath,
+                            _timelineOutPath);
+
+                    return new CaptureContext(
+                        timeline,
+                        resolution,
+                        track);
+                }
+                finally
+                {
+                    _captureWorkGate.Release();
+                }
+            },
+            cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        _captureKey = key;
+        _timelineCapture = context;
+
+        Capabilities = Capabilities with
+        {
+            HasCapturedTimeline = true,
+        };
+
+        return context;
+    }
+
+    /// <summary>
+    /// Returns a lightweight timeline-only source for the request's render key,
+    /// rebuilding it (without recapturing the file) whenever style, layout,
+    /// dimensions, track selection or presentation change.
+    /// </summary>
+    private async Task<PreparedTimelineSource> EnsureTimelineSourceAsync(
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        CaptureContext context =
+            await EnsureTimelineCaptureAsync(
+                request,
+                cancellationToken);
+
+        RenderKey renderKey = RenderKey.From(request);
+
+        if (_timelineSource is null
+            || _timelineRenderKey != renderKey)
+        {
+            _timelineRenderer?.Dispose();
+            _timelineRenderer = null;
+
+            _timelineSource =
+                VisualizationPrepareCoordinator
+                    .BuildTimelineSource(
+                        context.Timeline,
+                        request,
+                        _workspace);
+
+            _timelineRenderKey = renderKey;
+        }
+
+        return _timelineSource;
+    }
+
+    /// <summary>
+    /// Starts at most one heavy scope/stem generation task per capture key and
+    /// returns it. Caller cancellation (via <c>WaitAsync</c>) must cancel only
+    /// that caller's wait, never the underlying stem task, so repeated seeks or
+    /// render-only changes cannot abort preparation; the underlying task is
+    /// cancelled only when the capture key changes or the session is disposed.
+    /// </summary>
+    private Task<PreparedCapture> EnsureRenderAssetsTask(
+        VisualizationRequest request,
+        CaptureContext context)
+    {
+        if (_renderAssetsTask is not null)
+            return _renderAssetsTask;
+
+        Task<PreparedCapture> task = Task.Run(
+            async () =>
+            {
+                await _captureWorkGate.WaitAsync(_sessionLifetimeCts.Token);
+                try
+                {
+                    _sessionLifetimeCts.Token.ThrowIfCancellationRequested();
+
+                    PreparedCapture result =
+                        VisualizationPrepareCoordinator.CompleteCapture(
+                            context.Timeline,
+                            request,
+                            _runtime,
+                            _workspace,
+                            context.Resolution,
+                            context.PreparedTrack);
+
+                    return result;
+                }
+                finally
+                {
+                    _captureWorkGate.Release();
+                }
+            },
+            _sessionLifetimeCts.Token);
+
+        _renderAssetsTask = task;
+        return task;
+    }
+
+    /// <summary>
+    /// Disposes all renderers and clears both lightweight and full source
+    /// caches because the capture (and therefore every derived source) changed.
+    /// </summary>
+    private void InvalidateAllPreviewState()
+    {
+        _timelineRenderer?.Dispose();
+        _timelineRenderer = null;
+        _timelineSource = null;
+        _timelineRenderKey = null;
+
+        DisposeFullRenderers();
+        _prepared = null;
+        _fullRenderKey = null;
+
+        _capture = null;
+        _renderAssetsTask = null;
+    }
+
+    /// <summary>
+    /// Returns the full prepared source, waiting (but never cancelling) the
+    /// deduplicated scope/stem asset task, then projecting the finished capture
+    /// into a request-specific prepared source when the render key changes.
+    /// </summary>
     private async Task<PreparedVisualizationSource> EnsurePreparedAsync(
         VisualizationRequest request,
         CancellationToken cancellationToken)
     {
+        CaptureContext timelineContext =
+            await EnsureTimelineCaptureAsync(
+                request,
+                cancellationToken);
+
+        Task<PreparedCapture> task =
+            EnsureRenderAssetsTask(
+                request,
+                timelineContext);
+
+        PreparedCapture capture =
+            await task.WaitAsync(cancellationToken);
+
         cancellationToken.ThrowIfCancellationRequested();
 
-        CaptureKey captureKey = CaptureKey.From(request, _runtime);
-        RenderKey renderKey = RenderKey.From(request);
-
-        // Capture is reused until a capture-affecting setting changes.
-        if (_capture is null || _captureKey != captureKey)
+        if (_captureKey != CaptureKey.From(request, _runtime))
         {
-            DisposeAllRenderers();
-            _prepared = null;
-            _renderKey = null;
-
-            await Task.Run(() =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                VisualizationBackendResolution resolution =
-                    VisualizationBackendResolver.Resolve(request, _runtime);
-
-                PreparedTrack? track = null;
-                if (string.Equals(resolution.Backend.Id, "fmp", StringComparison.Ordinal))
-                {
-                    track = TrackPreparation.Prepare(
-                        request.InputPath, resolution.FmpComPath,
-                        _runtime.AssetsDir, resolution.SearchPaths);
-                }
-
-                _capture = VisualizationPrepareCoordinator.Capture(
-                    request,
-                    _runtime,
-                    _workspace,
-                    resolution,
-                    track,
-                    seedTimelinePath: _seedTimelinePath,
-                    timelineOutPath: _timelineOutPath);
-                Capabilities = Capabilities with { HasCapturedTimeline = true };
-            }, cancellationToken);
-
-            _captureKey = captureKey;
+            throw new OperationCanceledException(
+                "Preview capture was superseded.");
         }
 
-        // Layout/plan/energy/presentation depend on the full render request.
-        // Rebuild the projection for each distinct render key, reusing capture.
-        if (_prepared is null || _renderKey != renderKey)
+        _capture = capture;
+
+        RenderKey renderKey = RenderKey.From(request);
+
+        if (_prepared is null
+            || _fullRenderKey != renderKey)
         {
-            _prepared = VisualizationPrepareCoordinator.BuildSource(
-                _capture!, request, _workspace);
-            _renderKey = renderKey;
-            DisposeAllRenderers();
+            DisposeFullRenderers();
+
+            _prepared =
+                VisualizationPrepareCoordinator.BuildSource(
+                    capture,
+                    request,
+                    _workspace);
+
+            _fullRenderKey = renderKey;
         }
 
         return _prepared!;
@@ -581,4 +948,9 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     private sealed record PreparedFrameContext(
         PreparedVisualizationSource Prepared,
         VisualizationFrameRenderer Renderer);
+
+    private sealed record CaptureContext(
+        PreparedTimeline Timeline,
+        VisualizationBackendResolution Resolution,
+        PreparedTrack? PreparedTrack);
 }

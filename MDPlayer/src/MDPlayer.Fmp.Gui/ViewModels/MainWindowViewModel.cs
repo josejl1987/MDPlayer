@@ -52,6 +52,14 @@ public sealed class MainWindowViewModel : ObservableObject
     private double _previewTimeSeconds;
     private double _durationSeconds;
 
+    // Patch-3: progressive first paint splits the single refresh into an
+    // immediate timeline-only frame and an independent refinement that
+    // replaces it with interactive output once stems are prepared.
+    private bool _interactivePreviewReady;
+    private CancellationTokenSource _refinementCts = new();
+    private Task _refinementTask = Task.CompletedTask;
+    private int _refinementGeneration;
+
     private CancellationTokenSource _previewCts = new();
     private CancellationTokenSource _exportCts = new();
     private Task? _shutdownTask;
@@ -333,10 +341,18 @@ public sealed class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(HasInput), nameof(InputTitle), nameof(InputSummary));
             AddRecentFile(fullPath);
             SetRequest(BuildInitialRequest(fullPath));
+
+            // The first usable frame is the plan + a timeline-only still. The
+            // UI becomes usable (move to Ready) as soon as that first real
+            // frame exists; refinement to interactive scope output continues in
+            // the background and replaces it when ready.
+            await LoadInitialPreviewAsync(
+                _request!,
+                newSession,
+                _lifeCts.Token);
+
             SetState(GuiState.Ready);
-            // First load refreshes immediately (no debounce delay) and always
-            // plans, capturing and preparing the source once.
-            await RefreshPreviewAsync(PreviewRefreshKind.PlanAndFrame);
+            StartPreviewRefinement();
         }
         catch (OperationCanceledException)
         {
@@ -349,14 +365,116 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Produces and displays the first usable frame: a plan followed by a
+    /// timeline-only still (no stems/energy yet). After this returns the UI can
+    /// transition to <see cref="GuiState.Ready"/> and refinement may start.
+    /// </summary>
+    private async Task LoadInitialPreviewAsync(
+        VisualizationRequest request,
+        IVisualizationPreviewSession session,
+        CancellationToken cancellationToken)
+    {
+        Preview.SetLoading(
+            true,
+            "Reading timeline…");
+
+        VisualizationPlanResult plan =
+            await session.PlanAsync(
+                request,
+                cancellationToken);
+
+        ApplyPlan(plan);
+
+        (int width, int height) =
+            GetPreviewDimensions(request.Output);
+
+        PreviewFrameRequest frameRequest =
+            BuildFrameRequest(
+                PreviewFidelity.TimelineStill,
+                PreviewTimeSeconds,
+                width,
+                height);
+
+        PreviewFrameResult firstFrame =
+            await session.RenderFrameAsync(
+                request,
+                frameRequest,
+                cancellationToken);
+
+        Preview.ApplyFrame(firstFrame);
+
+        _interactivePreviewReady = false;
+    }
+
+    private static PreviewFrameRequest BuildFrameRequest(
+        PreviewFidelity fidelity,
+        double timeSeconds,
+        int width,
+        int height)
+    {
+        return new PreviewFrameRequest
+        {
+            TimeSeconds = timeSeconds,
+            Width = width,
+            Height = height,
+            Fidelity = fidelity,
+        };
+    }
+
+    /// <summary>
+    /// Fidelity used for immediate scrubbing/refresh frame requests: interactive
+    /// once refinement has succeeded, timeline-only until then.
+    /// </summary>
+    private PreviewFidelity CurrentInteractiveFidelity =>
+        _interactivePreviewReady
+            ? PreviewFidelity.InteractiveStill
+            : PreviewFidelity.TimelineStill;
+
     /// <summary>Applies a request delta and schedules a debounced preview refresh.</summary>
     public void ApplyVisualSetting(Func<VisualizationRequest, VisualizationRequest> transform)
     {
+        if (_request is null)
+            return;
+        VisualizationRequest previous = _request;
         if (SetNewRequest(transform))
         {
             _previewGeneration++;
+
+            if (CaptureSettingsChanged(previous, _request))
+            {
+                // Capture-affecting change: the session will invalidate the old
+                // capture key, perform a new timeline capture and start a new
+                // asset task. The next refresh renders a fresh timeline frame
+                // and restarts refinement.
+                _interactivePreviewReady = false;
+                CancelRefinement();
+            }
+            else
+            {
+                // Render-only change: keep the session-owned raw asset task
+                // alive; rebuild only the timeline source/renderer. The refresh
+                // renders a new timeline frame immediately and restarts the
+                // interactive waiter with the latest request.
+                CancelRefinement();
+            }
+
             SchedulePreviewRefresh();
         }
+    }
+
+    /// <summary>
+    /// True when the change alters audio/timeline capture (playback settings
+    /// such as sample rate, loop count, fade/tail, SSG gain, SPC pitch). The
+    /// session remains the authoritative invalidation layer; this only lets the
+    /// GUI mark the interactive preview stale so it re-renders a timeline frame
+    /// and restarts refinement after such a change.
+    /// </summary>
+    private static bool CaptureSettingsChanged(
+        VisualizationRequest previous,
+        VisualizationRequest next)
+    {
+        return previous.Playback != next.Playback;
     }
 
     /// <summary>Applies an output-only request delta without refreshing the preview.</summary>
@@ -509,6 +627,9 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         await _activePreviewRefresh;
+        // Also let any in-flight background refinement settle so tests (and
+        // callers) observe a stable preview image and fidelity.
+        await _refinementTask;
     }
 
     /// <summary>
@@ -610,15 +731,15 @@ public sealed class MainWindowViewModel : ObservableObject
             (int width, int height) =
                 GetPreviewDimensions(request.Output);
 
+            PreviewFrameRequest frameRequest = BuildFrameRequest(
+                CurrentInteractiveFidelity,
+                requestedTime,
+                width,
+                height);
+
             PreviewFrameResult frame = await session.RenderFrameAsync(
                 request,
-                new PreviewFrameRequest
-                {
-                    TimeSeconds = requestedTime,
-                    Width = width,
-                    Height = height,
-                    Fidelity = PreviewFidelity.InteractiveStill,
-                },
+                frameRequest,
                 ct);
 
             if (IsObsolete(generation, refreshSeq, ct))
@@ -626,10 +747,17 @@ public sealed class MainWindowViewModel : ObservableObject
 
             Preview.ApplyFrame(frame);
             ClearError();
+
+            // When refinement is still running the applied frame is a
+            // timeline-only approximation; restart the interactive waiter at
+            // the latest timeline position so a fresh request/time is used.
+            if (!_interactivePreviewReady)
+                StartPreviewRefinement();
         }
         catch (OperationCanceledException)
         {
-            // Replaced by a newer request or a newer refresh.
+            // Replaced by a newer request or a newer refresh. The session-owned
+            // asset task continues; only this waiter is cancelled.
         }
         catch (Exception ex)
         {
@@ -655,6 +783,97 @@ public sealed class MainWindowViewModel : ObservableObject
         _pendingPreviewRefresh = null;
 
         return RefreshPreviewAsync(PreviewRefreshKind.PlanAndFrame);
+    }
+
+    // ---- Progressive refinement ----
+
+    /// <summary>
+    /// Cancels only the current refinement waiter. Never cancels the
+    /// session-owned raw scope/stem task, so repeated edits/seeks cannot abort
+    /// preparation.
+    /// </summary>
+    private void CancelRefinement()
+    {
+        _refinementCts.Cancel();
+        _refinementCts.Dispose();
+        _refinementCts = CancellationTokenSource.CreateLinkedTokenSource(_lifeCts.Token);
+    }
+
+    /// <summary>
+    /// Starts a new interactive-refinement waiter for the current request and
+    /// timeline position. The heavy session-owned asset task runs independently
+    /// and continues across superseded waiters.
+    /// </summary>
+    private void StartPreviewRefinement()
+    {
+        if (_request is null || _session is null)
+            return;
+
+        CancelRefinement();
+
+        int generation = ++_refinementGeneration;
+
+        VisualizationRequest request = _request;
+        double time = PreviewTimeSeconds;
+        CancellationToken ct = _refinementCts.Token;
+
+        Preview.SetLoading(
+            true,
+            "Preparing channel scopes…");
+
+        _refinementTask = RefinePreviewAsync(generation, request, time, ct);
+    }
+
+    private async Task RefinePreviewAsync(
+        int generation,
+        VisualizationRequest request,
+        double timeSeconds,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            (int width, int height) =
+                GetPreviewDimensions(request.Output);
+
+            PreviewFrameResult frame =
+                await _session!.RenderFrameAsync(
+                    request,
+                    BuildFrameRequest(
+                        PreviewFidelity.InteractiveStill,
+                        timeSeconds,
+                        width,
+                        height),
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested
+                || generation != _refinementGeneration
+                || request != _request)
+            {
+                return;
+            }
+
+            Preview.ApplyFrame(frame);
+            _interactivePreviewReady = true;
+            ClearError();
+        }
+        catch (OperationCanceledException)
+        {
+            // The session-owned asset task continues when only this waiter was
+            // superseded by a newer seek/request.
+        }
+        catch (Exception ex)
+        {
+            if (generation == _refinementGeneration)
+            {
+                Preview.SetRefinementWarning(
+                    "Channel preview preparation failed: " + ex.Message);
+            }
+        }
+        finally
+        {
+            if (generation == _refinementGeneration)
+                Preview.SetLoading(false);
+        }
     }
 
     private bool IsObsolete(
@@ -860,6 +1079,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task DisposeSessionAsync()
     {
         CancelPreview();
+        CancelRefinement();
+        _interactivePreviewReady = false;
         Preview.Clear();
         if (_session is not null)
         {
@@ -887,6 +1108,7 @@ public sealed class MainWindowViewModel : ObservableObject
         _previewDebounce.Stop();
         _previewCts.Cancel();
         _exportCts.Cancel();
+        CancelRefinement();
         await DisposeSessionAsync();
         Preview.Dispose();
     }
