@@ -208,6 +208,7 @@ public static class PreviewCommand
         PreviewFidelity fidelity = settings.Fidelity switch
         {
             "layout" => PreviewFidelity.Layout,
+            "interactive" => PreviewFidelity.InteractiveStill,
             _ => PreviewFidelity.AccurateStill,
         };
         return new PreviewFrameRequest
@@ -313,8 +314,10 @@ public static class PreviewCommand
         return raw?.Trim().ToLowerInvariant() switch
         {
             "layout" => "layout",
+            "interactive" => "interactive",
             "accurate" => "accurate",
-            _ => throw new ArgumentException($"unknown fidelity '{raw}' (expected layout or accurate)"),
+            _ => throw new ArgumentException(
+                $"unknown fidelity '{raw}' (expected layout, interactive, or accurate)"),
         };
     }
 

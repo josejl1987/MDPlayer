@@ -50,6 +50,24 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     public bool HasScopeSource => _scopeFrames is not null;
 
     /// <summary>
+    /// True when the active scope source is the in-process random-access
+    /// channel reader (which approximates Corrscope's triggering) rather than
+    /// the production Corrscope bridge or master-waveform fallback.
+    /// </summary>
+    public bool UsesApproximatedScopeSource =>
+        _scopeFrames is InteractiveWaveformFrameSource;
+
+    /// <summary>
+    /// For an interactive scope source, the count of mapped scope channels whose
+    /// stem WAV could not be opened (their panels render transparent). Zero for
+    /// any other source.
+    /// </summary>
+    public int InteractiveScopeUnavailableChannelCount =>
+        _scopeFrames is InteractiveWaveformFrameSource interactive
+            ? interactive.UnavailableChannelCount
+            : 0;
+
+    /// <summary>
     /// Produces the finished RGBA frame for <paramref name="frameIndex"/>:
     /// semantic panels, layout background, scopes (or the transparent scope
     /// holes when no isolated scope source exists), title/credits, analysis

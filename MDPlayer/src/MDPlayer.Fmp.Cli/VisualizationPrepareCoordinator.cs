@@ -215,8 +215,8 @@ internal static class VisualizationPrepareCoordinator
         // expand the master fallback to the current panel count. This keeps the
         // capture reusable across compositions/track selections instead of
         // baking it to the first resolved layout.
-        ScopeRenderer.ScopeResult projectedScope =
-            ProjectScopes(scopeResult, layout, workspace);
+        ScopeProjection projected = ProjectScopes(scopeResult, layout, workspace);
+        ScopeRenderer.ScopeResult projectedScope = projected.Result;
 
         // Align the semantic timeline to the actual audio length.
         VisualizationTimeline videoTimeline = VisualizationSupport.AlignTimelineToAudio(
@@ -247,6 +247,7 @@ internal static class VisualizationPrepareCoordinator
             Analysis: AnalysisOverlayScene.Empty,
             Energy: energy,
             Scope: capture.Scope with { Result = projectedScope },
+            ScopeChannels: projected.Channels,
             Plan: plan,
             MasterAudioPath: capture.MasterAudioPath,
             BackendId: capture.BackendId,
@@ -262,13 +263,13 @@ internal static class VisualizationPrepareCoordinator
     /// means later layout/track-selection changes reuse the raw stems and re-derive
     /// the request-specific scope channel set.
     /// </summary>
-    internal static ScopeRenderer.ScopeResult ProjectScopes(
+    internal static ScopeProjection ProjectScopes(
         ScopeRenderer.ScopeResult captured,
         ResolvedVisualizationLayout layout,
         VisualizationWorkspace workspace)
     {
         if (!layout.Geometry.HasScopes)
-            return captured;
+            return new ScopeProjection(captured, Array.Empty<ProjectedScopeChannel>());
 
         // Name -> presentation track id derived from the *captured stems*
         // themselves. The renderers stamp their own channel identity onto each
@@ -308,19 +309,6 @@ internal static class VisualizationPrepareCoordinator
                 panelIndexOf.TryAdd($"{panels[i].Id}.{row.Id}", i);
         }
 
-        var projected = new ScopeRenderer.ScopeResult
-        {
-            Success = true,
-            InputPath = captured.InputPath,
-            OutputDir = captured.OutputDir,
-            MasterSamples = captured.MasterSamples,
-            SampleRate = captured.SampleRate,
-            CompletionReason = captured.CompletionReason,
-        };
-
-        if (master is not null)
-            projected.Stems.Add(master);
-
         if (isolated.Count == 0)
         {
             // No isolated stem was rendered at all: fall back to one master
@@ -332,7 +320,9 @@ internal static class VisualizationPrepareCoordinator
         // that resolve to a panel (request-specific track selection may have
         // produced a strict subset), ordered by panel index. Anything that does
         // not belong to a panel is dropped instead of being appended at the end,
-        // which previously could over-fill a custom one-panel grid.
+        // which previously could over-fill a custom one-panel grid. The panel
+        // index is preserved so the interactive renderer never infers panel
+        // identity from list position (sparse channel sets must not shift).
         var ordered = isolated
             .Select(stem =>
             {
@@ -343,7 +333,6 @@ internal static class VisualizationPrepareCoordinator
             .Where(item => item.PanelIndex < panels.Count)
             .OrderBy(item => item.PanelIndex)
             .ThenBy(item => item.Stem.StableOrder)
-            .Select(item => item.Stem)
             .ToList();
 
         if (ordered.Count == 0)
@@ -354,16 +343,41 @@ internal static class VisualizationPrepareCoordinator
             return ExpandMasterToPanels(workspace, captured, panels.Count);
         }
 
-        projected.Stems.AddRange(ordered);
-        return projected;
+        var projected = new ScopeRenderer.ScopeResult
+        {
+            Success = true,
+            InputPath = captured.InputPath,
+            OutputDir = captured.OutputDir,
+            MasterSamples = captured.MasterSamples,
+            SampleRate = captured.SampleRate,
+            CompletionReason = captured.CompletionReason,
+        };
+        if (master is not null)
+            projected.Stems.Add(master);
+        projected.Stems.AddRange(ordered.Select(item => item.Stem));
+
+        var channels = ordered
+            .Select(item => new ProjectedScopeChannel(
+                PanelIndex: item.PanelIndex,
+                Name: item.Stem.Name,
+                Label: item.Stem.Label,
+                WavPath: item.Stem.WavPath,
+                SemanticClass: item.Stem.SemanticClass,
+                WindowWidth: item.Stem.WindowWidth,
+                DefaultAmplification: item.Stem.DefaultAmplification,
+                DefaultColor: item.Stem.DefaultColor))
+            .ToArray();
+
+        return new ScopeProjection(projected, channels);
     }
 
     /// <summary>
     /// Master-fallback grid filling: when no isolated stems exist, publish one
     /// master channel per panel so every scope grid cell carries the master
-    /// waveform and the overlay scope cells stay aligned.
+    /// waveform and the overlay scope cells stay aligned. The interactive scope
+    /// source is handed an equivalent master-backed channel per panel.
     /// </summary>
-    private static ScopeRenderer.ScopeResult ExpandMasterToPanels(
+    private static ScopeProjection ExpandMasterToPanels(
         VisualizationWorkspace workspace,
         ScopeRenderer.ScopeResult scopeResult,
         int panelCount)
@@ -377,6 +391,7 @@ internal static class VisualizationPrepareCoordinator
             SampleRate = scopeResult.SampleRate,
             CompletionReason = scopeResult.CompletionReason,
         };
+        var channels = new ProjectedScopeChannel[panelCount];
         for (int panel = 0; panel < panelCount; panel++)
         {
             result.Stems.Add(new ScopeRenderer.StemResult
@@ -388,7 +403,25 @@ internal static class VisualizationPrepareCoordinator
                 Channels = 2,
                 Success = true,
             });
+            channels[panel] = new ProjectedScopeChannel(
+                PanelIndex: panel,
+                Name: "master",
+                Label: "Master",
+                WavPath: workspace.MasterAudioPath,
+                SemanticClass: ScopeSemanticClass.Mixed,
+                WindowWidth: 1,
+                DefaultAmplification: 1.0,
+                DefaultColor: null);
         }
-        return result;
+        return new ScopeProjection(result, channels);
     }
+
+    /// <summary>
+    /// Bundles the production scope result with the explicit panel->stem mapping
+    /// used by the interactive scope source. The mapping is required so sparse
+    /// channel sets are placed by panel index rather than by list position.
+    /// </summary>
+    internal sealed record ScopeProjection(
+        ScopeRenderer.ScopeResult Result,
+        IReadOnlyList<ProjectedScopeChannel> Channels);
 }

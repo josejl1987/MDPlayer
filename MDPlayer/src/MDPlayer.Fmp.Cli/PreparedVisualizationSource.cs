@@ -21,6 +21,7 @@ internal sealed record PreparedVisualizationSource(
     AnalysisOverlayScene Analysis,
     IReadOnlyList<ChannelEnergyEnvelope> Energy,
     VisualizationScopeArtifacts Scope,
+    IReadOnlyList<ProjectedScopeChannel> ScopeChannels,
     VisualizationPlanResult Plan,
     string MasterAudioPath,
     string BackendId,

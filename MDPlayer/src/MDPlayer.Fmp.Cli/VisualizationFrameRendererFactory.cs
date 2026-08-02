@@ -19,7 +19,8 @@ internal static class VisualizationFrameRendererFactory
         PreparedVisualizationSource prepared,
         VisualizationWorkspace workspace,
         RenderRuntimeOptions runtime,
-        bool introOutro)
+        bool introOutro,
+        ScopeFrameSourcePolicy scopePolicy = ScopeFrameSourcePolicy.Production)
     {
         ArgumentNullException.ThrowIfNull(prepared);
         ArgumentNullException.ThrowIfNull(workspace);
@@ -35,13 +36,12 @@ internal static class VisualizationFrameRendererFactory
                 prepared.Energy));
 
         IScopeFrameSource? scope =
-            CreateScopeSource(
-                prepared,
-                workspace,
-                runtime,
-                overlay);
+            scopePolicy == ScopeFrameSourcePolicy.Interactive
+                ? CreateInteractiveScopeSource(prepared, overlay)
+                : CreateProductionScopeSource(prepared, workspace, runtime, overlay);
 
         if (scope is null
+            && scopePolicy == ScopeFrameSourcePolicy.Production
             && prepared.Scope.Enabled
             && prepared.Layout.Geometry.HasScopes)
         {
@@ -68,12 +68,35 @@ internal static class VisualizationFrameRendererFactory
     }
 
     /// <summary>
+    /// Fully in-process interactive scope source for GUI stills. Derived from
+    /// the captured/isolated channel WAVs directly; it never probes Corrscope,
+    /// Python, <c>corrscope-frames.py</c> or FFmpeg. Returns null when there is
+    /// no scope region or no usable channel WAV (leaving scopes transparent).
+    /// </summary>
+    private static IScopeFrameSource? CreateInteractiveScopeSource(
+        PreparedVisualizationSource prepared,
+        PanelOverlayRenderer overlay)
+    {
+        if (!prepared.Scope.Enabled
+            || !prepared.Layout.Geometry.HasScopes)
+        {
+            return null;
+        }
+
+        return InteractiveWaveformFrameSource.TryCreate(
+            overlay,
+            prepared.ScopeChannels,
+            overlay.FpsNumerator,
+            overlay.FpsDenominator);
+    }
+
+    /// <summary>
     /// Starts the Corrscope raw-frame bridge when scopes are enabled and
     /// Corrscope is available; otherwise returns null so the caller falls back
     /// to the shared internal master-waveform source. The created frame source
     /// is ready to read frame 0 on first use.
     /// </summary>
-    private static IScopeFrameSource? CreateScopeSource(
+    private static IScopeFrameSource? CreateProductionScopeSource(
         PreparedVisualizationSource prepared,
         VisualizationWorkspace workspace,
         RenderRuntimeOptions runtime,
@@ -113,4 +136,18 @@ internal static class VisualizationFrameRendererFactory
                 workspace.CorrscopeConfigPath),
             overlay.ScopeFrameByteCount);
     }
+}
+
+/// <summary>
+/// Selects which scope frame source family a renderer is built with.
+/// <see cref="ScopeFrameSourcePolicy.Production"/> preserves the exact
+/// Corrscope path used for final video, motion preview and review images;
+/// <see cref="ScopeFrameSourcePolicy.Interactive"/> uses the fully in-process
+/// random-access channel waveform source for GUI stills (no external process,
+/// cheap seeks, approximate triggering).
+/// </summary>
+internal enum ScopeFrameSourcePolicy
+{
+    Production,
+    Interactive,
 }

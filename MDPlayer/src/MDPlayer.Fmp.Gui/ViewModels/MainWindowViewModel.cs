@@ -617,7 +617,7 @@ public sealed class MainWindowViewModel : ObservableObject
                     TimeSeconds = requestedTime,
                     Width = width,
                     Height = height,
-                    Fidelity = PreviewFidelity.AccurateStill,
+                    Fidelity = PreviewFidelity.InteractiveStill,
                 },
                 ct);
 

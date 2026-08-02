@@ -77,14 +77,28 @@ public enum VideoEncoder
 }
 
 /// <summary>
-/// Preview fidelity levels. Layout preview is cheapest; accurate still uses
+/// Preview fidelity levels. Layout preview is cheapest; interactive still is a
+/// random-access still optimized for timeline scrubbing; accurate still uses
 /// the final renderer at the selected frame; motion preview is a reduced
 /// resolution/frame-rate looping sequence.
 /// </summary>
 public enum PreviewFidelity
 {
     Layout,
+
+    /// <summary>
+    /// Random-access still optimized for interactive timeline movement.
+    /// Semantic rendering is exact; scope triggering is approximated from the
+    /// captured channel WAVs.
+    /// </summary>
+    InteractiveStill,
+
+    /// <summary>
+    /// Uses the same stateful scope and frame path as production output.
+    /// May be expensive for arbitrary seeks.
+    /// </summary>
     AccurateStill,
+
     Motion,
 }
 

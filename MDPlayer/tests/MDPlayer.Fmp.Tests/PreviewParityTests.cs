@@ -359,6 +359,7 @@ public sealed class PreviewParityTests
                     Result: null, // no Corrscope artifacts -> internal fallback path
                     Enabled: true,
                     HasIsolatedStems: false),
+                ScopeChannels: Array.Empty<ProjectedScopeChannel>(),
                 Plan: new VisualizationPlanResult
                 {
                     ResolvedLayout = "diagnostic",

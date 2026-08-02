@@ -975,7 +975,7 @@ public sealed class VisualizationV3ContractTests
 
         using var workspace = TemporaryVisualizationWorkspace.Create("ProjectionTest");
         ScopeRenderer.ScopeResult projected =
-            VisualizationPrepareCoordinator.ProjectScopes(captured, layout, workspace);
+            VisualizationPrepareCoordinator.ProjectScopes(captured, layout, workspace).Result;
 
         // The unmatched stem must be dropped, not retained with int.MaxValue
         // ordering.
