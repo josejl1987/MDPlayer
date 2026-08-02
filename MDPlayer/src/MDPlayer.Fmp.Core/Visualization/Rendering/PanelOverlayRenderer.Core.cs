@@ -474,6 +474,17 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
             PanelData panel = _panels[panelIndex];
+            // Overview and device variants use a compact visual grammar: header
+            // (name + current state), compact waveform/activity in the scope
+            // region, and no piano-roll / pitch-gutter / operator content.
+            if (_layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
+            {
+                if (drawSemantic)
+                    DrawOverviewDynamicPanel(destination, panel, currentSample);
+                DrawEnergyScopeBorder(destination, panel.Index, currentSample);
+                continue;
+            }
+
             // Dispatch from the immutable semantic descriptor prepared before
             // frame rendering. Scope-only compositions deliberately suppress
             // semantic geometry; their panels have no timeline height.
@@ -1144,6 +1155,16 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             OverlayRect header = _layout.GetHeaderRect(index);
             OverlayRect scope = _layout.GetScopeRect(index);
             OverlayRect timeline = _layout.GetTimelineRect(index);
+
+            // Compact overview/device panels share one static grammar: fill the
+            // panel, open the scope region, draw the accent + channel name, and
+            // skip all the full-grid chrome (pitch gutter, FM3 ribbons, rhythm
+            // rows, PCM lanes) that cannot fit.
+            if (_layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
+            {
+                DrawOverviewStaticPanel(frame, _panels[index]);
+                continue;
+            }
 
             FillRect(frame, panel, HeaderBackground);
             ClearRect(frame, scope);

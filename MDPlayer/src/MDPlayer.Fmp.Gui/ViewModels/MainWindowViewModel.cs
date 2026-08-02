@@ -51,6 +51,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private bool _hasFatalValidationIssues;
     private double _previewTimeSeconds;
     private double _durationSeconds;
+    private (double Width, double Height) _previewViewportSize;
 
     private CancellationTokenSource _previewCts = new();
     private CancellationTokenSource _exportCts = new();
@@ -61,6 +62,10 @@ public sealed class MainWindowViewModel : ObservableObject
     /// <summary>Debounce for visual/replan refreshes (e.g. style changes).</summary>
     private static readonly TimeSpan VisualRefreshDelay =
         TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Debounce for preview-viewport resize replans (150-200ms window).</summary>
+    private static readonly TimeSpan ResizeRefreshDelay =
+        TimeSpan.FromMilliseconds(180);
 
     /// <summary>Debounce for timeline seeks (frame-only refresh).</summary>
     private static readonly TimeSpan SeekRefreshDelay =
@@ -670,16 +675,54 @@ public sealed class MainWindowViewModel : ObservableObject
     /// preserving aspect ratio (the caps are maximums, not exact dimensions;
     /// clamping each axis independently would distort non-16:9 requests).
     /// </summary>
+    /// <summary>
+    /// Called (debounced) by the view when <c>PreviewViewport.Bounds</c> changes.
+    /// The preview bitmap is requested at the viewport's logical size rather
+    /// than only the configured maximum, so the layout resolver picks full or
+    /// overview grammar for the dimensions that actually display, and a large
+    /// bitmap is not rendered only to be scaled back down by Avalonia.
+    /// </summary>
+    public void SetPreviewViewportSize(double width, double height)
+    {
+        if (width <= 0 || height <= 0)
+            return;
+        _previewViewportSize = (width, height);
+    }
+
+    /// <summary>
+    /// Debounced viewport-resize refresh: updates the preview target size and
+    /// schedules a plan+frame rebuild so the layout resolver re-evaluates the
+    /// full/overview/device fallback for the new viewport dimensions. Debounced
+    /// to avoid a rebuild on every pixel of an active window resize.
+    /// </summary>
+    public void SchedulePreviewResize(double width, double height)
+    {
+        if (width <= 0 || height <= 0)
+            return;
+        SetPreviewViewportSize(width, height);
+        QueuePreviewRefresh(PreviewRefreshKind.PlanAndFrame, ResizeRefreshDelay);
+    }
+
     private (int Width, int Height) GetPreviewDimensions(OutputSettings output)
     {
         int maxWidth = Math.Max(1, _settings.Settings.PreviewMaxWidth);
         int maxHeight = Math.Max(1, _settings.Settings.PreviewMaxHeight);
 
+        // Prefer the actual viewport logical bounds (if available) so the
+        // preview geometry matches what is on screen; otherwise fall back to
+        // the configured maximum.
+        double targetWidth = _previewViewportSize.Width > 0
+            ? _previewViewportSize.Width
+            : maxWidth;
+        double targetHeight = _previewViewportSize.Height > 0
+            ? _previewViewportSize.Height
+            : maxHeight;
+
         return FitInside(
             Math.Max(1, output.Width),
             Math.Max(1, output.Height),
-            maxWidth,
-            maxHeight);
+            (int)Math.Clamp(targetWidth, 1, maxWidth),
+            (int)Math.Clamp(targetHeight, 1, maxHeight));
     }
 
     private void ApplyPlan(VisualizationPlanResult plan)

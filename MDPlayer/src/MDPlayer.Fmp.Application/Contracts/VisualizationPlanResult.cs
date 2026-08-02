@@ -13,6 +13,14 @@ public sealed record VisualizationPlanResult
     /// <summary>Concrete layout selected from the explicit composition.</summary>
     public required string ResolvedLayout { get; init; }
 
+    /// <summary>
+    /// The concrete residual layout (full diagnostic grid, diagnostic overview,
+    /// or device overview) that the canvas geometry actually supported.
+    /// Values: <c>diagnostic-grid</c>, <c>diagnostic-overview</c>,
+    /// <c>device-overview</c>.
+    /// </summary>
+    public string ResolvedVariant { get; init; } = "";
+
     /// <summary>The user-requested composition name.</summary>
     public required string RequestedLayout { get; init; }
 

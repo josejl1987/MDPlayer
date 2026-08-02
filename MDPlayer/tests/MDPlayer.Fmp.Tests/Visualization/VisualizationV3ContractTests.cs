@@ -629,6 +629,7 @@ public sealed class VisualizationV3ContractTests
                 timeline,
                 new ResolvedVisualizationLayout(
                     VisualizationLayoutMode.Diagnostic,
+                    VisualizationLayoutVariant.DiagnosticGrid,
                     topology,
                     layout),
                 VisualizationChannelFilter.Active,

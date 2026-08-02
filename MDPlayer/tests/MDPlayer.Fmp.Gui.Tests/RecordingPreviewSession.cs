@@ -55,6 +55,7 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
 
     private readonly List<double> _frameTimes = new();
     private readonly List<TaskCompletionSource> _frameGates = new();
+    private readonly List<(int Width, int Height)> _frameSizes = new();
 
     public RecordingPreviewSession(string inputPath)
     {
@@ -88,6 +89,9 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     /// <summary>Rendered frame request times, in call order.</summary>
     public IReadOnlyList<double> FrameTimes => _frameTimes;
 
+    /// <summary>Rendered frame request dimensions, in call order.</summary>
+    public IReadOnlyList<(int Width, int Height)> FrameSizes => _frameSizes;
+
     /// <summary>TimeSeconds of the most recently requested frame (0 if none).</summary>
     public double LastFrameTime => _frameTimes.Count == 0 ? 0 : _frameTimes[^1];
 
@@ -115,6 +119,7 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
         FrameCalls = 0;
         Requests.Clear();
         _frameTimes.Clear();
+        _frameSizes.Clear();
         _frameGates.Clear();
     }
 
@@ -155,6 +160,7 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     {
         FrameCalls++;
         _frameTimes.Add(preview.TimeSeconds);
+        _frameSizes.Add((preview.Width ?? 1, preview.Height ?? 1));
 
         // Capture the call index before any await so the returned PNG is
         // stable regardless of gating/release ordering.

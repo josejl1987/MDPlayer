@@ -28,10 +28,15 @@ internal static class VisualizationPlanBuilder
         IReadOnlyList<ValidationIssue> issues =
             VisualizationRequestValidator.Validate(request);
 
+        issues = AppendFallbackIssues(issues, layout.Variant);
+
         return new VisualizationPlanResult
         {
             ResolvedLayout =
                 VisualizationLayoutNames.ToCliName(layout.Mode),
+
+            ResolvedVariant =
+                VisualizationLayoutNames.ToCliVariant(layout.Variant),
 
             RequestedLayout =
                 VisualizationCommandFormatter.CompositionName(
@@ -78,6 +83,48 @@ internal static class VisualizationPlanBuilder
 
             TimelinePath = timelinePath,
         };
+    }
+
+    /// <summary>
+    /// Reports the responsive fallback as a plan issue: informational when the
+    /// full diagnostic grid is reduced to a diagnostic overview, warning when
+    /// the last tier groups channels by device. These are not errors — the
+    /// request still renders, just in a simpler visual grammar.
+    /// </summary>
+    private static IReadOnlyList<ValidationIssue> AppendFallbackIssues(
+        IReadOnlyList<ValidationIssue> issues,
+        VisualizationLayoutVariant variant)
+    {
+        if (variant == VisualizationLayoutVariant.DiagnosticGrid)
+            return issues;
+
+        var appended = new List<ValidationIssue>(issues.Count + 1);
+        appended.AddRange(issues);
+
+        if (variant == VisualizationLayoutVariant.DiagnosticOverview)
+        {
+            appended.Add(new ValidationIssue
+            {
+                Code = ValidationCodes.DiagnosticOverviewFallback,
+                Severity = ValidationSeverity.Information,
+                Message =
+                    "The requested dimensions cannot fit full diagnostic panels. "
+                    + "Using the diagnostic overview layout.",
+            });
+        }
+        else
+        {
+            appended.Add(new ValidationIssue
+            {
+                Code = ValidationCodes.DeviceOverviewFallback,
+                Severity = ValidationSeverity.Warning,
+                Message =
+                    "The requested dimensions cannot fit individual channel panels. "
+                    + "Channels are grouped by device.",
+            });
+        }
+
+        return appended;
     }
 
     private static double? DurationSeconds(VisualizationTimeline timeline)

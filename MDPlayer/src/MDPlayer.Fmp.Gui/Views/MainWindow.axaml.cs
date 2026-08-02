@@ -24,9 +24,30 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnDrop);
         Opened += (_, _) => _ = _vm.InitializeAsync();
 
+        // Observe the preview viewport's logical bounds so the preview bitmap
+        // is requested at (close to) the actually displayed size, letting the
+        // layout resolver choose full/overview/device grammar for those
+        // dimensions instead of rendering a bitmap Avalonia scales back down.
+        PreviewViewport.PropertyChanged += OnPreviewViewportPropertyChanged;
+        PreviewViewport.SizeChanged += OnPreviewViewportSizeChanged;
+
 #if DEBUG
         this.AttachDevTools();
 #endif
+    }
+
+    private void OnPreviewViewportSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        _vm.SchedulePreviewResize(Math.Max(0, e.NewSize.Width), Math.Max(0, e.NewSize.Height));
+    }
+
+    private void OnPreviewViewportPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == BoundsProperty)
+        {
+            Size bounds = PreviewViewport.Bounds.Size;
+            _vm.SchedulePreviewResize(Math.Max(0, bounds.Width), Math.Max(0, bounds.Height));
+        }
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
