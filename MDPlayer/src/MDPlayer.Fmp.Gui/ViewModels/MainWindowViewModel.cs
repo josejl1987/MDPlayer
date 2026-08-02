@@ -43,6 +43,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private int _requestRevision;
     private int _previewGeneration;
     private int _refreshSeq;
+    private PreviewRefreshKind? _pendingPreviewRefresh;
+    private Task _activePreviewRefresh = Task.CompletedTask;
     private GuiState _state = GuiState.Empty;
     private GuiError? _error;
     private IReadOnlyList<ValidationIssue> _validationIssues = Array.Empty<ValidationIssue>();
@@ -55,6 +57,25 @@ public sealed class MainWindowViewModel : ObservableObject
     private Task? _shutdownTask;
 
     private const int RecentFilesMax = 5;
+
+    /// <summary>Debounce for visual/replan refreshes (e.g. style changes).</summary>
+    private static readonly TimeSpan VisualRefreshDelay =
+        TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Debounce for timeline seeks (frame-only refresh).</summary>
+    private static readonly TimeSpan SeekRefreshDelay =
+        TimeSpan.FromMilliseconds(40);
+
+    /// <summary>
+    /// What a queued preview refresh must recompute. Ordering matters: a
+    /// stronger (plan) refresh must never be downgraded to a weaker (frame)
+    /// one when a seek arrives while a plan refresh is already pending.
+    /// </summary>
+    private enum PreviewRefreshKind
+    {
+        FrameOnly = 0,
+        PlanAndFrame = 1,
+    }
 
     public MainWindowViewModel(
         GuiSettingsStore settings,
@@ -313,7 +334,9 @@ public sealed class MainWindowViewModel : ObservableObject
             AddRecentFile(fullPath);
             SetRequest(BuildInitialRequest(fullPath));
             SetState(GuiState.Ready);
-            await RefreshPreviewAsync();
+            // First load refreshes immediately (no debounce delay) and always
+            // plans, capturing and preparing the source once.
+            await RefreshPreviewAsync(PreviewRefreshKind.PlanAndFrame);
         }
         catch (OperationCanceledException)
         {
@@ -470,75 +493,137 @@ public sealed class MainWindowViewModel : ObservableObject
 
     // ---- Preview refresh ----
 
-    /// <summary>Waits for any pending debounced refresh to complete.</summary>
+    /// <summary>
+    /// Waits for any pending debounced refresh (or the active one) to complete.
+    /// When no refresh is pending or active this is a no-op rather than starting
+    /// an extra refresh.
+    /// </summary>
     public async Task WaitForPreviewRefreshAsync()
     {
         _previewDebounce.Stop();
-        await RefreshPreviewAsync();
+
+        if (_pendingPreviewRefresh is { } kind)
+        {
+            _pendingPreviewRefresh = null;
+            _activePreviewRefresh = RefreshPreviewAsync(kind);
+        }
+
+        await _activePreviewRefresh;
     }
 
+    /// <summary>
+    /// Queues a plan+frame refresh (full rebuild) debounced for visual-settings
+    /// changes: style, layout, dimensions, playback-affecting settings, and any
+    /// other change that can alter the plan.
+    /// </summary>
     private void SchedulePreviewRefresh()
     {
+        QueuePreviewRefresh(PreviewRefreshKind.PlanAndFrame, VisualRefreshDelay);
+    }
+
+    /// <summary>
+    /// Queues a frame-only refresh debounced for timeline movement. Seeking
+    /// never changes the plan, so planning is skipped to reuse the cached
+    /// prepared source and frame renderer.
+    /// </summary>
+    private void ScheduleSeekPreview()
+    {
+        QueuePreviewRefresh(PreviewRefreshKind.FrameOnly, SeekRefreshDelay);
+    }
+
+    private void QueuePreviewRefresh(PreviewRefreshKind kind, TimeSpan delay)
+    {
+        // Prevent an in-flight older frame from being applied while the new
+        // refresh waits for its debounce interval.
+        CancelPreview();
+
+        if (_pendingPreviewRefresh is null
+            || kind > _pendingPreviewRefresh.Value)
+        {
+            _pendingPreviewRefresh = kind;
+        }
+
         _previewDebounce.Stop();
+        _previewDebounce.Interval = delay;
         _previewDebounce.Start();
     }
 
-    private void ScheduleSeekPreview()
-    {
-        // Updating the displayed time immediately; rendering coalesces here.
-        SchedulePreviewRefresh();
-    }
-
-    private async void OnPreviewDebounceTick(object? sender, EventArgs e)
+    private void OnPreviewDebounceTick(object? sender, EventArgs e)
     {
         _previewDebounce.Stop();
-        await RefreshPreviewAsync();
+
+        if (_pendingPreviewRefresh is not { } kind)
+            return;
+
+        _pendingPreviewRefresh = null;
+        // Fire-and-observe: RefreshPreviewAsync catches its own operational
+        // exceptions, so the timer boundary is controlled.
+        _activePreviewRefresh = RefreshPreviewAsync(kind);
     }
 
-    public async Task RefreshPreviewAsync()
+    /// <summary>
+    /// Performs an immediate preview refresh. <see cref="PreviewRefreshKind.PlanAndFrame"/>
+    /// rebuilds the plan (reusing the session's cached capture/prepared source)
+    /// before rendering a frame; <see cref="PreviewRefreshKind.FrameOnly"/> skips
+    /// planning and renders a frame at the current time, reusing the cached plan
+    /// dimensions.
+    /// </summary>
+    private async Task RefreshPreviewAsync(PreviewRefreshKind kind)
     {
         if (_request is null || _session is null)
             return;
 
         int generation = _previewGeneration;
         int refreshSeq = ++_refreshSeq;
+
         VisualizationRequest request = _request;
+        IVisualizationPreviewSession session = _session;
+        double requestedTime = PreviewTimeSeconds;
 
         CancelPreview();
+        _previewCts.Dispose();
         _previewCts = new CancellationTokenSource();
+
         CancellationToken ct = _previewCts.Token;
 
         Preview.SetLoading(true);
         try
         {
-            _plan = await _session.PlanAsync(request, ct);
-            if (IsObsolete(generation, ct))
-                return;
-            ApplyPlan(_plan);
+            if (kind == PreviewRefreshKind.PlanAndFrame)
+            {
+                VisualizationPlanResult plan =
+                    await session.PlanAsync(request, ct);
 
-            // The preview caps are maximums, not exact dimensions: fit the
-            // request's aspect ratio inside them instead of clamping each axis
-            // independently, which would distort non-16:9 requests.
-            int maxWidth = Math.Max(1, _settings.Settings.PreviewMaxWidth);
-            int maxHeight = Math.Max(1, _settings.Settings.PreviewMaxHeight);
-            (int width, int height) = FitInside(
-                Math.Max(1, request.Output.Width),
-                Math.Max(1, request.Output.Height),
-                maxWidth,
-                maxHeight);
+                if (IsObsolete(generation, refreshSeq, ct))
+                    return;
 
-            var frame = await _session.RenderFrameAsync(
+                _plan = plan;
+                ApplyPlan(plan);
+
+                // Applying the plan may reduce or initialize duration.
+                requestedTime = Math.Clamp(
+                    requestedTime,
+                    0,
+                    Math.Max(0, DurationSeconds));
+            }
+
+            (int width, int height) =
+                GetPreviewDimensions(request.Output);
+
+            PreviewFrameResult frame = await session.RenderFrameAsync(
                 request,
                 new PreviewFrameRequest
                 {
-                    TimeSeconds = PreviewTimeSeconds,
+                    TimeSeconds = requestedTime,
                     Width = width,
                     Height = height,
                     Fidelity = PreviewFidelity.AccurateStill,
                 },
                 ct);
-            if (IsObsolete(generation, ct))
+
+            if (IsObsolete(generation, refreshSeq, ct))
                 return;
+
             Preview.ApplyFrame(frame);
             ClearError();
         }
@@ -548,7 +633,8 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            Preview.SetError(ex.Message);
+            if (!IsObsolete(generation, refreshSeq, ct))
+                Preview.SetError(ex.Message);
         }
         finally
         {
@@ -559,8 +645,42 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    private bool IsObsolete(int generation, CancellationToken ct)
-        => ct.IsCancellationRequested || generation != _previewGeneration;
+    /// <summary>
+    /// Manual refresh always rebuilds the plan, bypassing any debounce. Used by
+    /// the Refresh command and Retry controls.
+    /// </summary>
+    public Task RefreshPreviewManuallyAsync()
+    {
+        _previewDebounce.Stop();
+        _pendingPreviewRefresh = null;
+
+        return RefreshPreviewAsync(PreviewRefreshKind.PlanAndFrame);
+    }
+
+    private bool IsObsolete(
+        int generation,
+        int refreshSeq,
+        CancellationToken cancellationToken)
+        => cancellationToken.IsCancellationRequested
+            || generation != _previewGeneration
+            || refreshSeq != _refreshSeq;
+
+    /// <summary>
+    /// Fits the request output dimensions inside the preview dimension caps,
+    /// preserving aspect ratio (the caps are maximums, not exact dimensions;
+    /// clamping each axis independently would distort non-16:9 requests).
+    /// </summary>
+    private (int Width, int Height) GetPreviewDimensions(OutputSettings output)
+    {
+        int maxWidth = Math.Max(1, _settings.Settings.PreviewMaxWidth);
+        int maxHeight = Math.Max(1, _settings.Settings.PreviewMaxHeight);
+
+        return FitInside(
+            Math.Max(1, output.Width),
+            Math.Max(1, output.Height),
+            maxWidth,
+            maxHeight);
+    }
 
     private void ApplyPlan(VisualizationPlanResult plan)
     {
@@ -621,7 +741,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         OpenInputCommand = new AsyncRelayCommand(OpenInputDialogAsync);
         RenderCommand = new RelayCommand(() => _ = StartRenderAsync(), () => CanRender);
-        RefreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewAsync, () => CanEdit);
+        RefreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewManuallyAsync, () => CanEdit);
         CancelCurrentCommand = new RelayCommand(CancelCurrent);
         CancelExportCommand = new RelayCommand(() => _exportCts.Cancel());
         SeekRelativeCommand = new RelayCommand(SeekRelative, _ => HasInput);
@@ -637,7 +757,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void WireEvents()
     {
-        Preview.RetryRequested += () => _ = (RefreshPreviewAsync());
+        Preview.RetryRequested += () => _ = RefreshPreviewManuallyAsync();
         Export.RetryRequested += () => _ = StartRenderAsync();
     }
 

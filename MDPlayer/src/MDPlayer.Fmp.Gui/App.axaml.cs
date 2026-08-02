@@ -4,7 +4,7 @@ using Avalonia.Markup.Xaml;
 // Pin the Avalonia type: `using Fmp.Application.*` otherwise makes
 // `Application` resolve to the Fmp.Application namespace.
 using Application = Avalonia.Application;
-using Fmp.Application.Preview;
+using Fmp.Cli;
 using Fmp.Gui.Services;
 using Fmp.Gui.ViewModels;
 using Fmp.Gui.Views;
@@ -28,9 +28,12 @@ public partial class App : global::Avalonia.Application
             var clipboard = new ClipboardService();
             var export = new ExportProcessService(settings.Settings.RenderCliPath);
 
-            // Uses the process-based session factory from the Application layer
-            // (drives `mdplayer-render plan/preview` with request JSON).
-            var previewFactory = new CliPreviewSessionFactory();
+            // Uses the in-process preview session factory, so UI previews run
+            // inside the app and reuse the captured timeline, prepared source
+            // and frame renderer across seeks. Final video rendering still goes
+            // through the standalone CLI via ExportProcessService below.
+            var previewFactory =
+                new InProcessVisualizationPreviewSessionFactory();
 
             var vm = new MainWindowViewModel(
                 settings, dialogs, clipboard, export, previewFactory, App.InitialInputPath);

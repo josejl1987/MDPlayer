@@ -23,6 +23,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
+    <!-- Provides the in-process preview session implementation. Referencing
+         the executable project as an assembly does not invoke its entry point. -->
+    <ProjectReference Include="..\MDPlayer.Fmp.Cli\MDPlayer.Fmp.Cli.csproj" />
   </ItemGroup>
 
 </Project>

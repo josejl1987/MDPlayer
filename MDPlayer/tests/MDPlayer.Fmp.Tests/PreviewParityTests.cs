@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Fmp.Application.Contracts;
+using Fmp.Application.Preview;
 using Fmp.Cli;
 using Fmp.Core.Analysis;
 using Fmp.Core.Audio;
@@ -473,6 +474,109 @@ public sealed class PreviewParityTests
         Assert.Same(VisualizationPalette.Accessible, accessible.Palette);
         Assert.NotSame(baseline.Palette, accessible.Palette);
         Assert.NotEqual(VisualizationPalette.Default.CanvasBackground, accessible.Palette.CanvasBackground);
+    }
+
+    // ---- J. Real in-process preview session smoke test ----
+
+    /// <summary>
+    /// Exercises the real in-process preview session end-to-end against a
+    /// checked-in <c>.vgz</c> fixture: open → plan → render accurate stills at
+    /// 0s/1s/2s → dispose. Asserts successful, non-empty frames and a stable
+    /// session across multiple renders. This is the same factory the GUI now
+    /// uses for UI previews, so it guards the wired seam. It is skipped when the
+    /// external rendering prerequisites (python3 + ffmpeg) are not on PATH, as
+    /// the accurate still depends on them; it does not assert timings.
+    /// </summary>
+    [SkippableFact]
+    public async Task InProcessPreviewSession_RendersFramesOnRealVgz()
+    {
+        bool hasPy = IsCommandAvailable("python3");
+        bool hasFf = IsCommandAvailable("ffmpeg");
+        Skip.IfNot(
+            hasPy && hasFf,
+            $"real .vgz preview smoke test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+
+        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        Assert.True(File.Exists(input), $"expected vgz fixture at {input}");
+
+        string sessionRoot = Path.Combine(
+            Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(sessionRoot);
+
+        VisualizationRequest request = new()
+        {
+            InputPath = input,
+            OutputPath = Path.Combine(sessionRoot, "preview.mp4"),
+            Composition = CompositionKind.Diagnostic,
+            Output = new OutputSettings
+            {
+                Width = 1280,
+                Height = 720,
+                FpsNumerator = 30,
+                FpsDenominator = 1,
+            },
+            Presentation = new PresentationSettings { Title = "Smoke" },
+        };
+
+        var factory = new InProcessVisualizationPreviewSessionFactory();
+        await using (IVisualizationPreviewSession session =
+               await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+        {
+            VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
+            Assert.NotNull(plan);
+
+            foreach (double time in new[] { 0.0, 1.0, 2.0 })
+            {
+                PreviewFrameResult frame = await session.RenderFrameAsync(
+                    request,
+                    new PreviewFrameRequest
+                    {
+                        TimeSeconds = time,
+                        Fidelity = PreviewFidelity.AccurateStill,
+                        Width = 1280,
+                        Height = 720,
+                    },
+                    CancellationToken.None);
+
+                Assert.NotNull(frame.PngBytes);
+                Assert.True(frame.PngBytes!.Length > 0,
+                    $"frame at t={time} produced an empty PNG");
+            }
+        }
+
+        // Session workspace can be cleaned up once disposed.
+        try { Directory.Delete(sessionRoot, recursive: true); }
+        catch (IOException) { /* best-effort cleanup */ }
+    }
+
+    private static bool IsCommandAvailable(string name)
+    {
+        try
+        {
+            using var probe = Process.Start(new ProcessStartInfo
+            {
+                FileName = name,
+                Arguments = "--version",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            if (probe is null)
+                return false;
+            // Drain pipes so a chatty child (e.g. ffmpeg on stderr) cannot
+            // block on a full pipe buffer.
+            string _ = probe.StandardOutput.ReadToEnd();
+            string __ = probe.StandardError.ReadToEnd();
+            probe.WaitForExit(5000);
+            // Presence is what matters; some builds (e.g. headless ffmpeg)
+            // return a nonzero "shown help/version" code, so don't require 0.
+            return probe.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool SpanEquals(byte[] a, byte[] b)

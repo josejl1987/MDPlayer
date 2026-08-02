@@ -8,23 +8,30 @@ using Fmp.Core.Visualization.Rendering;
 namespace Fmp.Cli;
 
 /// <summary>
-/// Creates in-process preview sessions for the CLI's <c>preview</c> and
-/// <c>review</c> commands. Binds the session to a CLI <see cref="RenderRuntimeOptions"/>
-/// so tool paths (FMP.COM, Corrscope, FFmpeg) are preserved.
+/// Creates in-process preview sessions for the GUI, and for the CLI's
+/// <c>preview</c> and <c>review</c> commands. The default constructor is the
+/// GUI entry point (no CLI-specific configuration); the <see cref="RenderRuntimeOptions"/>
+/// constructor is CLI-internal so tool paths (FMP.COM, Corrscope, FFmpeg) are
+/// preserved where a standalone render executable exists.
 /// </summary>
-internal sealed class InProcessVisualizationPreviewSessionFactory : IVisualizationPreviewSessionFactory
+public sealed class InProcessVisualizationPreviewSessionFactory : IVisualizationPreviewSessionFactory
 {
     private readonly RenderRuntimeOptions _runtime;
 
-    public InProcessVisualizationPreviewSessionFactory(RenderRuntimeOptions runtime)
+    public InProcessVisualizationPreviewSessionFactory()
+        : this(new RenderRuntimeOptions())
+    {
+    }
+
+    internal InProcessVisualizationPreviewSessionFactory(RenderRuntimeOptions runtime)
     {
         _runtime = runtime ?? new RenderRuntimeOptions();
     }
 
-    public async Task<IVisualizationPreviewSession> OpenAsync(
+    public Task<IVisualizationPreviewSession> OpenAsync(
         string inputPath,
         CancellationToken cancellationToken)
-        => await OpenWithTimelineAsync(inputPath, null, cancellationToken);
+        => OpenWithTimelineAsync(inputPath, null, cancellationToken);
 
     /// <summary>
     /// Opens a session optionally seeded from an existing captured timeline
@@ -33,7 +40,7 @@ internal sealed class InProcessVisualizationPreviewSessionFactory : IVisualizati
     /// supplied it receives an extra durable copy (surviving the temporary
     /// session directory).
     /// </summary>
-    public async Task<IVisualizationPreviewSession> OpenWithTimelineAsync(
+    internal async Task<IVisualizationPreviewSession> OpenWithTimelineAsync(
         string inputPath,
         string? seedTimelinePath,
         CancellationToken cancellationToken,

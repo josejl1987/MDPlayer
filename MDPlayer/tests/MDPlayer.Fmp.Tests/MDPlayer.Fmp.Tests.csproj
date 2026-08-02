@@ -33,6 +33,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
+    <!-- A real tracked repo fixture for the in-process preview smoke test. -->
+    <Content Include="..\..\..\21 Master Ninja.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\master-ninja.vgz</Link>
+    </Content>
   </ItemGroup>
 
 </Project>

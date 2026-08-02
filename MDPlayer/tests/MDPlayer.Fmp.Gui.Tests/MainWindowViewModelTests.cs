@@ -1,6 +1,7 @@
 using Fmp.Application.Contracts;
 using Fmp.Gui.Services;
 using Fmp.Gui.ViewModels;
+using Avalonia;
 using Avalonia.Headless.XUnit;
 using Xunit;
 
@@ -57,7 +58,7 @@ public sealed class MainWindowViewModelTests
             Assert.Equal(0, h.FrameCalls);
 
             // An explicit refresh still renders the (single) composition.
-            await h.VM.WaitForPreviewRefreshAsync();
+            await h.VM.RefreshPreviewManuallyAsync();
             Assert.Equal(1, h.PlanCalls);
             Assert.Equal(1, h.FrameCalls);
             Assert.Equal(h.Compositions[0].Value, h.LastRequest!.Composition);
@@ -149,6 +150,163 @@ public sealed class MainWindowViewModelTests
     }
 
     [AvaloniaFact]
+    public async Task CommittedSeekRendersFrameWithoutPlanning()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+            h.VM.PreviewScrubTime = 12;
+            h.VM.CommitScrub();
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(0, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+            Assert.Equal(12, h.Factory.LastSession.LastFrameTime);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task RapidSeeksCoalesceToOneFrame()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+            h.VM.PreviewScrubTime = 10;
+            h.VM.CommitScrub();
+            h.VM.PreviewScrubTime = 11;
+            h.VM.CommitScrub();
+            h.VM.PreviewScrubTime = 12;
+            h.VM.CommitScrub();
+
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(0, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+            Assert.Equal(12, h.Factory.LastSession.LastFrameTime);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task SeekThenVisualChange_ProducesOnePlanAndFrame()
+    {
+        // A seek followed by a visual change must coalesce into a single
+        // plan+frame refresh: the pending seek must never downgrade the
+        // stronger plan refresh.
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+            h.VM.PreviewScrubTime = 5;
+            h.VM.CommitScrub();
+            h.VM.Settings.Style.PastSeconds = 0.5m;
+
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task VisualChangeThenSeek_ProducesOnePlanAndFrame()
+    {
+        // A visual change followed by a seek must coalesce into a single
+        // plan+frame refresh for the newer time.
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+            h.VM.Settings.Style.PastSeconds = 0.5m;
+            h.VM.PreviewScrubTime = 5;
+            h.VM.CommitScrub();
+
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(1, h.PlanCalls);
+            Assert.Equal(1, h.FrameCalls);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task WaitingWithoutPendingWorkIsNoOp()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            h.ResetCalls();
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            Assert.Equal(0, h.PlanCalls);
+            Assert.Equal(0, h.FrameCalls);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task StaleFrameIsNotApplied()
+    {
+        // A superseded refresh must never overwrite the newest frame. Frame A is
+        // held in flight (gated) while a newer refresh B starts; releasing A
+        // first must not change CurrentImage, and only B's frame is applied.
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            // No ResetCalls here: the per-frame PNG identity is derived from the
+            // session's monotonic frame-call index, so opening=0, refresh A=1,
+            // refresh B=2.
+            h.Factory.LastSession.GateFrames = true;
+
+            Task refreshA = h.VM.RefreshPreviewManuallyAsync();
+            Assert.Single(h.Factory.LastSession.FrameGates);
+
+            Task refreshB = h.VM.RefreshPreviewManuallyAsync();
+            Assert.Equal(2, h.Factory.LastSession.FrameGates.Count);
+
+            // Release A's gate first; A is superseded so its 2x2 frame must not
+            // replace the 1x1 frame displayed from opening.
+            h.Factory.LastSession.FrameGates[0].SetResult();
+            await refreshA;
+            Assert.Equal(new PixelSize(1, 1), h.VM.Preview.CurrentImage!.PixelSize);
+
+            // Release B's gate; only B's 3x1 frame becomes CurrentImage.
+            h.Factory.LastSession.FrameGates[1].SetResult();
+            await refreshB;
+            Assert.Equal(new PixelSize(3, 1), h.VM.Preview.CurrentImage!.PixelSize);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
     public void GuiExposesEveryComposition()
     {
         CompositionKind[] expected = Enum.GetValues<CompositionKind>();
@@ -202,7 +360,7 @@ public sealed class MainWindowViewModelTests
 
                 // ...and its session is still usable: a preview refresh still works.
                 h2.ResetCalls();
-                await h2.VM.WaitForPreviewRefreshAsync();
+                await h2.VM.RefreshPreviewManuallyAsync();
                 Assert.Equal(1, h2.PlanCalls);
             }
             finally
@@ -226,7 +384,7 @@ public sealed class MainWindowViewModelTests
             // Gate the next refresh so it stays in flight while an export-only
             // setting changes.
             h.Factory.LastSession.PlanGate = new TaskCompletionSource();
-            Task refreshTask = h.VM.RefreshPreviewAsync();
+            Task refreshTask = h.VM.RefreshPreviewManuallyAsync();
 
             // PlanAsync runs synchronously up to the gate, so the refresh is in flight now.
             Assert.True(h.PlanCalls >= 1);
