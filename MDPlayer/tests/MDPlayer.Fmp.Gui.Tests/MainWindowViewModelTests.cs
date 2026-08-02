@@ -147,6 +147,72 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(expected, actual);
     }
 
+    [AvaloniaFact]
+    public async Task FailedOpen_ShowsErrorAndReturnsToUsableState()
+    {
+        // No prior input: a failed open must not leave the window stuck in LoadingInput.
+        Harness h = Harness.Create();
+        try
+        {
+            h.Factory.FailNextOpen = new InvalidOperationException("boom");
+            await h.VM.OpenInputAsync(h.InputPath);
+
+            Assert.Equal(GuiState.Empty, h.VM.State);
+            Assert.NotNull(h.VM.Error);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+
+        // With a previously opened input, a failed re-open must fall back to Ready
+        // with the old request still active instead of staying LoadingInput.
+        Harness h2 = Harness.Create();
+        await h2.OpenAsync();
+        try
+        {
+            h2.Factory.FailNextOpen = new InvalidOperationException("boom");
+            await h2.VM.OpenInputAsync(Path.Combine(Path.GetTempPath(), "other-" + Guid.NewGuid() + ".vgz"));
+
+            Assert.Equal(GuiState.Ready, h2.VM.State);
+            Assert.NotNull(h2.VM.Error);
+            Assert.NotNull(h2.VM.Request);
+        }
+        finally
+        {
+            await h2.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task ExportSettingChangeDuringInFlightPreview_ClearsLoading()
+    {
+        Harness h = Harness.Create();
+        await h.OpenAsync();
+        try
+        {
+            // Gate the next refresh so it stays in flight while an export-only
+            // setting changes.
+            h.Factory.LastSession.PlanGate = new TaskCompletionSource();
+            Task refreshTask = h.VM.RefreshPreviewAsync();
+
+            // PlanAsync runs synchronously up to the gate, so the refresh is in flight now.
+            Assert.True(h.PlanCalls >= 1);
+
+            h.VM.SetOutputPath("/tmp/in-flight-output.mp4");
+
+            h.Factory.LastSession.PlanGate.SetResult();
+            await refreshTask;
+
+            Assert.False(h.VM.Preview.IsLoading, "an export-only change must not leave the preview spinner stuck");
+            Assert.Equal("/tmp/in-flight-output.mp4", h.VM.Request!.OutputPath);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
     private sealed class Harness
     {
         public MainWindowViewModel VM { get; private set; } = null!;
@@ -158,6 +224,7 @@ public sealed class MainWindowViewModelTests
         public int PlanCalls => Factory.PlanCalls;
         public int FrameCalls => Factory.FrameCalls;
         public VisualizationRequest? LastRequest => Factory.LastRequest;
+        public string InputPath => _inputPath;
 
         public static Harness Create()
         {

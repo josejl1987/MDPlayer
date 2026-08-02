@@ -14,12 +14,24 @@ internal sealed class RecordingPreviewFactory : IVisualizationPreviewSessionFact
 
     public int PlanCalls => _sessions.Sum(s => s.PlanCalls);
     public int FrameCalls => _sessions.Sum(s => s.FrameCalls);
+    public IReadOnlyList<RecordingPreviewSession> Sessions => _sessions;
+    public RecordingPreviewSession LastSession => _sessions[^1];
+
+    /// <summary>When set, the next OpenAsync call throws before any session is created.</summary>
+    public Exception? FailNextOpen { get; set; }
+
     public VisualizationRequest? LastRequest => _sessions
         .SelectMany(s => s.Requests)
         .LastOrDefault();
 
     public Task<IVisualizationPreviewSession> OpenAsync(string inputPath, CancellationToken cancellationToken)
     {
+        if (FailNextOpen is { } failure)
+        {
+            FailNextOpen = null;
+            throw failure;
+        }
+
         var session = new RecordingPreviewSession(inputPath);
         _sessions.Add(session);
         return Task.FromResult<IVisualizationPreviewSession>(session);
@@ -53,6 +65,9 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     public int FrameCalls { get; private set; }
     public List<VisualizationRequest> Requests { get; } = new();
 
+    /// <summary>When set, PlanAsync blocks until the gate completes (simulates an in-flight refresh).</summary>
+    public TaskCompletionSource? PlanGate { get; set; }
+
     public VisualizationInputInfo Input { get; }
     public VisualizationSessionCapabilities Capabilities { get; } = new()
     {
@@ -71,6 +86,8 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
     {
         PlanCalls++;
         Requests.Add(request);
+        if (PlanGate is { } gate)
+            return PlanGatedAsync(gate.Task, cancellationToken);
         return Task.FromResult(new VisualizationPlanResult
         {
             ResolvedLayout = "unified",
@@ -79,6 +96,20 @@ internal sealed class RecordingPreviewSession : IVisualizationPreviewSession
             EstimatedDurationSeconds = 180,
             RepresentativePoints = [new RepresentativePoint { Kind = "start", TimeSeconds = 0, Label = "Start" }],
         });
+    }
+
+    private async Task<VisualizationPlanResult> PlanGatedAsync(Task gate, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new VisualizationPlanResult
+        {
+            ResolvedLayout = "unified",
+            RequestedLayout = "auto",
+            InputPath = "gated",
+            EstimatedDurationSeconds = 180,
+            RepresentativePoints = [new RepresentativePoint { Kind = "start", TimeSeconds = 0, Label = "Start" }],
+        };
     }
 
     public Task<PreviewFrameResult> RenderFrameAsync(

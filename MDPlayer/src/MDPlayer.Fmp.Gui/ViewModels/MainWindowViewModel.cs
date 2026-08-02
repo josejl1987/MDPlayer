@@ -42,6 +42,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private IVisualizationPreviewSession? _session;
     private VisualizationPlanResult? _plan;
     private int _requestRevision;
+    private int _previewGeneration;
+    private int _refreshSeq;
     private GuiState _state = GuiState.Empty;
     private GuiError? _error;
     private string? _completionMessage;
@@ -262,11 +264,12 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            SetState(GuiState.Ready);
+            SetState(HasInput ? GuiState.Ready : GuiState.Empty);
         }
         catch (Exception ex)
         {
             SetError("Failed to open input: " + ex.Message);
+            SetState(HasInput ? GuiState.Ready : GuiState.Empty);
         }
     }
 
@@ -274,7 +277,10 @@ public sealed class MainWindowViewModel : ObservableObject
     public void ApplyVisualSetting(Func<VisualizationRequest, VisualizationRequest> transform)
     {
         if (SetNewRequest(transform))
+        {
+            _previewGeneration++;
             SchedulePreviewRefresh();
+        }
     }
 
     /// <summary>Applies an output-only request delta without refreshing the preview.</summary>
@@ -429,7 +435,8 @@ public sealed class MainWindowViewModel : ObservableObject
         if (_request is null || _session is null)
             return;
 
-        int revision = _requestRevision;
+        int generation = _previewGeneration;
+        int refreshSeq = ++_refreshSeq;
         VisualizationRequest request = _request;
 
         CancelPreview();
@@ -440,7 +447,7 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             _plan = await _session.PlanAsync(request, ct);
-            if (IsObsolete(revision, ct))
+            if (IsObsolete(generation, ct))
                 return;
             ApplyPlan(_plan);
 
@@ -454,13 +461,13 @@ public sealed class MainWindowViewModel : ObservableObject
                     Fidelity = PreviewFidelity.AccurateStill,
                 },
                 ct);
-            if (IsObsolete(revision, ct))
+            if (IsObsolete(generation, ct))
                 return;
             Preview.ApplyFrame(frame);
         }
         catch (OperationCanceledException)
         {
-            // Replaced by a newer request.
+            // Replaced by a newer request or a newer refresh.
         }
         catch (Exception ex)
         {
@@ -468,13 +475,15 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         finally
         {
-            if (revision == _requestRevision)
+            // Only the most recently started refresh clears the loading flag, so a
+            // cancelled superseded refresh can never turn it off early.
+            if (_refreshSeq == refreshSeq)
                 Preview.SetLoading(false);
         }
     }
 
-    private bool IsObsolete(int revision, CancellationToken ct)
-        => ct.IsCancellationRequested || revision != _requestRevision;
+    private bool IsObsolete(int generation, CancellationToken ct)
+        => ct.IsCancellationRequested || generation != _previewGeneration;
 
     private void ApplyPlan(VisualizationPlanResult plan)
     {
@@ -593,6 +602,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         _request = request;
         _requestRevision++;
+        _previewGeneration++;
         Settings.Synchronize(request);
         ValidateCurrent();
         OnPropertyChanged(nameof(HasInput), nameof(OutputPath), nameof(HasOutputConflict),
