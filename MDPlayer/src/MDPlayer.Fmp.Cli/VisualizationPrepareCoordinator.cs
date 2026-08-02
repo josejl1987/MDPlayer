@@ -34,6 +34,15 @@ internal sealed record PreparedTimeline(
     bool MasterAudioProduced);
 
 /// <summary>
+/// Immutable plan/layout context for a request, keyed by <see cref="PlanKey"/>.
+/// It holds the resolved layout and prepared plan so a later frame-style change
+/// can re-project a fresh presentation without recomputing the expensive plan.
+/// </summary>
+internal sealed record PreparedPlanContext(
+    ResolvedVisualizationLayout Layout,
+    VisualizationPlanResult Plan);
+
+/// <summary>
 /// Shared PR4 preparation stages for the render pipeline. It centralizes
 /// backend resolution, semantic capture, scope/stem generation, layout
 /// resolution, presentation and energy analysis.
@@ -169,12 +178,48 @@ internal static class VisualizationPrepareCoordinator
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(workspace);
 
+        return BuildTimelineSourceFrom(capture, request, workspace, BuildPlanContext(capture.Timeline, request, workspace));
+    }
+
+    /// <summary>
+    /// Builds the request's layout and plan together so they can be cached as a
+    /// single immutable value keyed by <see cref="PlanKey"/>. Reusing this
+    /// context across a later frame-style change lets the caller re-project a
+    /// fresh presentation without recomputing the (expensive) plan.
+    /// </summary>
+    public static PreparedPlanContext BuildPlanContext(
+        VisualizationTimeline timeline,
+        VisualizationRequest request,
+        VisualizationWorkspace workspace)
+    {
         ResolvedVisualizationLayout layout =
             VisualizationLayoutBuilder.Build(
-                capture.Timeline,
+                timeline,
                 VisualizationLayoutModeMapper.FromComposition(
                     request.Composition),
                 request.ToLayoutSettings());
+
+        VisualizationPlanResult plan =
+            VisualizationPlanBuilder.Build(
+                request,
+                timeline,
+                layout,
+                workspace.TimelinePath);
+
+        return new PreparedPlanContext(layout, plan);
+    }
+
+    /// <summary>Builds a timeline source reusing a previously computed plan.</summary>
+    public static PreparedTimelineSource BuildTimelineSourceFrom(
+        PreparedTimeline capture,
+        VisualizationRequest request,
+        VisualizationWorkspace workspace,
+        PreparedPlanContext planContext)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(workspace);
+        ArgumentNullException.ThrowIfNull(planContext);
 
         VisualizationPresentation presentation =
             VisualizationSupport.ResolvePresentation(
@@ -188,19 +233,12 @@ internal static class VisualizationPrepareCoordinator
                     capture.MasterSamples)
                 : capture.Timeline;
 
-        VisualizationPlanResult plan =
-            VisualizationPlanBuilder.Build(
-                request,
-                capture.Timeline,
-                layout,
-                workspace.TimelinePath);
-
         return new PreparedTimelineSource(
             Request: request,
             Timeline: timeline,
-            Layout: layout,
+            Layout: planContext.Layout,
             Presentation: presentation,
-            Plan: plan,
+            Plan: planContext.Plan,
             MasterAudioPath: capture.MasterAudioPath,
             MasterAudioProduced:
                 capture.MasterAudioProduced
@@ -292,12 +330,27 @@ internal static class VisualizationPrepareCoordinator
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(workspace);
 
-        OutputSettings output = request.Output;
+        return BuildSourceFrom(
+            capture,
+            request,
+            workspace,
+            BuildPlanContext(capture.Timeline, request, workspace));
+    }
 
-        ResolvedVisualizationLayout layout = VisualizationLayoutBuilder.Build(
-            capture.Timeline,
-            VisualizationLayoutModeMapper.FromComposition(request.Composition),
-            request.ToLayoutSettings());
+    /// <summary>Builds a full visualization source reusing a previously computed plan.</summary>
+    public static PreparedVisualizationSource BuildSourceFrom(
+        PreparedCapture capture,
+        VisualizationRequest request,
+        VisualizationWorkspace workspace,
+        PreparedPlanContext planContext)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(workspace);
+        ArgumentNullException.ThrowIfNull(planContext);
+
+        OutputSettings output = request.Output;
+        ResolvedVisualizationLayout layout = planContext.Layout;
 
         ScopeRenderer.ScopeResult scopeResult = capture.Scope.Result;
         VisualizationPresentation presentation =
@@ -329,9 +382,6 @@ internal static class VisualizationPrepareCoordinator
             totalFrames, projectedScope.SampleRate,
             output.FpsNumerator, output.FpsDenominator);
 
-        VisualizationPlanResult plan = VisualizationPlanBuilder.Build(
-            request, capture.Timeline, layout, workspace.TimelinePath);
-
         return new PreparedVisualizationSource(
             Request: request,
             Timeline: videoTimeline,
@@ -341,7 +391,7 @@ internal static class VisualizationPrepareCoordinator
             Energy: energy,
             Scope: capture.Scope with { Result = projectedScope },
             ScopeChannels: projected.Channels,
-            Plan: plan,
+            Plan: planContext.Plan,
             MasterAudioPath: capture.MasterAudioPath,
             BackendId: capture.BackendId,
             TimelinePath: workspace.TimelinePath);

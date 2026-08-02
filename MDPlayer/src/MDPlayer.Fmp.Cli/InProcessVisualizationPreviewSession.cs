@@ -1,4 +1,5 @@
 using Fmp.Application.Contracts;
+using Fmp.Application.Export;
 using Fmp.Application.Inspection;
 using Fmp.Application.Preview;
 using Fmp.Core.Visualization;
@@ -67,20 +68,30 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     private readonly string? _seedTimelinePath;
     private readonly string? _timelineOutPath;
 
-    private CaptureKey? _captureKey;
+    private TimelineCaptureKey? _timelineCaptureKey;
     private CaptureContext? _timelineCapture;
 
-    private RenderKey? _timelineRenderKey;
+    private PlanKey? _planKey;
+    private PreparedPlanContext? _planCache;
+    private FrameStyleKey? _timelineFrameStyleKey;
     private PreparedTimelineSource? _timelineSource;
     private VisualizationFrameRenderer? _timelineRenderer;
 
+    private ScopeAssetKey? _scopeAssetKey;
     private Task<PreparedCapture>? _renderAssetsTask;
     private PreparedCapture? _capture;
 
-    private RenderKey? _fullRenderKey;
+    private FrameStyleKey? _frameStyleKey;
     private PreparedVisualizationSource? _prepared;
     private VisualizationFrameRenderer? _interactiveRenderer;
     private VisualizationFrameRenderer? _productionRenderer;
+
+    // ---- Instrumentation counters (internal, test-only seams) ----
+    private int _timelineCaptureCount;
+    private int _scopeAssetPreparationCount;
+    private int _planBuildCount;
+    private int _rendererConstructionCount;
+    private int _frameRenderCount;
 
     private readonly CancellationTokenSource _sessionLifetimeCts = new();
 
@@ -723,9 +734,9 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         VisualizationRequest request,
         CancellationToken cancellationToken)
     {
-        CaptureKey key = CaptureKey.From(request, _runtime);
+        TimelineCaptureKey key = KeyFor(request);
 
-        if (_timelineCapture is not null && _captureKey == key)
+        if (_timelineCapture is not null && _timelineCaptureKey == key)
         {
             return _timelineCapture;
         }
@@ -741,6 +752,8 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 try
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+
+                    Interlocked.Increment(ref _timelineCaptureCount);
 
                     VisualizationBackendResolution resolution =
                         VisualizationBackendResolver.Resolve(request, _runtime);
@@ -783,7 +796,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        _captureKey = key;
+        _timelineCaptureKey = key;
         _timelineCapture = context;
 
         Capabilities = Capabilities with
@@ -794,10 +807,24 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         return context;
     }
 
+    /// <summary>Builds the staged timeline-capture key from a live input file.</summary>
+    private TimelineCaptureKey KeyFor(VisualizationRequest request)
+    {
+        string fullPath = Path.GetFullPath(request.InputPath);
+        var file = new FileInfo(fullPath);
+        if (!file.Exists)
+        {
+            throw new VisualizationRequestException(
+                $"Capture input no longer exists: {request.InputPath}");
+        }
+        return TimelineCaptureKey.From(request, file, _runtime);
+    }
+
     /// <summary>
-    /// Returns a lightweight timeline-only source for the request's render key,
-    /// rebuilding it (without recapturing the file) whenever style, layout,
-    /// dimensions, track selection or presentation change.
+    /// Returns a lightweight timeline-only source for the request's frame-style
+    /// key, rebuilding it (without recapturing the file) whenever the frame
+    /// style changes. When only style/presentation changed the previously
+    /// computed plan is reused, so a title/style edit does not re-plan.
     /// </summary>
     private async Task<PreparedTimelineSource> EnsureTimelineSourceAsync(
         VisualizationRequest request,
@@ -808,25 +835,68 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
                 request,
                 cancellationToken);
 
-        RenderKey renderKey = RenderKey.From(request);
+        FrameStyleKey frameKey =
+            FrameStyleKey.From(
+                request,
+                PlanKey.From(request, ScopeAssetKey.From(request, _timelineCaptureKey!.Value)));
 
         if (_timelineSource is null
-            || _timelineRenderKey != renderKey)
+            || _timelineFrameStyleKey != frameKey)
         {
             _timelineRenderer?.Dispose();
             _timelineRenderer = null;
 
+            PreparedPlanContext plan =
+                await EnsurePlanContextAsync(
+                    context,
+                    request,
+                    cancellationToken);
+
             _timelineSource =
                 VisualizationPrepareCoordinator
-                    .BuildTimelineSource(
+                    .BuildTimelineSourceFrom(
                         context.Timeline,
                         request,
-                        _workspace);
+                        _workspace,
+                        plan);
 
-            _timelineRenderKey = renderKey;
+            _timelineFrameStyleKey = frameKey;
         }
 
         return _timelineSource;
+    }
+
+    /// <summary>
+    /// Returns (and caches by <c>PlanKey</c>) the resolved layout and prepared
+    /// plan for a request. A pure frame-style change (title, palette, effects,
+    /// note color) reuses this cached plan, so it never re-runs the expensive
+    /// <see cref="VisualizationPlanBuilder"/>.
+    /// </summary>
+    private async Task<PreparedPlanContext> EnsurePlanContextAsync(
+        CaptureContext context,
+        VisualizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        PlanKey planKey = PlanKey.From(
+            request,
+            ScopeAssetKey.From(request, _timelineCaptureKey!.Value));
+
+        if (_planCache is not null && _planKey == planKey)
+            return _planCache;
+
+        _planKey = planKey;
+
+        Interlocked.Increment(ref _planBuildCount);
+        var planContext =
+            VisualizationPrepareCoordinator.BuildPlanContext(
+                context.Timeline.Timeline,
+                request,
+                _workspace);
+
+        _planCache = planContext;
+        return planContext;
     }
 
     /// <summary>
@@ -842,6 +912,8 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     {
         if (_renderAssetsTask is not null)
             return _renderAssetsTask;
+
+        Interlocked.Increment(ref _scopeAssetPreparationCount);
 
         Task<PreparedCapture> task = Task.Run(
             async () =>
@@ -882,11 +954,14 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         _timelineRenderer?.Dispose();
         _timelineRenderer = null;
         _timelineSource = null;
-        _timelineRenderKey = null;
+        _timelineFrameStyleKey = null;
 
         DisposeFullRenderers();
         _prepared = null;
-        _fullRenderKey = null;
+        _frameStyleKey = null;
+
+        _planKey = null;
+        _planCache = null;
 
         _capture = null;
         _renderAssetsTask = null;
@@ -895,7 +970,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
     /// <summary>
     /// Returns the full prepared source, waiting (but never cancelling) the
     /// deduplicated scope/stem asset task, then projecting the finished capture
-    /// into a request-specific prepared source when the render key changes.
+    /// into a request-specific prepared source when the frame-style key changes.
     /// </summary>
     private async Task<PreparedVisualizationSource> EnsurePreparedAsync(
         VisualizationRequest request,
@@ -916,7 +991,7 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (_captureKey != CaptureKey.From(request, _runtime))
+        if (_timelineCaptureKey != KeyFor(request))
         {
             throw new OperationCanceledException(
                 "Preview capture was superseded.");
@@ -924,20 +999,30 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
 
         _capture = capture;
 
-        RenderKey renderKey = RenderKey.From(request);
+        FrameStyleKey frameKey =
+            FrameStyleKey.From(
+                request,
+                PlanKey.From(request, ScopeAssetKey.From(request, _timelineCaptureKey!.Value)));
 
         if (_prepared is null
-            || _fullRenderKey != renderKey)
+            || _frameStyleKey != frameKey)
         {
             DisposeFullRenderers();
 
+            PreparedPlanContext plan =
+                await EnsurePlanContextAsync(
+                    timelineContext,
+                    request,
+                    cancellationToken);
+
             _prepared =
-                VisualizationPrepareCoordinator.BuildSource(
+                VisualizationPrepareCoordinator.BuildSourceFrom(
                     capture,
                     request,
-                    _workspace);
+                    _workspace,
+                    plan);
 
-            _fullRenderKey = renderKey;
+            _frameStyleKey = frameKey;
         }
 
         return _prepared!;
