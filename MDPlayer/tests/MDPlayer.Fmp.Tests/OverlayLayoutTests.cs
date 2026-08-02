@@ -61,6 +61,18 @@ public sealed class OverlayLayoutTests
     }
 
     [Fact]
+    public void EightPanels_UseBalancedFourByTwoGrid()
+    {
+        // The diagnostic grid must never leave an unused rectangle: 8 panels
+        // pack into 4x2 exactly instead of 3x3-with-one-empty-cell.
+        var layout = new OverlayLayout(1920, 1080, 0.75, 2.25, panelCount: 8);
+
+        Assert.Equal(4, layout.ColumnCount);
+        Assert.Equal(2, layout.RowCount);
+        Assert.Equal(layout.BottomBarRect.Y, layout.GetPanelRect(7).Bottom);
+    }
+
+    [Fact]
     public void LargePcmTopologyFitsAdaptiveGrid()
     {
         var layout = new OverlayLayout(1920, 1080, 0.75, 2.25, panelCount: 32);

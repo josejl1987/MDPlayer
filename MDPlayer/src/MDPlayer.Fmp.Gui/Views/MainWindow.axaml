@@ -93,7 +93,7 @@
 
       <!-- Left: settings sections -->
       <Grid x:Name="SettingsSidebar" Grid.Column="0" IsEnabled="{Binding CanEdit}">
-        <ScrollViewer>
+        <ScrollViewer x:Name="SettingsScroll">
           <StackPanel x:Name="SidebarScrollContent" Margin="12,12,12,20" Spacing="6">
 
             <!-- INPUT -->
@@ -410,8 +410,8 @@
           </Grid>
         </Border>
 
-        <TextBlock Grid.Column="2" Classes="caption" Text="{Binding OutputStatusText}"
-                   VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="2" Classes="metric" Text="{Binding RenderSpecText}"
+                   VerticalAlignment="Center" TextAlignment="Right"/>
 
         <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8" IsVisible="{Binding Export.HasCompleted}">
           <Button Classes="secondary" Content="Open video" Command="{Binding OpenOutputCommand}"/>

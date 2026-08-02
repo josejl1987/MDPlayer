@@ -49,7 +49,7 @@ internal class CorrscopeConfigWriter
         public const string BgColor = "#080a0f";
         public const string GridColor = "#10141c";
         public const string MidlineColor = "#10141c";
-        public const double LineWidth = 2.5;
+        public const double LineWidth = 2.2;
         public const double LineOutlineWidth = 0.6;
         public const string GlobalLineOutlineColor = "#000000";
         public const string LabelColorOverride = "#d8dee9";

@@ -112,7 +112,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         GuiState.Empty => "Open a music file to begin.",
         GuiState.LoadingInput => "Loading input…",
-        GuiState.Ready => "Ready",
+        GuiState.Ready => "Ready to render",
         GuiState.Rendering => "Rendering…",
         _ => "",
     };
@@ -172,6 +172,28 @@ public sealed class MainWindowViewModel : ObservableObject
         : HasOutputConflict
             ? "Output already exists. Enable overwrite to render here."
             : "Output path is ready.";
+
+    /// <summary>Right-hand status readout: resolution · fps · encoder.</summary>
+    public string RenderSpecText
+    {
+        get
+        {
+            OutputSettings output = _request?.Output ?? new OutputSettings();
+            double fps = output.FpsDenominator > 0
+                ? output.FpsNumerator / (double)output.FpsDenominator
+                : 0;
+            string fpsText = fps > 0 && fps == Math.Floor(fps)
+                ? $"{(int)fps} FPS"
+                : $"{fps:0.##} FPS";
+            string encoder = output.Encoder switch
+            {
+                VideoEncoder.LibX264 => "H.264",
+                VideoEncoder.Nvenc => "NVENC",
+                _ => "H.264",
+            };
+            return $"{output.Width}×{output.Height} · {fpsText} · {encoder}";
+        }
+    }
 
     public bool HasFatalValidationIssues
     {
@@ -649,7 +671,7 @@ public sealed class MainWindowViewModel : ObservableObject
         Settings.Synchronize(next);
         ValidateCurrent();
         OnPropertyChanged(nameof(HasInput), nameof(OutputPath), nameof(HasOutputConflict),
-            nameof(OutputStatusText), nameof(CanOpenOutput));
+            nameof(OutputStatusText), nameof(RenderSpecText), nameof(CanOpenOutput));
         RefreshCommands();
         return true;
     }
@@ -662,7 +684,7 @@ public sealed class MainWindowViewModel : ObservableObject
         Settings.Synchronize(request);
         ValidateCurrent();
         OnPropertyChanged(nameof(HasInput), nameof(OutputPath), nameof(HasOutputConflict),
-            nameof(OutputStatusText), nameof(CanOpenOutput));
+            nameof(OutputStatusText), nameof(RenderSpecText), nameof(CanOpenOutput));
         RefreshCommands();
     }
 

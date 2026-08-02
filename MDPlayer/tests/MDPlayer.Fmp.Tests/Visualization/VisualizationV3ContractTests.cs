@@ -755,6 +755,42 @@ public sealed class VisualizationV3ContractTests
     }
 
     [Fact]
+    public void ActiveFilterOmitsWaveformOnlyPanels()
+    {
+        DeviceDescriptor device = VisualizationDeviceCatalog.Ym2612();
+        VoiceDescriptor[] voices = VisualizationDeviceCatalog.Ym2612Voices().Take(2).ToArray();
+        VisualizationTimeline timeline = new()
+        {
+            SampleRate = 1_000,
+            EndSample = 2_000,
+            Devices = [device],
+            Voices = voices,
+            Notes =
+            [
+                new NoteEvent(voices[0].Id.ToString(), 0, 1_000, 440, 69, "i",
+                    VisualizationNoteMode.Fm, false, []),
+            ],
+            WaveformChanges =
+            [
+                new WaveformChangeEvent(voices[1].Id.ToString(), 200, "w"),
+            ],
+        };
+
+        VisualizationTopology active = VisualizationTopologyBuilder.Build(
+            timeline,
+            VisualizationChannelFilter.Active);
+        VisualizationTopology diagnostic = VisualizationTopologyBuilder.Build(
+            timeline,
+            VisualizationChannelFilter.All);
+
+        // Waveform changes are channel-config state, not content: a channel
+        // with only waveform changes renders as SILENT, so the Active filter
+        // must drop it while All keeps the full diagnostic grid.
+        Assert.Single(active.Panels);
+        Assert.Equal(2, diagnostic.Panels.Count);
+    }
+
+    [Fact]
     public void AllFilterPreservesSilentDescriptorsInDiagnosticLayout()
     {
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2612();

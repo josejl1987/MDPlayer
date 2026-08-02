@@ -122,7 +122,7 @@ public class CorrscopeConfigWriterTests
             Assert.Contains("grid_line_width: 0.5", yaml);
             Assert.Contains("v_midline: false", yaml);
             Assert.Contains("h_midline: false", yaml);
-            Assert.Contains("line_width: 2.5", yaml);
+            Assert.Contains("line_width: 2.2", yaml);
             Assert.Contains("antialiasing: true", yaml);
 
             // Label styling

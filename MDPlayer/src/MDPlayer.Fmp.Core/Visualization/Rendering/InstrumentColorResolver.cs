@@ -28,9 +28,9 @@ internal static class InstrumentColorResolver
     {
         ulong hash = StableHash64(instrumentId ?? "");
         double hue = hash % 360;
-        double saturation = 0.58 + ((hash >> 9) & 0x0F) / 100.0;
-        double lightness = 0.54 + ((hash >> 17) & 0x0F) / 120.0;
-        return HslToRgb(hue, Math.Min(saturation, 0.76), Math.Min(lightness, 0.67));
+        double saturation = 0.62 + ((hash >> 9) & 0x0F) / 100.0;
+        double lightness = 0.60 + ((hash >> 17) & 0x0F) / 100.0;
+        return HslToRgb(hue, Math.Min(saturation, 0.80), Math.Min(lightness, 0.76));
     }
 
     public static OverlayColor ResolveChannelAccent(int panelIndex)
@@ -63,8 +63,8 @@ internal static class InstrumentColorResolver
     {
         int pitchClass = ((int)Math.Round(midiNote) % 12 + 12) % 12;
         int octave = Math.Clamp((int)Math.Round(midiNote) / 12 - 1, 0, 9);
-        double lightness = 0.52 + (octave - 4) * 0.02;
-        return HslToRgb(PitchClassHues[pitchClass], 0.68, Math.Clamp(lightness, 0.42, 0.68));
+        double lightness = 0.58 + (octave - 4) * 0.02;
+        return HslToRgb(PitchClassHues[pitchClass], 0.70, Math.Clamp(lightness, 0.48, 0.74));
     }
 
     public static OverlayColor ResolveChannelFill(int panelIndex, double midiNote)
@@ -72,8 +72,8 @@ internal static class InstrumentColorResolver
         if (panelIndex < 0 || panelIndex >= ChannelHues.Length)
             return new OverlayColor(200, 200, 210);
         int octave = Math.Clamp((int)Math.Round(midiNote) / 12 - 1, 0, 9);
-        double lightness = 0.48 + (octave - 4) * 0.025;
-        return HslToRgb(ChannelHues[panelIndex], 0.60, Math.Clamp(lightness, 0.40, 0.66));
+        double lightness = 0.54 + (octave - 4) * 0.025;
+        return HslToRgb(ChannelHues[panelIndex], 0.64, Math.Clamp(lightness, 0.46, 0.72));
     }
 
     public static OverlayColor ResolveChannelFill(string stableChannelId, double midiNote)
@@ -81,8 +81,8 @@ internal static class InstrumentColorResolver
         ulong hash = StableHash64(stableChannelId ?? "");
         double hue = hash % 360;
         int octave = Math.Clamp((int)Math.Round(midiNote) / 12 - 1, 0, 9);
-        double lightness = 0.48 + (octave - 4) * 0.025;
-        return HslToRgb(hue, 0.60, Math.Clamp(lightness, 0.40, 0.66));
+        double lightness = 0.54 + (octave - 4) * 0.025;
+        return HslToRgb(hue, 0.64, Math.Clamp(lightness, 0.46, 0.72));
     }
 
     public static OverlayColor ResolveFill(NoteColorMode mode, string instrumentId, int panelIndex, double midiNote)

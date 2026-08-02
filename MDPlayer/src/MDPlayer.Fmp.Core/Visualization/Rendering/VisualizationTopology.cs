@@ -294,8 +294,6 @@ internal static class VisualizationTopologyBuilder
             return true;
         if (timeline.AggregateHits.Any(value => ids.Contains(value.VoiceId)))
             return true;
-        if (timeline.WaveformChanges.Any(value => ids.Contains(value.VoiceId)))
-            return true;
 
         if (panel.Content == PanelContentKind.PercussionGroup
             && timeline.Rhythm.Any(evt => panel.VoiceIds.Any(id =>

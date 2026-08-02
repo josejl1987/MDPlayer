@@ -24,7 +24,7 @@ internal sealed record VisualizationPalette(
         new OverlayColor(19, 21, 31),
         new OverlayColor(15, 17, 25),
         new OverlayColor(11, 13, 20),
-        new OverlayColor(48, 52, 66, 150),
+        new OverlayColor(48, 52, 66, 110),
         new OverlayColor(76, 82, 103, 210),
         new OverlayColor(139, 146, 167),
         new OverlayColor(222, 226, 238),

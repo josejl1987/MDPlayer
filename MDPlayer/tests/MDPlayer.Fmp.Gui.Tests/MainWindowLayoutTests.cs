@@ -185,6 +185,13 @@ public sealed class MainWindowLayoutTests
         Grid mainContent =
             Required<Grid>(window, "MainContent");
 
+        ScrollViewer settingsScroll =
+            Required<ScrollViewer>(window, "SettingsScroll");
+
+        Assert.True(
+            settingsScroll.Bounds.Bottom <= statusBar.Bounds.Top,
+            "The settings scroll viewport must end above the status bar.");
+
         Assert.True(
             lastSection.Bounds.Bottom <= sidebarContent.Bounds.Bottom,
             "The last sidebar section must not overflow the scroll content.");
