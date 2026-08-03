@@ -2,6 +2,22 @@
 
 This project uses or references the following third-party software.
 
+## YM2608-LLE (native YM2608/OPNA backend)
+
+- **Licence:** GPL-2.0-or-later
+- **Source:** https://github.com/tildearrow/furnace (`extern/YM2608-LLE`,
+  original core by nukeykt)
+- **Pinned Furnace commit:** `3bdfc824fb7d2e813852f6fcfa482d8ea999588a`
+- **Usage:** The native YM2608-LLE backend contains GPL-2.0-or-later code. It
+  is not yet packaged in this stage. The exact Furnace commit is pinned and the
+  vendored core files are kept byte-identical under
+  `native/MDPlayer.OpnaNative/upstream/furnace-ym2608-lle`. See
+  `native/MDPlayer.OpnaNative/UPSTREAM.md` for the pin, per-file hashes and the
+  update procedure. The full licence text is in
+  `native/MDPlayer.OpnaNative/LICENSES/GPL-2.0-or-later.txt`.
+- **Note:** No compatibility claim is made here about the complete binary
+  distribution until packaging of the GPL-covered backend is addressed.
+
 ## Game_Music_Emu (SNES SPC core)
 
 - **Licence:** LGPL-2.1 with the static-linking exception in `gme/gme.h`

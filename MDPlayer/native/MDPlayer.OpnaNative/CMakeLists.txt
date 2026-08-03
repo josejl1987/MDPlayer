@@ -35,6 +35,31 @@ endif()
 # fmopna_impl.c, exactly as Furnace builds it.
 set(OPNANATIVE_UPSTREAM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/upstream/furnace-ym2608-lle")
 
+# ---------------------------------------------------------------------------
+# Static internal target compiling ONLY the pinned YM2608-LLE core.
+#
+# This is the Prompt-2 vendoring gate: it proves the vendored core compiles
+# in isolation and can be initialized/clocked. No MDPlayer integration code,
+# bus transactions, audio decoding, or resampling is included here — that
+# lives in the `mdplayer_opna` shared library target declared below.
+#
+# C standard: C99 (the vendored core is written to the C99 dialect that
+# Furnace builds it with; see UPSTREAM.md). Warnings are enabled; the core is
+# compiled with `-pedantic`-free -Wall -Wextra. Include paths are configured
+# in CMake (never by editing the vendored files).
+add_library(mdplayer_opna_core STATIC
+    "${OPNANATIVE_UPSTREAM_DIR}/fmopna_2608.c")
+target_compile_features(mdplayer_opna_core PRIVATE c_std_99)
+target_include_directories(mdplayer_opna_core PUBLIC
+    "${OPNANATIVE_UPSTREAM_DIR}")
+if(NOT MSVC)
+    target_compile_options(mdplayer_opna_core PRIVATE
+        -Wall -Wextra)
+endif()
+set_target_properties(mdplayer_opna_core PROPERTIES
+    OUTPUT_NAME "mdplayer_opna_core"
+    POSITION_INDEPENDENT_CODE ON)
+
 add_library(mdplayer_opna SHARED
     src/mdplayer_opna.c
     src/mdplayer_opna_core.c
@@ -80,3 +105,12 @@ target_include_directories(mdplayer_opna_probe PRIVATE
     "${OPNANATIVE_UPSTREAM_DIR}")
 target_link_libraries(mdplayer_opna_probe PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_probe COMMAND mdplayer_opna_probe)
+
+# ---------------------------------------------------------------------------
+# Prompt-2 vendoring gate: compile + init test for the pinned core.
+# Proves the vendored core compiles in isolation (via mdplayer_opna_core)
+# and can be initialized and clocked. Produces no audio.
+# ---------------------------------------------------------------------------
+add_executable(upstream_compile_test tests/upstream_compile_test.c)
+target_link_libraries(upstream_compile_test PRIVATE mdplayer_opna_core)
+add_test(NAME upstream_compile_test COMMAND upstream_compile_test)

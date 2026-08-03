@@ -1,4 +1,5 @@
 native/MDPlayer.SpcNative/build/
 native/MDPlayer.SpcNative/build-dbg/
+native/MDPlayer.OpnaNative/build*/
 runtimes/linux-x64/native/*.so
 runtimes/win-x64/native/*.dll
