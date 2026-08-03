@@ -30,8 +30,11 @@ extern "C" {
 #define OPNA_FURNACE_COMMIT "3bdfc824fb7d2e813852f6fcfa482d8ea999588a"
 
 /* Furnace's fixed SSG analogue gain into the digital mix (ym2608.cpp:
- * `fm_lle.o_analog*ssgVol*42`). Kept verbatim for parity; see mdplayer_opna_mix.c. */
-#define OPNA_FURNACE_SSG_ANALOG_SCALE 42
+ * `fm_lle.o_analog*ssgVol*42`). Kept verbatim for parity; see mdplayer_opna_mix.c.
+ * `MDP_OPNA_FURNACE_SSG_ANALOG_SCALE` is the canonical Prompt-4 name;
+ * `OPNA_FURNACE_SSG_ANALOG_SCALE` is kept as a short alias. */
+#define MDP_OPNA_FURNACE_SSG_ANALOG_SCALE 42
+#define OPNA_FURNACE_SSG_ANALOG_SCALE MDP_OPNA_FURNACE_SSG_ANALOG_SCALE
 
 /* --------------------------------------------------------------------- */
 /* Serial PCM decoder (adapted from Furnace `acquire_lle`)                */
