@@ -75,6 +75,20 @@
       <Link>runtimes/win-x64/native/mdplayer_spc.dll</Link>
     </None>
 
+    <!-- OPNA native library (libmdplayer_opna.so / mdplayer_opna.dll). Same
+         layout as the SPC library; OpnaNativeSession probes the current-OS
+         path under AppContext.BaseDirectory (or MDPLAYER_OPNA_NATIVE). -->
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_opna.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_opna.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_opna.so</Link>
+    </None>
+    <None Include="..\..\runtimes\win-x64\native\mdplayer_opna.dll"
+          Condition="Exists('..\..\runtimes\win-x64\native\mdplayer_opna.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/mdplayer_opna.dll</Link>
+    </None>
+
     <Content Include="../../../tools/music-analysis/pattern_analysis.py" LinkBase="tools/music-analysis">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
