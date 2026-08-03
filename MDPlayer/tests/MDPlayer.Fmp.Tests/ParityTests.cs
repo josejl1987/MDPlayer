@@ -42,10 +42,10 @@ public class ParityTests
         {
             OperandType.InlineNone => 0,
             OperandType.ShortInlineI
-                or OperandType.ShortInlineR
                 or OperandType.ShortInlineBrTarget
                 or OperandType.ShortInlineVar => 1,
             OperandType.InlineVar => 2,
+            OperandType.ShortInlineR => 4,
             OperandType.InlineI
                 or OperandType.InlineBrTarget
                 or OperandType.InlineField
