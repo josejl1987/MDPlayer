@@ -152,3 +152,34 @@ target_include_directories(mdplayer_opna_fm_audio_test PRIVATE
     "${OPNANATIVE_UPSTREAM_DIR}")
 target_link_libraries(mdplayer_opna_fm_audio_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_fm_audio_test COMMAND mdplayer_opna_fm_audio_test)
+
+# ---------------------------------------------------------------------------
+# Prompt-4A stereo pan/routing gate: left/right ordering, mono-SSG fold pan.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_pan_test tests/pan_test.c)
+target_include_directories(mdplayer_opna_pan_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_pan_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_pan_test COMMAND mdplayer_opna_pan_test)
+
+# ---------------------------------------------------------------------------
+# Prompt-4A Furnace-compatible SSG mix gate.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_ssg_test tests/ssg_test.c)
+target_include_directories(mdplayer_opna_ssg_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_ssg_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_ssg_test COMMAND mdplayer_opna_ssg_test)
+
+# ---------------------------------------------------------------------------
+# Prompt-4A ADPCM-B external-memory protocol gate.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_adpcm_test tests/adpcm_test.c)
+target_include_directories(mdplayer_opna_adpcm_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_adpcm_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_adpcm_test COMMAND mdplayer_opna_adpcm_test)
+
