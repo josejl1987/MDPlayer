@@ -56,3 +56,17 @@ void opna_lle_adpcm_clock(OpnaLleAdpcmBus *adpcm, fmopna_t *chip, int mem_config
     adpcm->cas = chip->o_cas;
     adpcm->ras = chip->o_ras;
 }
+
+/* Test-only loader: copy into the 256 KiB backing DRAM. Bounds-checked so a
+ * bad fixture fails loudly instead of corrupting memory. Production render never
+ * calls this. */
+void opna_lle_adpcm_load(OpnaLleAdpcmBus *adpcm, uint32_t offset,
+                         const uint8_t *data, uint32_t len)
+{
+    if ((uint64_t)offset + len > MDP_OPNA_ADPCM_RAM_BYTES) {
+        memset(adpcm->mem, 0, sizeof(adpcm->mem));   /* fail-fast, deterministic */
+        return;
+    }
+    if (len > 0)
+        memcpy(adpcm->mem + offset, data, len);
+}

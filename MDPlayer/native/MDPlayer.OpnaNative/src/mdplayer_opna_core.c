@@ -26,8 +26,10 @@ void opna_lle_serial_reset(OpnaLleSerialDecoder *decoder)
 
 void opna_lle_adpcm_reset(OpnaLleAdpcmBus *adpcm)
 {
-    /* backing RAM is intentionally left as-is (caller clears with bzero);
-     * only the bus latch state is reset. */
+    /* Prompt-4 gate: "clear RAM on reset". The top-level opna_lle_reset also
+     * zeroes the whole context, but this function is the authoritative ADPCM
+     * reset and must clear the 256 KiB backing buffer too. */
+    memset(adpcm->mem, 0, sizeof(adpcm->mem));
     adpcm->ad_mem_addr = 0;
     adpcm->cas = 0;
     adpcm->ras = 0;

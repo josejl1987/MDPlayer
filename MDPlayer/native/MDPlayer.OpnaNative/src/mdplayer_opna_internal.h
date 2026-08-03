@@ -118,11 +118,17 @@ void opna_lle_mix_frame(const fmopna_t *chip,
  * multiplexed o_dm + o_a8 bus, latched by CAS (column portion) and RAS
  * (row portion). We hold a 256 KiB backing buffer and drive input.dm /
  * input.dt0 back into the core according to memConfig (o_romcs / o_mden).
+ *
+ * `MDP_OPNA_ADPCM_RAM_BYTES` / `MDP_OPNA_ADPCM_ADDRESS_MASK` are the canonical
+ * Prompt-4 names (256 KiB, 18-bit address wrapped by 0x3ffff). `OPNA_ADPCM_B_SIZE`
+ * is kept as a short alias for backwards source compatibility.
  */
-#define OPNA_ADPCM_B_SIZE 0x40000   /* 256 KiB */
+#define MDP_OPNA_ADPCM_RAM_BYTES (256u * 1024u)
+#define MDP_OPNA_ADPCM_ADDRESS_MASK 0x3ffffu
+#define OPNA_ADPCM_B_SIZE MDP_OPNA_ADPCM_RAM_BYTES
 
 typedef struct {
-    uint8_t mem[OPNA_ADPCM_B_SIZE];
+    uint8_t mem[MDP_OPNA_ADPCM_RAM_BYTES];
     int ad_mem_addr;
     int cas;   /* previous o_cas */
     int ras;   /* previous o_ras */
@@ -131,6 +137,11 @@ typedef struct {
 void opna_lle_adpcm_reset(OpnaLleAdpcmBus *adpcm);
 /* called once per clock pair before FMOPNA_Clock second half */
 void opna_lle_adpcm_clock(OpnaLleAdpcmBus *adpcm, fmopna_t *chip, int mem_config);
+/* Test-only loader: copy `len` bytes into the external DRAM at `offset`
+ * (0 <= offset+len <= MDP_OPNA_ADPCM_RAM_BYTES). Not used by the production
+ * render path; provided so native tests can prime write/read/wrap fixtures. */
+void opna_lle_adpcm_load(OpnaLleAdpcmBus *adpcm, uint32_t offset,
+                         const uint8_t *data, uint32_t len);
 
 /* --------------------------------------------------------------------- */
 /* Full reset sequence (adapted from Furnace)                            */
