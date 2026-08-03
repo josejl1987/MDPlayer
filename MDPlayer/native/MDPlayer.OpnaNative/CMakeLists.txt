@@ -234,3 +234,32 @@ target_include_directories(mdplayer_opna_session_reset_test PRIVATE
 target_link_libraries(mdplayer_opna_session_reset_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_session_reset_test COMMAND mdplayer_opna_session_reset_test)
 
+# ---------------------------------------------------------------------------
+# Prompt-5 Workstream C: prescaler / native cadence audit + gate.
+# The prescaler audit is diagnostic. The cadence gate asserts constant 144
+# native cadence; it FAILS when variable cadence is detected (spec §22 hard
+# stop: fixed-rate resampler and Workstream D/E are not built).
+# NB: this gate is expected to FAIL (variable cadence from honoring 0x2E/0x2F
+# prescaler-select writes). It is the spec's hard-stop trigger.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_prescaler_audit_test tests/prescaler_audit_test.c)
+target_include_directories(mdplayer_opna_prescaler_audit_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_prescaler_audit_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_prescaler_audit_test COMMAND mdplayer_opna_prescaler_audit_test)
+set_tests_properties(mdplayer_opna_prescaler_audit_test PROPERTIES
+    RUN_SERIAL ON)
+
+add_executable(mdplayer_opna_native_cadence_test tests/native_cadence_test.c)
+target_include_directories(mdplayer_opna_native_cadence_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_native_cadence_test PRIVATE mdplayer_opna)
+add_test(NAME fixed_rate_resampler_requires_constant_native_cadence
+         COMMAND mdplayer_opna_native_cadence_test)
+set_tests_properties(fixed_rate_resampler_requires_constant_native_cadence
+                     PROPERTIES RUN_SERIAL ON)
+

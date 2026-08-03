@@ -81,18 +81,7 @@ void opna_lle_bus_drive(OpnaLle *ctx)
 
     OpnaLleQueuedWrite w;
     if (opna_lle_queue_front(&ctx->writes, &w)) {
-        if (w.address == 0x2e || w.address == 0x2f) {
-            /* Prescaler writes don't work well through the LLE bus; Furnace
-             * absorbs them directly into the register pool. */
-            chip->input.cs = 1;
-            chip->input.rd = 1;
-            chip->input.wr = 1;
-            chip->input.a1 = 0;
-            chip->input.a0 = 0;
-            chip->input.data = 0;
-            ctx->reg_pool[w.address & 0x1ff] = w.value;
-            opna_lle_queue_pop(&ctx->writes);
-        } else if (w.addr_written) {
+        if (w.addr_written) {
             /* Data phase. */
             chip->input.cs = 0;
             chip->input.rd = 1;

@@ -123,8 +123,12 @@ void opna_lle_mix_frame(const fmopna_t *chip,
  * Prompt-4 names (256 KiB, 18-bit address wrapped by 0x3ffff). `OPNA_ADPCM_B_SIZE`
  * is kept as a short alias for backwards source compatibility.
  */
+#ifndef MDP_OPNA_ADPCM_RAM_BYTES
 #define MDP_OPNA_ADPCM_RAM_BYTES (256u * 1024u)
+#endif
+#ifndef MDP_OPNA_ADPCM_ADDRESS_MASK
 #define MDP_OPNA_ADPCM_ADDRESS_MASK 0x3ffffu
+#endif
 #define OPNA_ADPCM_B_SIZE MDP_OPNA_ADPCM_RAM_BYTES
 
 typedef struct {
