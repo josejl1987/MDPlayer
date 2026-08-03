@@ -95,3 +95,21 @@ uint64_t opna_lle_master_clock(const OpnaLle *ctx)
 {
     return ctx->master_clock;
 }
+
+int opna_lle_obs_status_timer_a(const OpnaLle *ctx)
+{
+    /* Live internal timer-A status latch (timer_a_status is clocked [1] =
+     * previous phase). This is the observation that status reads and the IRQ
+     * pull both consume; it is not synthesized in managed/native glue. */
+    return ctx->core.timer_a_status[1] != 0;
+}
+
+int opna_lle_obs_status_timer_b(const OpnaLle *ctx)
+{
+    return ctx->core.timer_b_status[1] != 0;
+}
+
+int opna_lle_obs_irq_pull(const OpnaLle *ctx)
+{
+    return ctx->core.o_irq_pull != 0;
+}

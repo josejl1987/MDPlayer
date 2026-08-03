@@ -217,6 +217,21 @@ void opna_lle_write(OpnaLle *ctx, int address, int value);
  */
 void opna_lle_render(OpnaLle *ctx, int16_t *out_l, int16_t *out_r, size_t frames);
 
+/* --------------------------------------------------------------------- */
+/* Timer and IRQ observations (native tests only)                        */
+/* --------------------------------------------------------------------- */
+
+/*
+ * Expose the core's internal status / timer / IRQ observations so native tests
+ * can pin deterministic timer-overflow and IRQ-assertion positions without
+ * synthesizing timer status externally. These read the transistor-level core's
+ * live state (the same fields Furnace inspects); they are diagnostic only and
+ * are never used as final PCM.
+ */
+int opna_lle_obs_status_timer_a(const OpnaLle *ctx);   /* status_timer_a  */
+int opna_lle_obs_status_timer_b(const OpnaLle *ctx);   /* status_timer_b  */
+int opna_lle_obs_irq_pull(const OpnaLle *ctx);         /* o_irq_pull      */
+
 #ifdef __cplusplus
 }
 #endif

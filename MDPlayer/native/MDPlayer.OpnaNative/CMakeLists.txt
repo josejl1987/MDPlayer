@@ -183,3 +183,23 @@ target_include_directories(mdplayer_opna_adpcm_test PRIVATE
 target_link_libraries(mdplayer_opna_adpcm_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_adpcm_test COMMAND mdplayer_opna_adpcm_test)
 
+# ---------------------------------------------------------------------------
+# Prompt-4A timer + IRQ observations gate.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_timer_irq_test tests/timer_irq_test.c)
+target_include_directories(mdplayer_opna_timer_irq_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_timer_irq_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_timer_irq_test COMMAND mdplayer_opna_timer_irq_test)
+
+# ---------------------------------------------------------------------------
+# Prompt-4A determinism gate: identical PCM SHA-256 across three processes.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_determinism_test tests/determinism_test.c)
+target_include_directories(mdplayer_opna_determinism_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_determinism_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_determinism_test COMMAND mdplayer_opna_determinism_test)
