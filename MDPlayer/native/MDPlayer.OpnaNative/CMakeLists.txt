@@ -126,3 +126,15 @@ target_include_directories(mdplayer_opna_reset_test PRIVATE
     "${OPNANATIVE_UPSTREAM_DIR}")
 target_link_libraries(mdplayer_opna_reset_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_reset_test COMMAND mdplayer_opna_reset_test)
+
+# ---------------------------------------------------------------------------
+# Bus scheduler test (Prompt 3): verifies the pin-level write state machine
+# (address/data phases, A1/A0 selects, CS/RD/WR, prescaler write opportunity,
+# busy wait, SSG delay, explicit idle, FIFO order).
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_bus_test tests/bus_test.c)
+target_include_directories(mdplayer_opna_bus_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_bus_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_bus_test COMMAND mdplayer_opna_bus_test)
