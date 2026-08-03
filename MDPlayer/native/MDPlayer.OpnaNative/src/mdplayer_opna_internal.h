@@ -140,10 +140,24 @@ void opna_lle_adpcm_clock(OpnaLleAdpcmBus *adpcm, fmopna_t *chip, int mem_config
  *   576 full clock pairs after ic re-asserted (returning to reset state
  *     between); then it re-zeroes the serial/ADPCM bus state.
  * We implement exactly that triple of 576-pair phases.
+ *
+ * `phase_pairs` (optional, may be NULL) is filled with the number of complete
+ * low/high pairs executed in each of the three phases, and `*master_clock` is
+ * advanced by the total (1728). The running pair counter is the native
+ * absolute time represented by OpnaLle.master_clock; it never decreases and
+ * each increment executes one complete low/high pair.
  */
+typedef struct {
+    uint64_t phase1_pairs;   /* ic asserted       */
+    uint64_t phase2_pairs;   /* ic deasserted     */
+    uint64_t phase3_pairs;   /* ic re-asserted    */
+} OpnaLleResetCounts;
+
 void opna_lle_reset_core(fmopna_t *core,
                          OpnaLleSerialDecoder *decoder,
-                         OpnaLleAdpcmBus *adpcm);
+                         OpnaLleAdpcmBus *adpcm,
+                         uint64_t *master_clock,
+                         OpnaLleResetCounts *phase_pairs);
 
 /* --------------------------------------------------------------------- */
 /* Top-level driver                                                      */
@@ -162,7 +176,18 @@ struct OpnaLle {
     int reg_pool[512];
 
     int delay;        /* Furnace `delay`: 0 idle, 1 data-phase-wait, 2/3 wr */
+
+    /*
+     * Native absolute time in complete low/high master-clock pairs. It never
+     * decreases: reset advances it by 1728 (3 x 576) and every render frame
+     * advances it by the number of pairs needed to capture its serial frame.
+     * No floating-point timeline arithmetic is used anywhere in the driver.
+     */
+    uint64_t master_clock;
 };
+
+/* Absolute native time in complete low/high master-clock pairs (monotonic). */
+uint64_t opna_lle_master_clock(const OpnaLle *ctx);
 
 void opna_lle_reset(OpnaLle *ctx);
 

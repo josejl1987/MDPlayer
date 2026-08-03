@@ -114,3 +114,15 @@ add_test(NAME mdplayer_opna_probe COMMAND mdplayer_opna_probe)
 add_executable(upstream_compile_test tests/upstream_compile_test.c)
 target_link_libraries(upstream_compile_test PRIVATE mdplayer_opna_core)
 add_test(NAME upstream_compile_test COMMAND upstream_compile_test)
+
+# ---------------------------------------------------------------------------
+# Reset + clock test (Prompt 3): verifies the Furnace reset contract
+# (576/576/576 phases), the initial pin state, and that reset clears every
+# transient driver state while advancing master_clock monotonically.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_reset_test tests/reset_test.c)
+target_include_directories(mdplayer_opna_reset_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_reset_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_reset_test COMMAND mdplayer_opna_reset_test)

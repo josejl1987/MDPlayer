@@ -44,7 +44,9 @@ void opna_lle_adpcm_reset(OpnaLleAdpcmBus *adpcm)
  */
 void opna_lle_reset_core(fmopna_t *core,
                          OpnaLleSerialDecoder *decoder,
-                         OpnaLleAdpcmBus *adpcm)
+                         OpnaLleAdpcmBus *adpcm,
+                         uint64_t *master_clock,
+                         OpnaLleResetCounts *phase_pairs)
 {
     memset(core, 0, sizeof(*core));
 
@@ -69,21 +71,27 @@ void opna_lle_reset_core(fmopna_t *core,
     for (size_t h = 0; h < 576; h++) {
         FMOPNA_Clock(core, 0);
         FMOPNA_Clock(core, 1);
+        if (master_clock) (*master_clock)++;
     }
+    if (phase_pairs) phase_pairs->phase1_pairs = 576;
 
     /* Phase 2: ic released. */
     core->input.ic = 0;
     for (size_t h = 0; h < 576; h++) {
         FMOPNA_Clock(core, 0);
         FMOPNA_Clock(core, 1);
+        if (master_clock) (*master_clock)++;
     }
+    if (phase_pairs) phase_pairs->phase2_pairs = 576;
 
     /* Phase 3: ic re-asserted. */
     core->input.ic = 1;
     for (size_t h = 0; h < 576; h++) {
         FMOPNA_Clock(core, 0);
         FMOPNA_Clock(core, 1);
+        if (master_clock) (*master_clock)++;
     }
+    if (phase_pairs) phase_pairs->phase3_pairs = 576;
 
     /* After the reset clocking, re-zero the serial decoder and ADPCM bus
      * latch state (Furnace does exactly this: dacVal=0; dacOut=0; lastSH...

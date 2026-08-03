@@ -32,7 +32,8 @@ void opna_lle_reset(OpnaLle *ctx)
      * ADPCM limits, prescaler); we mirror that so a freshly-reset chip is
      * in the same starting state Furnace assumes.
      */
-    opna_lle_reset_core(&ctx->core, &ctx->serial, &ctx->adpcm);
+    opna_lle_reset_core(&ctx->core, &ctx->serial, &ctx->adpcm,
+                        &ctx->master_clock, NULL);
 
     /* enable 6 channel mode */
     opna_lle_write(ctx, 0x29, 0x80);
@@ -71,6 +72,7 @@ void opna_lle_render(OpnaLle *ctx, int16_t *out_l, int16_t *out_r, size_t frames
 
             FMOPNA_Clock(chip, 0);
             FMOPNA_Clock(chip, 1);
+            ctx->master_clock++;   /* this clock pair is now absolute history */
 
             /* Drive the ADPRCM external-memory bus each pair (so o_dm/o_a8
              * row/column latches and the returned memory byte are in sync
@@ -87,4 +89,9 @@ void opna_lle_render(OpnaLle *ctx, int16_t *out_l, int16_t *out_r, size_t frames
         opna_lle_mix_frame(chip, left, right, ctx->fm_vol, ctx->ssg_vol,
                            &out_l[h], &out_r[h]);
     }
+}
+
+uint64_t opna_lle_master_clock(const OpnaLle *ctx)
+{
+    return ctx->master_clock;
 }
