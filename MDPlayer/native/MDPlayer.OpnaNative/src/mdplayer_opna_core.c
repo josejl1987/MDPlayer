@@ -26,10 +26,19 @@ void opna_lle_serial_reset(OpnaLleSerialDecoder *decoder)
 
 void opna_lle_adpcm_reset(OpnaLleAdpcmBus *adpcm)
 {
-    /* Prompt-4 gate: "clear RAM on reset". The top-level opna_lle_reset also
-     * zeroes the whole context, but this function is the authoritative ADPCM
-     * reset and must clear the 256 KiB backing buffer too. */
+    /* Prompt-4 gate: "clear RAM on reset". This is the authoritative ADPCM
+     * reset and clears the 256 KiB backing buffer plus the latch state. */
     memset(adpcm->mem, 0, sizeof(adpcm->mem));
+    adpcm->ad_mem_addr = 0;
+    adpcm->cas = 0;
+    adpcm->ras = 0;
+}
+
+/* Chip-resolution of reset: re-zero only the ADPCM bus latch state
+ * (ad_mem_addr, cas, ras) exactly as Furnace does after its reset loop. Does
+ * NOT touch the external RAM contents, which are owned by the session adapter. */
+static void opna_lle_adpcm_reset_latch(OpnaLleAdpcmBus *adpcm)
+{
     adpcm->ad_mem_addr = 0;
     adpcm->cas = 0;
     adpcm->ras = 0;
@@ -48,7 +57,8 @@ void opna_lle_reset_core(fmopna_t *core,
                          OpnaLleSerialDecoder *decoder,
                          OpnaLleAdpcmBus *adpcm,
                          uint64_t *master_clock,
-                         OpnaLleResetCounts *phase_pairs)
+                         OpnaLleResetCounts *phase_pairs,
+                         bool clear_external_adpcm_ram)
 {
     memset(core, 0, sizeof(*core));
 
@@ -99,5 +109,23 @@ void opna_lle_reset_core(fmopna_t *core,
      * latch state (Furnace does exactly this: dacVal=0; dacOut=0; lastSH...
      * cas=0; ras=0; adMemAddr=0). */
     opna_lle_serial_reset(decoder);
+    if (clear_external_adpcm_ram)
+        opna_lle_adpcm_reset(adpcm);       /* zero RAM + latch */
+    else
+        opna_lle_adpcm_reset_latch(adpcm); /* only the latch; RAM preserved */
+}
+
+void opna_lle_reset_chip_state(fmopna_t *core,
+                               OpnaLleSerialDecoder *decoder,
+                               OpnaLleAdpcmBus *adpcm,
+                               uint64_t *master_clock,
+                               OpnaLleResetCounts *phase_pairs)
+{
+    opna_lle_reset_core(core, decoder, adpcm, master_clock, phase_pairs,
+                        false);
+}
+
+void opna_lle_clear_external_adpcm_ram(OpnaLleAdpcmBus *adpcm)
+{
     opna_lle_adpcm_reset(adpcm);
 }

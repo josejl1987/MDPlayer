@@ -52,7 +52,7 @@ static void test_mix_arithmetic(void)
 {
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
 
     ctx.core.o_analog = 7.0;
     ctx.ssg_vol = 128;
@@ -84,7 +84,7 @@ static void test_ssg_feeds_both_channels(void)
     enum { N = 160000 };
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
 
     /* square-wave tone on SSG channel A */
     opna_lle_write(&ctx, 0x07, 0x38);   /* tone A on (mixer), noise off */
@@ -110,7 +110,7 @@ static void test_ssg_feeds_both_channels(void)
     /* left must equal right at every sample (mono SSG folded into both) */
     OpnaLle c2;
     memset(&c2, 0, sizeof(c2));
-    opna_lle_reset(&c2);
+    opna_lle_reset(&c2, true);
     opna_lle_write(&c2, 0x07, 0x38);
     opna_lle_write(&c2, 0x08, 8);
     opna_lle_write(&c2, 0x09, 0);
@@ -132,8 +132,8 @@ static void test_disabling_ssg_removes_contribution(void)
     /* same tone, but ssgVol=0 => the analogue fold is zero; a control run at
      * default ssgVol must differ. */
     OpnaLle on, off;
-    memset(&on, 0, sizeof(on));  opna_lle_reset(&on);
-    memset(&off, 0, sizeof(off)); opna_lle_reset(&off);
+    memset(&on, 0, sizeof(on));  opna_lle_reset(&on, true);
+    memset(&off, 0, sizeof(off)); opna_lle_reset(&off, true);
     for (OpnaLle *c = &on; ; c = &off) {
         opna_lle_write(c, 0x07, 0x38);
         opna_lle_write(c, 0x08, 8);
@@ -165,7 +165,7 @@ static void test_digital_pcm_remains(void)
      * that the mix function still adds digital serial into the int16 out. */
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     ctx.ssg_vol = 0;
 
     int16_t l = 1234, r = -999;

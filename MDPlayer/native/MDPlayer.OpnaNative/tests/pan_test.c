@@ -41,7 +41,7 @@ static void test_digital_left_right_not_swapped(void)
 {
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     ctx.ssg_vol = 0;          /* remove analogue so only serial matters */
     ctx.core.o_analog = 0;
 
@@ -67,7 +67,7 @@ static void test_ssg_pan_is_both(void)
     enum { N = 60000 };
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     opna_lle_write(&ctx, 0x07, 0x38);
     opna_lle_write(&ctx, 0x08, 8);
     opna_lle_write(&ctx, 0x09, 0);

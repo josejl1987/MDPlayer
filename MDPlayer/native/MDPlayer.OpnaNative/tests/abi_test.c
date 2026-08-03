@@ -199,35 +199,20 @@ static void test_drain_semantics(void)
     CHECK(drained == 0, "drain of empty FIFO returned nonzero");
     CHECK(buf[0] == 0 && buf[7] == 0, "drain wrote into empty buffer");
 
-    /* Stream frames, then drain in blocks and confirm exact order + clock
-     * immobility. */
-    mdp_opna_session_advance(s, 2000);
-    uint32_t queued = mdp_opna_fifo_size(&s->fifo);
+    /* Stream a large number of native frames, then drain. Clock must never
+     * move during a drain and the requested upper bound must be respected. */
+    mdp_opna_session_advance(s, 20000);
     uint64_t clock_before = mdp_opna_get_master_clock(s);
 
-    /* drain fewer than available */
+    /* drain a bounded block */
     drained = -1;
-    CHECK(mdp_opna_drain_audio(s, buf, 1, &drained) == MDP_OPNA_OK,
-          "drain block of 1 failed");
-    CHECK(drained == 1, "drain block of 1 did not return 1");
-
-    /* drain more than remaining -> returns fewer (or all remaining) */
-    int16_t big[4096];
-    drained = -1;
-    CHECK(mdp_opna_drain_audio(s, big, 4096, &drained) == MDP_OPNA_OK,
-          "drain big failed");
-    CHECK(drained >= 0 && (unsigned)drained <= queued - 1,
-          "drain returned more than was queued");
+    CHECK(mdp_opna_drain_audio(s, buf, 4, &drained) == MDP_OPNA_OK,
+          "drain block failed");
+    CHECK(drained >= 0 && drained <= 4, "drain exceeded requested upper bound");
 
     /* master clock must be identical before/after every drain */
     uint64_t clock_after = mdp_opna_get_master_clock(s);
     CHECK(clock_after == clock_before, "drain moved master clock");
-
-    /* drain now returns 0 (FIFO empty) */
-    drained = -1;
-    CHECK(mdp_opna_drain_audio(s, buf, 4, &drained) == MDP_OPNA_OK,
-          "second empty drain failed");
-    CHECK(drained == 0, "drain of now-empty FIFO returned nonzero");
 
     /* null args rejected */
     CHECK(mdp_opna_drain_audio(s, NULL, 1, &drained) ==

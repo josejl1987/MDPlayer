@@ -4,13 +4,21 @@
  * Implements the versioned public session ABI on top of the existing
  * validated Furnace-compatible OpnaLle adapter. This file owns the opaque
  * session lifecycle (open/close/reset), clock advancement with timed
- * native-frame queuing, register writes and status reads through the existing
- * production scheduler, and FIFO drain.
+ * native-frame queuing and runtime cadence guarding, register writes and
+ * pin-level status reads through the production scheduler, FIFO drain and
+ * fixed-cadence resampling, and IRQ observation.
  *
  * Time semantics (see mdplayer_opna_internal.h): master_clock is absolute
  * time in complete low/high FMOPNA_Clock pairs; it never decreases; each
  * increment runs exactly one low/high pair. No floating-point timeline
  * arithmetic is used.
+ *
+ * Cadence policy (ABI version 1): the supported production profile is a fixed
+ * 144 master clocks per complete stereo serial frame. Every completed frame is
+ * compared with the previous one; any interval other than 144 latches a sticky
+ * MDP_OPNA_ERR_UNSUPPORTED_CADENCE error and stops fixed-rate resampling until
+ * the session is reset. Prescaler-select writes are always honored through the
+ * bus; a cadence-changing write is detected, not silently ignored.
  *
  * Adaptations copyright (C) 2026 MDPlayer contributors.
  *
@@ -19,6 +27,7 @@
 #include "mdplayer_opna_session.h"
 
 #include "../include/mdplayer_opna.h"
+#include "mdplayer_opna_resampler.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -76,29 +85,104 @@ static bool clock_pair(OpnaLle *ctx, int16_t *l, int16_t *r)
     return opna_lle_serial_clock(&ctx->serial, chip, l, r);
 }
 
-int mdp_opna_session_advance(mdp_opna_session *sess, uint64_t target_clock)
+/*
+ * Clock one low/high pair WITHOUT driving the write bus. Used to complete a
+ * pin-level status read transaction so that the pre-driven read pins (rd/cs
+ * asserted, a1/bank select) are not overwritten by a queued write opportunity.
+ * Mirrors clock_pair in every other respect (master_clock advance, ADPCM bus,
+ * serial decode).
+ */
+static bool clock_pair_read(OpnaLle *ctx)
 {
-    uint64_t cur = sess->lle.master_clock;
-    if (target_clock < cur)
-        return MDP_OPNA_ERR_CLOCK_REGRESSION;
+    fmopna_t *chip = &ctx->core;
 
+    FMOPNA_Clock(chip, 0);
+    FMOPNA_Clock(chip, 1);
+    ctx->master_clock++;
+    opna_lle_adpcm_clock(&ctx->adpcm, chip, ctx->mem_config);
+
+    int16_t l, r;
+    (void)l; (void)r;
+    return opna_lle_serial_clock(&ctx->serial, chip, &l, &r);
+}
+
+/*
+ * Advance the adapter and, per completed frame, run the cadence guard. Queues
+ * each completed stereo frame with the session FIFO. Returns an error if the
+ * foo overflow happens, or if the cadence guard latches unsupported cadence
+ * (in which case the offending frame is still queued but resampling stops).
+ */
+static int advance_frames(mdp_opna_session *sess, uint64_t target_clock)
+{
     OpnaLle *ctx = &sess->lle;
 
     while (ctx->master_clock < target_clock) {
         int16_t l, r;
         if (clock_pair(ctx, &l, &r)) {
-            mdp_opna_timed_frame frame;
-            frame.master_clock = ctx->master_clock;
-            frame.left = l;
-            frame.right = r;
-            if (!mdp_opna_fifo_push(&sess->fifo,
-                                    frame.master_clock,
-                                    frame.left,
-                                    frame.right))
+            uint64_t cur = ctx->master_clock;
+
+            /* Cadence guard. The frame cadence is native_frame_clocks; after
+             * the first frame, the interval from the previous frame must be
+             * exactly native_frame_clocks. Any other interval latches a sticky
+             * unsupported-cadence error and stops resampling. */
+            if (!sess->cadence_synced) {
+                sess->cadence_synced = true;
+            } else {
+                uint64_t interval = cur - sess->cadence_prev_clock;
+                if (interval != sess->native_frame_clocks && !sess->cadence_error) {
+                    sess->cadence_error = true;
+                    sess->cadence_cur_clock = cur;
+                    sess->cadence_observed_interval = interval;
+                    /* Prescaler mode / most recent prescaler write, recorded
+                     * from the live core for diagnostics. */
+                    sess->cadence_prescaler_mode =
+                        (int)ctx->core.prescaler_sel[1];
+                    sess->cadence_prescaler_write =
+                        (uint8_t)sess->prescaler_last_write;
+                }
+            }
+            sess->cadence_prev_clock = cur;
+
+            if (!mdp_opna_fifo_push(&sess->fifo, cur, l, r))
                 return MDP_OPNA_ERR_FIFO_OVERFLOW;
         }
     }
+
+    /* Frame starvation: the fixed-144 profile must produce a completed frame
+     * within a bounded number of native clock pairs. If none arrives after
+     * many frame periods (e.g. honoring 0x2F yields no serial output at all),
+     * the cadence is unsupported. Deterministic: a real 144-clock profile
+     * produces a frame every native_frame_clocks pairs, so FRAME_STARVE_CLOCKS
+     * is many frames' worth of headroom without being fragile. */
+    {
+        const uint64_t FRAME_STARVE_CLOCKS = 16u * sess->native_frame_clocks;
+        if (!sess->cadence_synced && !sess->cadence_error &&
+            ctx->master_clock >= sess->cadence_starve_base + FRAME_STARVE_CLOCKS) {
+            sess->cadence_error = true;
+            sess->cadence_cur_clock = ctx->master_clock;
+            sess->cadence_observed_interval = 0;
+            sess->cadence_prescaler_mode = (int)ctx->core.prescaler_sel[1];
+            sess->cadence_prescaler_write = sess->prescaler_last_write;
+            return MDP_OPNA_ERR_UNSUPPORTED_CADENCE;
+        }
+    }
+
     return MDP_OPNA_OK;
+}
+
+/*
+ * Clock from the current clock to `target_clock`. This is the ABI
+ * advance path; it drives the production scheduler and queues frames, running
+ * the cadence guard. It does NOT resample or drain.
+ */
+int mdp_opna_session_advance(mdp_opna_session *sess, uint64_t target_clock)
+{
+    uint64_t cur = sess->lle.master_clock;
+    if (target_clock < cur)
+        return MDP_OPNA_ERR_CLOCK_REGRESSION;
+    if (sess->cadence_error)
+        return MDP_OPNA_ERR_UNSUPPORTED_CADENCE;
+    return advance_frames(sess, target_clock);
 }
 
 /* --------------------------------------------------------------------- */
@@ -132,43 +216,43 @@ int mdp_opna_open(const mdp_opna_open_options *options,
         return MDP_OPNA_ERR_OUT_OF_MEMORY;
     }
 
-    /* calloc zeroes the entire session: external ADPCM RAM, FIFO, LLE state
-     * struct, master clock = 0, IRQ deasserted (o_irq_pull starts 0+chip). */
     sess->output_rate_hz = options->output_rate_hz;
     sess->rate_valid = true;
+    sess->native_frame_clocks = MDP_OPNA_NATIVE_FRAME_CLOCKS;
+    sess->prescaler_last_write = 0xFFu; /* Furnace default prescaler 0x2D */
 
     /*
-     * Power-on: initialize the existing native adapter and run the existing
-     * validated 576/576/576 reset sequence. opna_lle_reset() clears the write
-     * queue, runs the triple reset, and enqueues the Furnace default register
-     * init. It also zeroes ADPCM RAM (opna_lle_adpcm_reset fills it with 0),
-     * which satisfies the "fresh RAM is zero" requirement without duplicating
-     * reset logic here.
+     * Power-on: zero external RAM, reset chip state, reset scheduler/serial.
+     * opna_lle_reset(clear_external_adpcm_ram=true) zeroes the whole context
+     * (RAM included), runs the validated 576/576/576 sequence and enqueues the
+     * Furnace default register init.
      */
-    opna_lle_reset(&sess->lle);
+    opna_lle_reset(&sess->lle, true);
 
-    /*
-     * The power-on reset helper advanced master_clock by 1728 (3 x 576) while
-     * blanking the chip. The ABI session clock must start at zero (§7 step 12),
-     * so we reset it. No queued audio is produced during this initial reset.
-     */
+    /* The public timeline origin is zero; the helper advanced master_clock by
+     * 1728 while blanking the chip — no production time has elapsed yet. */
     sess->lle.master_clock = 0;
 
-    /* Clear the bus scheduler (post-reset the queue already holds the default
-     * init registers; draining to empty would lose them, so we instead rely on
-     * opna_lle_reset's own queue state as the power-on scheduler state. The
-     * queue is empty-after-render; here we clear it so no stale write leaks). */
+    /* Idle scheduler. The power-on default register init already enqueued
+     * writes; we clear the queue so no stale write leaks, then reset the
+     * per-session resetable state. */
     opna_lle_queue_reset(&sess->lle.writes);
 
-    /* Clear empty the serial decoder (already reset by opna_lle_reset). */
-    opna_lle_serial_reset(&sess->lle.serial);
+    /* Create the fixed-cadence resampler for the requested output rate. */
+    sess->resampler = mdp_opna_resampler_create(options->output_rate_hz);
+    if (!sess->resampler) {
+        set_error(error, error_size, "mdp_opna_open: resampler alloc failed");
+        free(sess);
+        if (out_session)
+            *out_session = NULL;
+        return MDP_OPNA_ERR_INTERNAL;
+    }
 
-    /* Clear the native-frame FIFO. */
+    /* FIFO, cadence guard and resampler start clean. */
     mdp_opna_fifo_reset(&sess->fifo);
-
-    /* Clear resampler state (none in the fixed-cadence case; the FIFO is the
-     * audio staging area). master_clock is already 0 from calloc. IRQ state is
-     * deasserted by the core reset (o_irq_pull starts 0). */
+    mdp_opna_resampler_reset((mdp_opna_resampler *)sess->resampler);
+    sess->cadence_synced = false;
+    sess->cadence_error = false;
 
     *out_session = sess;
     return MDP_OPNA_OK;
@@ -182,42 +266,35 @@ int mdp_opna_reset_chip(mdp_opna_session *session)
     OpnaLle *ctx = &session->lle;
 
     /*
-     * Run the existing validated 576/576/576 chip-reset helper on the live
-     * core. The helper (opna_lle_reset_core) blanks the core, runs the triple
-     * reset, and re-zeroes serial + ADPCM bus latch state — but it also clears
-     * the 256 KiB external ADPCM RAM via opna_lle_adpcm_reset. Per the ABI,
-     * chip reset must PRESERVE external ADPCM RAM, so we retain a transient
-     * copy and restore it afterwards. This performs no heap allocation (the
-     * copy lives on the stack) and does not touch the configured rate.
-     *
-     * We call opna_lle_reset_core directly (not the higher-level
-     * opna_lle_reset) so we do not re-apply the Furnace default register init
-     * or re-clear RAM through a second path; the chip is left in its raw
-     * post-reset pin state with ic re-asserted, exactly as the validated
-     * helper specifies.
+     * Chip reset: run the existing validated 576/576/576 chip-reset helper
+     * while PRESERVING the external ADPCM RAM (its contents are owned by the
+     * session adapter, not by transient reset state). No 256 KiB copy, no heap
+     * allocation. The serial decoder and ADPCM bus latch are re-zeroed by the
+     * helper; the external RAM backing buffer is untouched.
      */
-    uint8_t saved_ram[MDP_OPNA_ADPCM_RAM_BYTES];
-    memcpy(saved_ram, ctx->adpcm.mem, sizeof(saved_ram));
+    opna_lle_reset_chip_state(&ctx->core, &ctx->serial, &ctx->adpcm,
+                              &ctx->master_clock, NULL);
 
-    opna_lle_reset_core(&ctx->core, &ctx->serial, &ctx->adpcm,
-                        &ctx->master_clock, NULL);
-
-    /* Preserve the external ADPCM RAM across the reset. */
-    memcpy(ctx->adpcm.mem, saved_ram, sizeof(saved_ram));
-
-    /* Reset the scheduler (drop any pending writes, clean reg_pool). */
+    /* Scheduler idle: drop pending writes and clean the reg shadow. */
     opna_lle_queue_reset(&ctx->writes);
     for (int i = 0; i < 512; i++)
         ctx->reg_pool[i] = 0;
 
-    /* Reset serial partial-frame state (already re-zeroed by the helper, but
-     * keep it explicit), empty the native-frame FIFO, and reset the master
-     * clock to zero (the helper advanced it by 1728). */
+    /* Public timeline origin returns to zero. */
     ctx->master_clock = 0;
-    mdp_opna_fifo_reset(&session->fifo);
 
-    /* Reset IRQ observation state. The core reset re-zeroed o_irq_pull via
-     * memset; the FIFO/serial transients are cleared above. */
+    /* Empty the FIFO, reset the resampler and clear the cadence guard. The
+     * configured output rate is preserved (it is not touched here). */
+    mdp_opna_fifo_reset(&session->fifo);
+    mdp_opna_resampler_reset((mdp_opna_resampler *)session->resampler);
+    session->cadence_synced = false;
+    session->cadence_error = false;
+    session->cadence_prev_clock = 0;
+    session->cadence_cur_clock = 0;
+    session->cadence_observed_interval = 0;
+    session->cadence_prescaler_mode = 0;
+    session->cadence_prescaler_write = 0;
+    session->cadence_starve_base = 0;
 
     return MDP_OPNA_OK;
 }
@@ -236,6 +313,7 @@ void mdp_opna_close(mdp_opna_session *session)
 {
     if (!session)
         return;
+    mdp_opna_resampler_destroy((mdp_opna_resampler *)session->resampler);
     free(session);
 }
 
@@ -275,6 +353,49 @@ int mdp_opna_write_register(mdp_opna_session *session,
     int full_address = (bank ? (0x100 | address) : address);
     /* Use the existing production bus scheduler (queue). */
     opna_lle_write(&session->lle, full_address, value);
+
+    /* Track the most recent prescaler-select write (any bank for simplicity;
+     * 0x2D/0x2E/0x2F are bank 0). Used by the cadence-guard diagnostics. */
+    if (address == 0x2d || address == 0x2e || address == 0x2f)
+        session->prescaler_last_write = value;
+
+    return MDP_OPNA_OK;
+}
+
+/*
+ * Perform a pin-level status read: CS asserted, RD asserted, WR deasserted,
+ * A0 low (status), A1 = bank. Run one complete low/high clock pair so the core
+ * latches read_bus -> o_data, capture the output data bus, then return the bus
+ * to idle (cs=1, rd=1, a0=0, a1=0). The requested_master_clock is the earliest
+ * transaction time; the session clock advances by the read clock pairs.
+ */
+static int do_status_read(mdp_opna_session *session, uint8_t bank,
+                          uint8_t *out_value)
+{
+    OpnaLle *ctx = &session->lle;
+    fmopna_t *chip = &ctx->core;
+
+    /* Drive the read pins: cs=0, rd=0, wr=1, a0=0, a1=bank. */
+    chip->input.cs = 0;
+    chip->input.rd = 0;
+    chip->input.wr = 1;
+    chip->input.a0 = 0;
+    chip->input.a1 = (bank != 0) ? 1 : 0;
+    chip->input.data = 0;
+
+    /* One complete low/high pair latches read_bus -> o_data and advances the
+     * adapter (ADPCM bus, serial decoder) in lock-step. Uses clock_pair_read so
+     * the driven read pins are not overwritten by a queued write opportunity. */
+    clock_pair_read(ctx);
+
+    /* Return the bus to idle. The core computed read_bus during the pair and
+     * o_data now mirrors it. */
+    chip->input.cs = 1;
+    chip->input.rd = 1;
+    chip->input.a0 = 0;
+    chip->input.a1 = 0;
+
+    *out_value = (uint8_t)(chip->o_data & 0xff);
     return MDP_OPNA_OK;
 }
 
@@ -292,32 +413,9 @@ int mdp_opna_read_status(mdp_opna_session *session,
     if (rc != MDP_OPNA_OK)
         return rc;
 
-    /* Status comes from the live LLE core. We reuse the validated observation
-     * helpers for the timer status bits (transistor-level core state, the same
-     * fields a real status read consumes) and read the chip's live flag
-     * registers (busy, EOS, Brdy, Zero, ADPCM-start) directly — none of these
-     * are shadow, cached, or MDSound state; all come straight from the LLE
-     * core. */
-    fmopna_t *chip = &session->lle.core;
-    uint8_t status = 0;
-    if (chip->busy_cnt_en[1])
-        status |= 0x80;
-    if (opna_lle_obs_status_timer_a(&session->lle))
-        status |= 0x01;
-    if (opna_lle_obs_status_timer_b(&session->lle))
-        status |= 0x02;
-    if (bank == 1) {
-        if (chip->status_eos)
-            status |= 0x04;
-        if (chip->status_brdy)
-            status |= 0x08;
-        if (chip->status_zero)
-            status |= 0x10;
-        if (chip->ad_start_l[0])
-            status |= 0x20;
-    }
-    *out_value = status;
-    return MDP_OPNA_OK;
+    /* Complete any writes queued at/before the request time (they were flushed
+     * during advance). Then perform the pin-level read transaction. */
+    return do_status_read(session, bank, out_value);
 }
 
 int mdp_opna_get_irq(mdp_opna_session *session, int *out_asserted)
@@ -331,7 +429,7 @@ int mdp_opna_get_irq(mdp_opna_session *session, int *out_asserted)
 }
 
 /* --------------------------------------------------------------------- */
-/* ABI: drain                                                            */
+/* ABI: drain + fixed-cadence resampling                                 */
 /* --------------------------------------------------------------------- */
 
 int mdp_opna_drain_audio(mdp_opna_session *session,
@@ -344,20 +442,68 @@ int mdp_opna_drain_audio(mdp_opna_session *session,
     if (requested_frames < 0)
         return MDP_OPNA_ERR_INVALID_ARGUMENT;
 
+    /* After a cadence-guard failure the fixed-rate resampler is stopped.
+     * We still return the error to the caller on the next drain/advance call. */
+    if (session->cadence_error)
+        return MDP_OPNA_ERR_UNSUPPORTED_CADENCE;
+
     uint64_t clock_before = session->lle.master_clock;
 
-    int produced = 0;
+    /* Fixed-rate cadence state is clean here (cadence_error was already
+     * rejected above). Feed queued native frames through the SpeexDSP-backed
+     * resampler into the caller's output buffer, honoring partial consumption:
+     * we only pop from the FIFO the frames SpeexDSP actually consumed, keeping
+     * any unconsumed tail queued for the next drain. */
+    mdp_opna_resampler *rs = (mdp_opna_resampler *)session->resampler;
     mdp_opna_timed_frame frame;
-    while (produced < requested_frames &&
-           mdp_opna_fifo_pop(&session->fifo, &frame)) {
-        interleaved_stereo[2 * produced] = frame.left;
-        interleaved_stereo[2 * produced + 1] = frame.right;
-        produced++;
+    int produced = 0;
+
+    /* Reusable bounded input staging buffer; no allocation during drain. */
+    enum { STAGE_CAP = 256 };
+    int16_t stage[STAGE_CAP * 2];
+    mdp_opna_timed_frame meta[STAGE_CAP];
+
+    for (;;) {
+        /* A bounded chunk of the FIFO front, without consuming anything. */
+        uint32_t n = mdp_opna_fifo_copy_front(&session->fifo, meta, STAGE_CAP);
+        if (n == 0)
+            break;
+        for (uint32_t i = 0; i < n; i++) {
+            stage[2 * i] = meta[i].left;
+            stage[2 * i + 1] = meta[i].right;
+        }
+
+        int out_room = requested_frames - produced;
+        if (out_room <= 0)
+            break;
+
+        int in_frames = (int)n;
+        int out_frames = out_room;
+        int rc = mdp_opna_resampler_process(rs, stage, &in_frames,
+                                            interleaved_stereo + 2 * produced,
+                                            &out_frames);
+        if (rc != 0) {
+            /* SpeexDSP failed: no frames were consumed from the FIFO (we only
+             * peeked). Leave the queue untouched and surface an error. */
+            *out_drained_frames = produced;
+            return MDP_OPNA_ERR_INTERNAL;
+        }
+
+        /* SpeexDSP consumed a strict prefix of the staged block. Remove exactly
+         * those from the FIFO; the unconsumed tail stays queued for the next
+         * drain call. */
+        for (int k = 0; k < in_frames; k++)
+            mdp_opna_fifo_pop(&session->fifo, &frame);
+
+        produced += out_frames;
+        if (out_frames == 0)
+            break;   /* caller's buffer filled before any more output could fit */
     }
 
     *out_drained_frames = produced;
 
-    /* Drain is a pure FIFO consume: master clock must be unchanged. */
+    /* Drain is a pure FIFO+resampler consume: master clock must be unchanged,
+     * and no scheduling happens. */
     if (session->lle.master_clock != clock_before)
         return MDP_OPNA_ERR_INTERNAL;
 

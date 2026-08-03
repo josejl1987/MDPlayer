@@ -17,7 +17,7 @@
  */
 #include "mdplayer_opna_internal.h"
 
-void opna_lle_reset(OpnaLle *ctx)
+void opna_lle_reset(OpnaLle *ctx, bool clear_external_adpcm_ram)
 {
     memset(ctx, 0, sizeof(*ctx));
     ctx->fm_vol = 256;   /* Furnace default fmVol=256 */
@@ -33,7 +33,7 @@ void opna_lle_reset(OpnaLle *ctx)
      * in the same starting state Furnace assumes.
      */
     opna_lle_reset_core(&ctx->core, &ctx->serial, &ctx->adpcm,
-                        &ctx->master_clock, NULL);
+                        &ctx->master_clock, NULL, clear_external_adpcm_ram);
 
     /* enable 6 channel mode */
     opna_lle_write(ctx, 0x29, 0x80);

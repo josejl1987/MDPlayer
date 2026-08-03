@@ -93,6 +93,19 @@ bool mdp_opna_fifo_peek(const mdp_opna_fifo *f, mdp_opna_timed_frame *out);
 /* Highest depth ever observed (internal diagnostic / tests). */
 uint32_t mdp_opna_fifo_max_observed(const mdp_opna_fifo *f);
 
+/*
+ * Copy up to `max` oldest frames into `dst` (oldest first, preserving order)
+ * WITHOUT consuming them. Returns the number copied. The caller may later
+ * `mdp_opna_fifo_pop` exactly the count it actually processed; SpeexDSP
+ * consumes a strict prefix of the staged block, so popping the prefix removes
+ * exactly the frames fed. This is the primitive the drain loop uses to feed a
+ * contiguous bounded chunk while retaining any unconsumed input for the next
+ * drain call.
+ */
+uint32_t mdp_opna_fifo_copy_front(const mdp_opna_fifo *f,
+                                  mdp_opna_timed_frame *dst,
+                                  uint32_t max);
+
 #ifdef __cplusplus
 }
 #endif

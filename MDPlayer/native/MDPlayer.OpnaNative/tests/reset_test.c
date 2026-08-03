@@ -43,7 +43,7 @@ static void test_reset_576_phases(void)
 
     uint64_t before = opna_lle_master_clock(&ctx);
     opna_lle_reset_core(&ctx.core, &ctx.serial, &ctx.adpcm,
-                        &ctx.master_clock, &counts);
+                        &ctx.master_clock, &counts, true);
 
     /* Exact triple of 576-pair phases. */
     CHECK(counts.phase1_pairs == 576, "phase 1 (ic asserted) is not 576");
@@ -97,7 +97,8 @@ static void test_reset_clears_state(void)
 
     OpnaLleResetCounts counts;
     uint64_t master = 0;
-    opna_lle_reset_core(&ctx.core, &ctx.serial, &ctx.adpcm, &master, &counts);
+    opna_lle_reset_core(&ctx.core, &ctx.serial, &ctx.adpcm, &master, &counts,
+                        false);
 
     /* queued writes cleared */
     CHECK(ctx.core.input.a0 == 0 && ctx.core.input.a1 == 0,

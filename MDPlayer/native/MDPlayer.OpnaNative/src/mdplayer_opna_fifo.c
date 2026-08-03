@@ -75,3 +75,15 @@ uint32_t mdp_opna_fifo_max_observed(const mdp_opna_fifo *f)
 {
     return f->max_observed;
 }
+
+uint32_t mdp_opna_fifo_copy_front(const mdp_opna_fifo *f,
+                                  mdp_opna_timed_frame *dst,
+                                  uint32_t max)
+{
+    if (!f || !dst || max == 0)
+        return 0;
+    uint32_t n = f->count < max ? f->count : max;
+    for (uint32_t i = 0; i < n; i++)
+        dst[i] = f->buf[(f->head + i) & MDP_OPNA_FIFO_MASK];
+    return n;
+}

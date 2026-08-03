@@ -34,8 +34,29 @@ extern "C" {
 struct mdp_opna_session {
     OpnaLle lle;                     /* existing validated Furnace adapter   */
     mdp_opna_fifo fifo;              /* timed bounded native-frame FIFO     */
+
     uint32_t output_rate_hz;         /* validated 44100 / 48000 / 96000     */
-    bool rate_valid;                 /* false until output_rate_hz set      */
+    uint8_t  prescaler_last_write;   /* most recent 0x2D/2E/2F write value  */
+    bool rate_valid;                 /* true once opened with a supported rate */
+
+    /* Fixed-cadence PC-98 production profile. */
+    uint64_t native_frame_clocks;    /* 144: master clocks per complete frame */
+
+    /* Runtime cadence guard state. When a completed frame is not exactly
+     * `native_frame_clocks` after the previous one, cadence_error is set and
+     * fixed-rate resampling is stopped until the session is reset. */
+    bool cadence_synced;             /* false until the first frame is seen  */
+    bool cadence_error;              /* sticky: unsupported cadence detected */
+    uint64_t cadence_prev_clock;     /* completion clock of previous frame   */
+    uint64_t cadence_cur_clock;      /* completion clock of offending frame  */
+    uint64_t cadence_starve_base;    /* clock at which the current (unsynced)
+                                        period began, for starvation detect  */
+    uint64_t cadence_observed_interval;
+    uint8_t  cadence_prescaler_write;/* most recent 0x2D/2E/2F write value   */
+    int      cadence_prescaler_mode; /* core prescaler_sel[1] at failure     */
+
+    /* Resampler state (fixed-cadence polyphase). NULL until opened. */
+    void *resampler;
 };
 
 /*

@@ -109,7 +109,7 @@ static void render_and_digest(uint8_t digest[32])
 
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
 
     for (int i = 0; i < kFurnaceRefWriteCount; i++) {
         int addr = kFurnaceRefWrites[i].bank ? (0x100 | kFurnaceRefWrites[i].reg)

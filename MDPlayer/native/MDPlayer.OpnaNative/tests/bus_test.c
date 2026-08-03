@@ -68,7 +68,7 @@ static void test_fifo_order_and_idle(void)
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     opna_lle_write(&ctx, 0x0a4, 0x2a);   /* FM operator freq MSB, port 1 */
     opna_lle_write(&ctx, 0x28, 0xf0);    /* key-on, port 0 */
 
@@ -92,7 +92,7 @@ static void test_observed_phases(void)
 {
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
 
     /* A port-1 (bank 0x100) FM register forces the A1 bank bit and a full
      * address+data pair. Register 0x28 (< 0x40) is SSG-family and gets the
@@ -152,7 +152,7 @@ static void test_ssg_long_delay(void)
 {
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
 
     /* Drain the reset's power-on default registers so only our write remains
      * at the head of the queue. */
@@ -175,7 +175,7 @@ static void test_ssg_long_delay(void)
 
     /* Contrast: an FM-family register (>= 0x10, e.g. 0x30) uses delay==2. */
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     drain_until_bus_idle(&ctx);
     opna_lle_write(&ctx, 0x30, 0x7f);
     {

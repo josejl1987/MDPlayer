@@ -98,7 +98,7 @@ int main(void)
         return 1;
     }
 
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     REPLAY(&ctx);
     RENDER_FRAMES(&ctx, l, r);
 
@@ -121,7 +121,7 @@ int main(void)
         OpnaLle ctx2;
         int16_t *l2 = (int16_t *)malloc(sizeof(int16_t) * kFrames);
         int16_t *r2 = (int16_t *)malloc(sizeof(int16_t) * kFrames);
-        opna_lle_reset(&ctx2);
+        opna_lle_reset(&ctx2, true);
         REPLAY(&ctx2);
         if (l2 && r2) {
             RENDER_FRAMES(&ctx2, l2, r2);

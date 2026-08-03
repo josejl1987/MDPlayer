@@ -44,7 +44,7 @@ static OpnaLle timer_fixture(void)
 {
     OpnaLle ctx;
     memset(&ctx, 0, sizeof(ctx));
-    opna_lle_reset(&ctx);
+    opna_lle_reset(&ctx, true);
     int16_t l, r;
     opna_lle_render(&ctx, &l, &r, 1);
     opna_lle_write(&ctx, 0x24, 0);   /* Timer A MSB */

@@ -9,24 +9,26 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Sanitizer test builds (mirrors the MDPlayer.SpcNative convention). Default
 # OFF. The vendored YM2608-LLE core performs intentional signed-int arithmetic
-# that UBSan flags (left shifts of large constants) by design, so a full
-# -fsanitize=undefined build is noisy inside upstream; we therefore offer
-# AddressSanitizer only by default for the probe, with <...>_UBSAN optional.
-option(MDPLAYER_OPNA_SANITIZERS "Build mdplayer_opna and its probe with AddressSanitizer" OFF)
-option(MDPLAYER_OPNA_UBSAN "Also add UndefinedBehaviorSanitizer (noisy inside upstream core)" OFF)
+# that UBSan flags (left shifts of large constants) by design. To keep the
+# adapter and native tests fully instrumented while treating the byte-identical
+# upstream snapshot as an external dependency (Task C §12), the upstream core
+# target `mdplayer_opna_core` is built with UBSan disabled and the adapter +
+# tests are built with UBSan enabled (both under AddressSanitizer when
+# requested). MDPLAYER_OPNA_ADAPTER_UBSAN selects adapter+test UBSan.
+option(MDPLAYER_OPNA_SANITIZERS "Build with AddressSanitizer" OFF)
+option(MDPLAYER_OPNA_ADAPTER_UBSAN "Also add UndefinedBehaviorSanitizer to adapter + tests (upstream core stays UBSan-free)" OFF)
+if(MDPLAYER_OPNA_ADAPTER_UBSAN AND NOT MSVC)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=undefined")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
+endif()
+# Adapter + test UBSan is applied globally below; the upstream core target is
+# built with -fno-sanitize=undefined (Task C §12) so the identical vendored
+# snapshot is never instrumented.
 if(MDPLAYER_OPNA_SANITIZERS AND NOT MSVC)
-    set(MDPLAYER_OPNA_SANITIZE_FLAGS "-fsanitize=address -fno-omit-frame-pointer -g")
-    if(MDPLAYER_OPNA_UBSAN)
-        set(MDPLAYER_OPNA_SANITIZE_FLAGS
-            "-fsanitize=address,undefined -fno-omit-frame-pointer -g")
-    endif()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${MDPLAYER_OPNA_SANITIZE_FLAGS}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fno-omit-frame-pointer -g")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
-    if(MDPLAYER_OPNA_UBSAN)
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=undefined")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
-    endif()
 endif()
 
 # Vendored Furnace YM2608-LLE core (GPL-2.0-or-later; see UPSTREAM.md). We
@@ -55,6 +57,12 @@ target_include_directories(mdplayer_opna_core PUBLIC
 if(NOT MSVC)
     target_compile_options(mdplayer_opna_core PRIVATE
         -Wall -Wextra)
+    if(MDPLAYER_OPNA_ADAPTER_UBSAN)
+        # Upstream core stays UBSan-free (Task C §12): the pinned core performs
+        # intentional signed-int arithmetic that UBSan would flag.
+        target_compile_options(mdplayer_opna_core PRIVATE
+            -fno-sanitize=undefined)
+    endif()
 endif()
 set_target_properties(mdplayer_opna_core PROPERTIES
     OUTPUT_NAME "mdplayer_opna_core"
@@ -69,12 +77,44 @@ add_library(mdplayer_opna SHARED
     src/mdplayer_opna_mix.c
     src/mdplayer_opna_fifo.c
     src/mdplayer_opna_session.c
-    "${OPNANATIVE_UPSTREAM_DIR}/fmopna_2608.c")
+    src/mdplayer_opna_resampler.c)
 target_include_directories(mdplayer_opna PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(mdplayer_opna PRIVATE
-    "${OPNANATIVE_UPSTREAM_DIR}")
+    "${OPNANATIVE_UPSTREAM_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/speexdsp")
+# The wrapper includes speex_resampler.h with the same OUTSIDE_SPEEX /
+# RANDOM_PREFIX shim so its types and renamed declarations match the compiled
+# SpeexDSP static target.
+target_compile_definitions(mdplayer_opna PRIVATE
+    OUTSIDE_SPEEX
+    RANDOM_PREFIX=mdp_opna_speex)
+# The identical vendored core is linked as its own static target
+# (`mdplayer_opna_core`) so the adapter/tests can run UBSan-instrumented while
+# the upstream snapshot stays UBSan-free (Task C §12).
+target_link_libraries(mdplayer_opna PRIVATE mdplayer_opna_core)
+# SpeexDSP standalone resampler (fixed-point, prefixed, private). Vendored
+# under third_party/speexdsp (see its UPSTREAM.md); compiled as its own static
+# target and linked privately so no SpeexDSP symbol is exported from
+# libmdplayer_opna. RANDOM_PREFIX=mdp_opna_speex renames all its exported symbols.
+add_library(mdplayer_opna_speex_resampler STATIC
+    third_party/speexdsp/resample.c)
+# Linked into the shared libmdplayer_opna.so: must be position-independent
+# (required by -fsanitize=address builds and hardened linkers).
+set_target_properties(mdplayer_opna_speex_resampler PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mdplayer_opna_speex_resampler PRIVATE
+    third_party/speexdsp)
+target_compile_definitions(mdplayer_opna_speex_resampler PRIVATE
+    FIXED_POINT
+    OUTSIDE_SPEEX
+    RANDOM_PREFIX=mdp_opna_speex)
+target_link_libraries(mdplayer_opna PRIVATE mdplayer_opna_speex_resampler)
+if(UNIX)
+    # SpeexDSP filter-table creation requires libm.
+    target_link_libraries(mdplayer_opna_speex_resampler PRIVATE m)
+endif()
 set_target_properties(mdplayer_opna PROPERTIES
     OUTPUT_NAME "mdplayer_opna"
     POSITION_INDEPENDENT_CODE ON)
@@ -256,10 +296,32 @@ add_executable(mdplayer_opna_native_cadence_test tests/native_cadence_test.c)
 target_include_directories(mdplayer_opna_native_cadence_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     "${OPNANATIVE_UPSTREAM_DIR}")
 target_link_libraries(mdplayer_opna_native_cadence_test PRIVATE mdplayer_opna)
-add_test(NAME fixed_rate_resampler_requires_constant_native_cadence
-         COMMAND mdplayer_opna_native_cadence_test)
-set_tests_properties(fixed_rate_resampler_requires_constant_native_cadence
-                     PROPERTIES RUN_SERIAL ON)
+
+# The five cadence-policy tests. Every one passes: 0x2E/0x2F pass by detecting
+# and reporting unsupported cadence (no audio resampling required). There is no
+# deliberately failing test in this suite.
+foreach(cadence_case
+        default_profile_has_144_clock_cadence
+        prescaler_2d_has_144_clock_cadence
+        prescaler_2e_reports_unsupported_cadence
+        prescaler_2f_reports_unsupported_cadence
+        real_fm_trace_has_144_clock_cadence)
+    add_test(NAME ${cadence_case}
+             COMMAND mdplayer_opna_native_cadence_test -t ${cadence_case})
+    set_tests_properties(${cadence_case} PROPERTIES RUN_SERIAL ON)
+endforeach()
+
+# ---------------------------------------------------------------------------
+# Prompt-5.1 Task D: fixed-cadence resampler (SpeexDSP-backed).
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_resampler_test tests/resampler_test.c)
+target_include_directories(mdplayer_opna_resampler_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(mdplayer_opna_resampler_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_resampler_test COMMAND mdplayer_opna_resampler_test)
+set_tests_properties(mdplayer_opna_resampler_test PROPERTIES RUN_SERIAL ON)
 

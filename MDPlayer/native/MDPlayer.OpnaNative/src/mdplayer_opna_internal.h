@@ -171,11 +171,39 @@ typedef struct {
     uint64_t phase3_pairs;   /* ic re-asserted    */
 } OpnaLleResetCounts;
 
+/*
+ * Run the validated 576/576/576 chip-reset sequence on the core.
+ *
+ * When `clear_external_adpcm_ram` is true the 256 KiB external ADPCM backing
+ * buffer is also zeroed (power-on case). When false the external RAM is left
+ * untouched (chip-reset case), so ownership of the RAM stays with the session
+ * adapter rather than being copied transiently. The serial decoder and ADPCM
+ * bus latch state (ad_mem_addr/cas/ras) are always re-zeroed; only the RAM
+ * contents are optional. This remains the SINGLE implementation of the
+ * 576/576/576 sequence.
+ */
 void opna_lle_reset_core(fmopna_t *core,
                          OpnaLleSerialDecoder *decoder,
                          OpnaLleAdpcmBus *adpcm,
                          uint64_t *master_clock,
-                         OpnaLleResetCounts *phase_pairs);
+                         OpnaLleResetCounts *phase_pairs,
+                         bool clear_external_adpcm_ram);
+
+/*
+ * Chip-state reset that preserves external ADPCM RAM contents.
+ * Thin wrapper around opna_lle_reset_core(..., clear_external_adpcm_ram=false).
+ */
+void opna_lle_reset_chip_state(fmopna_t *core,
+                               OpnaLleSerialDecoder *decoder,
+                               OpnaLleAdpcmBus *adpcm,
+                               uint64_t *master_clock,
+                               OpnaLleResetCounts *phase_pairs);
+
+/*
+ * Zero the entire 256 KiB external ADPCM backing buffer (and its latch state).
+ * Power-on only; never used for a chip reset.
+ */
+void opna_lle_clear_external_adpcm_ram(OpnaLleAdpcmBus *adpcm);
 
 /* --------------------------------------------------------------------- */
 /* Top-level driver                                                      */
@@ -207,7 +235,7 @@ struct OpnaLle {
 /* Absolute native time in complete low/high master-clock pairs (monotonic). */
 uint64_t opna_lle_master_clock(const OpnaLle *ctx);
 
-void opna_lle_reset(OpnaLle *ctx);
+void opna_lle_reset(OpnaLle *ctx, bool clear_external_adpcm_ram);
 
 /* Schedule a register write so the bus state machine drives it on the next
  * valid prescaler phase. `value==0xffffffff`-style guard not required here. */
