@@ -1,0 +1,5 @@
+# The vendored YM2608-LLE core files must remain byte-identical to the pinned
+# Furnace tree, which uses CRLF line endings on disk. core.autocrlf=input would
+# normalize CRLF->LF on checkout and break byte-identity. Force the upstream
+# tree to be treated as opaque binary so its bytes are preserved exactly.
+upstream/**	-text
