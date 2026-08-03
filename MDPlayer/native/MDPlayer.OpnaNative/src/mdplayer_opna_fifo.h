@@ -55,7 +55,8 @@ typedef struct {
     uint32_t max_observed;  /* highest count ever reached   */
 } mdp_opna_fifo;
 
-/* Empty the FIFO. O(1); leaves capacity and backing array untouched. */
+/* Empty the FIFO. O(1); clears the observed-watermark and leaves the backing
+ * array untouched. Callers must have a valid, initialized fifo struct. */
 void mdp_opna_fifo_reset(mdp_opna_fifo *f);
 
 /* Number of elements currently in the FIFO. */

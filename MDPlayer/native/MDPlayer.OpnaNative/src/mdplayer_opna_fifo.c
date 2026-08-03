@@ -15,8 +15,7 @@ void mdp_opna_fifo_reset(mdp_opna_fifo *f)
 {
     f->head = 0;
     f->count = 0;
-    /* max_observed is intentionally preserved across reset: it records the
-     * busiest depth ever reached and is only cleared on (re)init. */
+    f->max_observed = 0;   /* emptying the FIFO resets its observed watermark */
 }
 
 uint32_t mdp_opna_fifo_size(const mdp_opna_fifo *f)
