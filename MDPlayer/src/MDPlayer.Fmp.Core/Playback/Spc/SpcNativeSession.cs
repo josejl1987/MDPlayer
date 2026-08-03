@@ -74,7 +74,7 @@ internal sealed class SpcNativeSession : IDisposable
 
     static SpcNativeSession()
     {
-        NativeLibrary.SetDllImportResolver(typeof(SpcNativeSession).Assembly, ResolveLibrary);
+        NativeLibraryResolver.Register(LibraryName, _ => _nativeLibraryHandle);
     }
 
     internal struct OpenOptions
@@ -624,9 +624,6 @@ internal sealed class SpcNativeSession : IDisposable
             _nativeLibraryHandle = handle;
         }
     }
-
-    private static IntPtr ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath) =>
-        libraryName == LibraryName ? _nativeLibraryHandle : IntPtr.Zero;
 
     private void EnsureOpen()
     {
