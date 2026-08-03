@@ -68,6 +68,7 @@ add_library(mdplayer_opna SHARED
     src/mdplayer_opna_adpcm.c
     src/mdplayer_opna_mix.c
     src/mdplayer_opna_fifo.c
+    src/mdplayer_opna_session.c
     "${OPNANATIVE_UPSTREAM_DIR}/fmopna_2608.c")
 target_include_directories(mdplayer_opna PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -213,4 +214,23 @@ add_executable(mdplayer_opna_fifo_test tests/fifo_test.c src/mdplayer_opna_fifo.
 target_include_directories(mdplayer_opna_fifo_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_test(NAME mdplayer_opna_fifo_test COMMAND mdplayer_opna_fifo_test)
+
+# ---------------------------------------------------------------------------
+# Prompt-5 Workstream A: versioned session ABI.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_abi_test tests/abi_test.c)
+target_include_directories(mdplayer_opna_abi_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_abi_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_abi_test COMMAND mdplayer_opna_abi_test)
+
+add_executable(mdplayer_opna_session_reset_test tests/session_reset_test.c)
+target_include_directories(mdplayer_opna_session_reset_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_session_reset_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_session_reset_test COMMAND mdplayer_opna_session_reset_test)
 
