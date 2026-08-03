@@ -138,3 +138,17 @@ target_include_directories(mdplayer_opna_bus_test PRIVATE
     "${OPNANATIVE_UPSTREAM_DIR}")
 target_link_libraries(mdplayer_opna_bus_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_bus_test COMMAND mdplayer_opna_bus_test)
+
+# ---------------------------------------------------------------------------
+# Serial PCM decoder + real-trace fixture test (Prompt 3): replays the
+# checked-in furnace_reference_fixture.c (real YM2608 OPNA trace) and verifies
+# the serial decoder emits only complete stereo frames, that both channels
+# produce frames, and that the real trace yields nonzero output.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_fm_audio_test tests/fm_audio_test.c)
+target_include_directories(mdplayer_opna_fm_audio_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_fm_audio_test PRIVATE mdplayer_opna)
+add_test(NAME mdplayer_opna_fm_audio_test COMMAND mdplayer_opna_fm_audio_test)
