@@ -26,6 +26,13 @@ internal static class Program
             return 0;
         }
 
+        if (args.Length >= 2 && args[0] == "--fmp-native")
+        {
+            int rate = args.Length >= 3 && int.TryParse(args[2], out var r) ? r : 48000;
+            double maxS = args.Length >= 4 && double.TryParse(args[3], out var m) ? m : 20.0;
+            return FmpNativeAudioBenchmarks.Run(args[1], rate, maxS);
+        }
+
         RunPhase1();
 
         if (args.Length > 0 && File.Exists(args[0]))
