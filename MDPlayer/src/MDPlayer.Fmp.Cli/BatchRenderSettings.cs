@@ -34,6 +34,13 @@ internal class BatchRenderSettings
     /// <summary>Optional register-trace output path (render command only).</summary>
     public string TracePath { get; set; }
 
+    /// <summary>
+    /// OPNA execution backend: "mdsound" (default, byte-identical) or
+    /// "native-lle" (clocked native YM2608 session; never falls back).
+    /// </summary>
+    public string OpnaBackend { get; set; }
+    public bool OpnaBackendExplicit { get; set; }
+
     public void ValidateCommon()
     {
         if (SampleRate <= 0)
@@ -50,6 +57,8 @@ internal class BatchRenderSettings
             throw new ArgumentException("--duration must be finite and positive");
         if (Timeout.HasValue && (!double.IsFinite(Timeout.Value) || Timeout.Value <= 0))
             throw new ArgumentException("--timeout must be finite and positive");
+        if (OpnaBackend != null && OpnaBackend is not ("mdsound" or "native-lle"))
+            throw new ArgumentException("--opna-backend must be 'mdsound' or 'native-lle'");
     }
 }
 
@@ -82,6 +91,12 @@ internal static class RenderOptionsParser
                 settings.SsgGainExplicit = true;
                 if (settings.SsgGainDb is < -60 or > 12)
                     throw new ArgumentException("--ssg-gain-db must be between -60 and +12");
+                return true;
+            case "--opna-backend":
+                settings.OpnaBackend = reader.RequireValue(name);
+                settings.OpnaBackendExplicit = true;
+                if (settings.OpnaBackend is not ("mdsound" or "native-lle"))
+                    throw new ArgumentException("--opna-backend must be 'mdsound' or 'native-lle'");
                 return true;
             default: return false;
         }

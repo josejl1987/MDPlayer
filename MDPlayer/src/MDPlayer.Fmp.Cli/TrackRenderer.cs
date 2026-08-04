@@ -23,6 +23,11 @@ internal sealed class TrackRenderer
                 MaxDurationSeconds = settings.Duration ?? settings.MaxDuration,
                 TimeoutSeconds = settings.Timeout,
                 TracePath = settings.TracePath,
+                OpnaBackend = settings.OpnaBackend switch
+                {
+                    "native-lle" => FmpOpnaBackend.NativeLle,
+                    _ => FmpOpnaBackend.Mdsound,
+                },
             };
 
             var result = renderer.RenderToWav(track.Data, track.Input.FullName, output, renderOpts);
