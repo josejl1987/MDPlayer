@@ -328,6 +328,21 @@ uint64_t mdp_opna_get_master_clock(const mdp_opna_session *session)
     return session->lle.master_clock;
 }
 
+int mdp_opna_get_output_latency_frames(const mdp_opna_session *session,
+                                       uint32_t *out_frames)
+{
+    if (!session || !out_frames)
+        return MDP_OPNA_ERR_INVALID_ARGUMENT;
+    int latency = mdp_opna_resampler_output_latency(
+        (const mdp_opna_resampler *)session->resampler);
+    if (latency < 0) {
+        *out_frames = 0;
+        return MDP_OPNA_ERR_INTERNAL;
+    }
+    *out_frames = (uint32_t)latency;
+    return MDP_OPNA_OK;
+}
+
 int mdp_opna_advance_to(mdp_opna_session *session, uint64_t master_clock)
 {
     if (!session)

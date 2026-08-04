@@ -170,6 +170,31 @@ public sealed class OpnaNativeSessionTests
         Assert.Equal(before, session.MasterClock);
     }
 
+    /// <summary>
+    /// The native resampler output latency is exposed as a frame count through
+    /// the ABI, is deterministic for the configured output rate, and is a pure
+    /// query: advancing time must not change the reported value.
+    /// </summary>
+    [Theory]
+    [InlineData(44100)]
+    [InlineData(48000)]
+    [InlineData(96000)]
+    public void OutputLatencyFrames_IsDeterministicAndTimeIndependent(int rate)
+    {
+        string lib = RequireNativeLibrary();
+        using var restore = SetNativeLibrary(lib);
+        using var session = OpnaNativeSession.Open((uint)rate);
+
+        int first = session.OutputLatencyFrames;
+        int second = session.OutputLatencyFrames;
+        Assert.Equal(first, second);
+        Assert.True(first >= 0, "latency must be non-negative");
+
+        session.AdvanceTo(100_000);
+        int afterAdvance = session.OutputLatencyFrames;
+        Assert.Equal(first, afterAdvance);
+    }
+
     /// <summary>Schedules the real Furnace YM2608 bus-write trace.</summary>
     private static void WriteFurnaceTrace(OpnaNativeSession session)
     {

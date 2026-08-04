@@ -36,8 +36,10 @@ extern "C" {
 /* Version                                                               */
 /* --------------------------------------------------------------------- */
 
-/* ABI version this header/library implements. */
-#define MDP_OPNA_ABI_VERSION 1u
+/* ABI version this header/library implements. Version 2 adds
+ * mdp_opna_get_output_latency_frames (a pure query that never advances time);
+ * it is backward compatible with ABI version 1. */
+#define MDP_OPNA_ABI_VERSION 2u
 
 /* --------------------------------------------------------------------- */
 /* Fixed hardware constants (not configurable in ABI version 1)         */
@@ -160,6 +162,16 @@ int mdp_opna_drain_audio(mdp_opna_session *session,
 
 /* Current absolute master clock. Pure query; never advances or mutates. */
 uint64_t mdp_opna_get_master_clock(const mdp_opna_session *session);
+
+/*
+ * Query the fixed output latency introduced by the native resampler, in
+ * output-rate stereo frames. Returns the value reported by the active
+ * SpeexDSP state for the configured output rate; deterministic for a fixed
+ * quality/rate/build. This is a pure query: it does not advance time, does
+ * not allocate, and does not modify resampler state.
+ */
+int mdp_opna_get_output_latency_frames(const mdp_opna_session *session,
+                                       uint32_t *out_frames);
 
 /* Close and free the session. Accepts NULL (no-op). */
 void mdp_opna_close(mdp_opna_session *session);

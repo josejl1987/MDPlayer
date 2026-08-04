@@ -26,6 +26,13 @@ public interface IClockedOpnaDevice : IDisposable
     bool IrqAsserted { get; }
 
     /// <summary>
+    /// Fixed output latency introduced by the native resampler, in output-rate
+    /// stereo frames. Pure query; does not advance time, allocate, or modify
+    /// resampler state. Deterministic for the configured output rate.
+    /// </summary>
+    int OutputLatencyFrames { get; }
+
+    /// <summary>
     /// Advances the chip so <paramref name="masterClock"/> becomes the current
     /// absolute time. Throws <see cref="OpnaClockRegressionException"/> if the
     /// clock would regress.

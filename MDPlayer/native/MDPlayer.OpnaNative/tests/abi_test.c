@@ -52,7 +52,7 @@ static int all_zero(const uint8_t *p, size_t n)
 
 static void test_abi_version(void)
 {
-    CHECK(MDP_OPNA_ABI_VERSION == 1u, "ABI_VERSION != 1");
+    CHECK(MDP_OPNA_ABI_VERSION == 2u, "ABI_VERSION != 2");
     CHECK(mdp_opna_get_abi_version() == MDP_OPNA_ABI_VERSION,
           "get_abi_version != MDP_OPNA_ABI_VERSION");
 }
@@ -293,6 +293,43 @@ static void test_irq_does_not_change_time(void)
     mdp_opna_close(s);
 }
 
+static void test_output_latency_query(void)
+{
+    /* Null args rejected. */
+    mdp_opna_open_options o0 = { 48000 };
+    mdp_opna_session *s0 = NULL;
+    mdp_opna_open(&o0, &s0, NULL, 0);
+    uint32_t out = 0;
+    CHECK(mdp_opna_get_output_latency_frames(NULL, &out) ==
+          MDP_OPNA_ERR_INVALID_ARGUMENT, "latency(NULL) not rejected");
+    CHECK(mdp_opna_get_output_latency_frames(s0, NULL) ==
+          MDP_OPNA_ERR_INVALID_ARGUMENT, "latency(out=NULL) not rejected");
+    mdp_opna_close(s0);
+
+    /* Deterministic per configured output rate, and stable across time/advance
+     * (a pure query: advancing time must not change the reported value). */
+    static const uint32_t rates[] = { 44100u, 48000u, 96000u };
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        mdp_opna_session *s = NULL;
+        char err[64];
+        mdp_opna_open_options o = { rates[i] };
+        CHECK(mdp_opna_open(&o, &s, err, sizeof(err)) == MDP_OPNA_OK,
+              "open failed for rate");
+        uint32_t lat = 0, lat2 = 0;
+        CHECK(mdp_opna_get_output_latency_frames(s, &lat) == MDP_OPNA_OK,
+              "latency query failed");
+        CHECK(mdp_opna_get_output_latency_frames(s, &lat2) == MDP_OPNA_OK,
+              "second latency query failed");
+        CHECK(lat == lat2, "latency query not deterministic");
+        CHECK(mdp_opna_advance_to(s, 1000) == MDP_OPNA_OK, "advance failed");
+        uint32_t lat3 = 0;
+        CHECK(mdp_opna_get_output_latency_frames(s, &lat3) == MDP_OPNA_OK,
+              "post-advance latency query failed");
+        CHECK(lat3 == lat, "advancing time changed reported latency");
+        mdp_opna_close(s);
+    }
+}
+
 int main(void)
 {
     test_abi_version();
@@ -305,6 +342,7 @@ int main(void)
     test_equal_clock_ordering();
     test_status_read_lle();
     test_irq_does_not_change_time();
+    test_output_latency_query();
     test_drain_semantics();
 
     if (failures) {

@@ -22,7 +22,7 @@ internal sealed class OpnaNativeSession : IDisposable
     public const int AdpcmRamBytes = 262_144;
 
     /// <summary>ABI version this wrapper targets (mdplayer_opna.h).</summary>
-    public const uint AbiVersionTarget = 1;
+    public const uint AbiVersionTarget = 2;
 
     /// <summary>Environment variable override for the native library location.</summary>
     public const string NativeLibraryEnvVar = "MDPLAYER_OPNA_NATIVE";
@@ -101,6 +101,10 @@ internal sealed class OpnaNativeSession : IDisposable
     private static extern ulong mdp_opna_get_master_clock(IntPtr session);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int mdp_opna_get_output_latency_frames(
+        IntPtr session, out uint outFrames);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern void mdp_opna_close(IntPtr session);
 
     /// <summary>
@@ -165,6 +169,23 @@ internal sealed class OpnaNativeSession : IDisposable
         {
             EnsureOpen();
             return mdp_opna_get_abi_version();
+        }
+    }
+
+    /// <summary>
+    /// Fixed output latency introduced by the native resampler, in output-rate
+    /// stereo frames. Pure query: does not advance time, allocate, or modify
+    /// resampler state. Deterministic for the configured output rate.
+    /// </summary>
+    public int OutputLatencyFrames
+    {
+        get
+        {
+            EnsureOpen();
+            int rc = mdp_opna_get_output_latency_frames(_session.DangerousGetHandle(), out uint frames);
+            if (rc != (int)MdpOpnaResult.Ok)
+                ThrowNativeError((MdpOpnaResult)rc);
+            return (int)frames;
         }
     }
 

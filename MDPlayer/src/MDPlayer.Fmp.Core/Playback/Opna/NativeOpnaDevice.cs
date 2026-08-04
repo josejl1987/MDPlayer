@@ -36,6 +36,9 @@ public sealed class NativeOpnaDevice : IClockedOpnaDevice
     public bool IrqAsserted => _session.GetIrq();
 
     /// <inheritdoc />
+    public int OutputLatencyFrames => _session.OutputLatencyFrames;
+
+    /// <inheritdoc />
     public void AdvanceTo(ulong masterClock) => _session.AdvanceTo(masterClock);
 
     /// <inheritdoc />

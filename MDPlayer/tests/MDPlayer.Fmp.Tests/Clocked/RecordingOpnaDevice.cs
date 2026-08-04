@@ -12,6 +12,7 @@ internal sealed class RecordingOpnaDevice : IClockedOpnaDevice
     public int OutputRateHz { get; set; } = 44100;
     public ulong MasterClock { get; private set; }
     public bool IrqAsserted { get; set; }
+    public int OutputLatencyFrames { get; set; }
 
     public List<(ulong clock, byte bank, byte address, byte value)> Writes { get; } = new();
     public List<(ulong clock, byte bank)> StatusReads { get; } = new();
