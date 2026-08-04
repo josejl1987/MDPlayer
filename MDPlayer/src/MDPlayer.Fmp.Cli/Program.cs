@@ -86,6 +86,9 @@ public class Program
         Console.WriteLine("  --title TEXT --subtitle TEXT --credits TEXT --font PATH");
         Console.WriteLine("  --loops COUNT --fade SECONDS --tail SECONDS --max-duration SECONDS");
         Console.WriteLine("  --sample-rate HZ           Capture sample rate (default: 48000)");
+        Console.WriteLine("--opna-backend <mdsound|native-audio>");
+        Console.WriteLine("    Select the YM2608 audio backend for FMP rendering.");
+        Console.WriteLine("    Default: mdsound.");
         Console.WriteLine("  --encoder auto|x264|nvenc  Encoder (default: auto)");
         Console.WriteLine("  --overwrite                Overwrite existing output");
         Console.WriteLine("  --progress human|jsonl     Progress output mode");

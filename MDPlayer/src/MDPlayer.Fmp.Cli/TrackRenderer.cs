@@ -25,7 +25,7 @@ internal sealed class TrackRenderer
                 TracePath = settings.TracePath,
                 OpnaBackend = settings.OpnaBackend switch
                 {
-                    "native-lle" => FmpOpnaBackend.NativeLle,
+                    "native-audio" => FmpOpnaBackend.NativeAudio,
                     _ => FmpOpnaBackend.Mdsound,
                 },
             };

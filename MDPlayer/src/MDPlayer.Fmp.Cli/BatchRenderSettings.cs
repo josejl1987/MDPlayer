@@ -35,8 +35,9 @@ internal class BatchRenderSettings
     public string TracePath { get; set; }
 
     /// <summary>
-    /// OPNA execution backend: "mdsound" (default, byte-identical) or
-    /// "native-lle" (clocked native YM2608 session; never falls back).
+    /// OPNA audio backend: "mdsound" (default, byte-identical) or
+    /// "native-audio" (trace-driven native YM2608 replay; never falls back).
+    /// The retired "native-lle" value is rejected, not aliased.
     /// </summary>
     public string OpnaBackend { get; set; }
     public bool OpnaBackendExplicit { get; set; }
@@ -57,8 +58,35 @@ internal class BatchRenderSettings
             throw new ArgumentException("--duration must be finite and positive");
         if (Timeout.HasValue && (!double.IsFinite(Timeout.Value) || Timeout.Value <= 0))
             throw new ArgumentException("--timeout must be finite and positive");
-        if (OpnaBackend != null && OpnaBackend is not ("mdsound" or "native-lle"))
-            throw new ArgumentException("--opna-backend must be 'mdsound' or 'native-lle'");
+        if (!ValidateOpnaBackend(OpnaBackend, out string backendError))
+            throw new ArgumentException(backendError);
+    }
+
+    /// <summary>
+    /// Validates the <c>--opna-backend</c> CLI value. Only "mdsound" and
+    /// "native-audio" are accepted. "native-lle" is rejected with the canonical
+    /// message (never silently aliased); "auto" and unknown values are also
+    /// rejected.
+    /// </summary>
+    internal static bool ValidateOpnaBackend(string backend, out string error)
+    {
+        if (backend == null)
+        {
+            error = null;
+            return true;
+        }
+        if (backend == "mdsound" || backend == "native-audio")
+        {
+            error = null;
+            return true;
+        }
+        if (backend == "native-lle")
+        {
+            error = "The native-lle backend is not available. Use native-audio for native YM2608 audio rendering.";
+            return false;
+        }
+        error = "--opna-backend must be 'mdsound' or 'native-audio'";
+        return false;
     }
 }
 
@@ -95,8 +123,8 @@ internal static class RenderOptionsParser
             case "--opna-backend":
                 settings.OpnaBackend = reader.RequireValue(name);
                 settings.OpnaBackendExplicit = true;
-                if (settings.OpnaBackend is not ("mdsound" or "native-lle"))
-                    throw new ArgumentException("--opna-backend must be 'mdsound' or 'native-lle'");
+                if (!BatchRenderSettings.ValidateOpnaBackend(settings.OpnaBackend, out string opnaBackendError))
+                    throw new ArgumentException(opnaBackendError);
                 return true;
             default: return false;
         }

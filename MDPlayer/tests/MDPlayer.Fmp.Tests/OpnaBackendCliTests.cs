@@ -47,15 +47,38 @@ public class OpnaBackendCliTests
     }
 
     [Fact]
-    public void Parse_OpnaBackend_NativeLle_Accepted()
+    public void Parse_OpnaBackend_NativeAudio_Accepted()
     {
-        var settings = Parse("--opna-backend", "native-lle");
-        Assert.Equal("native-lle", settings.OpnaBackend);
+        var settings = Parse("--opna-backend", "native-audio");
+        Assert.Equal("native-audio", settings.OpnaBackend);
         Assert.True(settings.OpnaBackendExplicit);
-        Assert.Equal(FmpOpnaBackend.NativeLle, ToBackend(settings));
+        Assert.Equal(FmpOpnaBackend.NativeAudio, ToBackend(settings));
+    }
+
+    [Fact]
+    public void Parse_OpnaBackend_NativeLle_IsRejected_notAliased()
+    {
+        var settings = new BatchRenderSettings();
+        var reader = new ArgumentReader(new[] { "--opna-backend", "native-lle" });
+        Assert.True(reader.TryReadOption(out string name, out _));
+
+        ArgumentException ex = null;
+        try
+        {
+            RenderOptionsParser.TryParse(ref reader, name, settings);
+        }
+        catch (ArgumentException caught)
+        {
+            ex = caught;
+        }
+        Assert.NotNull(ex);
+        Assert.Equal(
+            "The native-lle backend is not available. Use native-audio for native YM2608 audio rendering.",
+            ex.Message);
     }
 
     [Theory]
+    [InlineData("auto")]
     [InlineData("bogus")]
     [InlineData("NativeLle")]
     [InlineData("native")]
@@ -127,7 +150,7 @@ public class OpnaBackendCliTests
     }
 
     [Fact]
-    public void TrackRenderer_NativeLleBackend_PassesThroughAndFailsClosed()
+    public void TrackRenderer_NativeAudioBackend_PassesThroughAndRenders()
     {
         string lib = FindNativeLibrary();
         string ovi = FindOviFixture();
@@ -146,7 +169,7 @@ public class OpnaBackendCliTests
                 Tail = 0.1,
                 MaxDuration = 1.0,
                 Timeout = 5.0,
-                OpnaBackend = "native-lle",
+                OpnaBackend = "native-audio",
                 OpnaBackendExplicit = true,
             };
             var prepared = TrackPreparation.Prepare(ovi, settings.FmpCom, null, new[] { Path.GetDirectoryName(ovi) });
@@ -154,15 +177,8 @@ public class OpnaBackendCliTests
             try
             {
                 var outcome = new TrackRenderer().Render(prepared, outPath, settings);
-                // The option reached the native session (it boots the real FMP
-                // driver past the short-conditional-jump family) instead of
-                // silently rendering via MDSound. Bound the runaway after the
-                // 500 ms startup gate with a hard timeout so the render returns
-                // deterministically instead of hanging; no partial WAV is left
-                // behind regardless of duration.
-                Assert.True(outcome.StopReason == "timeout"
-                    || (outcome.Success && File.Exists(outPath)),
-                    $"expected timeout or success, got {outcome.StopReason}: {outcome.LastError}");
+                Assert.True(outcome.Success, $"native-audio render failed: {outcome.StopReason}: {outcome.LastError}");
+                Assert.True(File.Exists(outPath));
             }
             finally
             {
@@ -178,7 +194,7 @@ public class OpnaBackendCliTests
     private static FmpOpnaBackend ToBackend(BatchRenderSettings settings) =>
         settings.OpnaBackend switch
         {
-            "native-lle" => FmpOpnaBackend.NativeLle,
+            "native-audio" => FmpOpnaBackend.NativeAudio,
             _ => FmpOpnaBackend.Mdsound,
         };
 
