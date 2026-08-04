@@ -1,0 +1,26 @@
+/* libmdplayer_opna linker version script.
+ *
+ * Workstream P — symbol visibility. The shared library is allowed to export
+ * only the documented mdp_opna_* public API consumed by the managed wrapper.
+ * Everything else (the vendored Furnace core, FIFO helpers, the resampler
+ * wrapper and the statically-prefixed SpeexDSP) is hidden and cannot be
+ * resolved dynamically. This keeps the public surface small and prevents
+ * accidental coupling to vendored internals.
+ */
+MDP_OPNA_1.0 {
+  global:
+    mdp_opna_advance_to;
+    mdp_opna_clear_adpcm_ram;
+    mdp_opna_close;
+    mdp_opna_drain_audio;
+    mdp_opna_get_abi_version;
+    mdp_opna_get_irq;
+    mdp_opna_get_master_clock;
+    mdp_opna_get_output_latency_frames;
+    mdp_opna_open;
+    mdp_opna_read_status;
+    mdp_opna_reset_chip;
+    mdp_opna_write_register;
+  local:
+    *;
+};

@@ -33,6 +33,27 @@ extern "C" {
 #endif
 
 /* --------------------------------------------------------------------- */
+/* Symbol-visibility / export macro (Workstream P)                       */
+/* --------------------------------------------------------------------- */
+/* Public API functions are visible in the shipped shared library; every
+ * vendored-core / FIFO / resampler / SpeexDSP internal is hidden. On Windows
+ * this maps to dllexport; on ELF it pairs with -fvisibility=hidden and the
+ * linker version script. */
+#if defined(MDP_OPNA_STATIC)
+#  define MDP_OPNA_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
+#  if defined(MDP_OPNA_BUILDING)
+#    define MDP_OPNA_API __declspec(dllexport)
+#  else
+#    define MDP_OPNA_API __declspec(dllimport)
+#  endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#  define MDP_OPNA_API __attribute__((visibility("default")))
+#else
+#  define MDP_OPNA_API
+#endif
+
+/* --------------------------------------------------------------------- */
 /* Version                                                               */
 /* --------------------------------------------------------------------- */
 
@@ -90,7 +111,7 @@ typedef struct mdp_opna_session mdp_opna_session;
 /* --------------------------------------------------------------------- */
 
 /* Return exactly MDP_OPNA_ABI_VERSION. */
-uint32_t mdp_opna_get_abi_version(void);
+MDP_OPNA_API uint32_t mdp_opna_get_abi_version(void);
 
 /*
  * Open a session at the requested output rate and run the existing power-on
@@ -98,7 +119,7 @@ uint32_t mdp_opna_get_abi_version(void);
  * *out_session is NULL and an explicit result code is returned; `error` (when
  * supplied with error_size > 0) receives a NUL-terminated message.
  */
-int mdp_opna_open(const mdp_opna_open_options *options,
+MDP_OPNA_API int mdp_opna_open(const mdp_opna_open_options *options,
                   mdp_opna_session **out_session,
                   char *error,
                   size_t error_size);
@@ -108,27 +129,27 @@ int mdp_opna_open(const mdp_opna_open_options *options,
  * RAM and the configured output rate; empties queued audio and resets time
  * to zero. Performs no memory allocation.
  */
-int mdp_opna_reset_chip(mdp_opna_session *session);
+MDP_OPNA_API int mdp_opna_reset_chip(mdp_opna_session *session);
 
 /*
  * Fill all 256 KiB of external ADPCM RAM with `fill_value`. Does not reset
  * the chip, alter time, clear queued audio, alter the scheduler or the
  * resampler history.
  */
-int mdp_opna_clear_adpcm_ram(mdp_opna_session *session, uint8_t fill_value);
+MDP_OPNA_API int mdp_opna_clear_adpcm_ram(mdp_opna_session *session, uint8_t fill_value);
 
 /*
  * Advance the chip so that `master_clock` is the current absolute time.
  * Rejects a clock that would regress. Queues each completed stereo frame
  * with its completion clock. Stops exactly at the requested clock.
  */
-int mdp_opna_advance_to(mdp_opna_session *session, uint64_t master_clock);
+MDP_OPNA_API int mdp_opna_advance_to(mdp_opna_session *session, uint64_t master_clock);
 
 /*
  * Schedule one register write at the requested clock via the existing
  * production bus scheduler. Preserves call order for equal clocks.
  */
-int mdp_opna_write_register(mdp_opna_session *session,
+MDP_OPNA_API int mdp_opna_write_register(mdp_opna_session *session,
                             uint64_t requested_master_clock,
                             uint8_t bank,
                             uint8_t address,
@@ -138,7 +159,7 @@ int mdp_opna_write_register(mdp_opna_session *session,
  * Read the live LLE status at the requested clock. `out_value` receives the
  * status byte.
  */
-int mdp_opna_read_status(mdp_opna_session *session,
+MDP_OPNA_API int mdp_opna_read_status(mdp_opna_session *session,
                          uint64_t requested_master_clock,
                          uint8_t bank,
                          uint8_t *out_value);
@@ -147,7 +168,7 @@ int mdp_opna_read_status(mdp_opna_session *session,
  * Query the current chip IRQ level. Returns 0 or 1 through *out_asserted.
  * Never advances time, never clears IRQ, never modifies the core.
  */
-int mdp_opna_get_irq(mdp_opna_session *session, int *out_asserted);
+MDP_OPNA_API int mdp_opna_get_irq(mdp_opna_session *session, int *out_asserted);
 
 /*
  * Drain already-queued timed frames into `interleaved_stereo`
@@ -155,13 +176,13 @@ int mdp_opna_get_irq(mdp_opna_session *session, int *out_asserted);
  * returns fewer when insufficient input is queued. Never advances time.
  * `out_drained_frames` receives the count actually produced.
  */
-int mdp_opna_drain_audio(mdp_opna_session *session,
+MDP_OPNA_API int mdp_opna_drain_audio(mdp_opna_session *session,
                          int16_t *interleaved_stereo,
                          int requested_frames,
                          int *out_drained_frames);
 
 /* Current absolute master clock. Pure query; never advances or mutates. */
-uint64_t mdp_opna_get_master_clock(const mdp_opna_session *session);
+MDP_OPNA_API uint64_t mdp_opna_get_master_clock(const mdp_opna_session *session);
 
 /*
  * Query the fixed output latency introduced by the native resampler, in
@@ -170,11 +191,11 @@ uint64_t mdp_opna_get_master_clock(const mdp_opna_session *session);
  * quality/rate/build. This is a pure query: it does not advance time, does
  * not allocate, and does not modify resampler state.
  */
-int mdp_opna_get_output_latency_frames(const mdp_opna_session *session,
+MDP_OPNA_API int mdp_opna_get_output_latency_frames(const mdp_opna_session *session,
                                        uint32_t *out_frames);
 
 /* Close and free the session. Accepts NULL (no-op). */
-void mdp_opna_close(mdp_opna_session *session);
+MDP_OPNA_API void mdp_opna_close(mdp_opna_session *session);
 
 #ifdef __cplusplus
 }

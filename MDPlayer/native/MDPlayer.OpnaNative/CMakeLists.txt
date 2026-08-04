@@ -39,16 +39,7 @@ set(OPNANATIVE_UPSTREAM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/upstream/furnace-ym2608
 
 # ---------------------------------------------------------------------------
 # Static internal target compiling ONLY the pinned YM2608-LLE core.
-#
-# This is the Prompt-2 vendoring gate: it proves the vendored core compiles
-# in isolation and can be initialized/clocked. No MDPlayer integration code,
-# bus transactions, audio decoding, or resampling is included here — that
-# lives in the `mdplayer_opna` shared library target declared below.
-#
-# C standard: C99 (the vendored core is written to the C99 dialect that
-# Furnace builds it with; see UPSTREAM.md). Warnings are enabled; the core is
-# compiled with `-pedantic`-free -Wall -Wextra. Include paths are configured
-# in CMake (never by editing the vendored files).
+# ---------------------------------------------------------------------------
 add_library(mdplayer_opna_core STATIC
     "${OPNANATIVE_UPSTREAM_DIR}/fmopna_2608.c")
 target_compile_features(mdplayer_opna_core PRIVATE c_std_99)
@@ -57,9 +48,10 @@ target_include_directories(mdplayer_opna_core PUBLIC
 if(NOT MSVC)
     target_compile_options(mdplayer_opna_core PRIVATE
         -Wall -Wextra)
+    # Hidden visibility: the vendored core is linked into the shared library
+    # but must never appear in its exported surface (Workstream P).
+    target_compile_options(mdplayer_opna_core PRIVATE -fvisibility=hidden)
     if(MDPLAYER_OPNA_ADAPTER_UBSAN)
-        # Upstream core stays UBSan-free (Task C §12): the pinned core performs
-        # intentional signed-int arithmetic that UBSan would flag.
         target_compile_options(mdplayer_opna_core PRIVATE
             -fno-sanitize=undefined)
     endif()
@@ -68,7 +60,32 @@ set_target_properties(mdplayer_opna_core PROPERTIES
     OUTPUT_NAME "mdplayer_opna_core"
     POSITION_INDEPENDENT_CODE ON)
 
-add_library(mdplayer_opna SHARED
+# SpeexDSP standalone resampler (fixed-point, prefixed, private). Vendored
+# under third_party/speexdsp (see its UPSTREAM.md); compiled as its own static
+# target and linked privately so no SpeexDSP symbol is exported from
+# libmdplayer_opna. RANDOM_PREFIX=mdp_opna_speex renames all its exported symbols.
+add_library(mdplayer_opna_speex_resampler STATIC
+    third_party/speexdsp/resample.c)
+set_target_properties(mdplayer_opna_speex_resampler PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mdplayer_opna_speex_resampler PRIVATE
+    third_party/speexdsp)
+target_compile_definitions(mdplayer_opna_speex_resampler PRIVATE
+    FIXED_POINT
+    OUTSIDE_SPEEX
+    RANDOM_PREFIX=mdp_opna_speex)
+if(NOT MSVC)
+    # Hide SpeexDSP symbols; it is statically linked and never exported
+    # (Workstream P / no system SpeexDSP dependency).
+    target_compile_options(mdplayer_opna_speex_resampler PRIVATE -fvisibility=hidden)
+endif()
+if(UNIX)
+    target_link_libraries(mdplayer_opna_speex_resampler PRIVATE m)
+endif()
+
+# The shipped adapter sources. The shared library compiles these directly so
+# every public mdp_opna_* symbol is present in the loadable artifact.
+set(MDPLAYER_OPNA_ADAPTER_SOURCES
     src/mdplayer_opna.c
     src/mdplayer_opna_core.c
     src/mdplayer_opna_bus.c
@@ -78,49 +95,88 @@ add_library(mdplayer_opna SHARED
     src/mdplayer_opna_fifo.c
     src/mdplayer_opna_session.c
     src/mdplayer_opna_resampler.c)
+
+# ---------------------------------------------------------------------------
+# Shared runtime payload: the adapter sources + vendored core + SpeexDSP,
+# exported with a restricted symbol surface.
+# ---------------------------------------------------------------------------
+add_library(mdplayer_opna SHARED ${MDPLAYER_OPNA_ADAPTER_SOURCES})
 target_include_directories(mdplayer_opna PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(mdplayer_opna PRIVATE
     "${OPNANATIVE_UPSTREAM_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/speexdsp")
-# The wrapper includes speex_resampler.h with the same OUTSIDE_SPEEX /
-# RANDOM_PREFIX shim so its types and renamed declarations match the compiled
-# SpeexDSP static target.
 target_compile_definitions(mdplayer_opna PRIVATE
+    MDP_OPNA_BUILDING
     OUTSIDE_SPEEX
     RANDOM_PREFIX=mdp_opna_speex)
-# The identical vendored core is linked as its own static target
-# (`mdplayer_opna_core`) so the adapter/tests can run UBSan-instrumented while
-# the upstream snapshot stays UBSan-free (Task C §12).
-target_link_libraries(mdplayer_opna PRIVATE mdplayer_opna_core)
-# SpeexDSP standalone resampler (fixed-point, prefixed, private). Vendored
-# under third_party/speexdsp (see its UPSTREAM.md); compiled as its own static
-# target and linked privately so no SpeexDSP symbol is exported from
-# libmdplayer_opna. RANDOM_PREFIX=mdp_opna_speex renames all its exported symbols.
-add_library(mdplayer_opna_speex_resampler STATIC
-    third_party/speexdsp/resample.c)
-# Linked into the shared libmdplayer_opna.so: must be position-independent
-# (required by -fsanitize=address builds and hardened linkers).
-set_target_properties(mdplayer_opna_speex_resampler PROPERTIES
-    POSITION_INDEPENDENT_CODE ON)
-target_include_directories(mdplayer_opna_speex_resampler PRIVATE
-    third_party/speexdsp)
-target_compile_definitions(mdplayer_opna_speex_resampler PRIVATE
-    FIXED_POINT
-    OUTSIDE_SPEEX
-    RANDOM_PREFIX=mdp_opna_speex)
-target_link_libraries(mdplayer_opna PRIVATE mdplayer_opna_speex_resampler)
-if(UNIX)
-    # SpeexDSP filter-table creation requires libm.
-    target_link_libraries(mdplayer_opna_speex_resampler PRIVATE m)
+if(NOT MSVC)
+    target_compile_options(mdplayer_opna PRIVATE -Wall -Wextra)
+    # Hide everything unless explicitly marked MDP_OPNA_API (Workstream P).
+    target_compile_options(mdplayer_opna PRIVATE -fvisibility=hidden)
 endif()
+target_link_libraries(mdplayer_opna PRIVATE
+    mdplayer_opna_core mdplayer_opna_speex_resampler)
 set_target_properties(mdplayer_opna PROPERTIES
     OUTPUT_NAME "mdplayer_opna"
     POSITION_INDEPENDENT_CODE ON)
 
-# Packaging: copy the built library to MDPlayer runtimes/<rid>/native so a
-# future managed wrapper can probe it there. Linux now; Windows work deferred.
+# ---------------------------------------------------------------------------
+# Workstream P — symbol visibility. Restrict shared-library exports to the
+# documented mdp_opna_* API only (the managed wrapper's DllImport set). Hide
+# the vendored Furnace core, FIFO helpers, resampler wrapper and the
+# statically-prefixed SpeexDSP. Linux uses a GNU version script; Windows/MinGW
+# links an explicit export table.
+# ---------------------------------------------------------------------------
+if(UNIX AND NOT APPLE)
+    target_link_options(mdplayer_opna PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libmdplayer_opna.map")
+elseif(WIN32)
+    # Restrict the Windows DLL export table to the documented mdp_opna_* API
+    # using the explicit export list. Passing the .def as a linker input makes
+    # MinGW export only the listed symbols (no auto-export of every global), so
+    # SpeexDSP / FIFO / resampler wrapper / vendored-core internals stay private.
+    set_target_properties(mdplayer_opna PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+    target_link_options(mdplayer_opna PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/mdplayer_opna.def")
+endif()
+
+# Convenience dependency aggregate for native unit tests that probe internals
+# (vendored core, FIFO helpers, resampler wrapper, session internals). The
+# adapter is recompiled as its own static archive so test executables can
+# resolve internals that the shipped shared library now hides (Workstream P).
+add_library(mdplayer_opna_testlib STATIC ${MDPLAYER_OPNA_ADAPTER_SOURCES})
+set_target_properties(mdplayer_opna_testlib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mdplayer_opna_testlib PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(mdplayer_opna_testlib PRIVATE
+    "${OPNANATIVE_UPSTREAM_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/speexdsp")
+target_compile_definitions(mdplayer_opna_testlib PRIVATE
+    OUTSIDE_SPEEX
+    RANDOM_PREFIX=mdp_opna_speex)
+# The testlib is a static aggregate: consumers of the dev interface link it
+# statically, so the header must not emit dllimport on Windows.
+target_compile_definitions(mdplayer_opna_testlib PUBLIC MDP_OPNA_STATIC)
+if(NOT MSVC)
+    target_compile_options(mdplayer_opna_testlib PRIVATE -Wall -Wextra)
+endif()
+if(UNIX)
+    add_library(mdplayer_opna_dev INTERFACE)
+    target_link_libraries(mdplayer_opna_dev INTERFACE
+        "-Wl,--start-group"
+        mdplayer_opna_testlib mdplayer_opna_core mdplayer_opna_speex_resampler
+        "-Wl,--end-group")
+else()
+    add_library(mdplayer_opna_dev INTERFACE)
+    target_link_libraries(mdplayer_opna_dev INTERFACE
+        mdplayer_opna_testlib mdplayer_opna_core mdplayer_opna_speex_resampler)
+endif()
+
+# Packaging: copy the built library to MDPlayer runtimes/<rid>/native so the
+# managed wrapper can probe it there.
 if(WIN32)
     set(MDPLAYER_OPNA_RUNTIME_RID "win-x64")
     set(MDPLAYER_OPNA_RUNTIME_LIBRARY "mdplayer_opna.dll")
@@ -137,133 +193,89 @@ add_custom_command(TARGET mdplayer_opna POST_BUILD
     COMMENT "Copying ${MDPLAYER_OPNA_RUNTIME_LIBRARY} to runtimes/${MDPLAYER_OPNA_RUNTIME_RID}/native/"
     VERBATIM)
 
-# Stage-1 acceptance probe: the first audio gate. Vendored core + copied reset
-# + copied bus scheduler + copied serial decoder + bounded real FM trace prefix
-# -> nonzero stereo PCM.
+# Stage-1 acceptance probe: the first audio gate.
 enable_testing()
 add_executable(mdplayer_opna_probe tests/furnace_reference_probe.c)
 target_include_directories(mdplayer_opna_probe PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_probe PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_probe PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_probe COMMAND mdplayer_opna_probe)
 
-# ---------------------------------------------------------------------------
-# Prompt-2 vendoring gate: compile + init test for the pinned core.
-# Proves the vendored core compiles in isolation (via mdplayer_opna_core)
-# and can be initialized and clocked. Produces no audio.
-# ---------------------------------------------------------------------------
 add_executable(upstream_compile_test tests/upstream_compile_test.c)
 target_link_libraries(upstream_compile_test PRIVATE mdplayer_opna_core)
 add_test(NAME upstream_compile_test COMMAND upstream_compile_test)
 
-# ---------------------------------------------------------------------------
-# Reset + clock test (Prompt 3): verifies the Furnace reset contract
-# (576/576/576 phases), the initial pin state, and that reset clears every
-# transient driver state while advancing master_clock monotonically.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_reset_test tests/reset_test.c)
 target_include_directories(mdplayer_opna_reset_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_reset_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_reset_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_reset_test COMMAND mdplayer_opna_reset_test)
 
-# ---------------------------------------------------------------------------
-# Bus scheduler test (Prompt 3): verifies the pin-level write state machine
-# (address/data phases, A1/A0 selects, CS/RD/WR, prescaler write opportunity,
-# busy wait, SSG delay, explicit idle, FIFO order).
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_bus_test tests/bus_test.c)
 target_include_directories(mdplayer_opna_bus_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_bus_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_bus_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_bus_test COMMAND mdplayer_opna_bus_test)
 
-# ---------------------------------------------------------------------------
-# Serial PCM decoder + real-trace fixture test (Prompt 3): replays the
-# checked-in furnace_reference_fixture.c (real YM2608 OPNA trace) and verifies
-# the serial decoder emits only complete stereo frames, that both channels
-# produce frames, and that the real trace yields nonzero output.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_fm_audio_test tests/fm_audio_test.c)
 target_include_directories(mdplayer_opna_fm_audio_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_fm_audio_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_fm_audio_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_fm_audio_test COMMAND mdplayer_opna_fm_audio_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-4A stereo pan/routing gate: left/right ordering, mono-SSG fold pan.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_pan_test tests/pan_test.c)
 target_include_directories(mdplayer_opna_pan_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_pan_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_pan_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_pan_test COMMAND mdplayer_opna_pan_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-4A Furnace-compatible SSG mix gate.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_ssg_test tests/ssg_test.c)
 target_include_directories(mdplayer_opna_ssg_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_ssg_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_ssg_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_ssg_test COMMAND mdplayer_opna_ssg_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-4A ADPCM-B external-memory protocol gate.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_adpcm_test tests/adpcm_test.c)
 target_include_directories(mdplayer_opna_adpcm_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_adpcm_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_adpcm_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_adpcm_test COMMAND mdplayer_opna_adpcm_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-4A timer + IRQ observations gate.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_timer_irq_test tests/timer_irq_test.c)
 target_include_directories(mdplayer_opna_timer_irq_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_timer_irq_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_timer_irq_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_timer_irq_test COMMAND mdplayer_opna_timer_irq_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-4A determinism gate: identical PCM SHA-256 across three processes.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_determinism_test tests/determinism_test.c)
 target_include_directories(mdplayer_opna_determinism_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_determinism_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_determinism_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_determinism_test COMMAND mdplayer_opna_determinism_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-5 Workstream B: timed native-frame FIFO.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_fifo_test tests/fifo_test.c src/mdplayer_opna_fifo.c)
 target_include_directories(mdplayer_opna_fifo_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_test(NAME mdplayer_opna_fifo_test COMMAND mdplayer_opna_fifo_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-5 Workstream A: versioned session ABI.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_abi_test tests/abi_test.c)
 target_include_directories(mdplayer_opna_abi_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_abi_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_abi_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_abi_test COMMAND mdplayer_opna_abi_test)
 
 add_executable(mdplayer_opna_session_reset_test tests/session_reset_test.c)
@@ -271,23 +283,15 @@ target_include_directories(mdplayer_opna_session_reset_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_session_reset_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_session_reset_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_session_reset_test COMMAND mdplayer_opna_session_reset_test)
 
-# ---------------------------------------------------------------------------
-# Prompt-5 Workstream C: prescaler / native cadence audit + gate.
-# The prescaler audit is diagnostic. The cadence gate asserts constant 144
-# native cadence; it FAILS when variable cadence is detected (spec §22 hard
-# stop: fixed-rate resampler and Workstream D/E are not built).
-# NB: this gate is expected to FAIL (variable cadence from honoring 0x2E/0x2F
-# prescaler-select writes). It is the spec's hard-stop trigger.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_prescaler_audit_test tests/prescaler_audit_test.c)
 target_include_directories(mdplayer_opna_prescaler_audit_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_prescaler_audit_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_prescaler_audit_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_prescaler_audit_test COMMAND mdplayer_opna_prescaler_audit_test)
 set_tests_properties(mdplayer_opna_prescaler_audit_test PROPERTIES
     RUN_SERIAL ON)
@@ -298,11 +302,8 @@ target_include_directories(mdplayer_opna_native_cadence_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     "${OPNANATIVE_UPSTREAM_DIR}")
-target_link_libraries(mdplayer_opna_native_cadence_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_native_cadence_test PRIVATE mdplayer_opna_dev)
 
-# The five cadence-policy tests. Every one passes: 0x2E/0x2F pass by detecting
-# and reporting unsupported cadence (no audio resampling required). There is no
-# deliberately failing test in this suite.
 foreach(cadence_case
         default_profile_has_144_clock_cadence
         prescaler_2d_has_144_clock_cadence
@@ -314,29 +315,19 @@ foreach(cadence_case
     set_tests_properties(${cadence_case} PROPERTIES RUN_SERIAL ON)
 endforeach()
 
-# ---------------------------------------------------------------------------
-# Prompt-5.1 Task D: fixed-cadence resampler (SpeexDSP-backed).
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_resampler_test tests/resampler_test.c)
 target_include_directories(mdplayer_opna_resampler_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(mdplayer_opna_resampler_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_resampler_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_resampler_test COMMAND mdplayer_opna_resampler_test)
 set_tests_properties(mdplayer_opna_resampler_test PROPERTIES RUN_SERIAL ON)
 
-
-# ---------------------------------------------------------------------------
-# Prompt 8.1: status-read cadence regression.
-# A status read must be cadence-neutral: no master-clock advance, no serial
-# decoder run, no dropped frame. Verifies raw 144-clock frame cadence with and
-# without bank-0/bank-1/dense status polling at every phase of the frame period.
-# ---------------------------------------------------------------------------
 add_executable(mdplayer_opna_status_cadence_test tests/status_cadence_test.c)
 target_include_directories(mdplayer_opna_status_cadence_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(mdplayer_opna_status_cadence_test PRIVATE mdplayer_opna)
+target_link_libraries(mdplayer_opna_status_cadence_test PRIVATE mdplayer_opna_dev)
 
 foreach(status_case
         baseline_cadence_144

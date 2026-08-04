@@ -1,0 +1,20 @@
+; libmdplayer_opna Windows export file (Win-x64).
+;
+; Workstream P — symbol visibility. Documents exactly the exports the managed
+; wrapper resolves; the vendored Furnace core, FIFO helpers, resampler wrapper
+; and the statically-prefixed SpeexDSP are NOT exported.
+
+LIBRARY mdplayer_opna
+EXPORTS
+    mdp_opna_advance_to
+    mdp_opna_clear_adpcm_ram
+    mdp_opna_close
+    mdp_opna_drain_audio
+    mdp_opna_get_abi_version
+    mdp_opna_get_irq
+    mdp_opna_get_master_clock
+    mdp_opna_get_output_latency_frames
+    mdp_opna_open
+    mdp_opna_read_status
+    mdp_opna_reset_chip
+    mdp_opna_write_register
