@@ -159,8 +159,21 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
         catch (Exception ex)
         {
             _booted = false;
-            throw new InvalidOperationException($"Native FMP init failed: {ex.Message}", ex);
+            throw new InvalidOperationException(
+                "Native FMP init failed: " + DescribeBootFailure(ex), ex);
         }
+    }
+
+    private static string DescribeBootFailure(Exception ex)
+    {
+        if (ex is OpnaUnsupportedCadenceException)
+        {
+            return "the FMP driver's boot sequence is not compatible with the native fixed-cadence " +
+                   "profile: the driver polls the OPNA status registers, which perturbs the LLE serial " +
+                   "frame phase away from the supported 144-master-clock cadence. " +
+                   $"({ex.Message})";
+        }
+        return ex.Message;
     }
 
     private void OnPpz8LoadPcm(int bank, int mode, byte[][] pcmdata)
@@ -230,9 +243,10 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
                 _waitDone = _position + 1 >= _waitSamples;
             }
 
-            // Advance the device to the clock of output sample (_position +
-            // output latency), so the drained PCM covers exactly this sample.
-            AdvanceToSampleBoundary(_position + _outputLatencyFrames);
+            // Advance the device by exactly one output sample of master clock,
+            // so the drain yields exactly this output frame (latency is inside
+            // the resampler; PPZ8 is delayed by the same amount for alignment).
+            AdvanceToSampleBoundary(_position + 1);
 
             // Drain whatever the device has produced up to this clock.
             int drained;

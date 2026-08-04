@@ -98,9 +98,14 @@ public sealed class ClockedNise98OpnaBridgeTests
         Assert.Equal(ClosedForm(4), device.Writes[1].clock);
     }
 
-    /// <summary>Status reads return the native device result directly.</summary>
+    /// <summary>
+    /// Status reads (0x88/0x8c) return the native device status directly;
+    /// data reads (0x8a/0x8e) return the register read-back (last written
+    /// value, or the 86-board pseudo-registers) — the semantics the FMP
+    /// driver's boot code depends on.
+    /// </summary>
     [Fact]
-    public void Read_ReturnsNativeStatus_ForBothBanks()
+    public void Read_ReturnsNativeStatus_AndRegisterReadBack()
     {
         var nise98 = BuildMachine();
         var device = new RecordingOpnaDevice();
@@ -108,11 +113,27 @@ public sealed class ClockedNise98OpnaBridgeTests
         device.StatusBytes[1] = 0xB2;
         using var session = Attach(nise98, device);
 
+        // Status ports return the native device status directly.
         Assert.Equal(0xA1, session.Bridge.Read(5, 0x0188));
-        Assert.Equal(0xA1, session.Bridge.Read(6, 0x018a));
         Assert.Equal(0xB2, session.Bridge.Read(7, 0x018c));
-        Assert.Equal(0xB2, session.Bridge.Read(8, 0x018e));
-        Assert.Equal(4, device.StatusReads.Count);
+        Assert.Equal(2, device.StatusReads.Count);
+
+        // Data ports return the register read-back: 0 before any write.
+        Assert.Equal(0x00, session.Bridge.Read(9, 0x018a));
+        Assert.Equal(0x00, session.Bridge.Read(11, 0x018e));
+        Assert.Equal(2, device.StatusReads.Count); // no status traffic for data ports
+
+        // After writes, the read-back returns the last written value, and the
+        // 86-board pseudo-registers answer like the legacy FMPortInport.
+        session.Bridge.Write(13, 0x0188, 0x28);
+        session.Bridge.Write(14, 0x018a, 0x0f);
+        Assert.Equal(0x0f, session.Bridge.Read(15, 0x018a));
+        Assert.Equal(0x0f, session.Bridge.GetBank0Register(0x28));
+
+        session.Bridge.Write(17, 0x0188, 0x0e);
+        Assert.Equal(0x00, session.Bridge.Read(19, 0x018a)); // IRQ-select byte
+        session.Bridge.Write(21, 0x0188, 0xff);
+        Assert.Equal(0x01, session.Bridge.Read(23, 0x018a)); // board present
     }
 
     /// <summary>
