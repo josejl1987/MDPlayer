@@ -38,6 +38,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\master-ninja.vgz</Link>
     </Content>
+    <!-- Native-audio validation corpus manifest (Prompt 9R). -->
+    <Content Include="..\fixtures\fmp-native-audio-validation.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>fmp-native-audio-validation.json</Link>
+    </Content>
   </ItemGroup>
 
 </Project>

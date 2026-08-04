@@ -60,5 +60,12 @@ public sealed class NativeOpnaDevice : IClockedOpnaDevice
     public void ClearAdpcmRam(byte fillValue) => _session.ClearAdpcmRam(fillValue);
 
     /// <inheritdoc />
+    /// <summary>
+    /// ABI version reported by the loaded native library. Validation accessor
+    /// (no production counters); useful for the replay report and the ABI/export
+    /// gate.
+    /// </summary>
+    internal uint AbiVersion => _session.AbiVersion;
+
     public void Dispose() => _session.Dispose();
 }

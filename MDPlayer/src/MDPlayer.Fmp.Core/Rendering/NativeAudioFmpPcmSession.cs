@@ -29,7 +29,8 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     private readonly FmpPlaybackContext _context;
     private readonly int _sampleRate;
     private readonly FmpExecutionCaptureBuilder _builder;
-    private readonly NativeOpnaDevice _device; // opened up-front: validates native availability
+    private readonly IClockedOpnaDevice _device; // opened up-front: validates native availability
+    private readonly bool _ownsDevice;
     private readonly Queue<(short Left, short Right)> _opnaFifo = new();
     private readonly short[] _opnaScratch;
     private readonly short[] _ppz8One = new short[2];
@@ -55,14 +56,36 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     /// </summary>
     internal System.Threading.CancellationToken CancelToken { get; set; }
 
+    /// <summary>
+    /// Test-only replay mute seam (Workstream H — feature presence). Bit 0 mutes
+    /// the OPNA contribution, bit 1 mutes the PPZ8 contribution. The default
+    /// (0) leaves the production path byte-identical. Only the *replay* output
+    /// is affected; capture is unaffected. Exposed for feature-presence
+    /// validation, never as a public stem-rendering feature.
+    /// </summary>
+    internal byte ReplayMuteMask { get; set; }
+
     public NativeAudioFmpPcmSession(FmpPlaybackContext context)
+        : this(context, NativeOpnaDevice.Open(context!.SampleRate), ownsDevice: true)
+    {
+    }
+
+    /// <summary>
+    /// Test-seam constructor: accepts an externally-provided device (e.g. a
+    /// validation recording wrapper) instead of opening the native library
+    /// directly. The production path uses the single-argument constructor and
+    /// is unaffected. Ownership of the injected device transfers to the session
+    /// when <paramref name="ownsDevice"/> is true.
+    /// </summary>
+    internal NativeAudioFmpPcmSession(FmpPlaybackContext context, IClockedOpnaDevice device, bool ownsDevice)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
+        _ownsDevice = ownsDevice;
         _sampleRate = context.SampleRate;
         _builder = new FmpExecutionCaptureBuilder(_sampleRate, CpuClockHz);
         // Validate/resolve the native library before any capture work: an
         // unavailable native library must fail clearly without a wasted capture.
-        _device = NativeOpnaDevice.Open(_sampleRate);
+        _device = device ?? throw new ArgumentNullException(nameof(device));
         _opnaScratch = new short[NativeOpnaTraceRenderer.DefaultChunkFrames * 2];
     }
 
@@ -152,17 +175,26 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
                 RefillOpna();
 
             short opnaL = 0, opnaR = 0;
-            if (_opnaFifo.Count > 0)
+            if ((ReplayMuteMask & 1) == 0 && _opnaFifo.Count > 0)
             {
                 var f = _opnaFifo.Dequeue();
                 opnaL = f.Left;
                 opnaR = f.Right;
             }
+            else if (_opnaFifo.Count > 0)
+            {
+                // Muted OPNA: consume the FIFO but contribute silence.
+                _opnaFifo.Dequeue();
+            }
 
             // Generate the aligned PPZ8 frame for this host position.
-            int ppz8Got = _ppz8.RenderFrames(_pos, 1, _ppz8One);
-            short ppz8L = ppz8Got > 0 ? _ppz8One[0] : (short)0;
-            short ppz8R = ppz8Got > 0 ? _ppz8One[1] : (short)0;
+            short ppz8L = 0, ppz8R = 0;
+            if ((ReplayMuteMask & 2) == 0)
+            {
+                int ppz8Got = _ppz8.RenderFrames(_pos, 1, _ppz8One);
+                ppz8L = ppz8Got > 0 ? _ppz8One[0] : (short)0;
+                ppz8R = ppz8Got > 0 ? _ppz8One[1] : (short)0;
+            }
 
             _mixer.Mix(opnaL, opnaR, ppz8L, ppz8R, out short left, out short right);
             ApplyEnvelope(_pos, ref left, ref right);
@@ -228,6 +260,8 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
         }
         _ppz8?.Dispose();
         _opna?.Dispose(); // disposes the native device
+        if (_ownsDevice)
+            _device?.Dispose();
         _builder.Dispose();
     }
 }

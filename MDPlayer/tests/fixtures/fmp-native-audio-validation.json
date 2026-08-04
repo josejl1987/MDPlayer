@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FMP native-audio validation corpus (Prompt 9R)",
+  "description": "Fast-tier and extended-tier real-file corpus for validating the trace-driven native-audio FMP backend. Fixtures are referenced by stable resolver keys and located at runtime (user-provided OVI/track files; nothing copyrighted is embedded here). Resolver keys may be satisfied by the repo's local corpus config (tests/Corpus/local/local-config.json) or by the standard test-bin/Downloads OVI discovery. The manifest declares expected loop/duration behavior and required chip-feature coverage for feature-presence validation; it does not embed any fixture bytes.",
+  "version": 1,
+  "cpuClockFrequencyHz": 8000000,
+  "outputRates": [44100, 48000, 96000],
+  "fastValidationSubset": ["fm-combo", "ppz8-mixed", "adpcm-rhythm"],
+  "entries": [
+    {
+      "id": "fm-combo",
+      "resolverKey": "fm-combo",
+      "format": "OVI",
+      "expectedLoopBehavior": "looping",
+      "expectedApproximateDurationSeconds": 20,
+      "coverage": {
+        "fm": true, "ssg": false, "rhythmRss": false, "adpcmB": false, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "fast"
+    },
+    {
+      "id": "ppz8-mixed",
+      "resolverKey": "ppz8-mixed",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 15,
+      "coverage": {
+        "fm": true, "ssg": false, "rhythmRss": false, "adpcmB": false, "ppz8": true,
+        "mixedOpnaPpz8": true,
+        "timerPolling": true, "bank0Write": true, "bank1Write": false
+      },
+      "tier": "fast"
+    },
+    {
+      "id": "adpcm-rhythm",
+      "resolverKey": "adpcm-rhythm",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 12,
+      "coverage": {
+        "fm": true, "ssg": true, "rhythmRss": true, "adpcmB": true, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "fast"
+    },
+    {
+      "id": "ssg-fm",
+      "resolverKey": "ssg-fm",
+      "format": "OVI",
+      "expectedLoopBehavior": "looping",
+      "expectedApproximateDurationSeconds": 25,
+      "coverage": {
+        "fm": true, "ssg": true, "rhythmRss": false, "adpcmB": false, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "extended"
+    },
+    {
+      "id": "rhythm-heavy",
+      "resolverKey": "rhythm-heavy",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 18,
+      "coverage": {
+        "fm": true, "ssg": false, "rhythmRss": true, "adpcmB": false, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "extended"
+    },
+    {
+      "id": "adpcm-heavy",
+      "resolverKey": "adpcm-heavy",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 20,
+      "coverage": {
+        "fm": true, "ssg": false, "rhythmRss": false, "adpcmB": true, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "extended"
+    },
+    {
+      "id": "ppz8-bank1",
+      "resolverKey": "ppz8-bank1",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 15,
+      "coverage": {
+        "fm": false, "ssg": false, "rhythmRss": false, "adpcmB": false, "ppz8": true,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": true, "bank1Write": true
+      },
+      "tier": "extended"
+    },
+    {
+      "id": "short-track",
+      "resolverKey": "short-track",
+      "format": "OVI",
+      "expectedLoopBehavior": "nonLooping",
+      "expectedApproximateDurationSeconds": 6,
+      "coverage": {
+        "fm": true, "ssg": false, "rhythmRss": false, "adpcmB": false, "ppz8": false,
+        "mixedOpnaPpz8": false,
+        "timerPolling": true, "bank0Write": false, "bank1Write": false
+      },
+      "tier": "extended"
+    }
+  ]
+}
