@@ -20,6 +20,26 @@ namespace Fmp.Core.Nise98
         private NiseDos dos = null;
         private NisePPZ8 ppz8 = null;
         private fileTemp fileTemp = null;
+        private INise98OpnaPortHandler opnaPortHandler = null;
+
+        /// <summary>
+        /// CPU clock frequency (Hz) of the active machine configuration.
+        /// The clocked execution coordinator sets this from the machine it
+        /// drives; the legacy sample-position path never reads it. 0 means
+        /// "not configured" and is only valid on the legacy path.
+        /// </summary>
+        public uint CpuClockFrequencyHz { get; set; }
+
+        /// <summary>
+        /// Optional clocked OPNA port handler attached at the existing FM
+        /// port-I/O boundary. When null (legacy path) all YM2608 traffic
+        /// flows through the MDSound fmStatus/opnaWrite machinery untouched.
+        /// </summary>
+        public INise98OpnaPortHandler OpnaPortHandler
+        {
+            get => opnaPortHandler;
+            set => opnaPortHandler = value;
+        }
 
         private fmStatus fmReg088 = null;
         private fmStatus fmReg188 = null;
@@ -228,24 +248,32 @@ namespace Fmp.Core.Nise98
                 case 0x08a://FM port
                 case 0x08c://FM port
                 case 0x08e://FM port
+                    if (opnaPortHandler != null)
+                        return opnaPortHandler.Read(cpu.TotalCycles, port);
                     return FMPortInport(fmReg088, port);
 
                 case 0x188://FM port
                 case 0x18a://FM port
                 case 0x18c://FM port
                 case 0x18e://FM port
+                    if (opnaPortHandler != null)
+                        return opnaPortHandler.Read(cpu.TotalCycles, port);
                     return FMPortInport(fmReg188, port);
 
                 case 0x288://FM port
                 case 0x28a://FM port
                 case 0x28c://FM port
                 case 0x28e://FM port
+                    if (opnaPortHandler != null)
+                        return opnaPortHandler.Read(cpu.TotalCycles, port);
                     return FMPortInport(fmReg288, port);
 
                 case 0x388://FM port
                 case 0x38a://FM port
                 case 0x38c://FM port
                 case 0x38e://FM port
+                    if (opnaPortHandler != null)
+                        return opnaPortHandler.Read(cpu.TotalCycles, port);
                     return FMPortInport(fmReg388, port);
 
                 case 0xa460:
@@ -346,24 +374,44 @@ namespace Fmp.Core.Nise98
                 case 0x08a://FM port val
                 case 0x08c://FM port val
                 case 0x08e://FM port val
+                    if (opnaPortHandler != null)
+                    {
+                        opnaPortHandler.Write(cpu.TotalCycles, port, data);
+                        break;
+                    }
                     FMPortOutport(fmReg088, port, data);
                     break;
                 case 0x188://FM port adr
                 case 0x18a://FM port val
                 case 0x18c://FM port val
                 case 0x18e://FM port val
+                    if (opnaPortHandler != null)
+                    {
+                        opnaPortHandler.Write(cpu.TotalCycles, port, data);
+                        break;
+                    }
                     FMPortOutport(fmReg188, port, data);
                     break;
                 case 0x288://FM port adr
                 case 0x28a://FM port adr
                 case 0x28c://FM port adr
                 case 0x28e://FM port adr
+                    if (opnaPortHandler != null)
+                    {
+                        opnaPortHandler.Write(cpu.TotalCycles, port, data);
+                        break;
+                    }
                     FMPortOutport(fmReg288, port, data);
                     break;
                 case 0x388://FM port adr
                 case 0x38a://FM port adr
                 case 0x38c://FM port adr
                 case 0x38e://FM port adr
+                    if (opnaPortHandler != null)
+                    {
+                        opnaPortHandler.Write(cpu.TotalCycles, port, data);
+                        break;
+                    }
                     FMPortOutport(fmReg388, port, data);
                     break;
 

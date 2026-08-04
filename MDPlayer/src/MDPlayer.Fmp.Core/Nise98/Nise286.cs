@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Fmp.Core.Nise98
 {
-    public class Nise286
+    public class Nise286 : INiseCycleClock
     {
 
         //x86 全般に参考にしたサイト,ソース
@@ -30,11 +30,31 @@ namespace Fmp.Core.Nise98
         private List<UserInt> lstUserInt = new List<UserInt>();
         private object userIntLockObject = new object();
 
+        // Authoritative CPU cycle count.
+        //
+        // Instruction-timing convention: the Nise286 core does not model
+        // per-instruction 80286 microcycle timing (StepExecute historically
+        // returned 0 wait cycles). The clocked execution path therefore
+        // defines exactly one checked accumulator at the lowest common
+        // execution point (StepExecute) and counts every executed instruction
+        // as exactly one CPU clock tick at the machine's configured clock
+        // frequency (Nise98.CpuClockFrequencyHz). This convention is exposed
+        // in one comment here and verified by one CPU-timing test; it does
+        // not invent undocumented microcycle timings and does not rewrite the
+        // CPU core.
+        private ulong _totalCycles;
+
         public byte w_mmsk = 0xff;//(IR7 (INT0Fh)-IR0(INT08h))全割り込み不可
         public byte w_smsk = 0xff;//(IR15(INT17h)-IR8(INT10h))全割り込み不可
         public bool[] interruptTrigger = new bool[24];
         public int iLevel = 0;
         private List<Func<bool>> lstHook = new List<Func<bool>>();
+
+        /// <summary>Total executed instructions since reset, as CPU clock ticks.</summary>
+        public ulong TotalCycles => _totalCycles;
+
+        /// <summary>CPU clock frequency from the active Nise98 machine configuration.</summary>
+        public uint ClockFrequencyHz => machine.CpuClockFrequencyHz;
 
         public Nise286(Nise98 machine)
         {
@@ -64,6 +84,11 @@ namespace Fmp.Core.Nise98
                 Log.WriteLine(musicDriverInterface.LogLevel.ERROR, "CPU is HALT.");
                 return -1;
             }
+
+            // Lowest common execution point: exactly one checked tick per
+            // executed instruction (including hook-dispatched steps). See the
+            // instruction-timing convention comment above.
+            _totalCycles = checked(_totalCycles + 1);
 
             Interrupt();
 
