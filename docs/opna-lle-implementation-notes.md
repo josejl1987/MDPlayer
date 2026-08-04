@@ -148,3 +148,74 @@ Trace-driven native replay is intentionally the current production architecture.
 A future event-driven LLE execution mode could reuse the same exact clock
 mappers and native device while restoring a live IRQ loop — that is a separate
 architecture and is out of scope here.
+
+## 9. Prompt 9R — release status for the `native-audio` backend
+
+### Selection and defaults
+- **MDSound remains the default.** `native-audio` is an explicit, opt-in backend
+  (CLI `--opna-backend native-audio`). There is **no automatic fallback**: a
+  failed native render is a clear, typed error, never a silent MDSound replay.
+- The retired `native-lle` value is rejected, not aliased.
+
+### Architecture (unchanged)
+- **Pass 1** runs Nise98 + the legacy timer/control session purely for
+  deterministic capture (CPU-cycle event stream, OPNA register writes, PPZ8
+  commands, immutable PPZ8 banks).
+- **Pass 2** replays the captured events through the native YM2608 plus the shared
+  PPZ8 renderer, producing aligned mixed PCM. Replay performs **zero** native
+  status reads, **zero** native IRQ reads, and **no** CPU/Nise98 execution.
+
+### Supported rates and platforms
+- Output rates **44.1 kHz, 48 kHz, 96 kHz** only.
+- Native library paths:
+  - Linux x64: `runtimes/linux-x64/native/libmdplayer_opna.so`
+  - Windows x64: `runtimes/win-x64/native/mdplayer_opna.dll`
+- The runtime library has **no system SpeexDSP dependency** (SpeexDSP is
+  statically linked and renamed), no Furnace runtime, and no RPATH/CWD
+  dependency on Linux.
+
+### Determinism
+- Capture is deterministic across fresh sessions and independent of the discarded
+  PCM buffer size, and capture instrumentation does not change MDSound PCM.
+- Replay is deterministically identical **within a platform** for the same
+  immutable capture (byte-identical PCM across sessions and block/drain sizes).
+- Cross-platform byte equality is **not guaranteed** and is not required; the
+  cross-platform hash comparison is reported, not asserted equal.
+
+### Performance expectations
+- Legacy MDSound and the capture pass run far faster than real time.
+- **Native replay is dominated by the vendored Furnace YM2608-LLE synthesis**
+  (profilers attribute ~96% of replay wall time to `FMOPNA_Clock`). On a typical
+  x64 development machine the `native-audio` two-pass total renders at roughly
+  **0.2× real time** for chip-dense FMP tracks. The LL synthetic cost is intrinsic
+  to the faithful LLE core; a faster result would require skipping/coarsening
+  synthesis, changing chip clock or timestamps, lowering SpeexDSP quality, or
+  replacing the resampler — all of which are rejected. The backend is therefore
+  most practical for **offline rendering**, not real-time playback.
+- The full 30-minute extended stability tier is scheduled (nightly); at ~0.2×
+  real time it takes ~2.5 h wall.
+
+### Symbol surface
+- The shipped libraries export **only the documented `mdp_opna_*` API** (12
+  functions). Vendored-core, FIFO, resampler-wrapper and SpeexDSP internals are
+  hidden.
+
+### Troubleshooting
+- **Missing native library** — the managed wrapper raises a clear typed error
+  telling you the library path; MDSound is unaffected. Rebuild the native library
+  per `native/MDPlayer.OpnaNative/README.md`.
+- **ABI mismatch** — the wrapper checks the exported ABI version against its
+  target and reports; rebuild the native library from the same tree.
+- **Unsupported cadence** — a captured trace with `0x2E`/`0x2F` prescaler writes
+  throws `NotSupportedException` (no fallback).
+- **Capture memory usage** — capture events/banks are small value types held in
+  memory for the two-pass render; the capture store is reported in benchmarks.
+- **Slow replay pass** — expected (see Performance expectations); use a shorter
+  render window or the legacy MDSound backend for interactive preview.
+- **Slow capture pass** — capture uses the legacy MDSound session and is normally
+  fast; a very large track raises event-count memory proportionally.
+- **Windows DLL load failure** — confirm `runtimes/win-x64/native/mdplayer_opna.dll`
+  is present and depends only on KERNEL32 + the UCRT (no `speexdsp.dll`).
+- **Linux dependency failure** — `ldd libmdplayer_opna.so` should show only
+  `libm`/`libc`; no system SpeexDSP or Furnace runtime.
+
