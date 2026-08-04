@@ -128,7 +128,7 @@ public sealed class ClockedFmpExecutionSession : IDisposable
         }
 
         // Idle advancement based on cycles actually executed.
-        _device.AdvanceTo(_mapper.Map(_cpu.TotalCycles));
+        SynchronizeDeviceToCpu();
         return executed;
     }
 
@@ -172,8 +172,7 @@ public sealed class ClockedFmpExecutionSession : IDisposable
         _cpu.AdvanceIdleToCpuCycle(absoluteCpuCycle);
 
         // Map the resulting absolute cycle and advance the device.
-        ulong mapped = _mapper.Map(absoluteCpuCycle);
-        _device.AdvanceTo(mapped);
+        SynchronizeDeviceToCpu();
 
         // Sample the native IRQ at the resulting boundary.
         if (_device.IrqAsserted)
@@ -182,4 +181,101 @@ public sealed class ClockedFmpExecutionSession : IDisposable
 
     /// <summary>Disposes the owned clocked OPNA device.</summary>
     public void Dispose() => _device.Dispose();
+
+    /// <summary>
+    /// Bounded diagnostic returned by <see cref="ExecuteDriverFunction"/>.
+    /// </summary>
+    public readonly struct DriverCallResult
+    {
+        public DriverCallResult(ulong initialCpuCycle, ulong initialOpnaClock,
+            ulong finalCpuCycle, ulong finalOpnaClock, bool irqBefore, bool irqAfter)
+        {
+            InitialCpuCycle = initialCpuCycle;
+            InitialOpnaClock = initialOpnaClock;
+            FinalCpuCycle = finalCpuCycle;
+            FinalOpnaClock = finalOpnaClock;
+            IrqBefore = irqBefore;
+            IrqAfter = irqAfter;
+        }
+
+        public ulong InitialCpuCycle { get; }
+        public ulong InitialOpnaClock { get; }
+        public ulong FinalCpuCycle { get; }
+        public ulong FinalOpnaClock { get; }
+        public bool IrqBefore { get; }
+        public bool IrqAfter { get; }
+        public ulong CpuDelta => FinalCpuCycle - InitialCpuCycle;
+    }
+
+    /// <summary>
+    /// The single synchronization point for the final-cycle invariant: after
+    /// every real CPU execution operation the native OPNA device must sit
+    /// exactly at <c>mapper.Map(cpu.TotalCycles)</c>. All execution methods
+    /// (slice, driver function, boot call, init call) and the renderer share
+    /// this; none of them duplicate the mapper arithmetic.
+    /// </summary>
+    public void SynchronizeDeviceToCpu()
+    {
+        _device.AdvanceTo(_mapper.Map(_cpu.TotalCycles));
+    }
+
+    /// <summary>
+    /// Executes one real Nise98 driver function through the coordinator, the
+    /// ONLY sanctioned path for real CPU execution besides
+    /// <see cref="ExecuteSlice"/>.
+    ///
+    /// Replicates the exact <see cref="Nise98.CallRunfunctionCall"/> terminal
+    /// loop (queued UserInt then <c>StepExecute</c> until CS/IP return to
+    /// zero) but, unlike that method, performs the final-cycle synchronization
+    /// invariant:
+    ///
+    ///   * records the initial CPU cycle and initial OPNA clock;
+    ///   * executes the real driver function;
+    ///   * maps the actual final CPU cycle through the authoritative mapper
+    ///     and advances the native OPNA device to it (a driver call never
+    ///     returns with the CPU timeline ahead of OPNA);
+    ///   * samples the final native IRQ level;
+    ///   * propagates any assertion to the existing CPU interrupt input;
+    ///   * performs the synchronization again in <c>finally</c> when the
+    ///     function advanced CPU cycles before throwing, so an exception never
+    ///     leaks an unsynchronized device.
+    ///
+    /// The caller sets up the registers it wants (SS/SP/function arguments)
+    /// on <c>nise98.GetRegisters()</c> before calling, exactly as with
+    /// <see cref="Nise98.CallRunfunctionCall"/>.
+    /// </summary>
+    public DriverCallResult ExecuteDriverFunction(byte function)
+    {
+        ulong initialCpu = _cpu.TotalCycles;
+        ulong initialOpna = _device.MasterClock;
+        bool irqBefore = _device.IrqAsserted;
+        bool advanced = false;
+
+        try
+        {
+            UserInt ui = new UserInt { intNum = function };
+            _nise98.UserINT(ui);
+            _cpu.w_mmsk = 0xff;
+            _cpu.w_smsk = 0xff;
+            _nise98.GetDos().programTerminate = false;
+
+            do
+            {
+                _nise98.StepExecute();
+                advanced = true;
+            } while (_nise98.GetRegisters().CS != 0 || _nise98.GetRegisters().IP != 0);
+        }
+        finally
+        {
+            if (advanced)
+                SynchronizeDeviceToCpu();
+        }
+
+        bool irqAfter = _device.IrqAsserted;
+        if (irqAfter)
+            _cpu.interruptTrigger[OpnaIrqTriggerIndex] = true;
+
+        return new DriverCallResult(initialCpu, initialOpna,
+            _cpu.TotalCycles, _device.MasterClock, irqBefore, irqAfter);
+    }
 }
