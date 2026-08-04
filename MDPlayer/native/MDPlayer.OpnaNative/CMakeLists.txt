@@ -186,12 +186,18 @@ else()
 endif()
 set(MDPLAYER_OPNA_RUNTIMES_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../runtimes/${MDPLAYER_OPNA_RUNTIME_RID}/native")
-add_custom_command(TARGET mdplayer_opna POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${MDPLAYER_OPNA_RUNTIMES_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:mdplayer_opna>" "${MDPLAYER_OPNA_RUNTIMES_DIR}/${MDPLAYER_OPNA_RUNTIME_LIBRARY}"
-    COMMENT "Copying ${MDPLAYER_OPNA_RUNTIME_LIBRARY} to runtimes/${MDPLAYER_OPNA_RUNTIME_RID}/native/"
-    VERBATIM)
+# Only a clean (non-sanitized) build may publish the runtime artifact into the
+# shared MDPlayer runtimes/ directory; a sanitizer build must never clobber the
+# shipping library (that would make managed hosts try to load ASan/UBSan
+# runtimes and fail).
+if(NOT MDPLAYER_OPNA_SANITIZERS AND NOT MDPLAYER_OPNA_ADAPTER_UBSAN)
+    add_custom_command(TARGET mdplayer_opna POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${MDPLAYER_OPNA_RUNTIMES_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:mdplayer_opna>" "${MDPLAYER_OPNA_RUNTIMES_DIR}/${MDPLAYER_OPNA_RUNTIME_LIBRARY}"
+        COMMENT "Copying ${MDPLAYER_OPNA_RUNTIME_LIBRARY} to runtimes/${MDPLAYER_OPNA_RUNTIME_RID}/native/"
+        VERBATIM)
+endif()
 
 # Stage-1 acceptance probe: the first audio gate.
 enable_testing()
