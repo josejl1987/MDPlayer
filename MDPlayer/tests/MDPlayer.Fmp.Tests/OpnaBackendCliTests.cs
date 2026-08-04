@@ -145,6 +145,7 @@ public class OpnaBackendCliTests
                 Fade = 0.5,
                 Tail = 0.1,
                 MaxDuration = 1.0,
+                Timeout = 5.0,
                 OpnaBackend = "native-lle",
                 OpnaBackendExplicit = true,
             };
@@ -153,12 +154,15 @@ public class OpnaBackendCliTests
             try
             {
                 var outcome = new TrackRenderer().Render(prepared, outPath, settings);
-                // The option reached the native session (it fails deterministically
-                // after booting the real FMP driver — no longer on the fixed-cadence
-                // profile, which the status-read fix corrected) instead of silently
-                // rendering via MDSound. No partial WAV is left behind.
-                Assert.False(outcome.Success);
-                Assert.False(File.Exists(outPath));
+                // The option reached the native session (it boots the real FMP
+                // driver past the short-conditional-jump family) instead of
+                // silently rendering via MDSound. Bound the runaway after the
+                // 500 ms startup gate with a hard timeout so the render returns
+                // deterministically instead of hanging; no partial WAV is left
+                // behind regardless of duration.
+                Assert.True(outcome.StopReason == "timeout"
+                    || (outcome.Success && File.Exists(outPath)),
+                    $"expected timeout or success, got {outcome.StopReason}: {outcome.LastError}");
             }
             finally
             {

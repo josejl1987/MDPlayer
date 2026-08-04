@@ -8,13 +8,28 @@ namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
 /// Real-FMP native-LLE integration. The native session boots the real FMP
-/// driver through the clocked Nise98 path. After the Prompt-8.1 status-read
-/// cadence correction, the driver BOOTS successfully (no cadence perturbation),
-/// so the render proceeds and fails deterministically on the emulator's next
-/// unimplemented opcode. The contract verified here is fail-closed: the render
-/// reports a clear, deterministic error and never falls back to the MDSound
-/// path. Requires the built native library and the FMP.COM + track fixtures;
-/// tests skip when absent.
+/// driver through the clocked Nise98 path. After Prompt 8.3 implemented the
+/// complete short-conditional-jump family (0x70–0x7F), the driver boots past
+/// opcode 0x7C without a NotImplementedException and renders bounded frames
+/// with no fallback to MDSound.
+///
+/// Workstream I verified here (Stages 1 & 2):
+///   * driver boot succeeds — no cadence error, no NullReferenceException, no
+///     clock regression, no NotImplementedException for 0x70–0x7F;
+///   * bounded renders (1 / 7 / 64 / 257 frames) return within the test
+///     timeout with monotonic CPU cycles, monotonic OPNA master clock and
+///     monotonic output frame position — and no fallback.
+///
+/// Stage 3 (multi-second render with nonzero PCM) is documented as a
+/// remaining limitation: the native session's idle timeline races far ahead of
+/// the output frame position once the 500 ms startup gate is crossed, so a
+/// full-length render cannot be completed within a practical test timeout.
+/// That runaway is native-session OPNA/IRQ-clock behaviour outside the
+/// short-conditional-jump scope (and the prompt forbids altering native OPNA
+/// timing), so it is reported rather than patched.
+///
+/// Requires the built native library and the FMP.COM + track fixtures; tests
+/// skip when absent.
 /// </summary>
 public class NativeFmpIntegrationTests
 {
@@ -73,90 +88,107 @@ public class NativeFmpIntegrationTests
         return (File.Exists(fmp) && ovi != null && NativeLibrary() != null, ovi, fmp);
     }
 
-    private static (FmpRenderer.Result result, string path) RenderNative(string oviPath, double maxSeconds)
+    private static NativeLleFmpPcmSession OpenNativeSession(string ovi, double maxSeconds)
     {
-        var assets = new FmpRuntimeAssets(Path.Combine(AppContext.BaseDirectory, "FMP.COM"));
-        var fileSystem = new FmpFileSystem(new[] { Path.GetDirectoryName(oviPath) });
-        var renderer = new FmpRenderer(assets, fileSystem, 44100);
-        string outPath = Path.Combine(Path.GetTempPath(), $"native-{Guid.NewGuid():N}.wav");
-        var opts = new FmpRenderer.Options
-        {
-            LoopCount = 1,
-            FadeSeconds = 0.5,
-            TailSeconds = 0.2,
-            MaxDurationSeconds = maxSeconds,
-            OpnaBackend = FmpOpnaBackend.NativeLle,
-        };
-        var result = renderer.RenderToWav(File.ReadAllBytes(oviPath), Path.GetFileName(oviPath), outPath, opts);
-        return (result, outPath);
+        var context = new FmpPlaybackContext(
+            File.ReadAllBytes(ovi),
+            Path.GetFileName(ovi),
+            new FmpRuntimeAssets(Path.Combine(AppContext.BaseDirectory, "FMP.COM")),
+            new FmpFileSystem(new[] { Path.GetDirectoryName(ovi) }),
+            44100,
+            SsgGainDb: 0,
+            LoopCount: 1,
+            FadeSeconds: 0.0,
+            TailSeconds: 0.0,
+            MaxDurationSeconds: maxSeconds);
+        var sessionBase = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, context);
+        sessionBase.LoadTrack(File.ReadAllBytes(ovi), Path.GetFileName(ovi));
+        sessionBase.Boot();
+        return (NativeLleFmpPcmSession)sessionBase;
     }
 
+    // ---- Stage 1: boot past the short-Jcc family ----
+
     [Fact]
-    public void Native_Render_FailsClosed_NoFallback_NoSilentMdsound()
+    public void Native_Boot_SucceedsPastJccFamily_NoNotImplemented()
     {
         var (available, ovi, _) = Fixtures();
         if (!available) return;
         using var lib = UseNativeLibrary();
 
-        var (result, path) = RenderNative(ovi, maxSeconds: 2);
-        try
-        {
-            // Fail-closed: explicit error, never a silent MDSound render, and
-            // no partial WAV left behind. After the status-read cadence fix the
-            // FMP driver BOOTS successfully, so the render fails deterministically
-            // on the emulator's next unimplemented opcode rather than on cadence.
-            Assert.False(result.Success);
-            Assert.Equal("error", result.StopReason);
-            Assert.False(string.IsNullOrEmpty(result.LastError));
-            Assert.False(File.Exists(path));
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
+        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
+        // Boot returning without exception proves the driver executed past the
+        // previously-failing opcode 0x7C (and its sibling 0x70–0x7F) without a
+        // NotImplementedException, cadence error, NRE or clock regression.
+        Assert.NotNull(session);
     }
 
-    [Fact]
-    public void Native_BootFailure_IsDeterministic()
+    // ---- Stage 2: bounded renders (1 / 7 / 64 / 257 frames) ----
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(64)]
+    [InlineData(257)]
+    public void BoundedRender_Frames_MonotonicAndNonFallback(int frames)
     {
         var (available, ovi, _) = Fixtures();
         if (!available) return;
         using var lib = UseNativeLibrary();
 
-        var (r1, p1) = RenderNative(ovi, maxSeconds: 1);
-        var (r2, p2) = RenderNative(ovi, maxSeconds: 1);
-        try
+        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
+        var buf = new short[frames * 2];
+        int produced = 0;
+        while (produced < frames)
         {
-            Assert.False(r1.Success);
-            Assert.False(r2.Success);
-            Assert.Equal(r1.StopReason, r2.StopReason);
-            Assert.Equal(r1.LastError, r2.LastError);
+            int chunk = Math.Min(64, frames - produced);
+            int n = session.Render(buf.AsSpan(produced * 2, chunk * 2));
+            Assert.True(n > 0, $"bounded render produced no frames at {frames}-frame target");
+            produced += n;
         }
-        finally
-        {
-            if (File.Exists(p1)) File.Delete(p1);
-            if (File.Exists(p2)) File.Delete(p2);
-        }
+        Assert.Equal(frames, produced);
+
+        // The native session + clocked coordinator enforce monotonic/regression
+        // contracts internally (a regressed CPU cycle, OPNA master clock or
+        // output frame position throws via the no-progress guard); reaching a
+        // full bounded render proves all three stayed monotonic and no fallback
+        // was invoked.
     }
 
+    // ---- same-platform determinism over the boot + bounded-render path ----
+
     [Fact]
-    public void Native_BootFailure_MatchesAcrossSliceSizes()
+    public void Native_BootAndBoundedRender_SamePlatformDeterministic()
     {
-        // The fail-closed boot error must not depend on how the render is
-        // sliced (the boot itself is deterministic).
         var (available, ovi, _) = Fixtures();
         if (!available) return;
         using var lib = UseNativeLibrary();
 
-        string Run(int maxSeconds)
-        {
-            var (r, p) = RenderNative(ovi, maxSeconds);
-            if (File.Exists(p)) File.Delete(p);
-            return $"{r.StopReason}|{r.LastError}";
-        }
-
-        Assert.Equal(Run(1), Run(2));
+        byte[] p1 = RenderBoundedToPcm(ovi, frames: 1);
+        byte[] p2 = RenderBoundedToPcm(ovi, frames: 1);
+        Assert.Equal(Sha256(p1), Sha256(p2));
     }
+
+    private static byte[] RenderBoundedToPcm(string ovi, int frames)
+    {
+        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
+        var buf = new short[frames * 2];
+        int produced = 0;
+        while (produced < frames)
+        {
+            int n = session.Render(buf.AsSpan(produced * 2, (frames - produced) * 2));
+            Assert.True(n > 0, "bounded render produced no frames");
+            produced += n;
+        }
+        var result = new byte[frames * 4];
+        Buffer.BlockCopy(buf, 0, result, 0, result.Length);
+        return result;
+    }
+
+    private static string Sha256(byte[] data) =>
+        Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+    // ---- native device latency fixture (kept green) ----
 
     [Fact]
     public void Native_DeviceLatency_IsFixedAndQueried()
@@ -167,32 +199,11 @@ public class NativeFmpIntegrationTests
 
         using var device = NativeOpnaDevice.Open(44_100);
         int latency = device.OutputLatencyFrames;
-
-        // The fixed SpeexDSP output latency must be positive and stable.
         Assert.True(latency > 0, "output latency must be positive");
         using var again = NativeOpnaDevice.Open(44_100);
         Assert.Equal(latency, again.OutputLatencyFrames);
 
-        // The PPZ8 delay line used by the native session is sized from this
-        // exact value, so the two streams reach the mixer aligned.
         var delay = new Ppz8OutputDelayBuffer(latency);
         Assert.Equal(latency, delay.Capacity);
-    }
-
-    [Fact]
-    public void Native_OutputLength_MatchesRequest()
-    {
-        // The render reports the failure without fabricating output: the session
-        // never produces partial output, whether on a boot failure or on the
-        // deterministic emulator limitation encountered after a successful boot.
-        var (available, ovi, _) = Fixtures();
-        if (!available) return;
-        using var lib = UseNativeLibrary();
-
-        var (result, path) = RenderNative(ovi, maxSeconds: 5);
-        if (File.Exists(path)) File.Delete(path);
-
-        Assert.False(result.Success);
-        Assert.Equal(0, result.RenderedSamples);
     }
 }
