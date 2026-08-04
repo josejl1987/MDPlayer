@@ -13,12 +13,16 @@ namespace Fmp.Core.Rendering;
 /// </summary>
 internal class FmpRenderer
 {
+    private readonly FmpRuntimeAssets _assets;
+    private readonly IFmpFileSystem _fileSystem;
     private readonly FmpRuntime _runtime;
     private readonly MdsoundFmpChipSink _sink;
     private readonly int _sampleRate;
 
     public FmpRenderer(FmpRuntimeAssets assets, IFmpFileSystem fileSystem = null, int sampleRate = 44100, double ssgGainDb = 0)
     {
+        _assets = assets ?? throw new ArgumentNullException(nameof(assets));
+        _fileSystem = fileSystem;
         _sampleRate = sampleRate;
         _sink = new MdsoundFmpChipSink(sampleRate, ssgGainDb: ssgGainDb);
         _runtime = new FmpRuntime(_sink, assets, fileSystem);
@@ -39,6 +43,13 @@ internal class FmpRenderer
         /// Path for the register trace JSONL output. If null, tracing is disabled.
         /// </summary>
         public string TracePath { get; set; } = null;
+
+        /// <summary>
+        /// OPNA execution backend. Defaults to the existing MDSound host-PCM
+        /// path (byte-identical to the pre-backend branch). NativeLle opts into
+        /// the clocked native YM2608 session and never falls back.
+        /// </summary>
+        public FmpOpnaBackend OpnaBackend { get; set; } = FmpOpnaBackend.Mdsound;
     }
 
     /// <summary>
@@ -71,6 +82,7 @@ internal class FmpRenderer
             || !double.IsFinite(opts.FadeSeconds) || opts.FadeSeconds < 0
             || !double.IsFinite(opts.TailSeconds) || opts.TailSeconds < 0
             || opts.LoopCount <= 0
+            || !Enum.IsDefined(typeof(FmpOpnaBackend), opts.OpnaBackend)
             || (opts.TimeoutSeconds.HasValue
                 && (!double.IsFinite(opts.TimeoutSeconds.Value) || opts.TimeoutSeconds.Value <= 0)))
         {
@@ -78,6 +90,9 @@ internal class FmpRenderer
             result.LastError = "render duration, fade, tail, loop, or timeout option is invalid";
             return result;
         }
+
+        if (opts.OpnaBackend == FmpOpnaBackend.NativeLle)
+            return RenderToWavNative(trackData, trackFileName, outputWavPath, opts);
 
         // Optional trace writer — opened BEFORE Initialize to capture boot events
         RegisterTraceWriter traceWriter = null;
@@ -278,6 +293,99 @@ internal class FmpRenderer
             _runtime.TraceWriter = null;
             _sink.Stop();
             traceWriter?.Dispose();
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Native YM2608-LLE render path (opt-in via <see cref="Options.OpnaBackend"/>).
+    /// Boots the FMP driver through the clocked Nise98 session and renders the
+    /// host-PCM stream with the same termination, output-length, timeout and
+    /// stop-reason semantics as the default path. Never falls back to MDSound.
+    /// </summary>
+    private Result RenderToWavNative(byte[] trackData, string trackFileName, string outputWavPath, Options opts)
+    {
+        var result = new Result();
+
+        if (!string.IsNullOrEmpty(opts.TracePath))
+        {
+            result.Success = false;
+            result.StopReason = "trace_error";
+            result.LastError = "the native OPNA backend does not support register tracing yet";
+            return result;
+        }
+
+        Stopwatch timeoutWatch = null;
+        if (opts.TimeoutSeconds.HasValue && opts.TimeoutSeconds.Value > 0)
+            timeoutWatch = Stopwatch.StartNew();
+
+        var context = new FmpPlaybackContext(
+            trackData,
+            trackFileName,
+            _assets,
+            _fileSystem,
+            _sampleRate,
+            SsgGainDb: 0,
+            LoopCount: opts.LoopCount,
+            FadeSeconds: opts.FadeSeconds,
+            TailSeconds: opts.TailSeconds,
+            MaxDurationSeconds: opts.MaxDurationSeconds);
+
+        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, context);
+
+        long totalSamples = 0;
+        long maxSamples = checked((long)Math.Ceiling((opts.MaxDurationSeconds ?? 3600.0) * _sampleRate));
+        int bufferSize = _sampleRate / 100;
+
+        try
+        {
+            session.LoadTrack(trackData, trackFileName);
+            session.Boot();
+
+            using var wav = new WavWriter(outputWavPath, _sampleRate);
+            var interleaved = new short[bufferSize * 2];
+
+            while (totalSamples < maxSamples)
+            {
+                if (timeoutWatch != null && timeoutWatch.Elapsed.TotalSeconds >= opts.TimeoutSeconds.Value)
+                {
+                    result.StopReason = "timeout";
+                    break;
+                }
+
+                int samplesThisBlock = (int)Math.Min(bufferSize, maxSamples - totalSamples);
+                int produced = session.Render(interleaved.AsSpan(0, samplesThisBlock * 2));
+                if (produced <= 0)
+                    break; // session completed (termination satisfied)
+                wav.Write(interleaved.AsSpan(0, produced * 2));
+                totalSamples += produced;
+                if (session.IsCompleted)
+                    break;
+            }
+
+            if (result.StopReason is "trace_error" or "timeout")
+            {
+                result.RenderedSamples = totalSamples;
+                result.Success = false;
+                result.LastError = result.StopReason == "timeout" ? "render timed out" : "trace write failed";
+                return result;
+            }
+
+            wav.Close();
+            result.NaturallyStopped = session.NaturallyStopped;
+            result.RenderedSamples = totalSamples;
+            result.Success = true;
+            result.StopReason = session.StopReason ?? "max_duration";
+            if (totalSamples >= maxSamples && string.IsNullOrEmpty(result.StopReason))
+                result.StopReason = opts.MaxDurationSeconds.HasValue ? "max_duration" : "safety_limit";
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            if (string.IsNullOrEmpty(result.StopReason))
+                result.StopReason = "error";
+            result.LastError = $"{ex.GetType().Name}: {ex.Message}";
         }
 
         return result;
