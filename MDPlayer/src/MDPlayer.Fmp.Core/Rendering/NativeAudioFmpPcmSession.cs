@@ -24,9 +24,10 @@ namespace Fmp.Core.Rendering;
 internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
 {
     /// <summary>Active machine CPU clock; 8 MHz PC-9801 (matches the clocked tests).</summary>
-    private const uint CpuClockHz = 8_000_000;
+    internal const uint CpuClockHz = 8_000_000;
 
     private readonly FmpPlaybackContext _context;
+    private readonly FmpExecutionCaptureCache? _captureCache;
     private readonly int _sampleRate;
     private readonly FmpExecutionCaptureBuilder _builder;
     private readonly IClockedOpnaDevice _device; // opened up-front: validates native availability
@@ -65,8 +66,8 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     /// </summary>
     internal byte ReplayMuteMask { get; set; }
 
-    public NativeAudioFmpPcmSession(FmpPlaybackContext context)
-        : this(context, NativeOpnaDevice.Open(context!.SampleRate), ownsDevice: true)
+    public NativeAudioFmpPcmSession(FmpPlaybackContext context, FmpExecutionCaptureCache? captureCache = null)
+        : this(context, NativeOpnaDevice.Open(context!.SampleRate), ownsDevice: true, captureCache)
     {
     }
 
@@ -77,10 +78,13 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     /// is unaffected. Ownership of the injected device transfers to the session
     /// when <paramref name="ownsDevice"/> is true.
     /// </summary>
-    internal NativeAudioFmpPcmSession(FmpPlaybackContext context, IClockedOpnaDevice device, bool ownsDevice)
+    internal NativeAudioFmpPcmSession(
+        FmpPlaybackContext context, IClockedOpnaDevice device, bool ownsDevice,
+        FmpExecutionCaptureCache? captureCache = null)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _ownsDevice = ownsDevice;
+        _captureCache = captureCache;
         _sampleRate = context.SampleRate;
         _builder = new FmpExecutionCaptureBuilder(_sampleRate, CpuClockHz);
         // Validate/resolve the native library before any capture work: an
@@ -108,6 +112,20 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     public void Boot()
     {
         if (_booted) return;
+
+        // Determine the current-track capture identity up front. A matching
+        // completed capture in the current-session cache lets us skip the
+        // (expensive) control capture pass entirely.
+        FmpExecutionCaptureKey captureKey =
+            FmpExecutionCaptureKey.From(_context, _trackData);
+
+        FmpExecutionCapture? cached = _captureCache?.TryGet(captureKey);
+        if (cached is not null)
+        {
+            _capture = cached;
+            BeginReplay();
+            return;
+        }
 
         // ---- Pass 1: control capture via the proven legacy path ----
         _legacy = new LegacyMdsoundFmpPcmSession(_context, _builder);
@@ -147,7 +165,16 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
         _legacy.Dispose();
         _legacy = null;
 
-        // ---- Pass 2: replay state ----
+        // Publish only the completed capture to the current-session cache so a
+        // compatible later preview/export reuses it instead of re-capturing.
+        _captureCache?.Put(captureKey, _capture);
+
+        BeginReplay();
+    }
+
+    private void BeginReplay()
+    {
+        // ---- Pass 2: replay state from the (freshly captured or reused) capture ----
         _device.ResetChip();
         _opna = new NativeOpnaTraceRenderer(_device, _capture.Events, CpuClockHz, _sampleRate);
         _ppz8 = new Ppz8TraceRenderer(_capture.Events, _capture.Ppz8Banks, CpuClockHz, _sampleRate, _device.OutputLatencyFrames);
