@@ -71,6 +71,12 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
     private bool _driverActive = true;
     private PlaybackTermination _termination;
 
+    // Workstream B — per-assertion IRQ service state. A level-high IRQ is not
+    // a new event each time it is observed: one continuous assertion leads to
+    // exactly one driver invocation, and a second invocation requires a
+    // deassertion followed by a fresh assertion.
+    private bool _irqAssertionServiced;
+
     public NativeLleFmpPcmSession(FmpPlaybackContext context)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
@@ -138,9 +144,11 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
 
             string fmpComPath = _context.Assets.FmpComPath;
             _nise98.LoadRun(fmpComPath, "s -s -#42", 0x2000);
+            _clocked.SynchronizeDeviceToCpu();
             _regs = _nise98.GetRegisters();
 
             _nise98.GetPPZ8().FMPRegistPPZ8(out _step, out _regs);
+            _clocked.SynchronizeDeviceToCpu();
             _nise98.GetPPZ8().SetCallBack(OnPpz8LoadPcm, OnPpz8Write);
 
             var dos = _nise98.GetDos();
@@ -157,7 +165,7 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             _regs.DX = 0x0000;
             _regs.SS = unchecked((short)0xE000);
             _regs.SP = 0x0000;
-            _nise98.CallRunfunctionCall(0xd2, true, true, true, 10_000_000_000, 0);
+            _clocked.ExecuteDriverFunction(0xd2);
 
             _booted = true;
         }
@@ -226,18 +234,29 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             int loopBefore = _currentLoop;
             bool endedBefore = _playbackEnded;
 
+            // Advance idle machine time to this sample's output-frame boundary
+            // FIRST, so the native timer can progress and any overflow become
+            // observable as a fresh IRQ assertion. Both the authoritative
+            // Nise286 cycle counter and the mapped OPNA master clock move
+            // together through the clocked coordinator — no instruction is
+            // executed, no register/memory touched, no port I/O performed. If
+            // the machine has already passed this boundary, this is a no-op
+            // (never move either timeline backward).
+            AdvanceToSampleBoundary(_position + 1);
+
             if (_waitDone)
             {
                 // During fade (loop-limit termination) the driver keeps playing;
                 // after a natural stop or during the tail it stops ticking while
                 // the chip renders its last state (sustain) — the legacy path's
                 // exact callback selection.
-                if (_driverActive && _device.IrqAsserted)
+                if (_driverActive)
                 {
-                    // Reading the status clears the timer IRQ flags (real chip
-                    // behavior), mirroring the legacy clear-before-call flow.
-                    _device.ReadStatus(_device.MasterClock, 0);
-                    RunDriverFrame();
+                    // Workstream B: a level-high IRQ is served exactly once per
+                    // assertion. The timer acknowledgement must come from the
+                    // driver/native path (never cleared in managed code), so we
+                    // do NOT read status to clear IRQ here.
+                    ServiceIrqAssertions();
                 }
 
                 if (!_termination.Started)
@@ -259,14 +278,6 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             {
                 _waitDone = _position + 1 >= _waitSamples;
             }
-
-            // Advance idle machine time to this sample's output-frame boundary.
-            // Both the authoritative Nise286 cycle counter and the mapped OPNA
-            // master clock move together through the clocked coordinator — no
-            // CPU instruction is executed, no register/memory is touched, no
-            // port I/O is performed. If the machine has already passed this
-            // boundary, this is a no-op (never move either timeline backward).
-            AdvanceToSampleBoundary(_position + 1);
 
             // Drain whatever the device has produced up to this clock.
             int drained;
@@ -352,27 +363,69 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
     }
 
     /// <summary>
+    /// Workstream B — IRQ-assertion scheduler. Observes the native IRQ level
+    /// with explicit transition tracking; a new (<c>low→high</c>) assertion is
+    /// served exactly once (one driver invocation), and no further invocation
+    /// happens while the level stays <c>high→high</c>. Only a real <c>high→low</c>
+    /// deassertion re-arms the scheduler for the next assertion. Cleared from
+    /// managed code never.
+    ///
+    /// After a driver invocation completes, this re-samples the IRQ; if it
+    /// stayed high the current assertion remains serviced, if it went low the
+    /// scheduler re-arms immediately. It never recursively invokes the driver
+    /// while IRQ is high and never loops until IRQ clears.
+    /// </summary>
+    private void ServiceIrqAssertions()
+    {
+        bool level = _device.IrqAsserted;
+
+        // Low level: re-arm so the next fresh assertion is served.
+        if (!level)
+        {
+            _irqAssertionServiced = false;
+            return;
+        }
+
+        // Fresh (low->high) assertion: serve exactly once.
+        if (level && !_irqAssertionServiced)
+        {
+            _irqAssertionServiced = true;
+            RunDriverFrame();
+
+            // If the driver call dropped the level (its real timer-control
+            // acknowledgement reached the native chip), re-arm immediately. If
+            // it stayed high, keep the assertion serviced — no recursive
+            // invocation and no loop until IRQ clears.
+            if (!_device.IrqAsserted)
+                _irqAssertionServiced = false;
+        }
+    }
+
+    /// <summary>
     /// Runs the driver's one-frame routine with the exact register sequence of
     /// the legacy FmpRuntime.Tick path (0x14, then 0xd2 status and loop-count
     /// queries), so PPZ8/OPNA writes inside the routine are timestamped with
-    /// real CPU cycles.
+    /// real CPU cycles. Every CPU execution operation goes through the clocked
+    /// coordinator (<see cref="ClockedFmpExecutionSession.ExecuteDriverFunction"/>),
+    /// which synchronizes the native OPNA device to the final CPU cycle after
+    /// each call.
     /// </summary>
     private void RunDriverFrame()
     {
         _regs.SS = unchecked((short)0xE000);
         _regs.SP = 0x0000;
-        _nise98.CallRunfunctionCall(0x14);
+        _clocked.ExecuteDriverFunction(0x14);
 
         _regs.AX = 0x0004;
         _regs.SS = unchecked((short)0xE000);
         _regs.SP = 0x0000;
-        _nise98.CallRunfunctionCall(0xd2);
+        _clocked.ExecuteDriverFunction(0xd2);
         _playbackEnded = (_regs.AX == 0);
 
         _regs.AX = 0x1104;
         _regs.SS = unchecked((short)0xE000);
         _regs.SP = 0x0000;
-        _nise98.CallRunfunctionCall(0xd2);
+        _clocked.ExecuteDriverFunction(0xd2);
         int ptr = ((ushort)0x2000 << 4) + (ushort)_regs.AX;
         int loopCounter = _nise98.GetMem().PeekB(ptr + 0x17);
         if (loopCounter != _currentLoop)
