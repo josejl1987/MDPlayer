@@ -277,3 +277,78 @@ FMP.COM.
   output frame / driver state before and after; if none change it throws
   `NativeFmpNoProgressException` (message carries exactly those values, no
   retry, no sleep, no arbitrary iteration limits).
+
+## Prompt 8.3 — Nise286 short conditional jumps & native FMP CPU compatibility
+
+### Implemented: the complete short `Jcc rel8` family (0x70–0x7F)
+
+All sixteen short conditional jumps now decode and execute through the real
+Nise286 decoder. They share one condition evaluator and one rel8 executor
+(`Nise286.ConditionCode`, `EvaluateCondition`, `ExecuteShortConditionalJump`),
+so no opcode handler re-implements a flag predicate.
+
+| opcode | mnemonic | condition | taken when |
+|--------|----------|-----------|-----------|
+| 70 | JO | OF = 1 | OF |
+| 71 | JNO | OF = 0 | !OF |
+| 72 | JB | CF = 1 | CF |
+| 73 | JAE | CF = 0 | !CF |
+| 74 | JE | ZF = 1 | ZF |
+| 75 | JNE | ZF = 0 | !ZF |
+| 76 | JBE | CF or ZF | CF∨ZF |
+| 77 | JA | CF = 0 and ZF = 0 | ¬CF∧¬ZF |
+| 78 | JS | SF = 1 | SF |
+| 79 | JNS | SF = 0 | !SF |
+| 7A | JP | PF = 1 | PF |
+| 7B | JNP | PF = 0 | !PF |
+| 7C | JL | SF != OF | SF≠OF |
+| 7D | JGE | SF = OF | SF=OF |
+| 7E | JLE | ZF or SF != OF | ZF∨(SF≠OF) |
+| 7F | JG | ZF = 0 and SF = OF | ¬ZF∧(SF=OF) |
+
+Semantics (all sixteen):
+- The displacement is an **signed 8-bit** rel8 taken relative to the IP
+  **after the displacement byte** (the branch base), with 16-bit wrapping IP
+  arithmetic; CS is never modified and flags are never cleared or altered.
+- Conditions are evaluated exclusively from the emulated flag bits
+  (`CF/PF/ZF/SF/OF`) — never from host-language signed comparisons.
+- Instruction timing follows the authoritative Nise286 convention
+  (`Nise286CycleTimingTests`): exactly one CPU clock tick per executed
+  instruction, counted once at `StepExecute`. No taken/not-taken split is
+  invented and no per-instruction allocation occurs.
+
+### Result
+
+The real FMP driver boots **past opcode 0x7C** and renders bounded frames with
+no `NotImplementedException`, cadence error, `NullReferenceException`, clock
+regression or MDSound fallback. Bounded renders (1 / 7 / 64 / 257 frames) are
+monotonic in CPU cycles, OPNA master clock and output frame position and pass
+in a normal test timeout. Same-platform boot + bounded render is byte-identical
+across runs.
+
+### Remaining CPU limitation (real FMP multi-second render)
+
+Boot and bounded-frame rendering succeed. The **multi-second** render,
+however, does not complete within a practical test timeout: once the native
+session crosses the 500 ms startup gate (`NativeLleFmpPcmSession`), the
+driver's one-frame routine drives a large burst of CPU cycles per output frame,
+so the CPU/OPNA idle timeline races far ahead of the output frame position and
+the renderer must emit a disproportionate number of idle frames to catch up.
+This is native-session OPNA/IRQ-clock behaviour and is **outside** the
+short-conditional-jump scope; per the prompt's hard restrictions it is
+reported rather than patched (no native OPNA timing change, no MDSound
+fallback, no default-backend change). Consequently **no successful full-length
+native PCM render is claimed** for Prompt 8.3; the fail-closed CLI gate was
+updated to assert the native session returns deterministically (never hanging,
+never falling back).
+
+### Sanitizers
+
+- Native release (without sanitizers): full `ctest` green.
+- `build-asan` (`ASan`): 20/20 tests pass.
+- `build-ubsan` (`MDPLAYER_OPNA_ADAPTER_UBSAN=ON`, adapter+test UBSan): 24/24
+  tests pass after fixing a pre-existing signed `int` left-shift UB in the
+  native determinism SHA test (`tests/determinism_test.c`: cast each byte to
+  `uint32_t` before shifting).
+- `build-combined` (`ASan` + adapter `UBSan`): configured and built; see
+  combined run result.
