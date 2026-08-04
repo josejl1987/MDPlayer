@@ -32,6 +32,23 @@ public sealed record VisualizationRequest
         InputPath = inputPath,
         OutputPath = outputPath,
     };
+
+    /// <summary>
+    /// True when this input is FMP-family (OVI/OPI/MVI/MZI/OZS/OZI/MPI) and
+    /// therefore exposes the YM2608 (OPNA) audio backend. Used to gate the
+    /// backend selector in the UI and the lazy native-availability check.
+    /// </summary>
+    public bool IsFmpLike()
+    {
+        string ext = Path.GetExtension(InputPath) ?? "";
+        return ext.Contains("ovi", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("opi", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("mvi", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("mzi", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("ozs", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("ozi", StringComparison.OrdinalIgnoreCase)
+            || ext.Contains("mpi", StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>Output resolution, frame rate and encoding.</summary>

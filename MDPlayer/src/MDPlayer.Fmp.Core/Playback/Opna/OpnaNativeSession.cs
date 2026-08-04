@@ -35,8 +35,33 @@ internal sealed class OpnaNativeSession : IDisposable
         OperatingSystem.IsWindows() ? "mdplayer_opna.dll" : "libmdplayer_opna.so";
 
     /// <summary>.NET runtime identifier for the current OS (win-x64 / linux-x64).</summary>
-    private static string NativeRuntimeIdentifier =>
+    internal static string NativeRuntimeIdentifier =>
         OperatingSystem.IsWindows() ? "win-x64" : "linux-x64";
+
+    /// <summary>Expected location of the native library on this runtime.</summary>
+    internal static string NativeRuntimeLocation()
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(NativeLibraryEnvVar)))
+            return Environment.GetEnvironmentVariable(NativeLibraryEnvVar)!;
+        return Path.Combine(AppContext.BaseDirectory, "runtimes", NativeRuntimeIdentifier, "native", NativeLibraryFileName);
+    }
+
+    /// <summary>
+    /// Detects the ABI version of the currently-loadable native library without
+    /// constructing a long-lived session, or null if it cannot be determined.
+    /// </summary>
+    internal static uint? DetectAbiVersion()
+    {
+        try
+        {
+            using var session = Open(48_000);
+            return session.AbiVersion;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private const string LibraryName = "mdplayer_opna";
 

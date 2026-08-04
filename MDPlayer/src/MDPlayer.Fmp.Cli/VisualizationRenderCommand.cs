@@ -1,5 +1,6 @@
 using Fmp.Application.Contracts;
 using Fmp.Application.Export;
+using Fmp.Application.Rendering;
 
 namespace Fmp.Cli;
 
@@ -20,6 +21,25 @@ public static class VisualizationRenderCommand
         RenderInvocation? invocation = RenderCommandParser.ParseInvocation(args);
         if (invocation is null)
             return 2;
+
+        // Lazy native-availability gate: only when the request explicitly picks
+        // native audio for an FMP-family input do we probe the native library.
+        // MDSound and non-FMP inputs never probe and never fall back.
+        if (invocation.Request.Playback.OpnaBackend == FmpOpnaBackend.NativeAudio
+            && invocation.Request.IsFmpLike())
+        {
+            NativeOpnaAvailabilityResult availability =
+                NativeOpnaAvailability.Validate(invocation.Request.Playback.SampleRate, out Exception? diagnostic);
+            if (!availability.IsAvailable)
+            {
+                // Preserve the full exception for the diagnostic log; present a
+                // focused message to the user. No fallback, no auto-switch.
+                if (diagnostic is not null)
+                    Console.Error.WriteLine("diagnostic: {0}", diagnostic);
+                Console.Error.WriteLine($"error: {availability.ToDisplayMessage()}");
+                return 2;
+            }
+        }
         return VisualizationRunner.Run(invocation);
     }
 

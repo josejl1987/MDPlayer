@@ -95,6 +95,7 @@ internal static class RenderCommandParser
         StyleSettings style = seeded?.Style ?? new();
         PresentationSettings presentation = seeded?.Presentation ?? new();
         PlaybackSettings playback = seeded?.Playback ?? new();
+        FmpOpnaBackend? opnaBackendOverride = null;
         input = seeded?.InputPath;
 
         string? fmpCom = null;
@@ -262,6 +263,9 @@ internal static class RenderCommandParser
                     case "--spc-pitch":
                         playback = playback with { SpcPitch = ParseSpcPitch(reader.RequireValue(name)) };
                         break;
+                    case "--opna-backend":
+                        opnaBackendOverride = ParseOpnaBackend(reader.RequireValue(name));
+                        break;
 
                     // ---- runtime tool options ----
                     case "--fmp-com": fmpCom = reader.RequireValue(name); break;
@@ -308,6 +312,10 @@ internal static class RenderCommandParser
 
         if (string.IsNullOrWhiteSpace(input))
             throw new ArgumentException("no input file specified");
+
+        // ---- YM2608 backend override ----
+        if (opnaBackendOverride is not null)
+            playback = playback with { OpnaBackend = opnaBackendOverride.Value };
 
         // Resolve the output path (canonical: --output is the final video).
         string outputPath = ResolveOutputPath(args, seeded, input);
@@ -445,6 +453,20 @@ internal static class RenderCommandParser
         "relative" => SpcPitchInterpretation.Relative,
         _ => throw new ArgumentException($"unknown SPC pitch interpretation '{raw}'"),
     };
+
+    /// <summary>
+    /// Parses the YM2608 backend token. Only "mdsound" and "native-audio" are
+    /// accepted; the retired "native-lle" and any other value are rejected
+    /// outright (never silently mapped to native audio).
+    /// </summary>
+    internal static FmpOpnaBackend ParseOpnaBackend(string raw) => (raw ?? "").Trim().ToLowerInvariant() switch
+    {
+        "mdsound" => FmpOpnaBackend.Mdsound,
+        "native-audio" => FmpOpnaBackend.NativeAudio,
+        _ => throw new ArgumentException(
+            $"unknown YM2608 audio backend '{raw}' (expected mdsound, or native-audio)"),
+    };
+
 
     internal static RenderQuality ParseQuality(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
