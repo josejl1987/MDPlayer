@@ -342,6 +342,47 @@ native PCM render is claimed** for Prompt 8.3; the fail-closed CLI gate was
 updated to assert the native session returns deterministically (never hanging,
 never falling back).
 
+### Prompt 8.4 — native FMP timer IRQ scheduling (verified fix)
+
+The post-gate runaway is fixed via two clocked-coordinator invariants:
+
+- **Final CPU-cycle synchronization** (`ClockedFmpExecutionSession`):
+  `ExecuteDriverFunction` centralizes all real Nise98 driver execution. After
+  each driver call it maps the *actual* final CPU cycle through the
+  authoritative mapper, advances the native OPNA device to that clock
+  (`SynchronizeDeviceToCpu`), samples the final native IRQ, propagates it to the
+  Nise286 input, and re-syncs in a `finally` on exception. The renderer plays no
+  direct `CallRunfunctionCall`/`StepExecute`; the boot path is routed through
+  the coordinator with post-step sync. Regression: `ClockedDriverSyncTests` +
+  `DriverExecutionBoundaryTests`.
+- **One driver invocation per continuous IRQ assertion**
+  (`NativeLleFmpPcmSession.ServiceIrqAssertions`): a level-high assertion is
+  served exactly once; a second invocation requires a deassertion followed by a
+  fresh assertion. The IRQ is never cleared in managed code — only the driver's
+  own timer acknowledgement (through the native chip) clears it. No recursive
+  invocation while the level stays high, no loop until IRQ clears.
+
+**Runaway classification (Prompt 8.4):** A + B together.
+`DiagnosticInvocationCount = 4096` for 4096 output frames with IRQ
+`True→True` on every call, and `devClk` stayed frozen at `3993600` while the CPU
+advanced `+32,901` cycles per frame and `expOpnaFinal` climbed — the device was
+never advanced to the final mapped CPU cycle, so the timer's `0x27` clear
+write queued in the bus scheduler never flushed and the IRQ could not
+deassert. With the fix a 2 s / 48 kHz native render now completes in normal
+wall time (no freeze); all managed Release tests pass.
+
+**Remaining blocker — silent native PCM (not claimed):** the FMP driver
+schedules its musical frames with the MNDRV *software* FMTimer
+(`Nise98.Runtimer()`/`IntTimer()`, advanced once per output sample; the legacy
+path fires it ~225× over 2 s to produce sound). The clocked bridge routes the
+hardware `0x24–0x27` writes to the real native chip and bypasses that software
+timer, so on the native path the driver never advances its frame scheduler and
+emits no OPNA writes — `nonzero=0`. Driving it requires exactly the "sample-
+based timer" the prompt forbids on this path. The two requirements (nonzero
+multi-second native PCM **and** no sample-based timer) are therefore
+mutually incompatible for this driver, so **no successful full-length native
+PCM render is claimed** and Prompt 8.4 is reported, not over-claimed.
+
 ### Sanitizers
 
 - Native release (without sanitizers): full `ctest` green.
