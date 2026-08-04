@@ -743,6 +743,105 @@ public sealed class MainWindowViewModelTests
         }
     }
 
+    [AvaloniaFact]
+    public async Task OpnaBackend_Default_IsMdsound()
+    {
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            // Default (both a fresh request and the view-model property) is MDSound.
+            Assert.Equal(FmpOpnaBackend.Mdsound, h.LastRequest!.Playback.OpnaBackend);
+            Assert.Equal(FmpOpnaBackend.Mdsound, h.VM.Settings.Advanced.SelectedOpnaBackend);
+            Assert.Equal(0, h.VM.Settings.Advanced.SelectedOpnaBackendIndex);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task SelectingNativeAudio_NotifiesAndRoutesIntoRequest()
+    {
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            bool notified = false;
+            h.VM.Settings.Advanced.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(AdvancedSettingsViewModel.SelectedOpnaBackend)
+                    || e.PropertyName == nameof(AdvancedSettingsViewModel.SelectedOpnaBackendIndex))
+                    notified = true;
+            };
+
+            h.VM.Settings.Advanced.SelectedOpnaBackendIndex = 1;
+
+            Assert.True(notified, "property notification must occur");
+            Assert.Equal(FmpOpnaBackend.NativeAudio, h.VM.Settings.Advanced.SelectedOpnaBackend);
+            Assert.Equal(1, h.VM.Settings.Advanced.SelectedOpnaBackendIndex);
+            // The authoritative request (the one preview/export read) carries NativeAudio.
+            Assert.Equal(FmpOpnaBackend.NativeAudio, h.VM.Request!.Playback.OpnaBackend);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task ChangingOpnaBackend_InvalidatesTimelineCapturePreview()
+    {
+        Harness h = Harness.Create();
+        try
+        {
+            await h.OpenAsync();
+            h.ResetCalls();
+            h.VM.ApplyVisualSetting(r => r with
+            {
+                Playback = r.Playback with { OpnaBackend = FmpOpnaBackend.NativeAudio },
+            });
+            await h.VM.WaitForPreviewRefreshAsync();
+
+            // A backend change is a capture-affecting change: the interactive
+            // preview is stale, so the next frame is a timelineStill.
+            Assert.Equal(1, h.PlanCalls);
+            Assert.True(h.Factory.LastSession.FrameFidelities.Count >= 1);
+            Assert.Equal(PreviewFidelity.TimelineStill, h.Factory.LastSession.FrameFidelities[0]);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task OpnaBackend_Selector_VisibleForFmpInputsHiddenForNonFmp()
+    {
+        Harness fmp = Harness.CreateFmp("ovi");
+        try
+        {
+            await fmp.OpenAsync();
+            Assert.True(fmp.VM.Settings.Advanced.ShowOpnaBackend);
+        }
+        finally
+        {
+            await fmp.DisposeAsync();
+        }
+
+        Harness nonFmp = Harness.Create(); // `.vgz`
+        try
+        {
+            await nonFmp.OpenAsync();
+            Assert.False(nonFmp.VM.Settings.Advanced.ShowOpnaBackend);
+        }
+        finally
+        {
+            await nonFmp.DisposeAsync();
+        }
+    }
+
     private sealed class Harness
     {
         public MainWindowViewModel VM { get; private set; } = null!;
@@ -756,15 +855,28 @@ public sealed class MainWindowViewModelTests
         public VisualizationRequest? LastRequest => Factory.LastRequest;
         public string InputPath => _inputPath;
 
+        public static Harness CreateFmp(string extension)
+        {
+            string inputPath = Path.Combine(
+                Path.GetTempPath(), "mdplayer-gui-test-" + Guid.NewGuid() + "." + extension);
+            File.WriteAllBytes(inputPath, new byte[] { 0x4f, 0x56, 0x4d });
+            string settingsPath = Path.Combine(Path.GetTempPath(), "mdplayer-gui-settings-" + Guid.NewGuid() + ".json");
+            return CreateCore(new GuiSettingsStore(settingsPath), inputPath, settingsPath);
+        }
+
         public static Harness Create()
         {
             string inputPath = Path.Combine(Path.GetTempPath(), "mdplayer-gui-test-" + Guid.NewGuid() + ".vgz");
             File.WriteAllBytes(inputPath, new byte[] { 0x56, 0x67, 0x6d });
             string settingsPath = Path.Combine(Path.GetTempPath(), "mdplayer-gui-settings-" + Guid.NewGuid() + ".json");
+            return CreateCore(new GuiSettingsStore(settingsPath), inputPath, settingsPath);
+        }
 
+        private static Harness CreateCore(GuiSettingsStore settings, string inputPath, string settingsPath)
+        {
             var factory = new RecordingPreviewFactory();
             var vm = new MainWindowViewModel(
-                new GuiSettingsStore(settingsPath),
+                settings,
                 new FileDialogService(),
                 new ClipboardService(),
                 new ExportProcessService(null),
@@ -792,8 +904,8 @@ public sealed class MainWindowViewModelTests
         public async Task DisposeAsync()
         {
             await VM.ShutdownAsync();
-            File.Delete(_inputPath);
-            File.Delete(_settingsPath);
+            try { File.Delete(_inputPath); } catch { }
+            try { File.Delete(_settingsPath); } catch { }
         }
     }
 }

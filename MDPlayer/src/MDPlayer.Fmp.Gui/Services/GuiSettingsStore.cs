@@ -76,4 +76,12 @@ public sealed class GuiSettings
 
     /// <summary>Most recently opened inputs (most recent first).</summary>
     public List<string> RecentFiles { get; set; } = new();
+
+    /// <summary>
+    /// Last-selected YM2608 audio backend for FMP inputs, serialized as the
+    /// lowercase string "mdsound" or "native-audio". Missing (null/empty) and
+    /// invalid values keep the MDSound default — they must never be interpreted
+    /// as native audio.
+    /// </summary>
+    public string? OpnaBackend { get; set; } = "mdsound";
 }

@@ -687,7 +687,8 @@ public sealed class PreviewParityTests
     {
         var key = new TimelineCaptureKey(
             "song.vgz", 1024, 1_700_000_000, "fmp", 2,
-            1.5, 0.25, 3.125, 44100, -6.5, SpcPitchInterpretation.Relative);
+            1.5, 0.25, 3.125, 44100, -6.5, SpcPitchInterpretation.Relative,
+            FmpOpnaBackend.Mdsound);
 
         CultureInfo original = CultureInfo.CurrentCulture;
         try

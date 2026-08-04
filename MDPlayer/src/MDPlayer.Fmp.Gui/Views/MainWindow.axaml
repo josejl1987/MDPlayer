@@ -194,7 +194,7 @@
                                Maximum="86400" Increment="10" FormatString="0"/>
               </Grid>
               <Grid ColumnDefinitions="96,*" ColumnSpacing="12" RowSpacing="8"
-                    RowDefinitions="Auto,Auto,Auto,Auto">
+                    RowDefinitions="Auto,Auto,Auto,Auto,Auto">
                 <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Sample rate"
                            VerticalAlignment="Center"/>
                 <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
@@ -217,6 +217,15 @@
                           IsVisible="{Binding Settings.Advanced.ShowSpcPitch}"
                           ItemsSource="{Binding Settings.Advanced.SpcPitchOptions}"
                           SelectedItem="{Binding Settings.Advanced.SelectedSpcPitch}"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Classes="field-label" Text="YM2608 audio"
+                           VerticalAlignment="Center" IsVisible="{Binding Settings.Advanced.ShowOpnaBackend}"/>
+                <ComboBox Grid.Row="4" Grid.Column="1" x:Name="OpnaBackendSelector" Classes="compact"
+                          IsVisible="{Binding Settings.Advanced.ShowOpnaBackend}"
+                          AutomationProperties.Name="YM2608 audio backend"
+                          ToolTip.Tip="Audio backend used to render FMP YM2608 (OPNA) audio."
+                          ItemsSource="{Binding Settings.Advanced.OpnaBackendOptions}"
+                          SelectedIndex="{Binding Settings.Advanced.SelectedOpnaBackendIndex}"/>
               </Grid>
             </StackPanel>
 

@@ -408,6 +408,41 @@ public sealed class MainWindowLayoutTests
     /// Ready-state window fixture: input loaded, plan + preview image available,
     /// output path set, no fatal validation error, render enabled.
     /// </summary>
+    [AvaloniaFact]
+    public async Task OpnaBackendSelector_HiddenForNonFmpInput_VisibleAndInsideSidebarForFmp()
+    {
+        await using TestWindowFixture fixture =
+            await TestWindowFixture.CreateReadyAsync();
+        fixture.Window.Show();
+        fixture.Window.UpdateLayout();
+
+        // Non-FMP (.vgz): selector must be hidden.
+        Assert.False(fixture.ViewModel.Settings.Advanced.ShowOpnaBackend);
+        ComboBox? hidden =
+            fixture.Window.FindControl<ComboBox>("OpnaBackendSelector");
+        Assert.True(hidden == null || !hidden.IsEffectivelyVisible,
+            "backend selector must not be visible for a non-FMP input");
+
+        // FMP input: selector shows and fits inside the 320px sidebar.
+        await using TestWindowFixture fmp =
+            await TestWindowFixture.CreateFmpReadyAsync();
+        fmp.Window.Width = 1024;
+        fmp.Window.Height = 700;
+        fmp.Window.Show();
+        fmp.Window.UpdateLayout();
+
+        Assert.True(fmp.ViewModel.Settings.Advanced.ShowOpnaBackend);
+        ComboBox selector = Required<ComboBox>(fmp.Window, "OpnaBackendSelector");
+        Assert.True(selector.IsEffectivelyVisible);
+
+        Grid sidebar = Required<Grid>(fmp.Window, "SettingsSidebar");
+        Assert.InRange(selector.Bounds.Right, 0, sidebar.Bounds.Right);
+        // Enough width for "Native audio".
+        Assert.True(
+            selector.Bounds.Width >= 96 || selector.DesiredSize.Width > 0,
+            "selector should accommodate the 'Native audio' label");
+    }
+
     private sealed class TestWindowFixture : IAsyncDisposable
     {
         private readonly string _inputPath;
@@ -446,6 +481,40 @@ public sealed class MainWindowLayoutTests
             Assert.False(viewModel.HasFatalValidationIssues);
             Assert.True(viewModel.CanRender);
 
+            return fixture;
+        }
+
+        /// <summary>
+        /// Ready-state fixture opened on an FMP-family input (.ovi) so
+        /// FMP-only controls (such as the YM2608 backend selector) are visible.
+        /// </summary>
+        public static async Task<TestWindowFixture> CreateFmpReadyAsync()
+        {
+            string inputPath = Path.Combine(
+                Path.GetTempPath(), "mdplayer-gui-layout-" + Guid.NewGuid() + ".ovi");
+            await File.WriteAllBytesAsync(inputPath, new byte[] { 0x4f, 0x56, 0x4d });
+            string settingsPath = Path.Combine(
+                Path.GetTempPath(), "mdplayer-gui-settings-" + Guid.NewGuid() + ".json");
+
+            var factory = new RecordingPreviewFactory();
+            var viewModel = new MainWindowViewModel(
+                new GuiSettingsStore(settingsPath),
+                new FileDialogService(),
+                new ClipboardService(),
+                new ExportProcessService(null),
+                factory,
+                initialInputPath: null);
+
+            var fixture = new TestWindowFixture(
+                new MainWindow(viewModel), viewModel, inputPath, settingsPath);
+
+            await viewModel.OpenInputAsync(inputPath);
+            await viewModel.WaitForPreviewRefreshAsync();
+            viewModel.SetOutputPath(Path.Combine(
+                Path.GetTempPath(), "mdplayer-gui-layout-output-" + Guid.NewGuid() + ".mp4"));
+
+            Assert.Equal(GuiState.Ready, viewModel.State);
+            Assert.NotNull(viewModel.Preview.CurrentImage);
             return fixture;
         }
 

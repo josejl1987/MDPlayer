@@ -77,6 +77,22 @@ public enum VideoEncoder
 }
 
 /// <summary>
+/// YM2608 (OPNA) audio backend for FMP-family capture. Serialized as the
+/// lowercase strings "mdsound" / "native-audio". The default (0) is MDSound, so
+/// old requests/configuration without the field keep selecting MDSound. There
+/// is deliberately no "auto": the value is always explicit and native audio
+/// never falls back to MDSound.
+/// </summary>
+public enum FmpOpnaBackend
+{
+    /// <summary>Existing trace-driven MDSound host-PCM capture (default, unchanged byte-for-byte).</summary>
+    Mdsound = 0,
+
+    /// <summary>Trace-driven native YM2608 audio replay; never falls back.</summary>
+    NativeAudio = 1,
+}
+
+/// <summary>
 /// Preview fidelity levels. Layout preview is cheapest; timeline still is a
 /// dynamic semantic frame built only from the captured timeline; interactive
 /// still is a random-access still optimized for timeline scrubbing; accurate

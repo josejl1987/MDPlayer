@@ -32,7 +32,8 @@ internal readonly record struct TimelineCaptureKey(
     double? MaximumDurationSeconds,
     int SampleRate,
     double SsgGainDb,
-    SpcPitchInterpretation SpcPitch)
+    SpcPitchInterpretation SpcPitch,
+    FmpOpnaBackend OpnaBackend)
 {
     /// <summary>
     /// Builds the key from a real <see cref="FileInfo"/> so input identity
@@ -61,7 +62,8 @@ internal readonly record struct TimelineCaptureKey(
             request.Playback.MaximumDurationSeconds,
             request.Playback.SampleRate,
             request.Playback.SsgGainDb,
-            request.Playback.SpcPitch);
+            request.Playback.SpcPitch,
+            request.Playback.OpnaBackend);
     }
 }
 

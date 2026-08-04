@@ -1231,7 +1231,7 @@ public sealed class MainWindowViewModel : ObservableObject
         Preview.Dispose();
     }
 
-    private static VisualizationRequest BuildInitialRequest(string inputPath)
+    private VisualizationRequest BuildInitialRequest(string inputPath)
     {
         string? directory = Path.GetDirectoryName(inputPath);
         string name = Path.GetFileNameWithoutExtension(inputPath);
@@ -1240,7 +1240,33 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             InputPath = inputPath,
             OutputPath = Path.Combine(outputDir, "visualization.mp4"),
+            Playback = new PlaybackSettings
+            {
+                OpnaBackend = ResolvePersistedOpnaBackend(),
+            },
         };
+    }
+
+    /// <summary>
+    /// Resolves the persisted YM2608 backend, honoring the invalid-setting
+    /// policy: "mdsound" and "native-audio" are accepted; any missing, unknown
+    /// or retired value (notably "native-lle") stays MDSound and is never
+    /// silently promoted to native audio.
+    /// </summary>
+    private FmpOpnaBackend ResolvePersistedOpnaBackend()
+        => string.Equals(_settings.Settings.OpnaBackend, "native-audio", StringComparison.OrdinalIgnoreCase)
+            ? FmpOpnaBackend.NativeAudio
+            : FmpOpnaBackend.Mdsound;
+
+    /// <summary>
+    /// Persists the selected YM2608 audio backend through the existing
+    /// settings store. The stored value is the serialized "mdsound"/"native-audio"
+    /// string; the caller ensures it is one of those. No native probing happens here.
+    /// </summary>
+    public void PersistOpnaBackend(FmpOpnaBackend backend)
+    {
+        string serialized = backend == FmpOpnaBackend.NativeAudio ? "native-audio" : "mdsound";
+        _settings.Update(settings => settings.OpnaBackend = serialized);
     }
 
     private void AddRecentFile(string path)

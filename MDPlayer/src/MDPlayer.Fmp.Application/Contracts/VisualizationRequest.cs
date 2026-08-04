@@ -98,6 +98,13 @@ public sealed record PlaybackSettings
     public int SampleRate { get; init; } = 48_000;
     public double SsgGainDb { get; init; }
     public SpcPitchInterpretation SpcPitch { get; init; } = SpcPitchInterpretation.Estimate;
+
+    /// <summary>
+    /// YM2608 audio backend for FMP-family sources. The one authoritative value
+    /// for a render: preview and export both read it from the shared request.
+    /// MDSound is the default; native audio never falls back.
+    /// </summary>
+    public FmpOpnaBackend OpnaBackend { get; init; } = FmpOpnaBackend.Mdsound;
 }
 
 public enum SpcPitchInterpretation

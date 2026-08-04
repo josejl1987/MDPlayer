@@ -23,6 +23,8 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     private string _selectedSpcPitch = SpcPitchInterpretation.Estimate.ToString();
     private bool _showSsgGain;
     private bool _showSpcPitch;
+    private bool _showOpnaBackend;
+    private FmpOpnaBackend _selectedOpnaBackend = FmpOpnaBackend.Mdsound;
 
     public AdvancedSettingsViewModel(MainWindowViewModel owner)
     {
@@ -30,6 +32,12 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     }
 
     public IReadOnlyList<string> EncoderOptions { get; } = new[] { "Auto", "LibX264", "Nvenc" };
+    /// <summary>Display labels for the YM2608 audio backend selector (enum identifiers are not shown).</summary>
+    public IReadOnlyList<string> OpnaBackendOptions { get; } = new[]
+    {
+        "MDSound",
+        "Native audio",
+    };
     public IReadOnlyList<string> SpcPitchOptions { get; } = Enum.GetNames<SpcPitchInterpretation>();
     // Estimate resolves each BRR sample's root pitch from the S-DSP registers
     // for pitch-accurate notes; Relative keeps the raw relative pitch without
@@ -49,6 +57,13 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
     {
         get => _showSpcPitch;
         private set => SetProperty(ref _showSpcPitch, value);
+    }
+
+    /// <summary>True when the active input is FMP-family and exposes the YM2608 backend selector.</summary>
+    public bool ShowOpnaBackend
+    {
+        get => _showOpnaBackend;
+        private set => SetProperty(ref _showOpnaBackend, value);
     }
 
     public double SsgGainDb
@@ -136,6 +151,45 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// The single authoritative YM2608 audio backend for this render. Defaults
+    /// to <see cref="FmpOpnaBackend.Mdsound"/>. Changing it invalidates preview
+    /// state and (through <see cref="ApplyVisualSetting"/>) cancels an active
+    /// render; it never loads the native library or starts rendering itself.
+    /// </summary>
+    public FmpOpnaBackend SelectedOpnaBackend
+    {
+        get => _selectedOpnaBackend;
+        set
+        {
+            if (!SetProperty(ref _selectedOpnaBackend, value) || _suppress)
+            {
+                OnPropertyChanged(nameof(SelectedOpnaBackendIndex));
+                return;
+            }
+            _owner.PersistOpnaBackend(value);
+            OnPropertyChanged(nameof(SelectedOpnaBackendIndex));
+            _owner.ApplyVisualSetting(
+                r => r with { Playback = r.Playback with { OpnaBackend = value } });
+        }
+    }
+
+    /// <summary>
+    /// Index of the selected backend in <see cref="OpnaBackendOptions"/>
+    /// (0 = MDSound, 1 = Native audio). The ComboBox binds to this so the
+    /// displayed label ("Native audio", not the enum identifier) reflects the
+    /// selected value.
+    /// </summary>
+    public int SelectedOpnaBackendIndex
+    {
+        get => _selectedOpnaBackend == FmpOpnaBackend.NativeAudio ? 1 : 0;
+        set => SelectedOpnaBackend = value switch
+        {
+            1 => FmpOpnaBackend.NativeAudio,
+            _ => FmpOpnaBackend.Mdsound,
+        };
+    }
+
     public string SelectedEncoder
     {
         get => _selectedEncoder;
@@ -175,6 +229,7 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
             Overwrite = request.Output.Overwrite;
             SsgGainDb = request.Playback.SsgGainDb;
             SelectedSpcPitch = request.Playback.SpcPitch.ToString();
+            SelectedOpnaBackend = request.Playback.OpnaBackend;
         }
         finally
         {
@@ -194,6 +249,10 @@ public sealed class AdvancedSettingsViewModel : ObservableObject
                 || format.Contains("ozi", StringComparison.OrdinalIgnoreCase)
                 || IsFmpLike(format);
             ShowSpcPitch = format.Equals(".spc", StringComparison.OrdinalIgnoreCase);
+            ShowOpnaBackend = format.Contains("ovi", StringComparison.OrdinalIgnoreCase)
+                || format.Contains("mpi", StringComparison.OrdinalIgnoreCase)
+                || format.Contains("ozi", StringComparison.OrdinalIgnoreCase)
+                || IsFmpLike(format);
         }
         finally
         {
