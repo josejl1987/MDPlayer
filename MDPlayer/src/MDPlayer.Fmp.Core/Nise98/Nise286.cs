@@ -6,6 +6,31 @@ using System.Threading.Tasks;
 
 namespace Fmp.Core.Nise98
 {
+    /// <summary>
+    /// The sixteen short conditional-jump conditions, one per <c>Jcc rel8</c>
+    /// opcode (0x70–0x7F). Emulated flag bits are the sole authority; these
+    /// codes are consumed by <see cref="Nise286.EvaluateCondition"/>.
+    /// </summary>
+    internal enum ConditionCode : byte
+    {
+        Overflow,       // JO   0x70  OF = 1
+        NotOverflow,    // JNO  0x71  OF = 0
+        Below,          // JB   0x72  CF = 1
+        AboveOrEqual,   // JAE  0x73  CF = 0
+        Equal,          // JE   0x74  ZF = 1
+        NotEqual,       // JNE  0x75  ZF = 0
+        BelowOrEqual,   // JBE  0x76  CF = 1 or ZF = 1
+        Above,          // JA   0x77  CF = 0 and ZF = 0
+        Sign,           // JS   0x78  SF = 1
+        NotSign,        // JNS  0x79  SF = 0
+        Parity,         // JP   0x7A  PF = 1
+        NotParity,      // JNP  0x7B  PF = 0
+        Less,           // JL   0x7C  SF != OF
+        GreaterOrEqual, // JGE  0x7D  SF = OF
+        LessOrEqual,    // JLE  0x7E  ZF = 1 or SF != OF
+        Greater         // JG   0x7F  ZF = 0 and SF = OF
+    }
+
     public class Nise286 : INiseCycleClock
     {
 
@@ -256,22 +281,22 @@ namespace Fmp.Core.Nise98
                 case 0x6e: throw new NotImplementedException(op.ToString("X02"));//x186
                 case 0x6f: throw new NotImplementedException(op.ToString("X02"));//x186
 
-                case 0x70: throw new NotImplementedException(op.ToString("X02"));
-                case 0x71: throw new NotImplementedException(op.ToString("X02"));
-                case 0x72: JB_short(); break;
-                case 0x73: JNB_short(); break;
-                case 0x74: JZ_short(); break;
-                case 0x75: JNZ_short(); break;
-                case 0x76: JBE_short(); break;
-                case 0x77: JNBE_short(); break;
-                case 0x78: JS_short(); break;
-                case 0x79: JNS_short(); break;
-                case 0x7a: throw new NotImplementedException(op.ToString("X02"));
-                case 0x7b: throw new NotImplementedException(op.ToString("X02"));
-                case 0x7c: throw new NotImplementedException(op.ToString("X02"));
-                case 0x7d: JNL_short(); break;
-                case 0x7e: JNG_short(); break; 
-                case 0x7f: JNLE_short(); break;
+                case 0x70: ExecuteShortConditionalJump(ConditionCode.Overflow); break;       // JO
+                case 0x71: ExecuteShortConditionalJump(ConditionCode.NotOverflow); break;    // JNO
+                case 0x72: ExecuteShortConditionalJump(ConditionCode.Below); break;          // JB/JNAE/JC
+                case 0x73: ExecuteShortConditionalJump(ConditionCode.AboveOrEqual); break;   // JAE/JNB/JNC
+                case 0x74: ExecuteShortConditionalJump(ConditionCode.Equal); break;          // JE/JZ
+                case 0x75: ExecuteShortConditionalJump(ConditionCode.NotEqual); break;       // JNE/JNZ
+                case 0x76: ExecuteShortConditionalJump(ConditionCode.BelowOrEqual); break;   // JBE/JNA
+                case 0x77: ExecuteShortConditionalJump(ConditionCode.Above); break;          // JA/JNBE
+                case 0x78: ExecuteShortConditionalJump(ConditionCode.Sign); break;           // JS
+                case 0x79: ExecuteShortConditionalJump(ConditionCode.NotSign); break;        // JNS
+                case 0x7a: ExecuteShortConditionalJump(ConditionCode.Parity); break;         // JP/JPE
+                case 0x7b: ExecuteShortConditionalJump(ConditionCode.NotParity); break;      // JNP/JPO
+                case 0x7c: ExecuteShortConditionalJump(ConditionCode.Less); break;           // JL/JNGE
+                case 0x7d: ExecuteShortConditionalJump(ConditionCode.GreaterOrEqual); break; // JGE/JNL
+                case 0x7e: ExecuteShortConditionalJump(ConditionCode.LessOrEqual); break;    // JLE/JNG
+                case 0x7f: ExecuteShortConditionalJump(ConditionCode.Greater); break;        // JG/JNLE
 
                 case 0x80: GRP1B(); break;
                 case 0x81: GRP1W(); break;
@@ -2805,136 +2830,55 @@ namespace Fmp.Core.Nise98
         }
 
 
-        //0x72
-        private void JB_short()
+        //0x70–0x7F — all short conditional jumps share one executor and one
+        // condition evaluator. The displacement is a signed 8-bit value taken
+        // relative to the IP just after the displacement byte (the branch base),
+        // with 16-bit wrapping IP arithmetic. Flags are never modified.
+
+        /// <summary>
+        /// Shared <c>Jcc rel8</c> executor for every short conditional branch.
+        /// The signed displacement is relative to the IP after the displacement
+        /// byte (post-<see cref="Fetch"/> IP); taken path wraps IP at 16 bits.
+        /// </summary>
+        private void ExecuteShortConditionalJump(ConditionCode condition)
         {
             sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JB short:${0:X02}", imm8);
+            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "Jcc short:${0:X02}", imm8);
 
-            if (regs.CF)
+            if (EvaluateCondition(condition, regs))
             {
-                regs.IP += imm8;
+                // Branch base = IP after displacement fetch. 16-bit wrap.
+                regs.IP = unchecked((short)(regs.IP + imm8));
             }
         }
 
-        //0x73
-        private void JNB_short()
+        /// <summary>
+        /// Evaluates one short-branch condition against the authoritative emulated
+        /// flag bits. Signed conditions use SF/OF exactly (never host comparisons)
+        /// and unsigned conditions use CF/ZF.
+        /// </summary>
+        private static bool EvaluateCondition(ConditionCode condition, Register286 registers)
         {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNB short:${0:X02}", imm8);
-
-            if (!regs.CF)
+            return condition switch
             {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x74
-        private void JZ_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JZ short:${0:X02}", imm8);
-
-            if (regs.ZF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x75
-        private void JNZ_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNZ short:${0:X02}", imm8);
-
-            if (!regs.ZF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x76
-        private void JBE_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JBE short:${0:X02}", imm8);
-
-            if (regs.CF || regs.ZF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x77
-        private void JNBE_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNBE short:${0:X02}", imm8);
-
-            if (!regs.CF && !regs.ZF)//cmp then op1<op2
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x78
-        private void JS_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JS short:${0:X02}", imm8);
-
-            if (regs.SF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x79
-        private void JNS_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNS short:${0:X02}", imm8);
-
-            if (!regs.SF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x7d
-        private void JNL_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNL short:${0:X02}", imm8);
-
-            if (regs.SF == regs.OF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x7e
-        private void JNG_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNG short:${0:X02}", imm8);
-
-            if (regs.ZF || regs.SF != regs.OF)
-            {
-                regs.IP += imm8;
-            }
-        }
-
-        //0x7f
-        private void JNLE_short()
-        {
-            sbyte imm8 = (sbyte)Fetch();
-            Log.WriteLine(musicDriverInterface.LogLevel.TRACE, "JNLE short:${0:X02}", imm8);
-
-            if (!regs.ZF && regs.SF == regs.OF)
-            {
-                regs.IP += imm8;
-            }
+                ConditionCode.Overflow => registers.OF,
+                ConditionCode.NotOverflow => !registers.OF,
+                ConditionCode.Below => registers.CF,
+                ConditionCode.AboveOrEqual => !registers.CF,
+                ConditionCode.Equal => registers.ZF,
+                ConditionCode.NotEqual => !registers.ZF,
+                ConditionCode.BelowOrEqual => registers.CF || registers.ZF,
+                ConditionCode.Above => !registers.CF && !registers.ZF,
+                ConditionCode.Sign => registers.SF,
+                ConditionCode.NotSign => !registers.SF,
+                ConditionCode.Parity => registers.PF,
+                ConditionCode.NotParity => !registers.PF,
+                ConditionCode.Less => registers.SF != registers.OF,
+                ConditionCode.GreaterOrEqual => registers.SF == registers.OF,
+                ConditionCode.LessOrEqual => registers.ZF || (registers.SF != registers.OF),
+                ConditionCode.Greater => !registers.ZF && (registers.SF == registers.OF),
+                _ => false,
+            };
         }
 
         //0x80
