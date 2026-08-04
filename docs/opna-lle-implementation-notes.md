@@ -178,3 +178,61 @@ is not used; no resampler and no coefficient generation added.
 - Shared renderer: `src/MDPlayer.Fmp.Core/Nise98/NisePPZ8.cs` is a verbatim
   extraction of the legacy `MDPlayerx64/Driver/FMP/Nise98/NisePPZ8.cs` (fidelity
   proven by `Ppz8ExtractionFidelityTests`).
+
+## Prompt 8 — backend selection, native FMP session, CLI surface
+
+### Backend selection (Commit 2)
+
+- `FmpOpnaBackend` enum (`Mdsound = 0`, `NativeLle = 1`) — the default value is
+  0 so existing configs/CLI invocations keep the byte-identical MDSound path.
+- `IFmpPcmSession` + `FmpPlaybackContext` + `FmpPcmSessionFactory` — the factory
+  constructs exactly the requested backend and never catches a native
+  construction failure to fall back (no-fallback enforced by tests).
+- `LegacyMdsoundFmpPcmSession` — the existing sample-position sink session,
+  byte-identical to the pre-backend renderer (pinned by
+  `FmpLegacyBaselineTests`).
+- `FmpRenderer.Options.OpnaBackend` routes the choice; the default render loop
+  is untouched.
+
+### Native session (Commit 3)
+
+- `NativeLleFmpPcmSession` boots the real FMP driver on Nise98 through
+  `ClockedFmpExecutionSession` (same LoadRun/FMPRegistPPZ8/load/play sequence as
+  the legacy path). Every YM2608 access crosses the clocked bridge at the
+  authoritative cycle count; the device is advanced only by cycles actually
+  executed.
+- The bridge's data-port reads (0x8a/0x8e) now return the real YM2608 register
+  read-back (last written value, 86-board pseudo-registers 0x0e/0xff) — the
+  legacy FMPortInport semantics the FMP driver's boot code depends on; status
+  reads (0x88/0x8c) still return the native device status directly.
+- PPZ8: driver commands are captured with their CPU cycle, mapped to output
+  samples by an exact UInt128 rational mapper (`NisePpz8CommandMapper`), applied
+  to the shared MDSound PPZ8 renderer, delayed by the device's fixed output
+  latency (`Ppz8OutputDelayBuffer`) and mixed with the drained OPNA frames by
+  pure-integer arithmetic (`OpnaPpz8IntegerMixer`).
+- Deterministic tests: mapper-vs-clock-mapper oracle, delay-line alignment,
+  mixer exact arithmetic, latency query, backend selection, no-fallback.
+
+### Fixed-cadence fail-closed (verified against a real FMP.COM + .OVI)
+
+The native session is fail-closed: the fixed 144-master-clock cadence profile
+(ABI v1) cannot honor the FMP driver's boot sequence. The driver polls the OPNA
+status registers (48+ port-0x088 reads in a tight loop); each status read runs
+the LLE core clock with read pins asserted, which perturbs the serial decoder
+frame phase (the observed frame interval becomes 288 master clocks instead of
+144). The cadence guard then latches `MDP_OPNA_ERR_UNSUPPORTED_CADENCE` and the
+session reports a deterministic error — it never falls back, never produces
+partial output, and never silently degrades. This is covered by
+`NativeFmpIntegrationTests` (fail-closed contract, determinism across slices,
+no WAV left behind) and `OpnaBackendCliTests` (option passes through to the
+native session).
+
+A future Prompt would need to relax the cadence guard / make the serial decoder
+robust to read-transaction clocking before the native session can boot real
+FMP.COM.
+
+### CLI surface (Commit 4)
+
+- `--opna-backend mdsound|native-lle` on the standalone audio-render path
+  (`batch`/`analyze` option parser), strictly validated (unknown values rejected
+  with exit 2 semantics), default absent = MDSound.
