@@ -1,0 +1,130 @@
+# native-audio backend validation (Prompt 9R).
+#
+# Tier 1 — "fast" pull-request/commit gate (target under ~2 minutes for the
+# native + managed fast subsets). Ordinary PRs never run the extended corpus.
+#
+# Tier 2 — "extended" scheduled + manual gate: full real-file corpus, all
+# output rates, block/drain matrix, sanitizers, stability/leak, performance,
+# packaging and cross-platform hash reporting.
+
+name: native-audio
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # nightly extended gate
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "validation tier to run"
+        required: false
+        default: "fast"
+        type: choice
+        options:
+          - fast
+          - extended
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  native-release:
+    name: native Release ctest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native (Release)
+        run: |
+          cmake -S MDPlayer/native/MDPlayer.OpnaNative -B build-release \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --config Release
+      - name: Run native Release CTest
+        run: ctest --test-dir build-release --output-on-failure
+      - name: Packaging smoke (runtimes/linux-x64/native present + restricted exports)
+        run: |
+          test -f MDPlayer/runtimes/linux-x64/native/libmdplayer_opna.so
+          COUNT=$(readelf -Ws MDPlayer/runtimes/linux-x64/native/libmdplayer_opna.so \
+            | grep "FUNC.*GLOBAL.*DEFAULT" | grep -cv "UND" | xargs)
+          echo "exported FUNC globals: $COUNT"
+
+  managed-fast:
+    name: managed Release (fast tier)
+    runs-on: ubuntu-latest
+    needs: native-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build native (so fast tier tests can load it)
+        run: |
+          cmake -S MDPlayer/native/MDPlayer.OpnaNative -B build-release \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --config Release
+      - name: Restore + build managed Release
+        run: dotnet build MDPlayer/MDPlayer.Fmp.sln -c Release
+      - name: Capture determinism + block independence + native determinism (fixtures auto-skip if absent)
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioValidationTests.CaptureDeterminism|FullyQualifiedName~NativeAudioValidationTests.CaptureHash_Stable"
+      - name: Feature presence + audio sanity + report writer
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioValidationTests.Replay_AudioSanity|FullyQualifiedName~NativeAudioValidationTests.Replay_FeaturePresence|FullyQualifiedName~NativeAudioValidationTests.ValidationReport_JsonAuthoritative"
+      - name: Legacy regression (MDSound + capture-instrumentation parity)
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioSessionTests.SemanticInvariants|FullyQualifiedName~NativeAudioSessionTests.NoNativeLibrary|FullyQualifiedName~OpnaBackendCliTests|FullyQualifiedName~BackendSelectionTests"
+      - name: Hardening (leak, allocation, error matrix, ABI/export)
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioHardeningTests"
+
+  extended:
+    name: extended gate (${{ github.event.inputs.tier || 'nightly' }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'extended')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build native Release
+        run: |
+          cmake -S MDPlayer/native/MDPlayer.OpnaNative -B build-release \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --config Release
+      - name: Full real-file validation suite (all rates / block-drain / sanity / determinism)
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioValidationTests"
+      - name: Hardening + leak + allocation + error matrix
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build --filter "FullyQualifiedName~NativeAudioHardeningTests"
+      - name: Legacy regression (full)
+        run: dotnet test MDPlayer/MDPlayer.Fmp.sln -c Release --no-build
+      - name: Performance benchmark (real OVI; reported, not asserted)
+        run: |
+          FIX=$(find /home -iname "*.OVI" 2>/dev/null | head -n1)
+          if [ -n "$FIX" ]; then
+            dotnet run --project MDPlayer/benchmarks/MDPlayer.Fmp.Benchmarks -c Release \
+              -- --fmp-native "$FIX" 48000 8 || true
+          fi
+      - name: Adapter UBSan
+        run: |
+          cmake -S MDPlayer/native/MDPlayer.OpnaNative -B build-ubsan \
+            -DCMAKE_BUILD_TYPE=Release -DMDPLAYER_OPNA_SANITIZERS=OFF \
+            -DMDPLAYER_OPNA_ADAPTER_UBSAN=ON
+          cmake --build build-ubsan --config Release
+          UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-ubsan --output-on-failure
+
+  sanitizers:
+    name: sanitizers (ASan, ASan+UBSan)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'extended')
+    strategy:
+      matrix:
+        cfg:
+          - { name: asan,       flags: "-DMDPLAYER_OPNA_SANITIZERS=ON -DMDPLAYER_OPNA_ADAPTER_UBSAN=OFF" }
+          - { name: asan-ubsan, flags: "-DMDPLAYER_OPNA_SANITIZERS=ON  -DMDPLAYER_OPNA_ADAPTER_UBSAN=ON" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.cfg.name }}
+        run: |
+          cmake -S MDPlayer/native/MDPlayer.OpnaNative -B build-${{ matrix.cfg.name }} \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo ${{ matrix.cfg.flags }}
+          cmake --build build-${{ matrix.cfg.name }} --config Release
+      - name: Run CTest (${{ matrix.cfg.name }})
+        run: ctest --test-dir build-${{ matrix.cfg.name }} --output-on-failure
