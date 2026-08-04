@@ -168,7 +168,11 @@ public class OpnaBackendCliTests
                 Fade = 0.5,
                 Tail = 0.1,
                 MaxDuration = 1.0,
-                Timeout = 5.0,
+                // Native YM2608-LLE replay is ~0.2x real time (documented),
+                // so a 1 s window plus fade/tail can take several seconds of
+                // wall time; a generous timeout is a robustness threshold, not
+                // a performance assertion.
+                Timeout = 90.0,
                 OpnaBackend = "native-audio",
                 OpnaBackendExplicit = true,
             };
