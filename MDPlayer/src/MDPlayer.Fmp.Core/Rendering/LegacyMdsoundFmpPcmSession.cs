@@ -23,18 +23,33 @@ internal sealed class LegacyMdsoundFmpPcmSession : IFmpPcmSession
     private readonly long _tailSamples;
     private readonly long _maxSamples;
 
+    private readonly IFmpExecutionCaptureSink _captureSink;
+
+    /// <summary>
+    /// Optional explicit CPU clock (Hz) applied to the FMP runtime before boot;
+    /// used by the capture pass so replay's exact mappers agree with the
+    /// recorded authoritative cycle counts.
+    /// </summary>
+    internal uint? CpuClockFrequencyHz
+    {
+        set => _runtime.CpuClockFrequencyHz = value;
+    }
+
     private long _totalSamples;
     private int _currentLoop;
     private bool _runtimeStopped;
     private bool _booted;
 
-    public LegacyMdsoundFmpPcmSession(FmpPlaybackContext context)
+    public LegacyMdsoundFmpPcmSession(FmpPlaybackContext context, IFmpExecutionCaptureSink captureSink = null)
     {
+        _captureSink = captureSink;
         _context = context;
         _sampleRate = context.SampleRate;
         _bufferSize = _sampleRate / 100; // 10ms buffer, matching FmpRenderer
         _sink = new MdsoundFmpChipSink(_sampleRate, ssgGainDb: context.SsgGainDb);
         _runtime = new FmpRuntime(_sink, context.Assets, context.FileSystem);
+        if (captureSink != null)
+            _runtime.CaptureSink = captureSink;
         _fadeSamples = checked((long)Math.Ceiling(context.FadeSeconds * _sampleRate));
         _tailSamples = checked((long)Math.Ceiling(context.TailSeconds * _sampleRate));
         _maxSamples = checked((long)Math.Ceiling((context.MaxDurationSeconds ?? 3600.0) * _sampleRate));
@@ -141,4 +156,21 @@ internal sealed class LegacyMdsoundFmpPcmSession : IFmpPcmSession
     }
 
     public void Dispose() => _sink.Dispose();
+
+    // ---- Pass-1 capture reporting (consumed by the native-audio capture pass) ----
+
+    /// <summary>Total stereo frames the session has produced so far.</summary>
+    internal long TotalSamples => _totalSamples;
+
+    /// <summary>The legacy session's termination decision (null until first render).</summary>
+    internal PlaybackTermination TerminationState => _termination;
+
+    /// <summary>The FMP driver's current loop count.</summary>
+    internal int CurrentLoop => _runtime.CurrentLoop;
+
+    /// <summary>Authoritative Nise286 total cycle count at render completion.</summary>
+    internal ulong FinalCpuCycle => _runtime.AuthoritativeCycle();
+
+    /// <summary>True once the legacy session has produced its final frame.</summary>
+    internal bool CaptureReachedEnd => IsCompleted;
 }

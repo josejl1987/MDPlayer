@@ -24,6 +24,7 @@ internal class FmpRuntime
     private bool _playbackEnded;
     private int _loopCount;
     private int _loopCounter;
+    private string _trackFileName = "";
     public bool PlaybackEnded => _playbackEnded;
     public int LoopCount => _loopCount;
     public int CurrentLoop => _loopCounter;
@@ -37,6 +38,22 @@ internal class FmpRuntime
     /// Set before calling <see cref="Initialize"/> to capture boot events.
     /// </summary>
     public RegisterTraceWriter TraceWriter { get; set; }
+
+    /// <summary>
+    /// Optional Pass-1 capture tap. Defaults to null (disabled): the ordinary
+    /// MDSound path performs no capture allocation. When set before
+    /// <see cref="Initialize"/>, every YM2608 write and PPZ8 command is
+    /// recorded at its authoritative Nise286 cycle count.
+    /// </summary>
+    public IFmpExecutionCaptureSink CaptureSink { get; set; }
+
+    /// <summary>
+    /// Optional explicit CPU clock frequency (Hz) applied before the driver
+    /// boots. When set, the authoritative Nise286 cycle counter is interpreted
+    /// at this rate by the capture/replay exact mappers. The legacy MDSound
+    /// output does not depend on this value.
+    /// </summary>
+    public uint? CpuClockFrequencyHz { get; set; }
 
     public FmpRuntime(IFmpChipSink chipSink, FmpRuntimeAssets assets, IFmpFileSystem fileSystem = null)
     {
@@ -60,6 +77,9 @@ internal class FmpRuntime
     {
         try
         {
+            if (CpuClockFrequencyHz is uint cpuHz && cpuHz != 0)
+                _nise98.CpuClockFrequencyHz = cpuHz;
+            _trackFileName = Path.GetFileName(trackFileName) ?? "track";
             // Initialize Nise98 with callbacks
             _nise98.Init(
                 msgWrite: OnMsgWrite,
@@ -197,8 +217,16 @@ internal class FmpRuntime
         _opnaWriteCount++;
         byte port = (byte)((byte)dat.port == 0x8a ? 0 : 1);
         _chipSink.WriteYm2608(0, port, dat.address, dat.data, _samplePosition);
+        if (CaptureSink != null)
+            CaptureSink.CaptureOpnaWrite(AuthoritativeCycle(), port, (byte)dat.address, (byte)dat.data);
         TraceWriter?.WriteOpna(port, dat.address, dat.data, _samplePosition);
     }
+
+    /// <summary>
+    /// The authoritative Nise286 total-cycle counter, read at the exact I/O
+    /// call boundary. Falls back to 0 only when the CPU is not yet constructed.
+    /// </summary>
+    internal ulong AuthoritativeCycle() => _nise98.GetCPU()?.TotalCycles ?? 0;
 
     public int OpnaWriteCount => _opnaWriteCount;
 
@@ -212,7 +240,16 @@ internal class FmpRuntime
             samples[i] = pcmdata[i].AsMemory();
             totalBytes += pcmdata[i].Length;
         }
+        ulong cycle = AuthoritativeCycle();
         _chipSink.LoadPpz8Bank(bank, mode, samples, _samplePosition);
+
+        if (CaptureSink != null)
+        {
+            // Capture the immutable bank content by content-hash (deduplicated),
+            // then emit a bank-load command referencing the capture-local bank id.
+            int bankId = CaptureSink.CapturePpz8Bank(_trackFileName, bank, mode, pcmdata);
+            CaptureSink.CapturePpz8Command(cycle, new Ppz8Command(bank, mode, 0, bankId));
+        }
 
         // Compute SHA-256 of concatenated bank data for trace
         if (TraceWriter != null)
@@ -234,6 +271,8 @@ internal class FmpRuntime
     private void OnPpz8Write(int port, int adr, int data)
     {
         _chipSink.WritePpz8(port, adr, data, _samplePosition);
+        if (CaptureSink != null)
+            CaptureSink.CapturePpz8Command(AuthoritativeCycle(), new Ppz8Command(port, adr, data));
         TraceWriter?.WritePpz8Write(port, adr, data, _samplePosition);
     }
 }
