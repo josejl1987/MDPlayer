@@ -236,3 +236,44 @@ FMP.COM.
 - `--opna-backend mdsound|native-lle` on the standalone audio-render path
   (`batch`/`analyze` option parser), strictly validated (unknown values rejected
   with exit 2 semantics), default absent = MDSound.
+
+### Prompt 8.2 — status-read cadence fix, idle-time advancement, construction order
+
+- **Native status-read correction.** `do_status_read()` no longer advances the
+  master clock and no longer runs the serial decoder. Reading the YM2608 status
+  is asynchronous to the FM clock on the real chip, so the read is evaluated on
+  a transient copy of the core (pins applied, one clock pair, `o_data` read
+  back) while the real core, the serial decoder, the FIFO and the session clock
+  stay untouched. The 288-clock interval that a status read used to introduce
+  is gone; every raw frame interval stays exactly 144 regardless of status-poll
+  density or phase (`tests/status_cadence_test.c`). Commit
+  `4591d876` "native: keep OPNA cadence stable during status reads".
+  `ReadStatus(requestedClock)` now advances to `requestedClock` when necessary,
+  evaluates status there, returns it, and never advances beyond it.
+- **Result:** the real FMP driver's boot sequence (which polls status heavily)
+  now boots without a cadence error, so the fail-closed gate tests were updated
+  to assert the new deterministic failure point (the emulator's next
+  unimplemented opcode) instead of the cadence error. The no-fallback and
+  no-partial-WAV contract is unchanged.
+- **Construction order.** `ClockedFmpExecutionSession` now takes the
+  authoritative `Nise286` CPU in its constructor and rejects a null CPU
+  immediately (`ArgumentNullException`). `NativeLleFmpPcmSession.Boot()` follows
+  the explicit order: construct Nise98 → (coordinator installs the clocked
+  bridge) → `Init()` → obtain the CPU → construct the coordinator with it →
+  boot FMP. The session can no longer fail later from `ExecuteSlice()` with a
+  `NullReferenceException`.
+- **Explicit idle-time advancement.** `Nise286.AdvanceIdleToCpuCycle(absolute)`
+  advances the authoritative cycle counter without executing an instruction (no
+  registers, memory or port I/O touched); `ClockedFmpExecutionSession.AdvanceIdleToCpuCycle`
+  maps the resulting cycle through the existing `NiseOpnaClockMapper`, advances
+  the native OPNA device to the mapped clock and samples IRQ at the boundary.
+  The renderer's fake CPU spin loop (`SpinSegment`) was removed.
+- **Exact output-frame mapping.** `MapOutputFrameToCpuCycle` computes
+  `ceil(frame × cpuClockHz / sampleRate)` with UInt128 integer arithmetic (no
+  float, no TimeSpan, no Stopwatch). The coordinator rejects regression; equal
+  input is a no-op; if the CPU has already executed past the requested boundary
+  the renderer does nothing (never moves either timeline backward).
+- **No-progress guard.** Each render iteration records CPU cycles / OPNA clock /
+  output frame / driver state before and after; if none change it throws
+  `NativeFmpNoProgressException` (message carries exactly those values, no
+  retry, no sleep, no arbitrary iteration limits).
