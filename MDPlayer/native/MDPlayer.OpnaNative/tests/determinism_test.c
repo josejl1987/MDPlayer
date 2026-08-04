@@ -53,7 +53,7 @@ static void sha_transform(ShaC *c, const uint8_t *p)
 {
     uint32_t w[64], a,b,cc,d,e,f,g,h,t1,t2;
     for (int i = 0; i < 16; i++)
-        w[i] = (uint32_t)((p[i<<2]<<24)|(p[(i<<2)+1]<<16)|(p[(i<<2)+2]<<8)|p[(i<<2)+3]);
+        w[i] = (uint32_t)(((uint32_t)p[i<<2]<<24)|((uint32_t)p[(i<<2)+1]<<16)|((uint32_t)p[(i<<2)+2]<<8)|(uint32_t)p[(i<<2)+3]);
     for (int i = 16; i < 64; i++) {
         uint32_t s0 = ROR(w[i-15],7)^ROR(w[i-15],18)^(w[i-15]>>3);
         uint32_t s1 = ROR(w[i-2],17)^ROR(w[i-2],19)^(w[i-2]>>10);
