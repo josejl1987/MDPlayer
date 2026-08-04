@@ -67,6 +67,31 @@ namespace Fmp.Core.Nise98
             interruptTrigger = new bool[24];
         }
 
+        /// <summary>
+        /// Advances the authoritative machine-cycle counter directly to
+        /// <paramref name="absoluteCpuCycle"/> WITHOUT executing an instruction.
+        ///
+        /// This models elapsed machine time during which the rendering host is
+        /// not invoking driver or CPU code. It is NOT a executed instruction:
+        /// no instruction is fetched or decoded, no register is read or
+        /// written, no memory is touched, and no port I/O is performed. It
+        /// only moves the authoritative cycle clock forward so that a later
+        /// mapped YM2608 master-clock advance stays on the one authoritative
+        /// CPU-cycle timeline (never on a renderer-owned offset).
+        ///
+        /// The counter remains owned by <see cref="Nise286"/>; only this method
+        /// (and the reset path) may change it. A regression below the current
+        /// cycle throws <see cref="ArgumentOutOfRangeException"/>.
+        /// </summary>
+        internal void AdvanceIdleToCpuCycle(ulong absoluteCpuCycle)
+        {
+            if (absoluteCpuCycle < _totalCycles)
+                throw new ArgumentOutOfRangeException(
+                    nameof(absoluteCpuCycle), absoluteCpuCycle,
+                    $"CPU cycle clock regressed: {absoluteCpuCycle} < {_totalCycles}");
+            _totalCycles = absoluteCpuCycle;
+        }
+
         public Nise286(Nise98 machine)
         {
             this.regs = machine.GetRegisters();

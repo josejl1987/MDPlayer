@@ -182,7 +182,7 @@ public sealed class ClockedNise98OpnaBridgeTests
     {
         var nise98 = BuildMachine();
         var device = new RecordingOpnaDevice();
-        var session = new ClockedFmpExecutionSession(nise98, device);
+        var session = new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), device);
         LoadProgram(nise98, WriteProgram);
 
         session.ExecuteSlice(100);
@@ -256,7 +256,7 @@ public sealed class ClockedNise98OpnaBridgeTests
             fileTemp: new fileTemp(),
             ongen: Nise98Machine.enmOngenBoardType.PC9801_86B);
 
-        Assert.Throws<ArgumentException>(() => new ClockedFmpExecutionSession(nise98, new RecordingOpnaDevice()));
+        Assert.Throws<ArgumentException>(() => new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), new RecordingOpnaDevice()));
     }
 
     private static ulong ClosedForm(ulong cpuCycle, uint cpuHz = CpuHz)
@@ -264,7 +264,7 @@ public sealed class ClockedNise98OpnaBridgeTests
 
     private static ClockedFmpExecutionSession Attach(Nise98Machine nise98, RecordingOpnaDevice device)
     {
-        var session = new ClockedFmpExecutionSession(nise98, device);
+        var session = new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), device);
         return session;
     }
 }

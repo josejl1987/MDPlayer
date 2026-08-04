@@ -41,20 +41,33 @@ public sealed class ClockedFmpExecutionSession : IDisposable
     private readonly ClockedNise98OpnaBridge _bridge;
 
     /// <summary>
-    /// Creates a clocked session over the given machine and OPNA device. The
-    /// machine must already have <see cref="Nise98.CpuClockFrequencyHz"/> set
-    /// from the active machine configuration (never hard-coded here).
+    /// Creates a clocked execution coordinator over the given machine, its
+    /// authoritative Nise286 CPU and the OPNA device.
+    ///
+    /// Explicit construction order (the renderer/boot path must follow it):
+    ///   1. construct <see cref="Nise98"/>;
+    ///   2. install the clocked OPNA port bridge (done here, below) so that
+    ///      any port I/O during the subsequent boot crosses the clocked path;
+    ///   3. call <see cref="Nise98.Init"/>, which creates the Nise286 CPU;
+    ///   4. obtain the authoritative <see cref="Nise286"/> from
+    ///      <see cref="Nise98.GetCPU"/>;
+    ///   5. construct this coordinator with that non-null CPU;
+    ///   6. boot the FMP driver (port I/O is now timestamped).
+    ///
+    /// The CPU is captured eagerly and is rejected when null — the session
+    /// never constructs with a yet-to-be-created CPU, so it can never fail
+    /// later from <c>ExecuteSlice()</c> with a <see cref="NullReferenceException"/>.
     /// </summary>
-    public ClockedFmpExecutionSession(Nise98 nise98, IClockedOpnaDevice device)
+    public ClockedFmpExecutionSession(Nise98 nise98, Nise286 cpu, IClockedOpnaDevice device)
     {
         _nise98 = nise98 ?? throw new ArgumentNullException(nameof(nise98));
+        _cpu = cpu ?? throw new ArgumentNullException(nameof(cpu));
         _device = device ?? throw new ArgumentNullException(nameof(device));
         if (nise98.CpuClockFrequencyHz == 0)
             throw new ArgumentException(
                 "ClockedFmpExecutionSession requires Nise98.CpuClockFrequencyHz set from the active machine configuration.",
                 nameof(nise98));
 
-        _cpu = nise98.GetCPU();
         _mapper = new NiseOpnaClockMapper(nise98.CpuClockFrequencyHz);
         _bridge = new ClockedNise98OpnaBridge(_mapper, device);
         nise98.OpnaPortHandler = _bridge;
@@ -117,6 +130,54 @@ public sealed class ClockedFmpExecutionSession : IDisposable
         // Idle advancement based on cycles actually executed.
         _device.AdvanceTo(_mapper.Map(_cpu.TotalCycles));
         return executed;
+    }
+
+    /// <summary>
+    /// Advances idle machine time to the given absolute CPU cycle in one
+    /// operation: the authoritative Nise286 cycle counter AND the native
+    /// YM2608 master clock move together through the mapper.
+    ///
+    /// This models elapsed machine time during which the rendering host did
+    /// NOT invoke driver code. It is NOT an executed instruction: no
+    /// instruction is fetched, no register is modified, no memory is touched
+    /// and no port I/O is performed. Only the authoritative machine-cycle
+    /// counter, the mapped OPNA master clock and the IRQ level change.
+    ///
+    /// Sequence (per the explicit idle-cycle contract):
+    ///   1. reject regression;
+    ///   2. advance the authoritative Nise286 cycle counter by the exact
+    ///      positive delta (no-op for an equal target);
+    ///   3. map the resulting absolute cycle through the existing
+    ///      <see cref="NiseOpnaClockMapper"/>;
+    ///   4. advance the native OPNA device to that mapped clock;
+    ///   5. sample the native IRQ at the resulting boundary through the
+    ///      existing interrupt-arbitration path;
+    ///   6. the pending IRQ stays set for the next real CPU-execution
+    ///      boundary (<see cref="ExecuteSlice"/> consumes it).
+    ///
+    /// The cycle counter stays owned by <see cref="Nise286"/> — the renderer
+    /// never carries a second counter or a renderer-side offset.
+    /// </summary>
+    internal void AdvanceIdleToCpuCycle(ulong absoluteCpuCycle)
+    {
+        // Reject regression; equal target is a no-op (both the CPU counter and
+        // the mapped OPNA clock are unchanged).
+        if (absoluteCpuCycle < _cpu.TotalCycles)
+            throw new ArgumentOutOfRangeException(
+                nameof(absoluteCpuCycle), absoluteCpuCycle,
+                $"Idle target CPU cycle regressed: {absoluteCpuCycle} < {_cpu.TotalCycles}");
+        if (absoluteCpuCycle == _cpu.TotalCycles)
+            return;
+
+        _cpu.AdvanceIdleToCpuCycle(absoluteCpuCycle);
+
+        // Map the resulting absolute cycle and advance the device.
+        ulong mapped = _mapper.Map(absoluteCpuCycle);
+        _device.AdvanceTo(mapped);
+
+        // Sample the native IRQ at the resulting boundary.
+        if (_device.IrqAsserted)
+            _cpu.interruptTrigger[OpnaIrqTriggerIndex] = true;
     }
 
     /// <summary>Disposes the owned clocked OPNA device.</summary>

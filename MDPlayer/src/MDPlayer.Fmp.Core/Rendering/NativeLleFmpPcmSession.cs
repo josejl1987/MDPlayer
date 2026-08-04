@@ -37,14 +37,10 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
     /// <summary>Startup wait reproduced from the legacy path (500 ms).</summary>
     private const int StartupWaitMs = 500;
 
-    /// <summary>Segment holding the CPU idle spin loop (above the 0xE000 driver stack).</summary>
-    private const ushort SpinSegment = 0xE800;
-
     private readonly FmpPlaybackContext _context;
     private readonly int _sampleRate;
     private readonly Nise98Machine _nise98;
     private readonly NativeOpnaDevice _device;
-    private readonly ClockedFmpExecutionSession _clocked;
     private readonly NisePpz8CommandMapper _ppz8Mapper;
     private readonly Ppz8OutputDelayBuffer _ppz8Delay;
     private readonly OpnaPpz8IntegerMixer _mixer;
@@ -57,6 +53,13 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
     private readonly List<(long Sample, int Port, int Address, int Data)> _ppz8Writes = new();
     private readonly List<(long Sample, int Bank, int Mode, byte[][] Pcm)> _ppz8Loads = new();
     private readonly Queue<(short Left, short Right)> _opnaFifo = new();
+
+    // The execution coordinator is created during Boot(), after Nise98.Init()
+    // has created the authoritative Nise286 CPU (explicit construction order):
+    // construct Nise98 → install clocked OPNA bridge → Init → obtain CPU →
+    // construct coordinator with that non-null CPU → boot the FMP driver. The
+    // coordinator must NEVER be constructed against a null CPU.
+    private ClockedFmpExecutionSession _clocked;
 
     private Register286 _regs;
     private int _step;
@@ -76,7 +79,6 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
         _nise98 = new Nise98Machine();
         _nise98.CpuClockFrequencyHz = CpuClockHz;
         _device = NativeOpnaDevice.Open(_sampleRate);
-        _clocked = new ClockedFmpExecutionSession(_nise98, _device);
         _ppz8Mapper = new NisePpz8CommandMapper(CpuClockHz, _sampleRate);
 
         _outputLatencyFrames = _device.OutputLatencyFrames;
@@ -125,6 +127,15 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             );
             _nise98.GetDos().FileSystem = _context.FileSystem;
 
+            // Explicit construction order: must obtain the authoritative CPU
+            // (created by Init) BEFORE constructing the execution coordinator.
+            // The coordinator rejects a null CPU, so it can never fail later
+            // from ExecuteSlice() with a NullReferenceException.
+            Nise286 cpu = _nise98.GetCPU()
+                ?? throw new InvalidOperationException(
+                    "Native FMP boot requires Nise98.Init to have created a CPU.");
+            _clocked = new ClockedFmpExecutionSession(_nise98, cpu, _device);
+
             string fmpComPath = _context.Assets.FmpComPath;
             _nise98.LoadRun(fmpComPath, "s -s -#42", 0x2000);
             _regs = _nise98.GetRegisters();
@@ -147,12 +158,6 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             _regs.SS = unchecked((short)0xE000);
             _regs.SP = 0x0000;
             _nise98.CallRunfunctionCall(0xd2, true, true, true, 10_000_000_000, 0);
-
-            // Idle spin loop: EB FE (jmp $) in free memory above the driver stack.
-            var mem = _nise98.GetMem();
-            int spinLinear = (SpinSegment << 4) + 0;
-            mem.PokeB(spinLinear, 0xEB);
-            mem.PokeB(spinLinear + 1, 0xFE);
 
             _booted = true;
         }
@@ -193,6 +198,9 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
 
     public int Render(Span<short> interleavedStereo)
     {
+        if (_clocked == null)
+            throw new InvalidOperationException("NativeLleFmpPcmSession.Render called before Boot().");
+
         if ((interleavedStereo.Length & 1) != 0)
             throw new ArgumentOutOfRangeException(nameof(interleavedStereo), "span length must be even");
 
@@ -208,6 +216,15 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
         {
             if (_termination.IsComplete(_position))
                 break;
+
+            // No-progress guard fixtures (authoritative state before this
+            // iteration); used only to prove the loop actually advanced.
+            ulong cpuBefore = _clocked.TotalCpuCycles;
+            ulong opnaBefore = _device.MasterClock;
+            long frameBefore = _position;
+            bool driverBefore = _driverActive;
+            int loopBefore = _currentLoop;
+            bool endedBefore = _playbackEnded;
 
             if (_waitDone)
             {
@@ -243,9 +260,12 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
                 _waitDone = _position + 1 >= _waitSamples;
             }
 
-            // Advance the device by exactly one output sample of master clock,
-            // so the drain yields exactly this output frame (latency is inside
-            // the resampler; PPZ8 is delayed by the same amount for alignment).
+            // Advance idle machine time to this sample's output-frame boundary.
+            // Both the authoritative Nise286 cycle counter and the mapped OPNA
+            // master clock move together through the clocked coordinator — no
+            // CPU instruction is executed, no register/memory is touched, no
+            // port I/O is performed. If the machine has already passed this
+            // boundary, this is a no-op (never move either timeline backward).
             AdvanceToSampleBoundary(_position + 1);
 
             // Drain whatever the device has produced up to this clock.
@@ -285,33 +305,50 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
             interleavedStereo[produced * 2 + 1] = right;
             produced++;
             _position++;
+
+            // No-progress guard: if NOTHING advanced (CPU cycles, OPNA clock,
+            // output frame, driver state) during this iteration, throw. The
+            // message carries exactly these before/after values; the loop is
+            // never retried or slept through.
+            if (cpuBefore == _clocked.TotalCpuCycles
+                && opnaBefore == _device.MasterClock
+                && frameBefore == _position
+                && driverBefore == _driverActive
+                && loopBefore == _currentLoop
+                && endedBefore == _playbackEnded)
+            {
+                throw new NativeFmpNoProgressException(
+                    $"cpu:{cpuBefore}->{_clocked.TotalCpuCycles}; " +
+                    $"opna:{opnaBefore}->{_device.MasterClock}; " +
+                    $"frame:{frameBefore}->{_position}; " +
+                    $"driver:{driverBefore}->{_driverActive}; " +
+                    $"loop:{loopBefore}->{_currentLoop}; " +
+                    $"ended:{endedBefore}->{_playbackEnded}");
+            }
         }
 
         return produced;
     }
 
+    private static ulong MapOutputFrameToCpuCycle(long absoluteOutputFrame, int sampleRate)
+        => (ulong)(((UInt128)(ulong)absoluteOutputFrame * CpuClockHz + (ulong)sampleRate - 1) / (ulong)sampleRate);
+
     private void AdvanceToSampleBoundary(long sample)
     {
         if (sample < 0) return;
-        ulong targetClock = (ulong)((UInt128)sample * NiseOpnaClockMapper.Ym2608MasterClockHz / (ulong)_sampleRate);
-        ulong current = _device.MasterClock;
-        if (targetClock <= current)
+        ulong target = MapOutputFrameToCpuCycle(sample, _sampleRate);
+        // If the CPU (authoritative Nise286 cycles) has already executed past
+        // this output boundary — e.g. the driver's one-frame routine advanced
+        // real cycles during a frame call — do nothing. Never move either
+        // timeline backward. The coordinator itself rejects regression, so the
+        // renderer never hands it a retrograde target.
+        if (target <= _clocked.TotalCpuCycles)
             return;
-
-        // Execute a pure CPU spin loop so cycles actually executed keep the
-        // device clock in sync (driver writes inside frame calls are then
-        // timestamped at or after the device's current time).
-        ulong deltaCycles = (ulong)(((UInt128)(targetClock - current) * CpuClockHz) / NiseOpnaClockMapper.Ym2608MasterClockHz) + 1;
-        _regs.CS = unchecked((short)SpinSegment);
-        _regs.IP = 0;
-        while (deltaCycles > 0)
-        {
-            int chunk = (int)Math.Min(deltaCycles, 1_000_000);
-            _clocked.ExecuteSlice(chunk);
-            deltaCycles -= (ulong)chunk;
-        }
-        // Snap to the exact boundary clock (monotonic; never goes backward).
-        _device.AdvanceTo(targetClock);
+        // Advance idle machine time to this boundary: both the authoritative
+        // cycle counter and the mapped OPNA master clock move together through
+        // the coordinator. No CPU instruction is executed, no register/memory
+        // is touched, no port I/O is performed.
+        _clocked.AdvanceIdleToCpuCycle(target);
     }
 
     /// <summary>
@@ -374,7 +411,12 @@ internal sealed class NativeLleFmpPcmSession : IFmpPcmSession
     public void Dispose()
     {
         try { _ppz8.Stop(0); } catch { }
-        // The clocked session owns and disposes the native device.
-        _clocked.Dispose();
+        // The clocked session owns and disposes the native device. It is only
+        // created during Boot() (after Init), so guard for the not-yet-booted
+        // case and dispose the device directly then.
+        if (_clocked != null)
+            _clocked.Dispose();
+        else
+            _device.Dispose();
     }
 }

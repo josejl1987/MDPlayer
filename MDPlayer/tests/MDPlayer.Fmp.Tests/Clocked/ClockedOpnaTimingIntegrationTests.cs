@@ -55,7 +55,7 @@ public sealed class ClockedOpnaTimingIntegrationTests
 
         var nise98 = BuildMachine();
         LoadProgram(nise98, BuildProgram(advanceLoopIterations: 4));
-        using var session = new ClockedFmpExecutionSession(nise98, device);
+        using var session = new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), device);
 
         int executed = session.ExecuteSlice(1_000);
         // 6 instructions per register write, plus NOPs and HLT.
@@ -106,7 +106,7 @@ public sealed class ClockedOpnaTimingIntegrationTests
         var nise98 = BuildMachine();
         LoadProgram(nise98, BuildProgram(advanceLoopIterations: 100_000));
         using var device = NativeOpnaDevice.Open(44_100);
-        using var session = new ClockedFmpExecutionSession(nise98, device);
+        using var session = new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), device);
 
         session.ExecuteSlice(2_000_000);
 
@@ -208,7 +208,7 @@ public sealed class ClockedOpnaTimingIntegrationTests
         var nise98 = BuildMachine();
         LoadProgram(nise98, BuildProgram(advanceLoopIterations: 100_000));
         using var device = NativeOpnaDevice.Open(44_100);
-        using var session = new ClockedFmpExecutionSession(nise98, device);
+        using var session = new ClockedFmpExecutionSession(nise98, nise98.GetCPU(), device);
 
         int executed;
         do
