@@ -153,10 +153,11 @@ public class OpnaBackendCliTests
             try
             {
                 var outcome = new TrackRenderer().Render(prepared, outPath, settings);
-                // The option reached the native session (fail-closed cadence
-                // error) instead of silently rendering via MDSound.
+                // The option reached the native session (it fails deterministically
+                // after booting the real FMP driver — no longer on the fixed-cadence
+                // profile, which the status-read fix corrected) instead of silently
+                // rendering via MDSound. No partial WAV is left behind.
                 Assert.False(outcome.Success);
-                Assert.Contains("fixed-cadence", outcome.LastError);
                 Assert.False(File.Exists(outPath));
             }
             finally

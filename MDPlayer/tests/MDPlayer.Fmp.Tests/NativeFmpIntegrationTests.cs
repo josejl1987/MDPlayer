@@ -8,13 +8,13 @@ namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
 /// Real-FMP native-LLE integration. The native session boots the real FMP
-/// driver through the clocked Nise98 path. The current native fixed-cadence
-/// profile (144 master clocks per stereo frame, ABI v1) is not compatible with
-/// the FMP driver's boot sequence — the driver polls the OPNA status
-/// registers, which perturbs the LLE serial frame phase — so the contract
-/// verified here is fail-closed: the render reports a clear, deterministic
-/// error and never falls back to the MDSound path. Requires the built native
-/// library and the FMP.COM + track fixtures; tests skip when absent.
+/// driver through the clocked Nise98 path. After the Prompt-8.1 status-read
+/// cadence correction, the driver BOOTS successfully (no cadence perturbation),
+/// so the render proceeds and fails deterministically on the emulator's next
+/// unimplemented opcode. The contract verified here is fail-closed: the render
+/// reports a clear, deterministic error and never falls back to the MDSound
+/// path. Requires the built native library and the FMP.COM + track fixtures;
+/// tests skip when absent.
 /// </summary>
 public class NativeFmpIntegrationTests
 {
@@ -102,11 +102,12 @@ public class NativeFmpIntegrationTests
         try
         {
             // Fail-closed: explicit error, never a silent MDSound render, and
-            // no partial WAV left behind.
+            // no partial WAV left behind. After the status-read cadence fix the
+            // FMP driver BOOTS successfully, so the render fails deterministically
+            // on the emulator's next unimplemented opcode rather than on cadence.
             Assert.False(result.Success);
             Assert.Equal("error", result.StopReason);
             Assert.False(string.IsNullOrEmpty(result.LastError));
-            Assert.Contains("fixed-cadence", result.LastError);
             Assert.False(File.Exists(path));
         }
         finally
@@ -181,9 +182,9 @@ public class NativeFmpIntegrationTests
     [Fact]
     public void Native_OutputLength_MatchesRequest()
     {
-        // Even when the boot fails, the render reports the failure without
-        // fabricating output: the session never produces partial output on a
-        // failed boot.
+        // The render reports the failure without fabricating output: the session
+        // never produces partial output, whether on a boot failure or on the
+        // deterministic emulator limitation encountered after a successful boot.
         var (available, ovi, _) = Fixtures();
         if (!available) return;
         using var lib = UseNativeLibrary();
