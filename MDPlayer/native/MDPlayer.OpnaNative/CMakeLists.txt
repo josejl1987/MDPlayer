@@ -325,3 +325,25 @@ target_link_libraries(mdplayer_opna_resampler_test PRIVATE mdplayer_opna)
 add_test(NAME mdplayer_opna_resampler_test COMMAND mdplayer_opna_resampler_test)
 set_tests_properties(mdplayer_opna_resampler_test PROPERTIES RUN_SERIAL ON)
 
+
+# ---------------------------------------------------------------------------
+# Prompt 8.1: status-read cadence regression.
+# A status read must be cadence-neutral: no master-clock advance, no serial
+# decoder run, no dropped frame. Verifies raw 144-clock frame cadence with and
+# without bank-0/bank-1/dense status polling at every phase of the frame period.
+# ---------------------------------------------------------------------------
+add_executable(mdplayer_opna_status_cadence_test tests/status_cadence_test.c)
+target_include_directories(mdplayer_opna_status_cadence_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(mdplayer_opna_status_cadence_test PRIVATE mdplayer_opna)
+
+foreach(status_case
+        baseline_cadence_144
+        bank0_reads_keep_144
+        bank1_reads_keep_144
+        dense_polling_keep_144)
+    add_test(NAME ${status_case}
+             COMMAND mdplayer_opna_status_cadence_test -t ${status_case})
+    set_tests_properties(${status_case} PROPERTIES RUN_SERIAL ON)
+endforeach()

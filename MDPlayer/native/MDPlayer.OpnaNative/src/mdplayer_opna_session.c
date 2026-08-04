@@ -86,27 +86,6 @@ static bool clock_pair(OpnaLle *ctx, int16_t *l, int16_t *r)
 }
 
 /*
- * Clock one low/high pair WITHOUT driving the write bus. Used to complete a
- * pin-level status read transaction so that the pre-driven read pins (rd/cs
- * asserted, a1/bank select) are not overwritten by a queued write opportunity.
- * Mirrors clock_pair in every other respect (master_clock advance, ADPCM bus,
- * serial decode).
- */
-static bool clock_pair_read(OpnaLle *ctx)
-{
-    fmopna_t *chip = &ctx->core;
-
-    FMOPNA_Clock(chip, 0);
-    FMOPNA_Clock(chip, 1);
-    ctx->master_clock++;
-    opna_lle_adpcm_clock(&ctx->adpcm, chip, ctx->mem_config);
-
-    int16_t l, r;
-    (void)l; (void)r;
-    return opna_lle_serial_clock(&ctx->serial, chip, &l, &r);
-}
-
-/*
  * Advance the adapter and, per completed frame, run the cadence guard. Queues
  * each completed stereo frame with the session FIFO. Returns an error if the
  * foo overflow happens, or if the cadence guard latches unsupported cadence
@@ -378,39 +357,53 @@ int mdp_opna_write_register(mdp_opna_session *session,
 }
 
 /*
- * Perform a pin-level status read: CS asserted, RD asserted, WR deasserted,
- * A0 low (status), A1 = bank. Run one complete low/high clock pair so the core
- * latches read_bus -> o_data, capture the output data bus, then return the bus
- * to idle (cs=1, rd=1, a0=0, a1=0). The requested_master_clock is the earliest
- * transaction time; the session clock advances by the read clock pairs.
+ * Perform a pin-level status read combinationally, WITHOUT advancing the
+ * master clock and WITHOUT running the serial decoder or the write bus.
+ *
+ * Reading status is asynchronous to the FM clock on the real YM2608: the CPU
+ * asserts CS+RD and the chip drives the status byte onto the data bus without
+ * consuming any FM master-clock edges. Clocking the real chip here would (a)
+ * silently advance the session clock past the requested timestamp, and (b)
+ * run the serial decoder — possibly discarding a PCM frame that completes on
+ * that pair, breaking the fixed 144-clock cadence. Both are unacceptable.
+ *
+ * To stay byte-faithful to the vendored core, we evaluate the status on a
+ * transient COPY of the core: we copy the latched chip state, apply the read
+ * pins, run FMOPNA_Clock on the copy (it computes read_bus -> o_data exactly
+ * as the production path does), and read o_data back. The real core, the real
+ * serial decoder, the write-bus scheduler, the FIFO and the session clock are
+ * all left untouched, so:
+ *   - the session clock remains exactly at `requested_master_clock`;
+ *   - no serial frame is produced or discarded during the read;
+ *   - timer / IRQ / busy latched state is preserved.
+ *
+ * A few-KB copy per status read is fine: status polls are not on the per-frame
+ * audio hot path (the FMP driver polls a handful of times per frame).
  */
 static int do_status_read(mdp_opna_session *session, uint8_t bank,
                           uint8_t *out_value)
 {
     OpnaLle *ctx = &session->lle;
-    fmopna_t *chip = &ctx->core;
+    fmopna_t snapshot = ctx->core;
 
-    /* Drive the read pins: cs=0, rd=0, wr=1, a0=0, a1=bank. */
-    chip->input.cs = 0;
-    chip->input.rd = 0;
-    chip->input.wr = 1;
-    chip->input.a0 = 0;
-    chip->input.a1 = (bank != 0) ? 1 : 0;
-    chip->input.data = 0;
+    /* Drive the read pins on the snapshot: cs=0, rd=0, wr=1, a0=0, a1=bank.
+     * Mirror the exact selectors the core evaluates:
+     *   bank 0 (a1=0,a0=0) -> read0  : busy, timer A, timer B
+     *   bank 1 (a1=1,a0=0) -> read2  : busy, timer A, timer B, EOS, BRDY,
+     *                                   zero, ADPCM-B start (0x10/0x20 etc.) */
+    snapshot.input.cs = 0;
+    snapshot.input.rd = 0;
+    snapshot.input.wr = 1;
+    snapshot.input.a0 = 0;
+    snapshot.input.a1 = (bank != 0) ? 1 : 0;
+    snapshot.input.data = 0;
 
-    /* One complete low/high pair latches read_bus -> o_data and advances the
-     * adapter (ADPCM bus, serial decoder) in lock-step. Uses clock_pair_read so
-     * the driven read pins are not overwritten by a queued write opportunity. */
-    clock_pair_read(ctx);
+    /* Run one complete low/high pair on the copy so the core computes
+     * read_bus -> o_data. Only the snapshot is mutated; it is discarded. */
+    FMOPNA_Clock(&snapshot, 0);
+    FMOPNA_Clock(&snapshot, 1);
 
-    /* Return the bus to idle. The core computed read_bus during the pair and
-     * o_data now mirrors it. */
-    chip->input.cs = 1;
-    chip->input.rd = 1;
-    chip->input.a0 = 0;
-    chip->input.a1 = 0;
-
-    *out_value = (uint8_t)(chip->o_data & 0xff);
+    *out_value = (uint8_t)(snapshot.o_data & 0xff);
     return MDP_OPNA_OK;
 }
 
