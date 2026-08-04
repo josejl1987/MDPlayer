@@ -45,9 +45,9 @@ internal class FmpRenderer
         public string TracePath { get; set; } = null;
 
         /// <summary>
-        /// OPNA execution backend. Defaults to the existing MDSound host-PCM
-        /// path (byte-identical to the pre-backend branch). NativeLle opts into
-        /// the clocked native YM2608 session and never falls back.
+        /// OPNA audio backend. Defaults to the existing MDSound host-PCM
+        /// path (byte-identical to the pre-backend branch). NativeAudio opts into
+        /// the trace-driven native YM2608 replay session and never falls back.
         /// </summary>
         public FmpOpnaBackend OpnaBackend { get; set; } = FmpOpnaBackend.Mdsound;
     }
@@ -91,7 +91,7 @@ internal class FmpRenderer
             return result;
         }
 
-        if (opts.OpnaBackend == FmpOpnaBackend.NativeLle)
+        if (opts.OpnaBackend == FmpOpnaBackend.NativeAudio)
             return RenderToWavNative(trackData, trackFileName, outputWavPath, opts);
 
         // Optional trace writer — opened BEFORE Initialize to capture boot events
@@ -332,7 +332,7 @@ internal class FmpRenderer
             TailSeconds: opts.TailSeconds,
             MaxDurationSeconds: opts.MaxDurationSeconds);
 
-        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, context);
+        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context);
 
         long totalSamples = 0;
         long maxSamples = checked((long)Math.Ceiling((opts.MaxDurationSeconds ?? 3600.0) * _sampleRate));

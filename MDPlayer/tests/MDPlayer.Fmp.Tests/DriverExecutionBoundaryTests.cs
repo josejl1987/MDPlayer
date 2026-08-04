@@ -6,26 +6,19 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Source-boundary guard for the final-cycle synchronization invariant: every
-/// real Nise98 (FMP driver) CPU execution on the native LLE rendering path must
-/// flow through the clocked coordinator (<c>ClockedFmpExecutionSession</c>) so
-/// the native OPNA device is always advanced to the final mapped CPU cycle after
-/// a call. The coordinator (in Nise98/) is the single sanctioned owner of raw
-/// driver execution; the native renderer itself must not call
-/// <c>CallRunfunctionCall</c> / <c>StepExecute</c> directly.
+/// Source-boundary guard for the native-audio rendering path: the NativeAudio
+/// replay session must NEVER execute the FMP driver or a Nise286 instruction
+/// directly. All driver execution happens only in Pass 1 via the legacy
+/// MDSound runtime; Pass 2 is a pure offline native replay. Consequently the
+/// production native-audio session file must not call the raw Nise98 driver
+/// API (<c>CallRunfunctionCall</c> / <c>StepExecute</c>) at all.
 ///
-/// The legacy MDSound engine (FmpRuntime/LegacyMdsoundFmpPcmSession) is
-/// intentionally out of scope: it remains the unchanged default and keeps its
-/// own execution path.
+/// The legacy MDSound engine (FmpRuntime/LegacyMdsoundFmpPcmSession) remains
+/// the unchanged default and keeps its own execution path.
 /// </summary>
 public sealed class DriverExecutionBoundaryTests
 {
-    const string NativeSessionFile = "NativeLleFmpPcmSession.cs";
-    const string CoordinatorFile = "ClockedFmpExecutionSession.cs";
-    // The coordinator (which routes every native driver call) declares its raw
-    // usage; everything outside it must not. Reference it so a rename of the
-    // coordinator type keeps this guard honest.
-    string[] AllowedRawFiles = { CoordinatorFile };
+    const string NativeSessionFile = "NativeAudioFmpPcmSession.cs";
 
     [Fact]
     public void NativeRenderer_DoesNotExecuteDriverDirectly()
@@ -40,12 +33,12 @@ public sealed class DriverExecutionBoundaryTests
         {
             Assert.False(
                 File.ReadAllLines(nativeSession).Any(line => line.Contains(raw) && !line.TrimStart().StartsWith("//")),
-                $"'Rendering/{NativeSessionFile}' should not call the raw Nise98 API ({raw}); it must go through the clocked coordinator.");
+                $"'Rendering/{NativeSessionFile}' must never call the raw Nise98 API ({raw}); Pass 1 uses the legacy MDSound runtime and Pass 2 is a pure native replay.");
         }
     }
 
     [Fact]
-    public void AllRawCalls_LiveOnlyInTheCoordinator()
+    public void AllRawCalls_LiveOnlyInTheLegacyAndRuntime()
     {
         var coreDir = LocateSourceDir("MDPlayer.Fmp.Core");
         var rawFiles = Directory.EnumerateFiles(coreDir, "*.cs", SearchOption.AllDirectories)
@@ -54,9 +47,9 @@ public sealed class DriverExecutionBoundaryTests
             .Distinct()
             .ToList();
 
-        // CallRunfunctionCall is legitimate in: the Nise98 runtime itself (it
-        // defines it), the coordinator (routing), the legacy FMP runtime, and
-        // the PPZ8 module. The production NATIVE renderer must not be among them.
+        // CallRunfunctionCall is legitimate only in the Nise98 runtime (which
+        // defines and routes it) and the legacy FMP runtime used by Pass 1. The
+        // production native-audio rerenderter must not be among the callers.
         Assert.DoesNotContain(NativeSessionFile, rawFiles);
     }
 

@@ -1,16 +1,18 @@
 namespace Fmp.Core.Rendering;
 
 /// <summary>
-/// OPNA execution backend for the FMP host-PCM path. <see cref="Mdsound"/> is
-/// the existing default (byte-identical to the pre-backend branch);
-/// <see cref="NativeLle"/> opts into the clocked native YM2608-LLE session.
-/// The default serialized/CLI value must remain <see cref="Mdsound"/>.
+/// OPNA audio backend for the FMP host-PCM path. <see cref="Mdsound"/> is the
+/// existing byte-identical default; <see cref="NativeAudio"/> replays a
+/// deterministic control capture through the native YM2608 device and the
+/// shared PPZ8 renderer. There is deliberately no fallback and no "auto"
+/// selection. The default MDSound value (0) is unchanged so old serialized
+/// configs keep selecting MDSound.
 /// </summary>
 internal enum FmpOpnaBackend
 {
     /// <summary>Existing MDSound host-PCM path (default, unchanged).</summary>
     Mdsound = 0,
 
-    /// <summary>Clocked native YM2608-LLE session; never falls back to MDSound.</summary>
-    NativeLle = 1,
+    /// <summary>Trace-driven native YM2608 audio replay; never falls back.</summary>
+    NativeAudio = 1,
 }

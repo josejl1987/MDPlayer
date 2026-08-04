@@ -2,9 +2,9 @@ namespace Fmp.Core.Rendering;
 
 /// <summary>
 /// Narrow factory at the FMP host-PCM-session boundary. Selects the explicit
-/// execution path: <see cref="FmpOpnaBackend.Mdsound"/> returns the existing
-/// legacy MDSound implementation; <see cref="FmpOpnaBackend.NativeLle"/> returns
-/// the native clocked-YM2608 session.
+/// backend: <see cref="FmpOpnaBackend.Mdsound"/> returns the existing legacy
+/// MDSound implementation; <see cref="FmpOpnaBackend.NativeAudio"/> returns the
+/// trace-driven native YM2608 replay session.
 ///
 /// The factory only ever constructs the requested backend: it never probes or
 /// loads the native library for MDSound, and it never catches a native
@@ -18,7 +18,7 @@ internal static class FmpPcmSessionFactory
         return backend switch
         {
             FmpOpnaBackend.Mdsound => new LegacyMdsoundFmpPcmSession(context),
-            FmpOpnaBackend.NativeLle => new NativeLleFmpPcmSession(context),
+            FmpOpnaBackend.NativeAudio => new NativeAudioFmpPcmSession(context),
             _ => throw new ArgumentOutOfRangeException(nameof(backend), backend, "unknown FMP OPNA backend"),
         };
     }

@@ -7,26 +7,12 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Real-FMP native-LLE integration. The native session boots the real FMP
-/// driver through the clocked Nise98 path. After Prompt 8.3 implemented the
-/// complete short-conditional-jump family (0x70–0x7F), the driver boots past
-/// opcode 0x7C without a NotImplementedException and renders bounded frames
-/// with no fallback to MDSound.
-///
-/// Workstream I verified here (Stages 1 & 2):
-///   * driver boot succeeds — no cadence error, no NullReferenceException, no
-///     clock regression, no NotImplementedException for 0x70–0x7F;
-///   * bounded renders (1 / 7 / 64 / 257 frames) return within the test
-///     timeout with monotonic CPU cycles, monotonic OPNA master clock and
-///     monotonic output frame position — and no fallback.
-///
-/// Stage 3 (multi-second render with nonzero PCM) is documented as a
-/// remaining limitation: the native session's idle timeline races far ahead of
-/// the output frame position once the 500 ms startup gate is crossed, so a
-/// full-length render cannot be completed within a practical test timeout.
-/// That runaway is native-session OPNA/IRQ-clock behaviour outside the
-/// short-conditional-jump scope (and the prompt forbids altering native OPNA
-/// timing), so it is reported rather than patched.
+/// Real-FMP native-audio integration. The <see cref="NativeAudioFmpPcmSession"/>
+/// runs the existing legacy MDSound (FMP) path to completion as Pass 1, then
+/// replays the captured register trace through the native YM2608 device and the
+/// shared PPZ8 renderer (Pass 2). These tests prove the two-pass backend boots,
+/// renders to completion with nonzero deterministic PCM, and that the native
+/// device output-latency fixture remains correct.
 ///
 /// Requires the built native library and the FMP.COM + track fixtures; tests
 /// skip when absent.
@@ -88,107 +74,91 @@ public class NativeFmpIntegrationTests
         return (File.Exists(fmp) && ovi != null && NativeLibrary() != null, ovi, fmp);
     }
 
-    private static NativeLleFmpPcmSession OpenNativeSession(string ovi, double maxSeconds)
+    private static byte[] RenderAllToPcm(string ovi, int sampleRate = 44_100)
     {
         var context = new FmpPlaybackContext(
             File.ReadAllBytes(ovi),
             Path.GetFileName(ovi),
             new FmpRuntimeAssets(Path.Combine(AppContext.BaseDirectory, "FMP.COM")),
             new FmpFileSystem(new[] { Path.GetDirectoryName(ovi) }),
-            44100,
+            sampleRate,
             SsgGainDb: 0,
             LoopCount: 1,
             FadeSeconds: 0.0,
             TailSeconds: 0.0,
-            MaxDurationSeconds: maxSeconds);
-        var sessionBase = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, context);
-        sessionBase.LoadTrack(File.ReadAllBytes(ovi), Path.GetFileName(ovi));
-        sessionBase.Boot();
-        return (NativeLleFmpPcmSession)sessionBase;
-    }
+            MaxDurationSeconds: 8.0);
 
-    // ---- Stage 1: boot past the short-Jcc family ----
+        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context);
+        session.LoadTrack(File.ReadAllBytes(ovi), Path.GetFileName(ovi));
+        session.Boot();
 
-    [Fact]
-    public void Native_Boot_SucceedsPastJccFamily_NoNotImplemented()
-    {
-        var (available, ovi, _) = Fixtures();
-        if (!available) return;
-        using var lib = UseNativeLibrary();
-
-        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
-        // Boot returning without exception proves the driver executed past the
-        // previously-failing opcode 0x7C (and its sibling 0x70–0x7F) without a
-        // NotImplementedException, cadence error, NRE or clock regression.
-        Assert.NotNull(session);
-    }
-
-    // ---- Stage 2: bounded renders (1 / 7 / 64 / 257 frames) ----
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(7)]
-    [InlineData(64)]
-    [InlineData(257)]
-    public void BoundedRender_Frames_MonotonicAndNonFallback(int frames)
-    {
-        var (available, ovi, _) = Fixtures();
-        if (!available) return;
-        using var lib = UseNativeLibrary();
-
-        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
-        var buf = new short[frames * 2];
-        int produced = 0;
-        while (produced < frames)
+        var buffer = new List<byte>();
+        var scratch = new short[4096 * 2];
+        long totalFrames = 0;
+        int guard = 0;
+        int chunkFrames = scratch.Length / 2;
+        while (!session.IsCompleted)
         {
-            int chunk = Math.Min(64, frames - produced);
-            int n = session.Render(buf.AsSpan(produced * 2, chunk * 2));
-            Assert.True(n > 0, $"bounded render produced no frames at {frames}-frame target");
-            produced += n;
+            int n = session.Render(scratch);
+            if (n <= 0)
+            {
+                if (++guard > 4) throw new InvalidOperationException("native-audio render made no progress");
+                break;
+            }
+            guard = 0;
+            totalFrames += n;
+            var chunk = new byte[n * 4];
+            Buffer.BlockCopy(scratch, 0, chunk, 0, chunk.Length);
+            buffer.AddRange(chunk);
+            if (totalFrames > 8_000_000) break; // safety
         }
-        Assert.Equal(frames, produced);
-
-        // The native session + clocked coordinator enforce monotonic/regression
-        // contracts internally (a regressed CPU cycle, OPNA master clock or
-        // output frame position throws via the no-progress guard); reaching a
-        // full bounded render proves all three stayed monotonic and no fallback
-        // was invoked.
-    }
-
-    // ---- same-platform determinism over the boot + bounded-render path ----
-
-    [Fact]
-    public void Native_BootAndBoundedRender_SamePlatformDeterministic()
-    {
-        var (available, ovi, _) = Fixtures();
-        if (!available) return;
-        using var lib = UseNativeLibrary();
-
-        byte[] p1 = RenderBoundedToPcm(ovi, frames: 1);
-        byte[] p2 = RenderBoundedToPcm(ovi, frames: 1);
-        Assert.Equal(Sha256(p1), Sha256(p2));
-    }
-
-    private static byte[] RenderBoundedToPcm(string ovi, int frames)
-    {
-        using var session = OpenNativeSession(ovi, maxSeconds: 3600);
-        var buf = new short[frames * 2];
-        int produced = 0;
-        while (produced < frames)
-        {
-            int n = session.Render(buf.AsSpan(produced * 2, (frames - produced) * 2));
-            Assert.True(n > 0, "bounded render produced no frames");
-            produced += n;
-        }
-        var result = new byte[frames * 4];
-        Buffer.BlockCopy(buf, 0, result, 0, result.Length);
-        return result;
+        return buffer.ToArray();
     }
 
     private static string Sha256(byte[] data) =>
         Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 
-    // ---- native device latency fixture (kept green) ----
+    [Fact]
+    public void Native_Boot_RunsCaptureAndBuildsReplayState()
+    {
+        var (available, ovi, _) = Fixtures();
+        if (!available) return;
+        using var lib = UseNativeLibrary();
+
+        var context = new FmpPlaybackContext(
+            File.ReadAllBytes(ovi), Path.GetFileName(ovi),
+            new FmpRuntimeAssets(Path.Combine(AppContext.BaseDirectory, "FMP.COM")),
+            new FmpFileSystem(new[] { Path.GetDirectoryName(ovi) }),
+            44100, SsgGainDb: 0, LoopCount: 1, FadeSeconds: 0.0, TailSeconds: 0.0,
+            MaxDurationSeconds: 4.0);
+        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context);
+        session.LoadTrack(File.ReadAllBytes(ovi), Path.GetFileName(ovi));
+        session.Boot();
+        Assert.Equal(44100, session.OutputSampleRate);
+    }
+
+    [Fact]
+    public void Native_FullRender_NonzeroDeterministicPcm()
+    {
+        var (available, ovi, _) = Fixtures();
+        if (!available) return;
+        using var lib = UseNativeLibrary();
+
+        byte[] pcm = RenderAllToPcm(ovi);
+        Assert.NotEmpty(pcm);
+
+        // Nonzero: a real FMP track must produce actual audio, not silence.
+        bool nonZero = false;
+        for (int i = 0; i < pcm.Length; i += 2)
+        {
+            if (pcm[i] != 0 || pcm[i + 1] != 0) { nonZero = true; break; }
+        }
+        Assert.True(nonZero, "native-audio render produced silent PCM");
+
+        // Same-platform determinism: two independent replay sessions agree.
+        byte[] again = RenderAllToPcm(ovi);
+        Assert.Equal(Sha256(pcm), Sha256(again));
+    }
 
     [Fact]
     public void Native_DeviceLatency_IsFixedAndQueried()

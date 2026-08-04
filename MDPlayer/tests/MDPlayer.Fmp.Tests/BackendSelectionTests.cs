@@ -35,13 +35,13 @@ public class BackendSelectionTests
     }
 
     [Fact]
-    public void Factory_NativeLle_ReturnsNativeSession()
+    public void Factory_NativeAudio_ReturnsNativeSession()
     {
         string lib = RequireNativeLibrary();
         using var restore = SetNativeLibrary(lib);
 
-        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, NewContext());
-        Assert.Contains("NativeLleFmpPcmSession", session.GetType().Name);
+        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, NewContext());
+        Assert.Contains("NativeAudioFmpPcmSession", session.GetType().Name);
         Assert.Equal(44100, session.OutputSampleRate);
     }
 
@@ -60,7 +60,7 @@ public class BackendSelectionTests
         // The default serialized value must remain 0 (Mdsound) so old configs
         // keep rendering identically.
         Assert.Equal(0, (int)FmpOpnaBackend.Mdsound);
-        Assert.Equal(1, (int)FmpOpnaBackend.NativeLle);
+        Assert.Equal(1, (int)FmpOpnaBackend.NativeAudio);
         Assert.Equal(2, Enum.GetNames<FmpOpnaBackend>().Length);
     }
 
@@ -74,7 +74,7 @@ public class BackendSelectionTests
 
         Assert.ThrowsAny<Exception>(() =>
         {
-            using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeLle, NewContext());
+            using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, NewContext());
         });
     }
 
@@ -150,7 +150,7 @@ public class BackendSelectionTests
             TailSeconds = 0.1,
             MaxDurationSeconds = 1.0,
             TracePath = Path.Combine(Path.GetTempPath(), "native-trace.jsonl"),
-            OpnaBackend = FmpOpnaBackend.NativeLle,
+            OpnaBackend = FmpOpnaBackend.NativeAudio,
         };
 
         var result = renderer.RenderToWav(Array.Empty<byte>(), "x.ovi", outPath, opts);
