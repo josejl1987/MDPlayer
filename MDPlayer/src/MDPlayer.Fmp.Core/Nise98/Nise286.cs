@@ -56,6 +56,17 @@ namespace Fmp.Core.Nise98
         /// <summary>CPU clock frequency from the active Nise98 machine configuration.</summary>
         public uint ClockFrequencyHz => machine.CpuClockFrequencyHz;
 
+        /// <summary>
+        /// Resets CPU state for a fresh run: cycle counter back to origin,
+        /// halt cleared, pending interrupt triggers cleared.
+        /// </summary>
+        public void Reset()
+        {
+            _totalCycles = 0;
+            hltSW = false;
+            interruptTrigger = new bool[24];
+        }
+
         public Nise286(Nise98 machine)
         {
             this.regs = machine.GetRegisters();

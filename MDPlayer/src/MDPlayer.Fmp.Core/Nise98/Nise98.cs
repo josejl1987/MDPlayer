@@ -183,6 +183,40 @@ namespace Fmp.Core.Nise98
             return cpu;
         }
 
+        /// <summary>
+        /// Resets the machine for a fresh run (coordinator reset order, step 1):
+        /// the CPU returns to origin (cycle counter zero, halt cleared, pending
+        /// interrupt triggers cleared). The legacy YM2608 board state (address
+        /// latches, ADPCM pointers, busy flags) is reset separately by
+        /// <see cref="ResetOpnaPortState"/>.
+        /// </summary>
+        public void Reset()
+        {
+            cpu.Reset();
+        }
+
+        /// <summary>
+        /// Resets the YM2608 port-side state that the clocked bridge keeps
+        /// independent of the native chip: bank-0 and bank-1 address latches,
+        /// ADPCM pointers and busy flags. Never touches the native device and
+        /// never clears external ADPCM RAM (that stays separate from an
+        /// ordinary chip reset).
+        /// </summary>
+        public void ResetOpnaPortState()
+        {
+            foreach (fmStatus fs in new[] { fmReg088, fmReg188, fmReg288, fmReg388 })
+            {
+                if (fs == null) continue;
+                fs.p88lastAdr = 0;
+                fs.p8clastAdr = 0;
+                fs.IsBusy = false;
+                fs.IsTimerAOverFlow = false;
+                fs.IsTimerBOverFlow = true;
+                fs.AdpcmPtr = 0;
+                fs.AdpcmReadMode = false;
+            }
+        }
+
         public void UserINT(UserInt ui)
         {
             cpu.AddUserInt(ui);
