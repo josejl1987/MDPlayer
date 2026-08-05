@@ -82,7 +82,15 @@ static bool clock_pair(OpnaLle *ctx, int16_t *l, int16_t *r)
     if (can_write)
         opna_lle_bus_settle(ctx);
 
-    return opna_lle_serial_clock(&ctx->serial, chip, l, r);
+    int16_t left_serial = 0, right_serial = 0;
+    if (!opna_lle_serial_clock(&ctx->serial, chip, &left_serial, &right_serial))
+        return false;
+
+    /* Fold the SSG analogue into this completed frame exactly as
+     * opna_lle_render does, so the session/replay path hears SSG too. */
+    opna_lle_mix_frame(chip, left_serial, right_serial,
+                       ctx->fm_vol, ctx->ssg_vol, l, r);
+    return true;
 }
 
 /*

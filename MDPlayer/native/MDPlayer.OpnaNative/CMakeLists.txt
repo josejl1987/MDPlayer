@@ -292,6 +292,14 @@ target_include_directories(mdplayer_opna_session_reset_test PRIVATE
 target_link_libraries(mdplayer_opna_session_reset_test PRIVATE mdplayer_opna_dev)
 add_test(NAME mdplayer_opna_session_reset_test COMMAND mdplayer_opna_session_reset_test)
 
+add_executable(mdplayer_opna_session_ssg_test tests/session_ssg_test.c)
+target_include_directories(mdplayer_opna_session_ssg_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${OPNANATIVE_UPSTREAM_DIR}")
+target_link_libraries(mdplayer_opna_session_ssg_test PRIVATE mdplayer_opna_dev)
+add_test(NAME mdplayer_opna_session_ssg_test COMMAND mdplayer_opna_session_ssg_test)
+
 add_executable(mdplayer_opna_prescaler_audit_test tests/prescaler_audit_test.c)
 target_include_directories(mdplayer_opna_prescaler_audit_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
