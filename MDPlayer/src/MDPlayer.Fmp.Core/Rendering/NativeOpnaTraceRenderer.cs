@@ -2,39 +2,34 @@ using Fmp.Core.Playback.Opna;
 
 namespace Fmp.Core.Rendering;
 
-using Fmp.Core.Nise98;
-
 /// <summary>
-/// Pass-2 native OPNA replay. Owns the clocked native YM2608 device, the exact
-/// CPU-cycle→OPNA-master-clock mapper, the capture event cursor and the native
-/// OPNA scratch buffer. It applies every captured YM2608 register write at its
-/// authoritative master clock and advances the chip to each chunk-boundary
-/// clock; audio produced by the device is drained out by the caller. It never
-/// reads status or IRQ, never executes a CPU instruction, and never touches
-/// PPZ8.
+/// Pass-2 native OPNA replay. Owns the clocked native YM2608 device, the
+/// capture event cursor and the native OPNA scratch buffer. It applies every
+/// captured YM2608 register write at its absolute YM2608 master clock and
+/// advances the chip to each chunk-boundary clock; audio produced by the
+/// device is drained out by the caller. It never reads status or IRQ, never
+/// executes a CPU instruction, and never touches PPZ8. Event clock positions
+/// come directly from the capture — no CPU-cycle mapper is involved.
 /// </summary>
 internal sealed class NativeOpnaTraceRenderer : IDisposable
 {
     public const int DefaultChunkFrames = 4096;
 
     private readonly IClockedOpnaDevice _device;
-    private readonly NiseOpnaClockMapper _mapper;
-    private readonly CpuToOutputFrameMapper _cpuFrame;
+    private readonly OpnaMasterClockFrameMapper _frameMapper;
     private readonly IReadOnlyList<FmpCapturedEvent> _events;
 
     private int _cursor;
-    private ulong _lastCycle;
+    private ulong _lastClock;
 
     public NativeOpnaTraceRenderer(
         IClockedOpnaDevice device,
         IReadOnlyList<FmpCapturedEvent> events,
-        ulong cpuClockHz,
         int sampleRate)
     {
         _device = device ?? throw new ArgumentNullException(nameof(device));
         _events = events;
-        _mapper = new NiseOpnaClockMapper((uint)cpuClockHz);
-        _cpuFrame = new CpuToOutputFrameMapper(cpuClockHz, sampleRate);
+        _frameMapper = new OpnaMasterClockFrameMapper(sampleRate);
     }
 
     /// <summary>Current absolute native master clock.</summary>
@@ -47,12 +42,12 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
     public int EventCursor => _cursor;
 
     /// <summary>
-    /// Replays every captured OPNA write whose CPU cycle is at or below the
+    /// Replays every captured OPNA write whose master clock is at or below the
     /// ceiling for <paramref name="chunkEndFrame"/>, in exact order. Each write
-    /// maps its own cycle to an OPNA clock, advances the device to it and
-    /// writes the register at that same clock (equal-clock order preserved; no
-    /// extra advance merely to perform a write). Then advances the device to
-    /// the mapped clock of the chunk-boundary ceiling.
+    /// advances the device to its own absolute clock and writes the register at
+    /// that same clock (equal-clock order preserved; no extra advance merely to
+    /// perform a write). Then advances the device to the clock of the
+    /// chunk-boundary ceiling.
     /// </summary>
     public void ReplayToChunkBoundary(long chunkEndFrame)
     {
@@ -61,34 +56,22 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
         // be advanced past offset=chunkEndFrame output periods PLUS the latency
         // (the pre-roll flushes latency frames before the first real one).
         long framesClock = chunkEndFrame + _device.OutputLatencyFrames;
-        ulong ceiling = _cpuFrame.MapFrameToCpuCeiling(framesClock);
+        ulong ceiling = _frameMapper.MapFrameToMasterCeiling(framesClock);
         for (; _cursor < _events.Count; _cursor++)
         {
             var e = _events[_cursor];
             if (e is not CapturedOpnaWrite write)
                 continue; // PPZ8 events are not consumed by the OPNA cursor
-            if (write.CpuCycle > ceiling)
+            if (write.OpnaMasterClock > ceiling)
                 break;
-            if (write.CpuCycle < _lastCycle)
+            if (write.OpnaMasterClock < _lastClock)
                 throw new InvalidOperationException($"OPNA capture regressed at sequence {write.Sequence}");
-            ulong clock = _mapper.Map(write.CpuCycle);
-            EnsureCadenceSupported(write, clock);
-            _device.WriteRegister(clock, write.Port, write.Address, write.Data);
-            _lastCycle = write.CpuCycle;
+            EnsureCadenceSupported(write, write.OpnaMasterClock);
+            _device.WriteRegister(write.OpnaMasterClock, write.Port, write.Address, write.Data);
+            _lastClock = write.OpnaMasterClock;
         }
-        ulong boundaryClock = _mapper.Map(ceiling);
-        _device.AdvanceTo(boundaryClock);
+        _device.AdvanceTo(ceiling);
     }
-
-    /// <summary>Advances the device to the mapped clock of <paramref name="cpuCycle"/>.</summary>
-    public void AdvanceToCpuCycle(ulong cpuCycle)
-    {
-        _device.AdvanceTo(_mapper.Map(cpuCycle));
-    }
-
-    /// <summary>Drains available native frames (never advances the clock).</summary>
-    public int DrainAudio(short[] interleaved, int requestedFrames) =>
-        _device.DrainAudio(interleaved, requestedFrames);
 
     /// <summary>
     /// Failure model for cadence writes the native ABI does not support: the
@@ -105,11 +88,15 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
         {
             throw new NotSupportedException(
                 $"Captured YM2608 write requests an unsupported cadence: " +
-                $"cpu={write.CpuCycle} opnaClock={clock} port={write.Port} " +
+                $"opnaClock={clock} port={write.Port} " +
                 $"address=0x{write.Address:X2} data=0x{write.Data:X2}. " +
                 $"Only the fixed 144-master-clock cadence (register 0x2D) is supported.");
         }
     }
 
     public void Dispose() => _device.Dispose();
+
+    /// <summary>Drains available native frames (never advances the clock).</summary>
+    public int DrainAudio(short[] interleaved, int requestedFrames) =>
+        _device.DrainAudio(interleaved, requestedFrames);
 }

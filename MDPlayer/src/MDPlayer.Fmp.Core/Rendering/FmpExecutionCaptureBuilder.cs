@@ -11,12 +11,12 @@ namespace Fmp.Core.Rendering;
 ///
 /// The implementation is deterministic: the same FMP execution yields the
 /// same event stream. It uses <see cref="List{T}"/> and record structs;
-/// per-event class allocations are avoided.
+/// per-event class allocations are avoided. The time coordinate is the absolute
+/// YM2608 master clock supplied by the capture tap — it is never derived here.
 /// </summary>
 internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDisposable
 {
     private readonly int _outputSampleRate;
-    private readonly ulong _cpuClockHz;
 
     private readonly List<FmpCapturedEvent> _events = new();
     private readonly List<Ppz8BankSnapshot> _banks = new();
@@ -25,29 +25,26 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
     private ulong _sequence;
     private bool _disposed;
 
-    public FmpExecutionCaptureBuilder(int outputSampleRate, ulong cpuClockHz)
+    public FmpExecutionCaptureBuilder(int outputSampleRate)
     {
         if (outputSampleRate <= 0)
             throw new ArgumentOutOfRangeException(nameof(outputSampleRate));
-        if (cpuClockHz == 0)
-            throw new ArgumentOutOfRangeException(nameof(cpuClockHz));
         _outputSampleRate = outputSampleRate;
-        _cpuClockHz = cpuClockHz;
     }
 
     public int EventCount => _events.Count;
 
-    public void CaptureOpnaWrite(ulong cpuCycle, byte port, byte address, byte data)
+    public void CaptureOpnaWrite(ulong opnaMasterClock, byte port, byte address, byte data)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _events.Add(new CapturedOpnaWrite(cpuCycle, NextSequence(), port, address, data));
+        _events.Add(new CapturedOpnaWrite(opnaMasterClock, NextSequence(), port, address, data));
     }
 
-    public void CapturePpz8Command(ulong cpuCycle, in Ppz8Command command)
+    public void CapturePpz8Command(ulong opnaMasterClock, in Ppz8Command command)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _events.Add(new CapturedPpz8Command(
-            cpuCycle, NextSequence(), command.Port, command.Address, command.Data, command.BankId));
+            opnaMasterClock, NextSequence(), command.Port, command.Address, command.Data, command.BankId));
     }
 
     public int CapturePpz8Bank(string logicalName, int bankIndex, int mode, ReadOnlySpan<byte[]> dataChannels)
@@ -85,20 +82,20 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
         return bankId;
     }
 
-    public ulong FinalCpuCycle { get; private set; }
+    public ulong FinalOpnaMasterClock { get; private set; }
 
-    public void SetFinalCpuCycle(ulong cpuCycle)
+    public void SetFinalOpnaMasterClock(ulong opnaMasterClock)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (cpuCycle < FinalCpuCycle)
-            throw new ArgumentOutOfRangeException(nameof(cpuCycle), "final CPU cycle regressed");
-        FinalCpuCycle = cpuCycle;
+        if (opnaMasterClock < FinalOpnaMasterClock)
+            throw new ArgumentOutOfRangeException(nameof(opnaMasterClock), "final master clock regressed");
+        FinalOpnaMasterClock = opnaMasterClock;
     }
 
     /// <summary>
-    /// Validates that events are already globally ordered (cycle ascending,
-    /// sequence strictly increasing) and finalizes the capture. Safe to call
-    /// once; subsequent sink writes throw.
+    /// Validates that events are already globally ordered (master clock
+    /// ascending, sequence strictly increasing) and finalizes the capture.
+    /// Safe to call once; subsequent sink writes throw.
     /// </summary>
     public FmpExecutionCapture Finish(
         long finalOutputFrame,
@@ -114,9 +111,8 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
         return new FmpExecutionCapture
         {
             OutputSampleRate = _outputSampleRate,
-            CpuClockFrequencyHz = _cpuClockHz,
             Events = _events,
-            FinalCpuCycle = FinalCpuCycle,
+            FinalOpnaMasterClock = FinalOpnaMasterClock,
             FinalOutputFrame = finalOutputFrame,
             FadeStartOutputFrame = fadeStartFrame,
             FadeEndOutputFrame = fadeEndFrame,
@@ -129,16 +125,16 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
 
     private void ValidateOrder()
     {
-        ulong prevCycle = 0;
+        ulong prevClock = 0;
         ulong prevSeq = 0;
         for (int i = 0; i < _events.Count; i++)
         {
             var e = _events[i];
-            if (e.CpuCycle < prevCycle)
-                throw new InvalidOperationException($"capture out of order at index {i}: cycle {e.CpuCycle} < {prevCycle}");
+            if (e.OpnaMasterClock < prevClock)
+                throw new InvalidOperationException($"capture out of order at index {i}: master clock {e.OpnaMasterClock} < {prevClock}");
             if (e.Sequence <= prevSeq)
                 throw new InvalidOperationException($"capture sequence not strictly increasing at index {i}");
-            prevCycle = e.CpuCycle;
+            prevClock = e.OpnaMasterClock;
             prevSeq = e.Sequence;
         }
     }

@@ -3,9 +3,10 @@ namespace Fmp.Core.Rendering;
 /// <summary>
 /// Optional event tap on the existing FMP execution path. When installed,
 /// capture events are recorded at the exact operation boundary where Nise98
-/// performs them, timestamped with the authoritative Nise286 cycle count.
-/// The default is null (capture disabled): the ordinary MDSound path then
-/// performs no event allocation whatsoever.
+/// performs them, timestamped with the authoritative absolute YM2608
+/// master-clock position accumulated by <see cref="FmpRuntime"/> at the control
+/// tick rate. The default is null (capture disabled): the ordinary MDSound
+/// path then performs no event allocation whatsoever.
 /// </summary>
 internal interface IFmpExecutionCaptureSink
 {
@@ -13,10 +14,10 @@ internal interface IFmpExecutionCaptureSink
     /// Captures one YM2608 register write. <paramref name="port"/> is the
     /// logical YM2608 port (0 or 1), already normalized at the boundary.
     /// </summary>
-    void CaptureOpnaWrite(ulong cpuCycle, byte port, byte address, byte data);
+    void CaptureOpnaWrite(ulong opnaMasterClock, byte port, byte address, byte data);
 
-    /// <summary>Captures one PPZ8 command at its authoritative CPU cycle.</summary>
-    void CapturePpz8Command(ulong cpuCycle, in Ppz8Command command);
+    /// <summary>Captures one PPZ8 command at its authoritative master-clock position.</summary>
+    void CapturePpz8Command(ulong opnaMasterClock, in Ppz8Command command);
 
     /// <summary>
     /// Captures one PPZ8 bank's immutable content. Returns the capture-local

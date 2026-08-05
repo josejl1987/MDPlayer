@@ -48,6 +48,10 @@ internal sealed class LegacyMdsoundFmpPcmSession : IFmpPcmSession
         _bufferSize = _sampleRate / 100; // 10ms buffer, matching FmpRenderer
         _sink = new MdsoundFmpChipSink(_sampleRate, ssgGainDb: context.SsgGainDb);
         _runtime = new FmpRuntime(_sink, context.Assets, context.FileSystem);
+        // The control tick rate equals the output sample rate: the renderer
+        // invokes FmpRuntime.Tick() once per output stereo frame, and each such
+        // tick advances the absolute YM2608 master-clock timeline.
+        _runtime.ControlTickRate = _sampleRate;
         if (captureSink != null)
             _runtime.CaptureSink = captureSink;
         _fadeSamples = checked((long)Math.Ceiling(context.FadeSeconds * _sampleRate));
@@ -168,8 +172,8 @@ internal sealed class LegacyMdsoundFmpPcmSession : IFmpPcmSession
     /// <summary>The FMP driver's current loop count.</summary>
     internal int CurrentLoop => _runtime.CurrentLoop;
 
-    /// <summary>Authoritative Nise286 total cycle count at render completion.</summary>
-    internal ulong FinalCpuCycle => _runtime.AuthoritativeCycle();
+    /// <summary>Absolute YM2608 master clock at render completion.</summary>
+    internal ulong FinalOpnaMasterClock => _runtime.FinalOpnaMasterClock;
 
     /// <summary>True once the legacy session has produced its final frame.</summary>
     internal bool CaptureReachedEnd => IsCompleted;

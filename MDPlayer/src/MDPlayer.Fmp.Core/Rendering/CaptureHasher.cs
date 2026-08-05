@@ -23,7 +23,7 @@ namespace Fmp.Core.Rendering;
 internal static class CaptureHasher
 {
     /// <summary>Bumped whenever the canonical byte encoding changes.</summary>
-    public const uint CaptureHashVersion = 1;
+    public const uint CaptureHashVersion = 2;
 
     private static void WriteU8(Span<byte> dst, ref int off, byte value) => dst[off++] = value;
 
@@ -52,8 +52,7 @@ internal static class CaptureHasher
 
     /// <summary>
     /// Computes the canonical SHA-256 of the capture. The hash covers the
-    /// capture version, CPU clock frequency, output rate (capture scheduling
-    /// is rate-dependent through <see cref="CpuToOutputFrameMapper"/>), the
+    /// capture version, output rate (capture scheduling is rate-dependent), the
     /// fully-ordered event stream, bank IDs + hashes in capture order, and the
     /// termination metadata. Returns uppercase hex SHA-256.
     /// </summary>
@@ -78,20 +77,19 @@ internal static class CaptureHasher
         var buffer = new byte[estimatedSize];
         int off = 0;
 
-        // Capture version (uint), CPU clock (ulong), rate-present flag + rate.
+        // Capture version (uint), output rate-present flag + rate.
         WriteU32(buffer, ref off, CaptureHashVersion);
-        WriteU64(buffer, ref off, capture.CpuClockFrequencyHz);
         WriteU8(buffer, ref off, 1); // output rate is always present
         WriteU32(buffer, ref off, (uint)capture.OutputSampleRate);
 
-        // Fully ordered event stream: type (0=OPNA, 1=PPZ8), CPU cycle, seq, payload.
+        // Fully ordered event stream: type (0=OPNA, 1=PPZ8), master clock, seq, payload.
         foreach (var e in capture.Events)
         {
             switch (e)
             {
                 case CapturedOpnaWrite opna:
                     WriteU8(buffer, ref off, 0);
-                    WriteU64(buffer, ref off, opna.CpuCycle);
+                    WriteU64(buffer, ref off, opna.OpnaMasterClock);
                     WriteU64(buffer, ref off, opna.Sequence);
                     WriteU8(buffer, ref off, opna.Port);
                     WriteU8(buffer, ref off, opna.Address);
@@ -99,7 +97,7 @@ internal static class CaptureHasher
                     break;
                 case CapturedPpz8Command ppz8:
                     WriteU8(buffer, ref off, 1);
-                    WriteU64(buffer, ref off, ppz8.CpuCycle);
+                    WriteU64(buffer, ref off, ppz8.OpnaMasterClock);
                     WriteU64(buffer, ref off, ppz8.Sequence);
                     WriteU32(buffer, ref off, (uint)ppz8.Port);
                     WriteU32(buffer, ref off, (uint)ppz8.Address);
@@ -120,7 +118,7 @@ internal static class CaptureHasher
         }
 
         // Termination metadata.
-        WriteU64(buffer, ref off, capture.FinalCpuCycle);
+        WriteU64(buffer, ref off, capture.FinalOpnaMasterClock);
         WriteU64(buffer, ref off, (ulong)capture.FinalOutputFrame);
         WriteU64(buffer, ref off, (ulong)capture.FadeStartOutputFrame);
         WriteU64(buffer, ref off, (ulong)capture.FadeEndOutputFrame);

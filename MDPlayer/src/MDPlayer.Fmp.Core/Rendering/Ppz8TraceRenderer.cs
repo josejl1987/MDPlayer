@@ -1,11 +1,10 @@
 namespace Fmp.Core.Rendering;
 
-using Fmp.Core.Nise98;
 using MDSound;
 
 /// <summary>
 /// Pass-2 PPZ8 replay. Owns the shared MDSound PPZ8 renderer, the captured
-/// immutable bank snapshots, the PPZ8 event cursor and the CPU-cycle→output
+/// immutable bank snapshots, the PPZ8 event cursor and the master-clock→output
 /// frame mapper, plus the output-latency delay line and scratch buffers.
 /// Produces host-aligned stereo PPZ8 frames for a contiguous output window,
 /// applying each captured command before the output frame it maps to and
@@ -17,7 +16,7 @@ internal sealed class Ppz8TraceRenderer : IDisposable
     private readonly PPZ8 _ppz8;
     private readonly IReadOnlyDictionary<int, Ppz8BankSnapshot> _banksById;
     private readonly IReadOnlyList<FmpCapturedEvent> _events;
-    private readonly CpuToOutputFrameMapper _cpuFrame;
+    private readonly OpnaMasterClockFrameMapper _frameMapper;
     private readonly Ppz8OutputDelayBuffer _delay;
     private readonly int _latencyFrames;
 
@@ -28,17 +27,16 @@ internal sealed class Ppz8TraceRenderer : IDisposable
     public Ppz8TraceRenderer(
         IReadOnlyList<FmpCapturedEvent> events,
         IReadOnlyList<Ppz8BankSnapshot> banks,
-        ulong cpuClockHz,
         int sampleRate,
         int latencyFrames)
     {
         _events = events;
         _banksById = banks.ToDictionary(b => b.BankId);
-        _cpuFrame = new CpuToOutputFrameMapper(cpuClockHz, sampleRate);
+        _frameMapper = new OpnaMasterClockFrameMapper(sampleRate);
         _latencyFrames = Math.Max(0, latencyFrames);
         _delay = new Ppz8OutputDelayBuffer(_latencyFrames);
         _ppz8 = new PPZ8();
-        _ppz8.Start(0, (uint)NiseOpnaClockMapper.Ym2608MasterClockHz);
+        _ppz8.Start(0, (uint)OpnaMasterClock.Hz);
         _ppz8Out = new int[2][] { new int[1], new int[1] };
     }
 
@@ -90,7 +88,7 @@ internal sealed class Ppz8TraceRenderer : IDisposable
             var e = _events[_cursor];
             if (e is not CapturedPpz8Command cmd)
                 continue; // OPNA events are not consumed by the PPZ8 cursor
-            long frame = _cpuFrame.MapOutputFrame(cmd.CpuCycle);
+            long frame = _frameMapper.MapOutputFrame(cmd.OpnaMasterClock);
             if (frame > generatedFrame)
                 break;
             if (frame < generatedFrame)

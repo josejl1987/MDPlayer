@@ -9,9 +9,11 @@ namespace Fmp.Core.Rendering;
 ///
 ///  * Pass 1 (control capture) runs the existing legacy MDSound FMP session to
 ///    completion with an event tap enabled, discarding its PCM. Every YM2608
-///    write and PPZ8 command is recorded at its authoritative Nise286 cycle in
-///    one global sequence; banks are captured immutably (content-hash
-///    deduplicated); loop/fade/tail/termination come exactly from that session.
+///    write and PPZ8 command is recorded at its authoritative absolute YM2608
+///    master clock (accumulated by FmpRuntime at the control tick rate — never
+///    Nise286 cycles, which reset per driver call) in one global sequence;
+///    banks are captured immutably (content-hash deduplicated);
+///    loop/fade/tail/termination come exactly from that session.
 ///  * Pass 2 (native audio replay) drives the native YM2608 device offline from
 ///    the captured trace (no Nise98 execution, no status/IRQ reads) and the
 ///    shared PPZ8 renderer, then mixes the two streams with the fixed integer
@@ -86,7 +88,7 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
         _ownsDevice = ownsDevice;
         _captureCache = captureCache;
         _sampleRate = context.SampleRate;
-        _builder = new FmpExecutionCaptureBuilder(_sampleRate, CpuClockHz);
+        _builder = new FmpExecutionCaptureBuilder(_sampleRate);
         // Validate/resolve the native library before any capture work: an
         // unavailable native library must fail clearly without a wasted capture.
         _device = device ?? throw new ArgumentNullException(nameof(device));
@@ -152,7 +154,7 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
         _fadeEnd = fadeActive ? checked(term.FadeStartSample + fadeLen) : 0;
         long tailEnd = term != null ? term.StopAtSample : _legacy.TotalSamples;
 
-        _builder.SetFinalCpuCycle(_legacy.FinalCpuCycle);
+        _builder.SetFinalOpnaMasterClock(_legacy.FinalOpnaMasterClock);
         _capture = _builder.Finish(
             finalOutputFrame: _legacy.TotalSamples,
             fadeStartFrame: _fadeStart,
@@ -176,8 +178,8 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
     {
         // ---- Pass 2: replay state from the (freshly captured or reused) capture ----
         _device.ResetChip();
-        _opna = new NativeOpnaTraceRenderer(_device, _capture.Events, CpuClockHz, _sampleRate);
-        _ppz8 = new Ppz8TraceRenderer(_capture.Events, _capture.Ppz8Banks, CpuClockHz, _sampleRate, _device.OutputLatencyFrames);
+        _opna = new NativeOpnaTraceRenderer(_device, _capture.Events, _sampleRate);
+        _ppz8 = new Ppz8TraceRenderer(_capture.Events, _capture.Ppz8Banks, _sampleRate, _device.OutputLatencyFrames);
         _pos = 0;
         _booted = true;
     }
@@ -255,7 +257,7 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
             // No chip time advanced, no events consumed and no audio: a genuine
             // stall. Report it — never retry or busy-loop.
             throw new NativeFmpNoProgressException(
-                $"eventCursor={_opna.EventCursor} lastCpuCycle={_capture.FinalCpuCycle} " +
+                $"eventCursor={_opna.EventCursor} finalMasterClock={_capture.FinalOpnaMasterClock} " +
                 $"nativeMasterClock={_opna.MasterClock} producedFrames={_pos} " +
                 $"requestedFrames={chunkEnd} availableNativeFrames={drained}");
         }

@@ -12,14 +12,13 @@ internal sealed class CaptureValidationReport
 {
     public required string FixtureId { get; init; }
     public required int OutputSampleRate { get; init; }
-    public required ulong CpuClockFrequencyHz { get; init; }
 
     public required int EventCount { get; init; }
     public required int OpnaWriteCount { get; init; }
     public required int Ppz8CommandCount { get; init; }
     public required int Ppz8BankCount { get; init; }
 
-    public required ulong FinalCpuCycle { get; init; }
+    public required ulong FinalOpnaMasterClock { get; init; }
     public required long FinalOutputFrame { get; init; }
     public required long FadeStartOutputFrame { get; init; }
     public required long FadeEndOutputFrame { get; init; }

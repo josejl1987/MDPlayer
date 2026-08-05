@@ -25,6 +25,16 @@ internal class FmpRuntime
     private int _loopCount;
     private int _loopCounter;
     private string _trackFileName = "";
+
+    // Absolute YM2608 master-clock timeline. Advanced by one control tick at
+    // the control tick rate (output sample rate, since FmpRuntime.Tick is
+    // invoked once per output frame) so the accumulated master clock tracks
+    // real elapsed musical time. This is the authoritative capture time
+    // coordinate — never Nise286 instruction cycles (which are reset per
+    // driver call and do not advance during startup waits or timer ticks).
+    private ulong _opnaMasterClock;
+    private ulong _clockRemainder;
+    private int _controlTickRate;
     public bool PlaybackEnded => _playbackEnded;
     public int LoopCount => _loopCount;
     public int CurrentLoop => _loopCounter;
@@ -43,15 +53,38 @@ internal class FmpRuntime
     /// Optional Pass-1 capture tap. Defaults to null (disabled): the ordinary
     /// MDSound path performs no capture allocation. When set before
     /// <see cref="Initialize"/>, every YM2608 write and PPZ8 command is
-    /// recorded at its authoritative Nise286 cycle count.
+    /// recorded at its authoritative absolute YM2608 master-clock position.
     /// </summary>
     public IFmpExecutionCaptureSink CaptureSink { get; set; }
 
     /// <summary>
+    /// Control tick rate (Hz) for the absolute OPNA master-clock timeline —
+    /// the rate at which <see cref="Tick"/> advances. Because the renderer
+    /// invokes <see cref="Tick"/> once per output stereo frame, this is the
+    /// output sample rate. Must be set before any capture writes occur.
+    /// </summary>
+    public int ControlTickRate
+    {
+        get => _controlTickRate;
+        set
+        {
+            if (value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(value), "control tick rate must be positive");
+            _controlTickRate = value;
+        }
+    }
+
+    /// <summary>Absolute YM2608 master-clock position at the current control tick.</summary>
+    public ulong OpnaMasterClock => _opnaMasterClock;
+
+    /// <summary>Absolute YM2608 master-clock position of the most recent tick.</summary>
+    internal ulong FinalOpnaMasterClock => _opnaMasterClock;
+
+    /// <summary>
     /// Optional explicit CPU clock frequency (Hz) applied before the driver
-    /// boots. When set, the authoritative Nise286 cycle counter is interpreted
-    /// at this rate by the capture/replay exact mappers. The legacy MDSound
-    /// output does not depend on this value.
+    /// boots. Affects Nise286 emulation timing (wait-loop durations). It does
+    /// NOT drive the capture or replay timeline — event timestamps come from
+    /// the absolute YM2608 master clock accumulated at the control tick rate.
     /// </summary>
     public uint? CpuClockFrequencyHz { get; set; }
 
@@ -149,6 +182,11 @@ internal class FmpRuntime
     /// </summary>
     public void Tick()
     {
+        // Advance the absolute master-clock timeline every control tick — this
+        // includes the startup-wait phase (which returns below without running
+        // the driver), so the captured timeline represents real elapsed time.
+        AdvanceControlTick();
+
         if (!_running) return;
         if (_waitSamplesRemaining > 0)
         {
@@ -218,15 +256,25 @@ internal class FmpRuntime
         byte port = (byte)((byte)dat.port == 0x8a ? 0 : 1);
         _chipSink.WriteYm2608(0, port, dat.address, dat.data, _samplePosition);
         if (CaptureSink != null)
-            CaptureSink.CaptureOpnaWrite(AuthoritativeCycle(), port, (byte)dat.address, (byte)dat.data);
+            CaptureSink.CaptureOpnaWrite(_opnaMasterClock, port, (byte)dat.address, (byte)dat.data);
         TraceWriter?.WriteOpna(port, dat.address, dat.data, _samplePosition);
     }
 
     /// <summary>
-    /// The authoritative Nise286 total-cycle counter, read at the exact I/O
-    /// call boundary. Falls back to 0 only when the CPU is not yet constructed.
+    /// Advances the absolute YM2608 master-clock timeline by one control tick:
+    /// accumulate <see cref="OpnaMasterClock.Hz"/> / <paramref name="_controlTickRate"/>
+    /// using integer quotient/remainder arithmetic (never floating point), so
+    /// the accumulated master clock tracks real elapsed musical time without
+    /// drift. The remainder carries exactly across ticks.
     /// </summary>
-    internal ulong AuthoritativeCycle() => _nise98.GetCPU()?.TotalCycles ?? 0;
+    private void AdvanceControlTick()
+    {
+        if (_controlTickRate <= 0)
+            return;
+        UInt128 numerator = (UInt128)_clockRemainder + Fmp.Core.Rendering.OpnaMasterClock.Hz;
+        _opnaMasterClock += (ulong)(numerator / (ulong)_controlTickRate);
+        _clockRemainder = (ulong)(numerator % (ulong)_controlTickRate);
+    }
 
     public int OpnaWriteCount => _opnaWriteCount;
 
@@ -240,7 +288,6 @@ internal class FmpRuntime
             samples[i] = pcmdata[i].AsMemory();
             totalBytes += pcmdata[i].Length;
         }
-        ulong cycle = AuthoritativeCycle();
         _chipSink.LoadPpz8Bank(bank, mode, samples, _samplePosition);
 
         if (CaptureSink != null)
@@ -248,7 +295,7 @@ internal class FmpRuntime
             // Capture the immutable bank content by content-hash (deduplicated),
             // then emit a bank-load command referencing the capture-local bank id.
             int bankId = CaptureSink.CapturePpz8Bank(_trackFileName, bank, mode, pcmdata);
-            CaptureSink.CapturePpz8Command(cycle, new Ppz8Command(bank, mode, 0, bankId));
+            CaptureSink.CapturePpz8Command(_opnaMasterClock, new Ppz8Command(bank, mode, 0, bankId));
         }
 
         // Compute SHA-256 of concatenated bank data for trace
@@ -272,7 +319,7 @@ internal class FmpRuntime
     {
         _chipSink.WritePpz8(port, adr, data, _samplePosition);
         if (CaptureSink != null)
-            CaptureSink.CapturePpz8Command(AuthoritativeCycle(), new Ppz8Command(port, adr, data));
+            CaptureSink.CapturePpz8Command(_opnaMasterClock, new Ppz8Command(port, adr, data));
         TraceWriter?.WritePpz8Write(port, adr, data, _samplePosition);
     }
 }

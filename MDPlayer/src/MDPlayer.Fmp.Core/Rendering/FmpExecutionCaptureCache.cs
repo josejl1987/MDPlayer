@@ -15,7 +15,6 @@ namespace Fmp.Core.Rendering;
 internal readonly record struct FmpExecutionCaptureKey(
     string TrackContentSha256,
     int OutputSampleRate,
-    ulong CpuClockFrequencyHz,
     int LoopCount,
     double FadeSeconds,
     double TailSeconds,
@@ -26,6 +25,8 @@ internal readonly record struct FmpExecutionCaptureKey(
     /// Builds the key from a playback context plus the immutable track bytes.
     /// Content identity is SHA-256 over the track bytes (the existing loader
     /// already owns the in-memory bytes, so no re-reading of large files here).
+    /// The captured event timeline is independent of the emulated CPU clock, so
+    /// the key does not include it.
     /// </summary>
     public static FmpExecutionCaptureKey From(FmpPlaybackContext context, byte[] trackData)
     {
@@ -34,7 +35,6 @@ internal readonly record struct FmpExecutionCaptureKey(
         return new(
             TrackContentSha256: TrackContentSha(trackData),
             OutputSampleRate: context.SampleRate,
-            CpuClockFrequencyHz: NativeAudioFmpPcmSession.CpuClockHz,
             LoopCount: context.LoopCount,
             FadeSeconds: context.FadeSeconds,
             TailSeconds: context.TailSeconds,
@@ -49,7 +49,6 @@ internal readonly record struct FmpExecutionCaptureKey(
         string.Join('|',
             TrackContentSha256,
             OutputSampleRate,
-            CpuClockFrequencyHz,
             LoopCount,
             FadeSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             TailSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
