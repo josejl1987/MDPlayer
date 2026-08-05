@@ -86,7 +86,7 @@ internal static class NativeAudioValidationRunner
         string ovi, int sampleRate, double maxSeconds, int discardFrames = 4096)
     {
         var ctx = Context(ovi, sampleRate, maxSeconds);
-        var builder = new FmpExecutionCaptureBuilder(sampleRate, CpuHz);
+        var builder = new FmpExecutionCaptureBuilder(sampleRate);
         using var legacy = new LegacyMdsoundFmpPcmSession(ctx, builder);
         legacy.CpuClockFrequencyHz = CpuHz;
         legacy.LoadTrack(File.ReadAllBytes(ovi), Path.GetFileName(ovi));
@@ -106,7 +106,7 @@ internal static class NativeAudioValidationRunner
         long fadeEnd = fadeActive ? checked(term.FadeStartSample + fadeLen) : 0;
         long tailEnd = term != null ? term.StopAtSample : legacy.TotalSamples;
 
-        builder.SetFinalCpuCycle(legacy.FinalCpuCycle);
+        builder.SetFinalOpnaMasterClock(legacy.FinalOpnaMasterClock);
         var capture = builder.Finish(
             finalOutputFrame: legacy.TotalSamples,
             fadeStartFrame: fadeStart,

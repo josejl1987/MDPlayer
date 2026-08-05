@@ -42,9 +42,9 @@ public class NativeAudioValidationTests
         foreach (var e in capture.Events)
         {
             if (e is CapturedOpnaWrite w)
-                canon.Add((w.CpuCycle, w.Sequence, 0, w.Port, w.Address, w.Data, -1));
+                canon.Add((w.OpnaMasterClock, w.Sequence, 0, w.Port, w.Address, w.Data, -1));
             else if (e is CapturedPpz8Command p)
-                canon.Add((p.CpuCycle, p.Sequence, 1, (byte)p.Port, (byte)p.Address, (byte)p.Data, p.BankId));
+                canon.Add((p.OpnaMasterClock, p.Sequence, 1, (byte)p.Port, (byte)p.Address, (byte)p.Data, p.BankId));
         }
         return (hash, canon);
     }

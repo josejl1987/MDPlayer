@@ -1,74 +1,77 @@
-using Fmp.Core.Nise98;
-using Fmp.Core.Playback.Opna;
 using Fmp.Core.Rendering;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Prompt-8 native-path timing components: the exact rational PPZ8 command
-/// mapper (verified against the clock mapper's own closed form), the fixed
-/// output-latency delay line, and the pure-integer final mixer.
+/// Prompt-8 native-path timing components: the exact rational master-clock→
+/// output-frame mapper (verified against an independent UInt128 oracle), the
+/// fixed output-latency delay line, and the pure-integer final mixer.
 /// </summary>
 public class NativeTimingComponentsTests
 {
-    private const uint CpuHz = 8_000_000;
+    private const ulong MasterHz = OpnaMasterClock.Hz;
     private const int SampleRate = 44100;
 
-    [Fact]
-    public void Ppz8CommandMapper_MatchesClockMapper_ExactOracle()
-    {
-        var mapper = new NisePpz8CommandMapper(CpuHz, SampleRate);
-        var clock = new NiseOpnaClockMapper(CpuHz);
+    private static long OracleOutputFrame(ulong masterClock) =>
+        (long)((UInt128)masterClock * (ulong)SampleRate / MasterHz);
 
-        // Sweep across a full second of CPU time plus boundary values.
-        ulong[] cycles = { 0, 1, 2, 3, 7, 8, 15, 16, 31, 100, 1000, 7997, 12345, 44100, 8_000_000 - 1, 8_000_000, 8_000_001, 1_000_000_000 };
-        foreach (ulong c in cycles)
-        {
-            Assert.Equal(clock.Map(c), mapper.MapMasterClock(c));
-        }
-
-        // A dense sweep must also agree with the closed form floor(c * master / cpu).
-        var rng = new Random(42);
-        for (int i = 0; i < 10_000; i++)
-        {
-            ulong c = (ulong)rng.NextInt64(0, 200_000_000);
-            ulong expected = (ulong)((UInt128)c * NiseOpnaClockMapper.Ym2608MasterClockHz / CpuHz);
-            Assert.Equal(expected, mapper.MapMasterClock(c));
-        }
-    }
+    private static ulong OracleFrameToMasterCeiling(long frame) =>
+        (ulong)(((UInt128)(ulong)frame * MasterHz + (ulong)SampleRate - 1) / (ulong)SampleRate);
 
     [Fact]
-    public void Ppz8CommandMapper_MapSample_MatchesMathematicalOracle()
+    public void OpnaFrameMapper_MapOutputFrame_MatchesMathematicalOracle()
     {
-        var mapper = new NisePpz8CommandMapper(CpuHz, SampleRate);
+        var mapper = new OpnaMasterClockFrameMapper(SampleRate);
 
-        // sample = floor(floor(c * master / cpu) * rate / master), UInt128 exact.
+        // A dense sweep must agree with floor(masterClock * sr / masterHz).
         var rng = new Random(7);
         for (int i = 0; i < 10_000; i++)
         {
             ulong c = (ulong)rng.NextInt64(0, 500_000_000);
-            ulong masterClock = (ulong)((UInt128)c * NiseOpnaClockMapper.Ym2608MasterClockHz / CpuHz);
-            long expected = (long)((UInt128)masterClock * (ulong)SampleRate / NiseOpnaClockMapper.Ym2608MasterClockHz);
-            Assert.Equal(expected, mapper.MapSample(c));
+            Assert.Equal(OracleOutputFrame(c), mapper.MapOutputFrame(c));
+        }
+
+        // Boundary values across a full second of real time.
+        foreach (ulong c in new ulong[]
+            { 0, 1, 2, 3, 100, 1000, SampleRate - 1, SampleRate, MasterHz - 1, MasterHz, MasterHz + 1 })
+        {
+            Assert.Equal(OracleOutputFrame(c), mapper.MapOutputFrame(c));
         }
     }
 
     [Fact]
-    public void Ppz8CommandMapper_IsMonotonicAndDeterministic()
+    public void OpnaFrameMapper_MapFrameToMasterCeiling_MatchesOracle()
     {
-        var a = new NisePpz8CommandMapper(CpuHz, SampleRate);
-        var b = new NisePpz8CommandMapper(CpuHz, SampleRate);
+        var mapper = new OpnaMasterClockFrameMapper(SampleRate);
+        foreach (long f in new long[] { 0, 1, 44100, 100000, 1_000_000 })
+            Assert.Equal(OracleFrameToMasterCeiling(f), mapper.MapFrameToMasterCeiling(f));
+    }
+
+    [Fact]
+    public void OpnaFrameMapper_IsMonotonicAndDeterministic()
+    {
+        var a = new OpnaMasterClockFrameMapper(SampleRate);
+        var b = new OpnaMasterClockFrameMapper(SampleRate);
 
         long previous = -1;
         for (ulong c = 0; c < 3_000_000; c += 97)
         {
-            long sa = a.MapSample(c);
-            long sb = b.MapSample(c);
+            long sa = a.MapOutputFrame(c);
+            long sb = b.MapOutputFrame(c);
             Assert.Equal(sa, sb); // deterministic: fresh mapper gives same result
-            Assert.True(sa >= previous, $"sample regressed at cycle {c}");
+            Assert.True(sa >= previous, $"output frame regressed at master clock {c}");
             previous = sa;
         }
+    }
+
+    [Fact]
+    public void OpnaFrameMapper_RejectsBadArguments()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new OpnaMasterClockFrameMapper(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new OpnaMasterClockFrameMapper(-1));
+        var mapper = new OpnaMasterClockFrameMapper(SampleRate);
+        Assert.Throws<ArgumentOutOfRangeException>(() => mapper.MapFrameToMasterCeiling(-1));
     }
 
     [Fact]
@@ -171,12 +174,5 @@ public class NativeTimingComponentsTests
     public void OpnaPpz8IntegerMixer_RejectsNegativeGain()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new OpnaPpz8IntegerMixer(-1));
-    }
-
-    [Fact]
-    public void NisePpz8CommandMapper_RejectsBadArguments()
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new NisePpz8CommandMapper(0, 44100));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new NisePpz8CommandMapper(CpuHz, 0));
     }
 }

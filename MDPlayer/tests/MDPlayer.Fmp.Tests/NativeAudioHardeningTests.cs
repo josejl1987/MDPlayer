@@ -134,11 +134,11 @@ public class NativeAudioHardeningTests
         // One PPZ8 load command referencing bank 999, which is not in the set.
         var events = new List<FmpCapturedEvent>
         {
-            new CapturedPpz8Command(CpuCycle: 0, Sequence: 1, Port: 0x0A, Address: 0x11, Data: 0x20, BankId: 999),
+            new CapturedPpz8Command(OpnaMasterClock: 0, Sequence: 1, Port: 0x0A, Address: 0x11, Data: 0x20, BankId: 999),
         };
         var banks = new List<Ppz8BankSnapshot>();
 
-        using var renderer = new Ppz8TraceRenderer(events, banks, 8_000_000, 48_000, 0);
+        using var renderer = new Ppz8TraceRenderer(events, banks, 48_000, 0);
         var ex = Assert.Throws<InvalidOperationException>(() =>
         {
             var scratch = new short[1 * 2];

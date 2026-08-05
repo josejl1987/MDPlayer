@@ -41,9 +41,8 @@ public class FmpExecutionCaptureCacheTests
         => new FmpExecutionCapture
         {
             OutputSampleRate = sampleRate,
-            CpuClockFrequencyHz = NativeAudioFmpPcmSession.CpuClockHz,
             Events = System.Array.Empty<FmpCapturedEvent>(),
-            FinalCpuCycle = 0,
+            FinalOpnaMasterClock = 0,
             FinalOutputFrame = 1000 * sampleRate / 1000,
             FadeStartOutputFrame = 0,
             FadeEndOutputFrame = 0,

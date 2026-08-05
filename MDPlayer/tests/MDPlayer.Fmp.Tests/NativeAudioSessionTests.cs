@@ -235,7 +235,7 @@ public class NativeAudioSessionTests
         string? ovi = FindOvi(0);
 
         // Capture via the legacy MDSound session (semantic contract).
-        var builder = new FmpExecutionCaptureBuilder(44100, CpuHz);
+        var builder = new FmpExecutionCaptureBuilder(44100);
         using var legacy = new LegacyMdsoundFmpPcmSession(Context(ovi!, 44100), builder);
         legacy.CpuClockFrequencyHz = CpuHz;
         legacy.LoadTrack(File.ReadAllBytes(ovi!), Path.GetFileName(ovi!));
@@ -245,7 +245,7 @@ public class NativeAudioSessionTests
         long fadeLen = checked((long)Math.Ceiling(0.5 * 44100));
         var term = legacy.TerminationState;
         bool fadeActive = term != null && term.FadeActive;
-        builder.SetFinalCpuCycle(legacy.FinalCpuCycle);
+        builder.SetFinalOpnaMasterClock(legacy.FinalOpnaMasterClock);
         var mdsoundCapture = builder.Finish(legacy.TotalSamples,
             fadeActive ? term!.FadeStartSample : 0,
             fadeActive ? term.FadeStartSample + fadeLen : 0,
@@ -266,7 +266,7 @@ public class NativeAudioSessionTests
         // Fade/tail boundaries are decided by the legacy control path above;
         // the native path shares that control path (this test verifies the
         // capture contract is populated, not that PCM matches).
-        Assert.True(mdsoundCapture.FinalCpuCycle > 0);
+        Assert.True(mdsoundCapture.FinalOpnaMasterClock > 0);
     }
 
     [Fact]
