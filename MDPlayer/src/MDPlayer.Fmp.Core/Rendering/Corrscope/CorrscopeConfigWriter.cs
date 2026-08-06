@@ -133,11 +133,14 @@ internal class CorrscopeConfigWriter
                 sb.AppendLine($"# Active channels: {audibleChannels.Count}/{orderedChannels.Count} (silent: {string.Join(", ", silentChannels.Select(s => s.Name))})");
             }
 
-            // Corrscope treats an empty `channels:` value as null and fails
-            // before rendering. A master-only fallback must remain renderable
-            // even when the short capture is below the silence threshold.
+            // Corrscope treats an empty `channels:` value as null and crashes
+            // with "TypeError: object of type 'NoneType' has no len()" before
+            // rendering, and a video with no scope content is useless anyway.
+            // So when every captured stem is below the silence threshold (short
+            // captures, very quiet tracks), force at least the first ordered
+            // channel in so the config remains renderable and the scope stays
+            // visible instead of silently vanishing or aborting the render.
             if (audibleChannels.Count == 0
-                && overrides?.IncludeMasterAsChannel == true
                 && orderedChannels.Count > 0)
             {
                 audibleChannels.Add(orderedChannels[0]);

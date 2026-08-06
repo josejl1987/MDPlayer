@@ -22,4 +22,26 @@ internal static class FmpPcmSessionFactory
             _ => throw new ArgumentOutOfRangeException(nameof(backend), backend, "unknown FMP OPNA backend"),
         };
     }
+
+    /// <summary>
+    /// Backend-aware factory that injects an externally-built OPNA device. Only
+    /// the native backend uses it; used to place a playback-asset observer on
+    /// the ordered write stream when asset dumping is requested. Passing a
+    /// non-null device for the MDSound backend is rejected.
+    /// </summary>
+    public static IFmpPcmSession Create(
+        FmpOpnaBackend backend,
+        FmpPlaybackContext context,
+        global::Fmp.Core.Playback.Opna.IClockedOpnaDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (backend == FmpOpnaBackend.Mdsound)
+        {
+            if (device is not null)
+                throw new InvalidOperationException("cannot inject a device into the MDSound backend");
+            return new LegacyMdsoundFmpPcmSession(context);
+        }
+
+        return new NativeAudioFmpPcmSession(context, device, ownsDevice: false);
+    }
 }

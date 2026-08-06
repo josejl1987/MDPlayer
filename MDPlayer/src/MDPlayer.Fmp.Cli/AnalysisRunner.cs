@@ -154,7 +154,7 @@ internal static class AnalysisRunner
         if (FmpFormat.IsSupportedExtension(input.Extension))
             return CaptureFmpTimeline(options);
 
-        IReadOnlyList<string> searchPaths = VisualizationBackendResolver.BuildSearchPaths(input, options);
+        IReadOnlyList<string> searchPaths = VisualizationBackendResolver.BuildSearchPaths(input, options.SearchPaths, options.AssetsDir, options.FmpCom);
         var environment = new PlaybackEnvironment(searchPaths, true, options.SampleRate);
         string fmpCom = PlaybackBackendRegistry.ResolveFmpCom(options.FmpCom, searchPaths);
         PlaybackBackendRegistry registry = PlaybackBackendRegistry.CreateDefault(environment, fmpCom);

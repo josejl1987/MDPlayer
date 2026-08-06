@@ -4,6 +4,7 @@ using Fmp.Application.Contracts;
 using Fmp.Application.Export;
 using Fmp.Application.Preview;
 using Fmp.Application.Validation;
+using Fmp.Application.PlaybackAssets;
 using Fmp.Gui.Services;
 
 namespace Fmp.Gui.ViewModels;
@@ -141,6 +142,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public RelayCommand OpenOutputFolderCommand { get; private set; } = null!;
     public RelayCommand OpenOutputCommand { get; private set; } = null!;
     public AsyncRelayCommand CopyErrorCommand { get; private set; } = null!;
+    public AsyncRelayCommand ExportFurnaceAssetsCommand { get; private set; } = null!;
 
     // ---- Observable state ----
 
@@ -180,6 +182,30 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public bool HasError => Error is not null;
     public string ErrorMessage => Error?.Message ?? "";
+
+    private string _furnaceExportNotice = "";
+    private bool _furnaceExportNoticeIsError;
+
+    /// <summary>User-facing result of the last Furnace asset export, or empty.</summary>
+    public string FurnaceExportNotice
+    {
+        get => _furnaceExportNotice;
+        private set
+        {
+            if (SetProperty(ref _furnaceExportNotice, value))
+                OnPropertyChanged(nameof(HasFurnaceExportNotice));
+        }
+    }
+
+    /// <summary>True when a Furnace export result notice is visible.</summary>
+    public bool HasFurnaceExportNotice => !string.IsNullOrEmpty(FurnaceExportNotice);
+
+    /// <summary>True when the Furnace export notice represents a failure.</summary>
+    public bool FurnaceExportNoticeIsError
+    {
+        get => _furnaceExportNoticeIsError;
+        private set => SetProperty(ref _furnaceExportNoticeIsError, value);
+    }
 
     public string InputTitle => _input?.Title ?? _input?.DisplayName ?? "No input open";
 
@@ -1089,6 +1115,7 @@ public sealed class MainWindowViewModel : ObservableObject
         OpenOutputFolderCommand = new RelayCommand(OpenOutputFolder, () => HasInput);
         OpenOutputCommand = new RelayCommand(OpenOutput, () => CanOpenOutput);
         CopyErrorCommand = new AsyncRelayCommand(CopyErrorAsync, () => HasError);
+        ExportFurnaceAssetsCommand = new AsyncRelayCommand(ExportFurnaceAssetsAsync, () => HasInput);
     }
 
     private void WireEvents()
@@ -1108,6 +1135,60 @@ public sealed class MainWindowViewModel : ObservableObject
         catch (Exception ex)
         {
             SetError(ex.Message);
+        }
+    }
+
+    private async Task ExportFurnaceAssetsAsync()
+    {
+        FurnaceExportNotice = "";
+        if (_input is null)
+        {
+            FurnaceExportNotice = "Open a music file before exporting Furnace assets.";
+            FurnaceExportNoticeIsError = true;
+            return;
+        }
+
+        try
+        {
+            string? folder = await _dialogs.PickFolderAsync();
+            if (folder is null)
+                return; // user cancelled
+
+            FurnaceExportResult result = await Task.Run(() =>
+                FurnaceExportService.Dump(_input.FullPath, folder, sampleRate: 44100));
+
+            if (!string.IsNullOrEmpty(result.RenderError))
+            {
+                FurnaceExportNotice = "Furnace export failed: " + result.RenderError;
+                FurnaceExportNoticeIsError = true;
+                return;
+            }
+
+            string warning = string.IsNullOrEmpty(result.ExportWarning)
+                ? ""
+                : " (" + result.ExportWarning + ")";
+
+            if (result.ExportedCount == 0)
+            {
+                // A completed render with no captured FM instruments is usually
+                // a signal, not a silent success: the file may be SSG/rhy-only,
+                // unplayable, or may end before any FM key-on. Surface it.
+                FurnaceExportNotice =
+                    "Furnace export produced no FM instruments. If this song uses FM "
+                    + "operator channels, it may not be an FMP/OVI track, or playback ended "
+                    + "before any FM note. manifest.json was still written." + warning;
+                FurnaceExportNoticeIsError = true;
+                return;
+            }
+
+            FurnaceExportNotice =
+                $"Furnace export complete: {result.ExportedCount} instrument(s) + manifest.json → {folder}{warning}";
+            FurnaceExportNoticeIsError = false;
+        }
+        catch (Exception ex)
+        {
+            FurnaceExportNotice = "Furnace export failed: " + ex.Message;
+            FurnaceExportNoticeIsError = true;
         }
     }
 
@@ -1192,6 +1273,7 @@ public sealed class MainWindowViewModel : ObservableObject
         SeekEndCommand.RaiseCanExecuteChanged();
         PreviousPointCommand.RaiseCanExecuteChanged();
         NextPointCommand.RaiseCanExecuteChanged();
+        ExportFurnaceAssetsCommand.RaiseCanExecuteChanged();
     }
 
     private async Task DisposeSessionAsync()

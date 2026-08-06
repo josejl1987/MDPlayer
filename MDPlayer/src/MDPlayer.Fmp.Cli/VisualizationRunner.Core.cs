@@ -114,6 +114,14 @@ internal static partial class VisualizationRunner
                 prepared =
                     VisualizationPrepareCoordinator.BuildSource(
                         reusableCapture, request, workspace);
+                // The reusable bundle keeps its stems/master in the published
+                // bundle directory, but the corrscope config (written against the
+                // workspace scope dir) references `../audio/*.wav` relative to
+                // the workspace. Stage the bundle's audio into the workspace's
+                // `audio/` dir and rebase every stem reference so the reuse path
+                // renders scopes exactly like a fresh capture.
+                StageReusableStems(
+                    reusableCapture, prepared.Scope.Result, workspace);
                 Directory.CreateDirectory(Path.GetDirectoryName(workspace.TimelinePath)!);
                 VisualizationJsonWriter.Write(workspace.TimelinePath, reusableCapture.Timeline);
 
@@ -278,5 +286,46 @@ internal static partial class VisualizationRunner
             Console.Error.WriteLine($"error: visualization capture failed: {ex.Message}");
             return 7;
         }
+    }
+
+    /// <summary>
+    /// Stages a reused bundle's audio into the output workspace. The published
+    /// bundle stores master + isolated stems in its own <c>audio/</c> directory,
+    /// but the corrscope config is written against this workspace's scope dir
+    /// and references stems by name as <c>../audio/&lt;stem&gt;.wav</c>. Copying
+    /// the bundle audio by stem name makes the reuse path render scopes exactly
+    /// like a fresh capture (where the workspace already holds those files).
+    /// </summary>
+    private static void StageReusableStems(
+        PreparedCapture reusableCapture,
+        ScopeRenderer.ScopeResult scopeResult,
+        VisualizationWorkspace workspace)
+    {
+        Directory.CreateDirectory(workspace.AudioDir);
+
+        if (!string.IsNullOrWhiteSpace(reusableCapture.MasterAudioPath)
+            && File.Exists(reusableCapture.MasterAudioPath))
+        {
+            CopyIfDifferent(reusableCapture.MasterAudioPath, workspace.MasterAudioPath);
+        }
+
+        foreach (ScopeRenderer.StemResult stem in scopeResult.Stems)
+        {
+            if (!stem.Success || string.IsNullOrWhiteSpace(stem.WavPath))
+                continue;
+            if (!File.Exists(stem.WavPath))
+                continue;
+            string dest = Path.Combine(workspace.AudioDir, stem.Name + ".wav");
+            CopyIfDifferent(stem.WavPath, dest);
+        }
+    }
+
+    private static void CopyIfDifferent(string source, string dest)
+    {
+        string sourceFull = Path.GetFullPath(source);
+        string destFull = Path.GetFullPath(dest);
+        if (string.Equals(sourceFull, destFull, StringComparison.Ordinal))
+            return;
+        File.Copy(sourceFull, dest, overwrite: true);
     }
 }

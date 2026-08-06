@@ -105,6 +105,11 @@ internal sealed class NativeAudioFmpPcmSession : IFmpPcmSession
             ? "max_duration"
             : _capture.TerminationReason;
 
+    /// <summary>Absolute OPNA master clock (pairs) at completion of the capture
+    /// pass. 0 if the session has not yet captured. This is the exact
+    /// denominator for per-pair PMU normalization of the native render.</summary>
+    public ulong FinalOpnaMasterClock => _capture?.FinalOpnaMasterClock ?? 0;
+
     public void LoadTrack(byte[] trackData, string trackFileName)
     {
         _trackData = trackData;

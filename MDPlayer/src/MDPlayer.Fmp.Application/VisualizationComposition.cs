@@ -37,7 +37,8 @@ internal static class VisualizationComposition
         ResolvedVisualizationLayout layout,
         ScopeRenderer.ScopeResult scope,
         bool enabled,
-        string? backendId = null)
+        string? backendId = null,
+        string? corrExecutablePath = null)
     {
         if (!enabled || !layout.Geometry.HasScopes)
             return null;
@@ -60,11 +61,18 @@ internal static class VisualizationComposition
                 RenderHeight = Math.Max(1, layout.Geometry.CorrscopeGridHeight),
                 LayoutNCols = layout.Geometry.ColumnCount,
                 IncludeMasterAsChannel = !scope.Stems.Any(s => s.Name != "master" && s.Success),
-                IncludeSilentChannels = request.Tracks.Selection == TrackSelectionMode.All,
+                // Keep the full per-channel panel set (including silent voices)
+                // so corrscope's ncols layout produces exactly the RowCount x
+                // ColumnCount grid the overlay slices: dropping silent channels
+                // shrinks corrscope's row height below ScopeHeight and breaks
+                // the grid alignment / frame dimensions.
+                IncludeSilentChannels = true,
                 HideLabels = true,
                 ResDivisor = 1.0,
                 Antialiasing = request.Output.Quality != RenderQuality.Draft,
             });
-        return new CorrscopeRunner(runtime.ToolTimeoutMinutes, runtime.CorrscopePath);
+        // A resolved corr executable path (e.g. the managed venv's `corr`
+        // wrapper) overrides the user-supplied --corrscope override.
+        return new CorrscopeRunner(runtime.ToolTimeoutMinutes, corrExecutablePath ?? runtime.CorrscopePath);
     }
 }

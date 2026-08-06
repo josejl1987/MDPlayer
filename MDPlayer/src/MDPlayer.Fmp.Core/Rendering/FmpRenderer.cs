@@ -2,7 +2,11 @@ using System.Diagnostics;
 using Fmp.Core.Audio;
 using Fmp.Core.Audio.Mdsound;
 using Fmp.Core.IO;
+using Fmp.Core.Playback.Opna;
+using Fmp.Core.PlaybackAssets;
+using Fmp.Core.PlaybackAssets.Furnace;
 using Fmp.Core.Tracing;
+using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Rendering;
 
@@ -15,8 +19,9 @@ internal class FmpRenderer
 {
     private readonly FmpRuntimeAssets _assets;
     private readonly IFmpFileSystem _fileSystem;
-    private readonly FmpRuntime _runtime;
     private readonly MdsoundFmpChipSink _sink;
+    private readonly PlaybackAssetObservingChipSink _observingSink;
+    private readonly FmpRuntime _runtime;
     private readonly int _sampleRate;
 
     public FmpRenderer(FmpRuntimeAssets assets, IFmpFileSystem fileSystem = null, int sampleRate = 44100, double ssgGainDb = 0)
@@ -25,7 +30,11 @@ internal class FmpRenderer
         _fileSystem = fileSystem;
         _sampleRate = sampleRate;
         _sink = new MdsoundFmpChipSink(sampleRate, ssgGainDb: ssgGainDb);
-        _runtime = new FmpRuntime(_sink, assets, fileSystem);
+        // The observing chip sink sits permanently between the FMP runtime and
+        // the synthesizer; it forwards untouched until a collector is attached
+        // for an asset-dump render.
+        _observingSink = new PlaybackAssetObservingChipSink(_sink);
+        _runtime = new FmpRuntime(_observingSink, assets, fileSystem);
     }
 
     /// <summary>
@@ -50,6 +59,14 @@ internal class FmpRenderer
         /// the trace-driven native YM2608 replay session and never falls back.
         /// </summary>
         public FmpOpnaBackend OpnaBackend { get; set; } = FmpOpnaBackend.Mdsound;
+
+        /// <summary>
+        /// Optional target directory for Furnace-compatible FM asset (.tfi)
+        /// dumping. When set, observed key-on instruments are exported here
+        /// after the render completes. Supported on both the default MDSound
+        /// backend and the native OPNA backend.
+        /// </summary>
+        public string AssetDumpDirectory { get; set; } = null;
     }
 
     /// <summary>
@@ -62,11 +79,18 @@ internal class FmpRenderer
         public string StopReason { get; set; } = "";
         public string LastError { get; set; } = "";
 
+        /// <summary>Absolute YM2608 master clock (OPNA clock pairs) at render
+        /// completion for the native backend; 0 for non-native backends.</summary>
+        public ulong FinalOpnaMasterClock { get; set; }
+
         /// <summary>Whether playback stopped naturally (FMP finished).</summary>
         public bool NaturallyStopped { get; set; }
 
         /// <summary>Trace writer reference, if tracing was enabled.</summary>
         public RegisterTraceWriter TraceWriter { get; set; }
+
+        /// <summary>Set when an asset-dump export reported failures.</summary>
+        public string AssetDumpError { get; set; } = "";
     }
 
     /// <summary>
@@ -120,10 +144,21 @@ internal class FmpRenderer
             timeoutWatch = Stopwatch.StartNew();
         }
 
+        IPlaybackAssetCollector collector = null;
+
         try
         {
             // Start chip synthesis
             _sink.Start();
+
+            // Attach an asset collector for the MDSound path (the default
+            // backend) before initialization so key-on writes during boot and
+            // playback are observed through the ordered FMP write stream.
+            if (!string.IsNullOrWhiteSpace(opts.AssetDumpDirectory))
+            {
+                collector = new PlaybackAssetCollector();
+                _observingSink.Collector = collector;
+            }
 
             // Initialize FMP runtime (boots FMP.COM, loads track)
             // Trace writer is already attached, so boot/init events are captured.
@@ -134,8 +169,11 @@ internal class FmpRenderer
             // does not tick, so the chip renders its reset state.
             _runtime.SetWaitSamples(_sampleRate * 500 / 1000);
 
-            // Create WAV writer
-            using var wav = new WavWriter(outputWavPath, _sampleRate);
+            // Create WAV writer (optional: a null output path requests an audio-less
+            // render, e.g. a firmware-asset dump).
+            using var wav = string.IsNullOrEmpty(outputWavPath)
+                ? null
+                : new WavWriter(outputWavPath, _sampleRate);
 
             // Render loop
             int bufferSize = _sampleRate / 100; // 10ms buffer
@@ -222,8 +260,8 @@ internal class FmpRenderer
                     interleaved[i * 2 + 1] = (short)r;
                 }
 
-                // Write to WAV
-                wav.Write(interleaved.AsSpan(0, samplesThisBlock * 2));
+                // Write to WAV (only when an output path was requested)
+                wav?.Write(interleaved.AsSpan(0, samplesThisBlock * 2));
                 totalSamples += samplesThisBlock;
                 if (_runtime.CurrentLoop != currentLoop)
                     currentLoop = _runtime.CurrentLoop;
@@ -266,8 +304,8 @@ internal class FmpRenderer
                 return result;
             }
 
-            // Finalize WAV
-            wav.Close();
+            // Finalize WAV (when present)
+            wav?.Close();
 
             result.NaturallyStopped = termination.Started;
             result.RenderedSamples = totalSamples;
@@ -288,9 +326,16 @@ internal class FmpRenderer
         {
             // Cleanup order:
             // 1. Unhook trace writer (null the delegate references so no more callbacks fire)
-            // 2. Stop chip synthesis
-            // 3. Close/dispose trace writer (flushes, computes SHA-256)
+            // 2. Detach the asset collector (captures no more writes)
+            // 3. Stop chip synthesis
+            // 4. Close/dispose trace writer (flushes, computes SHA-256)
+            // 5. Complete + export collected FM assets (never fails playback)
             _runtime.TraceWriter = null;
+            if (collector != null)
+            {
+                _observingSink.Collector = null;
+                ExportAssetsIfRequested(collector, opts.AssetDumpDirectory, result);
+            }
             _sink.Stop();
             traceWriter?.Dispose();
         }
@@ -332,7 +377,7 @@ internal class FmpRenderer
             TailSeconds: opts.TailSeconds,
             MaxDurationSeconds: opts.MaxDurationSeconds);
 
-        using var session = FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context);
+        using var session = BuildSession(opts, context, out IPlaybackAssetCollector collector);
 
         long totalSamples = 0;
         long maxSamples = checked((long)Math.Ceiling((opts.MaxDurationSeconds ?? 3600.0) * _sampleRate));
@@ -343,7 +388,9 @@ internal class FmpRenderer
             session.LoadTrack(trackData, trackFileName);
             session.Boot();
 
-            using var wav = new WavWriter(outputWavPath, _sampleRate);
+            using var wav = string.IsNullOrEmpty(outputWavPath)
+                ? null
+                : new WavWriter(outputWavPath, _sampleRate);
             var interleaved = new short[bufferSize * 2];
 
             while (totalSamples < maxSamples)
@@ -358,7 +405,7 @@ internal class FmpRenderer
                 int produced = session.Render(interleaved.AsSpan(0, samplesThisBlock * 2));
                 if (produced <= 0)
                     break; // session completed (termination satisfied)
-                wav.Write(interleaved.AsSpan(0, produced * 2));
+                wav?.Write(interleaved.AsSpan(0, produced * 2));
                 totalSamples += produced;
                 if (session.IsCompleted)
                     break;
@@ -372,9 +419,10 @@ internal class FmpRenderer
                 return result;
             }
 
-            wav.Close();
+            wav?.Close();
             result.NaturallyStopped = session.NaturallyStopped;
             result.RenderedSamples = totalSamples;
+            result.FinalOpnaMasterClock = session.FinalOpnaMasterClock;
             result.Success = true;
             result.StopReason = session.StopReason ?? "max_duration";
             if (totalSamples >= maxSamples && string.IsNullOrEmpty(result.StopReason))
@@ -388,6 +436,64 @@ internal class FmpRenderer
             result.LastError = $"{ex.GetType().Name}: {ex.Message}";
         }
 
+        ExportAssetsIfRequested(collector, opts.AssetDumpDirectory, result);
+
         return result;
+    }
+
+    /// <summary>
+    /// Builds the native-audio session, injecting the asset-observing device
+    /// when dumping is requested. The collector is returned (may be null).
+    /// </summary>
+    private static IFmpPcmSession BuildSession(
+        FmpRenderer.Options opts,
+        FmpPlaybackContext context,
+        out IPlaybackAssetCollector collector)
+    {
+        collector = null;
+
+        if (string.IsNullOrWhiteSpace(opts.AssetDumpDirectory))
+            return FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context);
+
+        // Place a single authoritative observer on the ordered YM2608 write
+        // stream immediately before it reaches the native emulator.
+        collector = new PlaybackAssetCollector();
+        var inner = NativeOpnaDevice.Open(context.SampleRate);
+        var observing = new PlaybackAssetObservingDevice(
+            inner,
+            collector,
+            ChipType.Ym2608,
+            chipIndex: 0);
+
+        return FmpPcmSessionFactory.Create(FmpOpnaBackend.NativeAudio, context, observing);
+    }
+
+    /// <summary>
+    /// Completes the collection and exports FM assets. Never terminates or
+    /// fails playback; failures are reported on the result. The target
+    /// directory is created on demand.
+    /// </summary>
+    private static void ExportAssetsIfRequested(
+        IPlaybackAssetCollector collector,
+        string directory,
+        Result result)
+    {
+        if (collector == null || string.IsNullOrWhiteSpace(directory))
+            return;
+
+        try
+        {
+            var snapshot = collector.Complete();
+            var export = FurnaceAssetExporter.Export(snapshot, directory);
+            if (export.Failed)
+            {
+                result.AssetDumpError = "asset dump export failed for: "
+                    + string.Join(", ", export.Failures.Keys);
+            }
+        }
+        catch (Exception ex)
+        {
+            result.AssetDumpError = $"asset dump export failed: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 }

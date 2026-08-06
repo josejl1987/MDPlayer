@@ -177,4 +177,6 @@ internal sealed class LegacyMdsoundFmpPcmSession : IFmpPcmSession
 
     /// <summary>True once the legacy session has produced its final frame.</summary>
     internal bool CaptureReachedEnd => IsCompleted;
+
+    ulong IFmpPcmSession.FinalOpnaMasterClock => _runtime.FinalOpnaMasterClock;
 }

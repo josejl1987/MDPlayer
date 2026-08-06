@@ -287,7 +287,12 @@ internal static class VisualizationCaptureBundle
 
         RequireArtifact(bundleRootFull, manifest.TimelinePath, "timeline");
         RequireArtifact(bundleRootFull, manifest.MasterAudioPath, "master audio");
-        if (manifest.ScopeEnabled)
+        // Only FMP parallel-synthesis captures write a scope `metadata.json`;
+        // VGM/register captures render scopes straight from the published
+        // isolated stems and never produce that artifact. The metadata file is a
+        // presence guard, not used to reconstruct scopes, so it must only be
+        // required for the backend that actually writes it.
+        if (manifest.ScopeEnabled && string.Equals(manifest.BackendId, "fmp", StringComparison.Ordinal))
             RequireArtifact(bundleRootFull, manifest.ScopeMetadataPath, "scope metadata");
         foreach (CaptureStem stem in manifest.Stems)
             RequireArtifact(bundleRootFull, stem.WavPath, "stem WAV");
@@ -317,6 +322,9 @@ internal static class VisualizationCaptureBundle
                     WavPath = Path.Combine(bundleRootFull, stem.WavPath),
                     RenderedSamples = stem.RenderedSamples,
                     Channels = stem.Channels,
+                    // Only successful stems are ever published to the bundle, so
+                    // every reconstructed stem is audio-bearing.
+                    Success = true,
                 }).ToList(),
         };
 

@@ -82,27 +82,9 @@ internal sealed class ProgressJsonlWriter
     }
 
     /// <summary>
-    /// Maps an error message + exit code to a stable machine-readable code
-    /// (see ValidationCodes). Exit codes are checked first, then the message.
+    /// Failure-code mapping now lives in the application assembly
+    /// (FailureCodeMapper) so the GUI preview session shares it without
+    /// referencing this CLI progress writer.
     /// </summary>
-    internal static string MapFailureCode(string message, int exitCode)
-    {
-        if (exitCode == 9)
-            return ValidationCodes.OutputExists;
-        if (exitCode == 10)
-            return ValidationCodes.NoRenderableContent;
-        if (message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase))
-            return ValidationCodes.FfmpegNotFound;
-        if (message.Contains("nvenc", StringComparison.OrdinalIgnoreCase))
-            return ValidationCodes.EncoderUnavailable;
-        if (message.Contains("corrscope", StringComparison.OrdinalIgnoreCase))
-            return ValidationCodes.CorrscopeNotFound;
-        if (message.Contains("stems", StringComparison.OrdinalIgnoreCase))
-            return ValidationCodes.MissingStems;
-        if (message.Contains("FMP.COM", StringComparison.Ordinal))
-            return ValidationCodes.ToolNotFound;
-        return ValidationCodes.CaptureFailed;
-    }
-
     private static double? Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 }

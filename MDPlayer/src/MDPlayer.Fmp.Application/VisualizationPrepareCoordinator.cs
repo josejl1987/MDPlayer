@@ -222,13 +222,13 @@ internal static class VisualizationPrepareCoordinator
         ArgumentNullException.ThrowIfNull(planContext);
 
         VisualizationPresentation presentation =
-            VisualizationSupport.ResolvePresentation(
+            VisualizationPresentationSupport.ResolvePresentation(
                 request,
                 new FileInfo(request.InputPath));
 
         VisualizationTimeline timeline =
             capture.MasterSamples > 0
-                ? VisualizationSupport.AlignTimelineToAudio(
+                ? VisualizationPresentationSupport.AlignTimelineToAudio(
                     capture.Timeline,
                     capture.MasterSamples)
                 : capture.Timeline;
@@ -354,7 +354,7 @@ internal static class VisualizationPrepareCoordinator
 
         ScopeRenderer.ScopeResult scopeResult = capture.Scope.Result;
         VisualizationPresentation presentation =
-            VisualizationSupport.ResolvePresentation(request, new FileInfo(request.InputPath));
+            VisualizationPresentationSupport.ResolvePresentation(request, new FileInfo(request.InputPath));
 
         // Project the reusable captured scope assets to the resolved layout:
         // filter/order isolated stems by the current topology's panel order and
@@ -365,7 +365,7 @@ internal static class VisualizationPrepareCoordinator
         ScopeRenderer.ScopeResult projectedScope = projected.Result;
 
         // Align the semantic timeline to the actual audio length.
-        VisualizationTimeline videoTimeline = VisualizationSupport.AlignTimelineToAudio(
+        VisualizationTimeline videoTimeline = VisualizationPresentationSupport.AlignTimelineToAudio(
             capture.Timeline, projectedScope.MasterSamples);
 
         // ---- Energy analysis ----

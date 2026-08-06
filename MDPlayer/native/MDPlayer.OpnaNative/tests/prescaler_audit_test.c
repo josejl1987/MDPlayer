@@ -46,12 +46,14 @@ static void audit_window(mdp_opna_session *s,
 {
     mdp_opna_reset_chip(s);
 
-    /* Submit the prescaler-select write first (through the bus scheduler). */
+    /* Submit the prescaler-select write first. Goes through the adapter-level
+     * bus scheduler (opna_lle_write) so the audit still measures the chip's
+     * real cadence response to a contract-violating write; the session ABI
+     * (mdp_opna_write_register) rejects 0x2E/0x2F up front under QW1. */
     if (override_reg != 0xFFFFFFFFu) {
         /* Schedule the write at clock 0; the bus will drive it on the next
          * valid prescaler phase. */
-        mdp_opna_write_register(s, 0, 0, (uint8_t)override_reg,
-                                (uint8_t)override_value);
+        opna_lle_write(&s->lle, (int)override_reg, (int)override_value);
         /* advance past the prescaler transition point */
         mdp_opna_advance_to(s, 32);
     }

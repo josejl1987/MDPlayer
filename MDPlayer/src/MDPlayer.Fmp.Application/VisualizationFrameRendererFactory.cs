@@ -132,10 +132,12 @@ internal static class VisualizationFrameRendererFactory
     }
 
     /// <summary>
-    /// Starts the Corrscope raw-frame bridge when scopes are enabled and
-    /// Corrscope is available; otherwise returns null so the caller falls back
-    /// to the shared internal master-waveform source. The created frame source
-    /// is ready to read frame 0 on first use.
+    /// Starts the Corrscope raw-frame bridge when scopes are enabled. Corrscope
+    /// is a hard requirement for any render that needs scope content: when the
+    /// tool is missing it is installed into a managed, project-local venv, and
+    /// if it still cannot run the render fails rather than silently emitting
+    /// empty scope regions. Returns null only when scopes are genuinely not part
+    /// of this render (so the deterministic master-waveform fallback applies).
     /// </summary>
     private static IScopeFrameSource? CreateProductionScopeSource(
         PreparedVisualizationSource prepared,
@@ -150,6 +152,31 @@ internal static class VisualizationFrameRendererFactory
         if (prepared.Scope.Result is null)
             return null;
 
+        // Hard requirement: ensure corrscope is usable, auto-installing into a
+        // project-local venv when absent. An explicit --corrscope override is
+        // authoritative. A failure here stops the render.
+        string pythonPath;
+        string corrExecutablePath;
+        try
+        {
+            pythonPath = CorrscopeInstaller.Ensure(
+                TimeSpan.FromMinutes(runtime.ToolTimeoutMinutes),
+                explicitCorrPath: runtime.CorrscopePath);
+            corrExecutablePath = CorrscopeInstaller.ResolveCorrExecutable(pythonPath);
+        }
+        catch (CorrscopeInstallException ex)
+        {
+            throw new VisualizationScopeException(
+                "Corrscope is required for this render but could not be installed: " + ex.Message,
+                4);
+        }
+        if (string.IsNullOrWhiteSpace(pythonPath))
+        {
+            throw new VisualizationScopeException(
+                "Corrscope is required for this render but could not be resolved. Install with: pip install corrscope",
+                4);
+        }
+
         CorrscopeRunner? runner = VisualizationComposition.PrepareCorrscope(
             prepared.Request,
             runtime,
@@ -157,18 +184,23 @@ internal static class VisualizationFrameRendererFactory
             prepared.Layout,
             prepared.Scope.Result,
             enabled: true,
-            backendId: prepared.BackendId);
+            backendId: prepared.BackendId,
+            corrExecutablePath: corrExecutablePath);
 
         if (runner is null || !runner.IsAvailable)
-            return null;
+        {
+            throw new VisualizationScopeException(
+                "Corrscope is required for this render but its executable could not be located.",
+                4);
+        }
 
         string bridgePath = Path.Combine(AppContext.BaseDirectory, "corrscope-frames.py");
         if (!File.Exists(bridgePath))
-            return null;
-
-        string pythonPath = CorrscopeRunner.ResolvePythonPath(runner.CorrPath);
-        if (string.IsNullOrWhiteSpace(pythonPath))
-            return null;
+        {
+            throw new VisualizationScopeException(
+                "Corrscope is required for this render but the frame bridge 'corrscope-frames.py' is missing.",
+                4);
+        }
 
         return new CorrscopeFrameSource(
             () => runner.StartRawFrames(

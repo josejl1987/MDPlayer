@@ -651,7 +651,7 @@ public sealed class PanelOverlayRendererTests
         File.WriteAllBytes(tempFile, new byte[16]);
         try
         {
-            var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(tempFile));
+            var presentation = VisualizationPresentationSupport.ResolvePresentation(request, new FileInfo(tempFile));
             Assert.Equal("TestTrack", presentation.Title);
             Assert.Equal("", presentation.Subtitle);
             Assert.Equal("", presentation.Credits);
@@ -680,7 +680,7 @@ public sealed class PanelOverlayRendererTests
         File.WriteAllBytes(tempFile, new byte[16]);
         try
         {
-            var presentation = VisualizationSupport.ResolvePresentation(request, new FileInfo(tempFile));
+            var presentation = VisualizationPresentationSupport.ResolvePresentation(request, new FileInfo(tempFile));
             Assert.Equal("PALACE OF DESTRUCTION", presentation.Title);
             Assert.Equal("YS I", presentation.Subtitle);
             Assert.Equal("JOSEJL", presentation.Credits);

@@ -418,6 +418,79 @@ public class CorrscopeConfigWriterTests
     }
 
     [Fact]
+    public void Write_AllStemsSilent_StillEmitsAChannelToAvoidCorrscopeCrash()
+    {
+        // Regression: when every captured stem is below the silence threshold,
+        // the old code emitted an empty `channels:` list. Corrscope 0.11 treats
+        // that as a null list and crashes with
+        // "TypeError: object of type 'NoneType' has no len()". At least one
+        // channel must be emitted so the config stays renderable.
+        string dir = Directory.CreateTempSubdirectory("fmp-corrscope-silent-").FullName;
+        try
+        {
+            string audioDir = Path.Combine(dir, "audio");
+            Directory.CreateDirectory(audioDir);
+            WriteSilentWav(Path.Combine(audioDir, "ym2608-fm1.wav"), 44100, 1000);
+
+            var result = new ScopeRenderer.ScopeResult
+            {
+                OutputDir = dir,
+                SampleRate = 44100,
+                MasterSamples = 44100,
+                Success = true,
+            };
+            result.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = "master", Label = "Master", StableOrder = 0,
+                WavPath = Path.Combine(audioDir, "master.wav"),
+                RenderedSamples = 44100, Channels = 2, Success = true,
+            });
+            result.Stems.Add(new ScopeRenderer.StemResult
+            {
+                Name = "ym2608-fm1", Label = "FM1", StableOrder = 10,
+                WavPath = Path.Combine(audioDir, "ym2608-fm1.wav"),
+                RenderedSamples = 44100, Channels = 1, Success = true,
+            });
+
+            string yamlPath = Path.Combine(dir, "corrscope.yaml");
+            CorrscopeConfigWriter.Write(yamlPath, dir, result);
+
+            string yaml = File.ReadAllText(yamlPath);
+            Assert.Contains("- !ChannelConfig", yaml);
+            Assert.DoesNotContain("channels:\n\n", yaml); // not an empty list
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    private static void WriteSilentWav(string path, int sampleRate, int sampleCount)
+    {
+        const short channels = 1;
+        const short bitsPerSample = 16;
+        const short blockAlign = channels * (bitsPerSample / 8);
+        int dataSize = sampleCount * blockAlign;
+
+        using var stream = File.Create(path);
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.ASCII, leaveOpen: false);
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+        writer.Write(36 + dataSize);
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write(channels);
+        writer.Write(sampleRate);
+        writer.Write(sampleRate * blockAlign);
+        writer.Write(blockAlign);
+        writer.Write(bitsPerSample);
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+        writer.Write(dataSize);
+        // all-zero PCM = silence
+    }
+
+    [Fact]
     public void Write_FixedGridIncludesSilentChannelsAndHidesLabels()
     {
         string dir = Directory.CreateTempSubdirectory("fmp-corrscope-grid-").FullName;

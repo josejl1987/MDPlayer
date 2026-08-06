@@ -401,7 +401,9 @@ static void test_drain_does_not_advance_time(void)
     mdp_opna_close(s);
 }
 
-/* Session-level gate: honoring a cadence-changing prescaler write rejects. */
+/* Session-level gate: a cadence-changing prescaler write must reject. With
+ * QW1 the write path rejects it up front; otherwise it is honored through
+ * the bus and the cadence guard latches the error on advance/drain. */
 static void test_unsupported_cadence_rejected(void)
 {
     mdp_opna_open_options opt = { 48000 };
@@ -411,6 +413,13 @@ static void test_unsupported_cadence_rejected(void)
           "open failed for cadence test");
     if (!s) return;
     int rc = mdp_opna_write_register(s, 0, 0, 0x2e, 1);
+#ifdef MDPLAYER_OPNA_QW1_FIXED_PRESCALER
+    CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
+          "prescaler write not rejected at clock 0");
+    rc = mdp_opna_advance_to(s, 4000);
+    CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
+          "sticky cadence error not surfaced on advance");
+#else
     CHECK(rc == MDP_OPNA_OK, "prescaler write rejected at clock 0");
     rc = mdp_opna_advance_to(s, 4000);
     if (rc == MDP_OPNA_OK) {
@@ -420,6 +429,7 @@ static void test_unsupported_cadence_rejected(void)
     }
     CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
           "unsupported cadence was not rejected");
+#endif
     mdp_opna_close(s);
 }
 

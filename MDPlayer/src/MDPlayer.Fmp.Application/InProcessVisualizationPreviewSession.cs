@@ -223,11 +223,14 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
         // A capture only publishes reusable scope/stem artifacts when the
         // backend actually produced them on disk. Master-fallback captures
         // render the scope from the master waveform at projection time, so they
-        // have no bundled scope metadata or isolated stems and are published as
-        // timeline + master-audio only (the loader must not require a scope
-        // metadata artifact the strategy never wrote).
+        // have no isolated stems and are published as timeline + master-audio
+        // only. For stem-based backends (FMP parallel synthesis and VGM/register
+        // isolates), the isolated stems ARE the scope artifacts; FMP additionally
+        // writes a `metadata.json` (used only as a presence guard), but VGM does
+        // not write one and relies on the published stems alone. So a capture is
+        // scope-enabled exactly when it produced isolated stems.
         bool hasIsolatedStems = successfulStems.Any(stem => stem.Name != "master");
-        bool scopeEnabled = hasIsolatedStems && File.Exists(_workspace.ScopeMetadataPath);
+        bool scopeEnabled = hasIsolatedStems;
 
         await VisualizationCaptureBundle.WriteManifestAsync(
             _sessionRoot,

@@ -130,7 +130,20 @@ internal static class ScopePlanner
         {
             ChipType.Huc6280 => 6,
             ChipType.Ym2612 => 6,
+            ChipType.Ym2151 => 8,
             ChipType.Sn76489 => 4,
+            ChipType.Okim6295 => 1,
+            ChipType.Ym2203 => 6,
+            ChipType.Ym2610 => 8,
+            ChipType.Ym2413 => 9,
+            ChipType.Ym3526 => 9,
+            ChipType.Ym3812 => 9,
+            ChipType.Y8950 => 9,
+            ChipType.Ymf262 => 18,
+            ChipType.Ay8910 => 4,
+            ChipType.NesApu => 5,
+            ChipType.Dmg => 4,
+            ChipType.K051649 => 6,
             _ => 0,
         });
         if (streams > budget)
@@ -154,7 +167,10 @@ internal static class ScopePlanner
     }
 
     private static bool IsVgmStemDevice(ChipType type) =>
-        type is ChipType.Huc6280 or ChipType.Ym2612 or ChipType.Sn76489;
+        type is ChipType.Huc6280 or ChipType.Ym2612 or ChipType.Ym2151 or ChipType.Sn76489 or ChipType.Okim6295
+            or ChipType.Ym2203 or ChipType.Ym2610 or ChipType.Ym2413 or ChipType.Ym3526 or ChipType.Ym3812
+            or ChipType.Y8950 or ChipType.Ymf262 or ChipType.Ay8910 or ChipType.NesApu or ChipType.Dmg
+            or ChipType.K051649;
 
     private static StemPlan MasterPlan(IReadOnlyList<DeviceDescriptor> devices) =>
         devices.Count == 0

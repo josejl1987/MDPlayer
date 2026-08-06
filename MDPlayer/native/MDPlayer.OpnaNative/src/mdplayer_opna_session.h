@@ -37,6 +37,9 @@ struct mdp_opna_session {
 
     uint32_t output_rate_hz;         /* validated 44100 / 48000 / 96000     */
     uint8_t  prescaler_last_write;   /* most recent 0x2D/2E/2F write value  */
+    int      prescaler_sel;          /* QW1: expected core prescaler_sel
+                                        (2 = fixed 144-clock mode); the write
+                                        path enforces it stays 2 */
     bool rate_valid;                 /* true once opened with a supported rate */
 
     /* Fixed-cadence PC-98 production profile. */

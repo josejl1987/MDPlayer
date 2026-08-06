@@ -425,6 +425,153 @@ public sealed class VgmPlaybackBackendTests
     }
 
     [Fact]
+    public void VgmScopeRenderer_RendersYm2151AndOkim6295ChannelStems()
+    {
+        // A register stream driving a YM2151 (OPM) FM voice on channel 1 plus
+        // an OKIM6295 sample command. Both chips previously caused every scope
+        // panel to fall back to the master mix; they must now emit isolated
+        // per-channel stems (8× YM2151 + 1× OKIM).
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-ym2151-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-output-{Guid.NewGuid():N}");
+        string master = Path.Combine(output, "master.wav");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgmWithYm2151(
+                // YM2151 ch1: key code + key fraction + key on (like OPM).
+                0x54, 0x29, 0x4C,
+                0x54, 0x31, 0x00,
+                0x54, 0x08, 0x18,
+                0x61, 0x10, 0x00,
+                0x54, 0x08, 0x00,
+                // OKIM6295 sample command (0xB8: instance flag|addr + data).
+                0xB8, 0x00, 0x00,
+                0x66));
+
+            ScopeRenderer.ScopeResult result = VgmScopeRenderer.Render(
+                path,
+                output,
+                master,
+                sampleRate: 44_100,
+                loopCount: 1,
+                fadeSeconds: 0,
+                tailSeconds: 0.01,
+                maxDurationSeconds: 1);
+
+            Assert.True(result.Success, result.LastError);
+            string[] channelStems = result.Stems
+                .Where(stem => stem.Name != "master")
+                .Select(stem => stem.Name)
+                .ToArray();
+            Assert.True(channelStems.Length >= 9);
+            Assert.Contains("ym2151-fm1", channelStems);
+            Assert.Contains("ym2151-fm8", channelStems);
+            Assert.Contains("okim6295-sample", channelStems);
+            Assert.All(result.Stems.Where(stem => stem.Name != "master"), stem =>
+            {
+                Assert.True(stem.Success, stem.Error);
+                Assert.True(File.Exists(stem.WavPath), stem.WavPath);
+            });
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VgmScopeRenderer_RendersYm2203AndYm2610ChannelStems()
+    {
+        // Drive a YM2203 FM note on channel 0 and a YM2610 FM note on channel 1
+        // in one stream. Both chips used to make every scope panel fall back to
+        // the master mix; they must now emit isolated per-channel FM+SSG stems
+        // (YM2203: fm1..3 + ssg1..3, YM2610: fm1..4 + ssg1..3), and a note
+        // written to one channel must be audible there while the sibling stays
+        // silent.
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-opn-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-opn-out-{Guid.NewGuid():N}");
+        string master = Path.Combine(output, "master.wav");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgm(
+                // YM2203 (0x55) FM ch0 with a complete OPN operator patch so the
+                // emulator actually rings: DT/MUL, TL, RS/AR, SL/RR, key on ch0.
+                0x55, 0x30, 0x31,
+                0x55, 0x38, 0x03,
+                0x55, 0x40, 0x03,
+                0x55, 0x48, 0x03,
+                0x55, 0x50, 0x00,
+                0x55, 0x58, 0x10,
+                0x55, 0x70, 0x1F,
+                0x55, 0x78, 0x1F,
+                0x55, 0xB0, 0x0F,
+                0x55, 0xA0, 0x6A,
+                0x55, 0xA4, 0x20,
+                0x55, 0x28, 0x30,
+                0x61, 0xFF, 0x7F,
+                0x55, 0x28, 0x00,
+                // YM2610 (0x58) FM ch1 so the device is present and its stems
+                // are emitted (not a master fallback).
+                0x58, 0x28, 0xF1,
+                0x61, 0xFF, 0x7F,
+                0x58, 0x28, 0x00,
+                0x66));
+
+            ScopeRenderer.ScopeResult result = VgmScopeRenderer.Render(
+                path, output, master,
+                sampleRate: 44_100, loopCount: 1, fadeSeconds: 0, tailSeconds: 0, maxDurationSeconds: 3);
+
+            Assert.True(result.Success, result.LastError);
+            var byName = result.Stems.ToDictionary(stem => stem.Name);
+            Assert.Contains("ym2203-fm1", byName.Keys);
+            Assert.Contains("ym2203-fm3", byName.Keys);
+            Assert.Contains("ym2203-ssg1", byName.Keys);
+            Assert.Contains("ym2203-ssg3", byName.Keys);
+            // YM2610 siblings must also be emitted (channel stems, no fallback).
+            Assert.Contains("ym2610-fm1", byName.Keys);
+            Assert.Contains("ym2610-fm4", byName.Keys);
+            Assert.Contains("ym2610-ssg1", byName.Keys);
+            Assert.Contains("ym2610-ssg3", byName.Keys);
+
+            // A sustained channel-0 note must be audible in fm1 and absent in fm2.
+            double fm1 = StemRms(byName["ym2203-fm1"]);
+            double fm2 = StemRms(byName["ym2203-fm2"]);
+            Assert.True(fm1 > -60, $"ym2203-fm1 should be audible but was {fm1:F1}dB");
+            Assert.True(fm2 < -90, $"ym2203-fm2 should be silent but was {fm2:F1}dB");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
+    private static double StemRms(ScopeRenderer.StemResult stem)
+    {
+        if (!File.Exists(stem.WavPath)) return -200;
+        byte[] bytes = File.ReadAllBytes(stem.WavPath);
+        int off = FindDataOffset(bytes);
+        int count = (bytes.Length - off) / 2;
+        if (count <= 0) return -200;
+        long sum = 0; int samples = 0, step = Math.Max(1, count / 200_000);
+        for (int i = 0; i < count; i += step)
+        {
+            short v = (short)(bytes[off + i * 2] | (bytes[off + i * 2 + 1] << 8));
+            sum += (long)v * v; samples++;
+        }
+        double rms = Math.Sqrt((double)sum / samples);
+        return 20 * Math.Log10((rms + 1e-9) / 32768);
+    }
+
+    private static int FindDataOffset(byte[] b)
+    {
+        for (int i = 0; i < b.Length - 4; i++)
+            if (b[i] == (byte)'d' && b[i + 1] == 'a' && b[i + 2] == 't' && b[i + 3] == 'a')
+                return i + 8;
+        return 44;
+    }
+
+    [Fact]
     public void Capture_DecodesYm2610RegisterStream()
     {
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-ym2610-{Guid.NewGuid():N}.vgm");
@@ -869,13 +1016,64 @@ public sealed class VgmPlaybackBackendTests
                 "--overwrite",
                 "--quiet",
                 "--ffmpeg", "/usr/bin/ffmpeg",
-                "--corrscope", "/nonexistent/corrscope",
+                // No --corrscope override: the unified runner provisions and uses
+                // a working Corrscope (existing PATH/pipx install or the managed
+                // project-local venv).
             ]);
 
             Assert.Equal(0, exitCode);
             Assert.True(File.Exists(output));
             Assert.True(File.Exists(Path.Combine(
                 Path.GetDirectoryName(output)!, "timeline.json")));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(output)) File.Delete(output);
+            string outputDir = Path.Combine(
+                Path.GetDirectoryName(output)!,
+                Path.GetFileNameWithoutExtension(output));
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CanonicalRender_InvalidExplicitCorrscope_FailsWithHardRequirement()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-corrscope-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-corrscope-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgm(
+                0x52, 0xA0, 0x35,
+                0x52, 0xA4, 0x21,
+                0x52, 0x28, 0xF0,
+                0x61, 0x10, 0x00,
+                0x52, 0x28, 0x00,
+                0x66));
+
+            // Corrscope is now a hard requirement for scoped renders: an explicit
+            // but invalid --corrscope must fail the render rather than silently
+            // emit empty scope regions.
+            int exitCode = VisualizationRenderCommand.Handle(
+            [
+                path,
+                "--output", output,
+                "--width", "480",
+                "--height", "360",
+                "--fps", "10",
+                "--loops", "1",
+                "--fade", "0",
+                "--tail", "0",
+                "--max-duration", "1",
+                "--overwrite",
+                "--quiet",
+                "--ffmpeg", "/usr/bin/ffmpeg",
+                "--corrscope", "/nonexistent/corrscope",
+            ]);
+
+            Assert.NotEqual(0, exitCode);
+            Assert.False(File.Exists(output));
         }
         finally
         {

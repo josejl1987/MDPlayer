@@ -14,6 +14,12 @@ public static class BatchCommand
     {
         /// <summary>True when the track was skipped because the output already exists.</summary>
         public bool Skipped { get; init; }
+
+        /// <summary>Number of stereo samples rendered for this track.</summary>
+        public long RenderedSamples { get; init; }
+
+        /// <summary>Final YM2608 master clock (OPNA pairs) for the native backend.</summary>
+        public ulong FinalOpnaMasterClock { get; init; }
     }
 
     public static int Handle(string[] args)
@@ -144,14 +150,22 @@ public static class BatchCommand
             var outcome = new TrackRenderer().Render(track, wavFile, opts);
             if (outcome.Success)
             {
-                results.Add(new BatchResult(inputLabel, outputLabel, Success: true, Error: null));
+                results.Add(new BatchResult(inputLabel, outputLabel, Success: true, Error: null)
+                {
+                    FinalOpnaMasterClock = outcome.FinalOpnaMasterClock,
+                    RenderedSamples = outcome.RenderedSamples,
+                });
                 succeeded++;
                 if (!opts.Quiet)
                     Console.Error.WriteLine($"  ok: {wavFile}");
             }
             else
             {
-                results.Add(new BatchResult(inputLabel, null, Success: false, Error: outcome.LastError));
+                results.Add(new BatchResult(inputLabel, null, Success: false, Error: outcome.LastError)
+                {
+                    FinalOpnaMasterClock = outcome.FinalOpnaMasterClock,
+                    RenderedSamples = outcome.RenderedSamples,
+                });
                 failed++;
                 if (!opts.Quiet)
                     Console.Error.WriteLine($"  fail: {outcome.LastError}");

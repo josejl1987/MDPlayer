@@ -21,6 +21,16 @@ internal interface IFmpPcmSession : IDisposable
     /// <summary>Stop reason reported to the caller ("natural_stop", "loop_limit", ...).</summary>
     string StopReason { get; }
 
+    /// <summary>
+    /// Absolute YM2608 master-clock position (OPNA clock pairs) at render
+    /// completion. For the native backend this is the identical 0-based count
+    /// implied by the session timeline (7,987,200 pairs per emulated second)
+    /// and is the exact denominator for per-pair PMU normalization. Backends
+    /// whose clock model is not the native 7,987,200 Hz cadence report their
+    /// own clock but should not be normalized against the native rate.
+    /// </summary>
+    ulong FinalOpnaMasterClock { get; }
+
     /// <summary>Provides the track payload before <see cref="Boot"/>.</summary>
     void LoadTrack(byte[] trackData, string trackFileName);
 

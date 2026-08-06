@@ -81,8 +81,8 @@ void opna_lle_reset_core(fmopna_t *core,
     /* Phase 1: ic asserted. */
     core->input.ic = 1;
     for (size_t h = 0; h < 576; h++) {
-        FMOPNA_Clock(core, 0);
-        FMOPNA_Clock(core, 1);
+        FMOPNA_Clock_RESET0(core);
+        FMOPNA_Clock_RESET1(core);
         if (master_clock) (*master_clock)++;
     }
     if (phase_pairs) phase_pairs->phase1_pairs = 576;
@@ -90,8 +90,8 @@ void opna_lle_reset_core(fmopna_t *core,
     /* Phase 2: ic released. */
     core->input.ic = 0;
     for (size_t h = 0; h < 576; h++) {
-        FMOPNA_Clock(core, 0);
-        FMOPNA_Clock(core, 1);
+        FMOPNA_Clock_RESET0(core);
+        FMOPNA_Clock_RESET1(core);
         if (master_clock) (*master_clock)++;
     }
     if (phase_pairs) phase_pairs->phase2_pairs = 576;
@@ -99,8 +99,8 @@ void opna_lle_reset_core(fmopna_t *core,
     /* Phase 3: ic re-asserted. */
     core->input.ic = 1;
     for (size_t h = 0; h < 576; h++) {
-        FMOPNA_Clock(core, 0);
-        FMOPNA_Clock(core, 1);
+        FMOPNA_Clock_RESET0(core);
+        FMOPNA_Clock_RESET1(core);
         if (master_clock) (*master_clock)++;
     }
     if (phase_pairs) phase_pairs->phase3_pairs = 576;

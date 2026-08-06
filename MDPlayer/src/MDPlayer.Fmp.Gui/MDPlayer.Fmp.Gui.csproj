@@ -27,9 +27,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
-    <!-- Provides the in-process preview session implementation. Referencing
-         the executable project as an assembly does not invoke its entry point. -->
-    <ProjectReference Include="..\MDPlayer.Fmp.Cli\MDPlayer.Fmp.Cli.csproj" />
+    <!-- The in-process preview session factory now lives in the application
+         assembly (Fmp.Cli namespace) so the GUI does not reference the CLI
+         parser assembly (architecture: no GUI<->CLI coupling). -->
   </ItemGroup>
 
 </Project>

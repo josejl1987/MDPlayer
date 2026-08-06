@@ -89,6 +89,7 @@ public class Program
         Console.WriteLine("--opna-backend <mdsound|native-audio>");
         Console.WriteLine("    Select the YM2608 audio backend for FMP rendering.");
         Console.WriteLine("    Default: mdsound.");
+        Console.WriteLine("  --dump-furnace-assets DIR  Export FM instruments as Furnace .tfi (FMP/OVI and VGM/VGZ)");
         Console.WriteLine("  --encoder auto|x264|nvenc  Encoder (default: auto)");
         Console.WriteLine("  --overwrite                Overwrite existing output");
         Console.WriteLine("  --progress human|jsonl     Progress output mode");

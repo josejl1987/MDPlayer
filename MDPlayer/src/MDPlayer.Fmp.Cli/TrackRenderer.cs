@@ -28,6 +28,7 @@ internal sealed class TrackRenderer
                     "native-audio" => FmpOpnaBackend.NativeAudio,
                     _ => FmpOpnaBackend.Mdsound,
                 },
+                AssetDumpDirectory = settings.FurnaceAssetDumpDirectory,
             };
 
             var result = renderer.RenderToWav(track.Data, track.Input.FullName, output, renderOpts);
@@ -49,8 +50,10 @@ internal sealed class TrackRenderer
                 Success = result.Success,
                 LastError = result.LastError,
                 RenderedSamples = result.RenderedSamples,
+                FinalOpnaMasterClock = result.FinalOpnaMasterClock,
                 StopReason = result.StopReason,
                 Metadata = metadata,
+                AssetDumpError = result.AssetDumpError,
             };
         }
         catch (Exception ex)
@@ -65,6 +68,8 @@ internal sealed class RenderOutcome
     public bool Success { get; init; }
     public string LastError { get; init; }
     public long RenderedSamples { get; init; }
+    public ulong FinalOpnaMasterClock { get; init; }
     public string StopReason { get; init; }
+    public string AssetDumpError { get; init; }
     public FmpMetadata Metadata { get; init; }
 }

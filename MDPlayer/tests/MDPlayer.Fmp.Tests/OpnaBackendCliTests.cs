@@ -220,6 +220,34 @@ public class OpnaBackendCliTests
         return null;
     }
 
+    /// <summary>
+    /// Batch JSON must carry the final native master clock and rendered sample
+    /// count so the perf benchmark can normalize per-pair metrics against the
+    /// ACTUAL native-session clock (7,987,200 pairs/s) rather than the host
+    /// output rate x 144. Added by the measurement-fix pass; these fields are
+    /// what native_render_bench.sh reads from `tracks[0]`.
+    /// </summary>
+    [Fact]
+    public void BatchResult_Serializes_MasterClockAndSamples()
+    {
+        var result = new BatchCommand.BatchResult(
+            "a.ovi", "a.wav", Success: true, Error: null)
+        {
+            FinalOpnaMasterClock = 23_961_600, // 3 emulated seconds at 7,987,200/s
+            RenderedSamples = 144_000,         // 3 s at 48 kHz
+        };
+
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            new[] { result },
+            new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            });
+
+        Assert.Contains("\"finalOpnaMasterClock\":23961600", json);
+        Assert.Contains("\"renderedSamples\":144000", json);
+    }
+
     private static string FindNativeLibrary()
     {
         string dir = AppContext.BaseDirectory;

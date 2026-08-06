@@ -57,10 +57,12 @@ public static class RenderCommand
 
         if (opts.Json)
         {
-            PrintJson(new { success = outcome.Success, exitCode, output = outputPath, samples = outcome.RenderedSamples, stopReason = outcome.StopReason });
+            PrintJson(new { success = outcome.Success, exitCode, output = outputPath, samples = outcome.RenderedSamples, stopReason = outcome.StopReason, assetDumpError = outcome.AssetDumpError });
         }
         else if (outcome.Success)
         {
+            if (!string.IsNullOrEmpty(outcome.AssetDumpError))
+                Console.Error.WriteLine($"warning: {outcome.AssetDumpError}");
             if (!opts.Quiet)
                 Console.Error.WriteLine($"done: {outputPath} ({TimeSpan.FromSeconds((double)outcome.RenderedSamples / opts.SampleRate):g}) reason={outcome.StopReason}");
         }

@@ -17,7 +17,7 @@ public sealed class VisualizationBackendResolverTests
         var input = new FileInfo(Path.Combine(Path.GetTempPath(), "track.ovi"));
         var settings = new BatchRenderSettings();
 
-        IReadOnlyList<string> paths = VisualizationBackendResolver.BuildSearchPaths(input, settings);
+        IReadOnlyList<string> paths = VisualizationBackendResolver.BuildSearchPaths(input, settings.SearchPaths, settings.AssetsDir, settings.FmpCom);
 
         string appDir = Path.GetFullPath(AppContext.BaseDirectory);
         Assert.Contains(paths, path =>

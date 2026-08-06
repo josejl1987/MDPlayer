@@ -83,8 +83,10 @@ internal static class VisualizationBackendResolver
 
     internal static IReadOnlyList<string> BuildSearchPaths(
         FileInfo input,
-        BatchRenderSettings settings)
-        => BuildSearchPathsCore(input, settings.SearchPaths, settings.AssetsDir, settings.FmpCom);
+        IReadOnlyList<string> searchPaths,
+        string assetsDir,
+        string fmpCom)
+        => BuildSearchPathsCore(input, searchPaths, assetsDir, fmpCom);
 
     internal static IReadOnlyList<string> BuildSearchPaths(
         FileInfo input,

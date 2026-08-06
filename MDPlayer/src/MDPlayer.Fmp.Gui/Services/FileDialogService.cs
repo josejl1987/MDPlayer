@@ -75,4 +75,19 @@ public sealed class FileDialogService
 
         return files.FirstOrDefault()?.TryGetLocalPath();
     }
+
+    public async Task<string?> PickFolderAsync()
+    {
+        if (TopLevel is not { } top)
+            return null;
+
+        IReadOnlyList<IStorageFolder> folders =
+            await top.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = "Choose export folder",
+                AllowMultiple = false,
+            });
+
+        return folders.FirstOrDefault()?.TryGetLocalPath();
+    }
 }

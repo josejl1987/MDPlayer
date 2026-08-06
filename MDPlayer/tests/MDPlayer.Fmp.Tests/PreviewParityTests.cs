@@ -608,6 +608,89 @@ public sealed class PreviewParityTests
         }
     }
 
+    /// <summary>
+    /// A register-log (VGM/VGZ) capture publishes isolated per-channel stems as
+    /// its scope artifacts but never writes the FMP-only `metadata.json`. The
+    /// published reusable bundle must therefore load back with scopes ENABLED
+    /// whenever it has isolated stems — the previous gating of scope-enable on
+    /// the existence of `metadata.json` wrongly disabled scopes for VGM, which
+    /// is why GUI "convert to video" produced a video with no scope panels even
+    /// though the in-app preview (which reads the live stems) showed them.
+    /// </summary>
+    [SkippableFact]
+    public async Task PublishedVgmBundle_LoadsPreparedCaptureWithScopesEnabled()
+    {
+        bool hasPy = IsCommandAvailable("python3");
+        bool hasFf = IsCommandAvailable("ffmpeg");
+        Skip.IfNot(
+            hasPy && hasFf,
+            $"real .vgz scope-reuse test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+
+        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        if (!File.Exists(input))
+            return;
+
+        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            VisualizationRequest request = new()
+            {
+                InputPath = input,
+                OutputPath = Path.Combine(root, "preview.mp4"),
+                Composition = CompositionKind.Diagnostic,
+                Output = new OutputSettings
+                {
+                    Width = 1280,
+                    Height = 720,
+                    FpsNumerator = 30,
+                    FpsDenominator = 1,
+                },
+                Presentation = new PresentationSettings { Title = "Reuse" },
+            };
+
+            var factory = new InProcessVisualizationPreviewSessionFactory();
+            await using (IVisualizationPreviewSession session =
+                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+            {
+                _ = await session.PlanAsync(request, CancellationToken.None);
+
+                await using (ReusableCaptureLease lease =
+                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+                {
+                    string manifestJson = await File.ReadAllTextAsync(
+                        Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
+                    using var manifestDoc = JsonDocument.Parse(manifestJson);
+                    string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
+
+                    PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                        lease.DirectoryPath,
+                        lease.CaptureKey,
+                        request,
+                        backendId,
+                        CancellationToken.None);
+
+                    // The crux of the regression: VGM isolated stems ARE the
+                    // scope, so scopes must be enabled whenever isolated stems
+                    // are present — even though no `metadata.json` is bundled.
+                    Assert.False(string.IsNullOrWhiteSpace(backendId));
+                    if (reuse.Scope.HasIsolatedStems)
+                    {
+                        Assert.True(
+                            reuse.Scope.Enabled,
+                            "a register-log capture with isolated stems must preserve scope-enable "
+                            + "through bundle publish/reuse, even without an FMP metadata.json");
+                    }
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { /* best-effort cleanup */ }
+        }
+    }
+
     // ---- Commit 1: reusable capture identity / fail-closed loading ----
 
     /// <summary>

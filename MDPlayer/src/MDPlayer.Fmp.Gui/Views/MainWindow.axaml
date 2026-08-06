@@ -25,7 +25,32 @@
     <KeyBinding Gesture="End" Command="{Binding SeekEndCommand}"/>
   </Window.KeyBindings>
 
-  <Grid x:Name="MainLayout" RowDefinitions="48,Auto,*,36,Auto">
+  <Grid x:Name="MainLayout" RowDefinitions="48,Auto,Auto,*,36,Auto">
+
+
+    <!-- ── Furnace asset export notice ────────────────────────────── -->
+    <Border x:Name="FurnaceNotice" Grid.Row="1" IsVisible="{Binding HasFurnaceExportNotice}"
+            Classes="toolbar" BorderThickness="0,1,0,0" Padding="12,6">
+      <Border.Styles>
+        <Style Selector="TextBlock">
+          <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style Selector="TextBlock#FurnaceErrorText">
+          <Setter Property="Foreground" Value="{StaticResource Brush.Error}"/>
+        </Style>
+        <Style Selector="TextBlock#FurnaceSuccessText">
+          <Setter Property="Foreground" Value="{StaticResource Brush.Accent}"/>
+        </Style>
+      </Border.Styles>
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock x:Name="FurnaceErrorText" Text="{Binding FurnaceExportNotice}"
+                   IsVisible="{Binding FurnaceExportNoticeIsError}"
+                   TextWrapping="Wrap" VerticalAlignment="Center"/>
+        <TextBlock x:Name="FurnaceSuccessText" Text="{Binding FurnaceExportNotice}"
+                   IsVisible="{Binding !FurnaceExportNoticeIsError}"
+                   TextWrapping="Wrap" VerticalAlignment="Center"/>
+      </StackPanel>
+    </Border>
 
     <!-- ── Top toolbar ─────────────────────────────────────────────── -->
     <Border x:Name="TopToolbar" Grid.Row="0" Classes="toolbar" Padding="12,0">
@@ -42,6 +67,8 @@
                      TextTrimming="CharacterEllipsis" MaxWidth="420" VerticalAlignment="Center"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button x:Name="ExportFurnaceButton" Classes="secondary" Content="Export Furnace…"
+                  Command="{Binding ExportFurnaceAssetsCommand}" IsVisible="{Binding HasInput}"/>
           <Button x:Name="RenderButton" Classes="primary" Content="Render"
                   Command="{Binding RenderCommand}" MinWidth="110" HorizontalContentAlignment="Center"/>
           <Button Classes="secondary" Content="Cancel" Command="{Binding CancelExportCommand}"
@@ -51,7 +78,7 @@
     </Border>
 
     <!-- ── Export strip (progress / completed / failed) ────────────── -->
-    <Border x:Name="ExportProgress" Grid.Row="1" IsVisible="{Binding Export.IsActive}" Classes="toolbar"
+    <Border x:Name="ExportProgress" Grid.Row="2" IsVisible="{Binding Export.IsActive}" Classes="toolbar"
             BorderThickness="0,1,0,0" Padding="12,8">
       <StackPanel Spacing="6">
         <StackPanel Orientation="Horizontal" Spacing="12">
@@ -81,7 +108,7 @@
     </Border>
 
     <!-- ── Main area: settings | preview+transport | diagnostics ────── -->
-    <Grid x:Name="MainContent" Grid.Row="2">
+    <Grid x:Name="MainContent" Grid.Row="3">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="320"/>
         <ColumnDefinition Width="6"/>
@@ -513,7 +540,7 @@
     </Grid>
 
     <!-- ── Bottom status: error + status ───────────────────────────── -->
-    <Border x:Name="StatusBar" Grid.Row="3" Classes="status" Padding="12,5">
+    <Border x:Name="StatusBar" Grid.Row="4" Classes="status" Padding="12,5">
       <Grid ColumnDefinitions="*,Auto,2*" ColumnSpacing="12">
         <TextBlock Grid.Column="0" Text="{Binding StatusText}" VerticalAlignment="Center"/>
 
@@ -534,7 +561,7 @@
     </Border>
 
     <!-- ── Validation issues (why Render may be disabled) ────────────── -->
-    <Border Grid.Row="4" IsVisible="{Binding HasValidationIssues}" Classes="status" Padding="12,5">
+    <Border Grid.Row="5" IsVisible="{Binding HasValidationIssues}" Classes="status" Padding="12,5">
       <ItemsControl ItemsSource="{Binding ValidationIssues}">
         <ItemsControl.ItemTemplate>
           <DataTemplate x:DataType="contracts:ValidationIssue">

@@ -42,6 +42,12 @@ internal class BatchRenderSettings
     public string OpnaBackend { get; set; }
     public bool OpnaBackendExplicit { get; set; }
 
+    /// <summary>
+    /// Optional target directory for Furnace-compatible FM asset (.tfi) dump.
+    /// Only effective with the native-audio OPNA backend.
+    /// </summary>
+    public string FurnaceAssetDumpDirectory { get; set; }
+
     public void ValidateCommon()
     {
         if (SampleRate <= 0)
@@ -125,6 +131,9 @@ internal static class RenderOptionsParser
                 settings.OpnaBackendExplicit = true;
                 if (!BatchRenderSettings.ValidateOpnaBackend(settings.OpnaBackend, out string opnaBackendError))
                     throw new ArgumentException(opnaBackendError);
+                return true;
+            case "--dump-furnace-assets":
+                settings.FurnaceAssetDumpDirectory = reader.RequireValue(name);
                 return true;
             default: return false;
         }

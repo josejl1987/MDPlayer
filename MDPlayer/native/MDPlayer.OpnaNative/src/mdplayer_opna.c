@@ -70,8 +70,8 @@ void opna_lle_render(OpnaLle *ctx, int16_t *out_l, int16_t *out_r, size_t frames
             if (can_write)
                 opna_lle_bus_drive(ctx);
 
-            FMOPNA_Clock(chip, 0);
-            FMOPNA_Clock(chip, 1);
+            FMOPNA_Clock_SEL0(chip);
+            FMOPNA_Clock_SEL1(chip);
             ctx->master_clock++;   /* this clock pair is now absolute history */
 
             /* Drive the ADPRCM external-memory bus each pair (so o_dm/o_a8

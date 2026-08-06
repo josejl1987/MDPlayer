@@ -17,8 +17,16 @@
  * 144 master clocks per complete stereo serial frame. Every completed frame is
  * compared with the previous one; any interval other than 144 latches a sticky
  * MDP_OPNA_ERR_UNSUPPORTED_CADENCE error and stops fixed-rate resampling until
- * the session is reset. Prescaler-select writes are always honored through the
- * bus; a cadence-changing write is detected, not silently ignored.
+ * the session is reset.
+ *
+ * QW1 (MDPLAYER_OPNA_QW1_FIXED_PRESCALER, shipping default): the production
+ * core runs the fixed-prescaler (select=2) specialization, which is bit-exact
+ * only while the prescaler select stays 2. The write path therefore enforces
+ * the contract up front: a 0x2D/0x2E/0x2F write that would move the select
+ * away from 2 is rejected with MDP_OPNA_ERR_UNSUPPORTED_CADENCE before it
+ * reaches the bus. Without QW1, prescaler-select writes are always honored
+ * through the bus and a cadence-changing write is detected, not silently
+ * ignored.
  *
  * Adaptations copyright (C) 2026 MDPlayer contributors.
  *
@@ -73,8 +81,8 @@ static bool clock_pair(OpnaLle *ctx, int16_t *l, int16_t *r)
     if (can_write)
         opna_lle_bus_drive(ctx);
 
-    FMOPNA_Clock(chip, 0);
-    FMOPNA_Clock(chip, 1);
+    FMOPNA_Clock_SEL0(chip);
+    FMOPNA_Clock_SEL1(chip);
     ctx->master_clock++;
 
     opna_lle_adpcm_clock(&ctx->adpcm, chip, ctx->mem_config);
@@ -207,6 +215,7 @@ int mdp_opna_open(const mdp_opna_open_options *options,
     sess->rate_valid = true;
     sess->native_frame_clocks = MDP_OPNA_NATIVE_FRAME_CLOCKS;
     sess->prescaler_last_write = 0xFFu; /* Furnace default prescaler 0x2D */
+    sess->prescaler_sel = 2; /* QW1: fixed-144 mode after the IC reset */
 
     /*
      * Power-on: zero external RAM, reset chip state, reset scheduler/serial.
@@ -282,6 +291,7 @@ int mdp_opna_reset_chip(mdp_opna_session *session)
     session->cadence_prescaler_mode = 0;
     session->cadence_prescaler_write = 0;
     session->cadence_starve_base = 0;
+    session->prescaler_sel = 2; /* QW1: the IC reset leaves select=2 */
 
     return MDP_OPNA_OK;
 }
@@ -353,6 +363,36 @@ int mdp_opna_write_register(mdp_opna_session *session,
         return rc;
 
     int full_address = (bank ? (0x100 | address) : address);
+
+#ifdef MDPLAYER_OPNA_QW1_FIXED_PRESCALER
+    /* QW1 fixed-144 contract: the production core runs the fixed-prescaler
+     * (select=2) specialization, which is bit-exact only while the prescaler
+     * select stays 2. Enforce that contract here, at the write path, with
+     * the exact core semantics (bank 0 only):
+     *   0x2F clears the select, 0x2D sets bit 1, 0x2E sets bit 0.
+     * Any write that would move the select away from 2 is rejected up
+     * front; such a session could not keep the fixed 144-clock cadence
+     * anyway (the managed renderer already refuses these writes). */
+    if (full_address == 0x2d || full_address == 0x2e || full_address == 0x2f) {
+        int sel = session->prescaler_sel;
+        if (full_address == 0x2f)
+            sel = 0;
+        if (full_address == 0x2d)
+            sel |= 2;
+        if (full_address == 0x2e)
+            sel |= 1;
+        if (sel != 2) {
+            session->cadence_error = true;
+            session->cadence_cur_clock = session->lle.master_clock;
+            session->cadence_observed_interval = 0;
+            session->cadence_prescaler_mode = sel;
+            session->cadence_prescaler_write = value;
+            return MDP_OPNA_ERR_UNSUPPORTED_CADENCE;
+        }
+        session->prescaler_sel = sel;
+    }
+#endif
+
     /* Use the existing production bus scheduler (queue). */
     opna_lle_write(&session->lle, full_address, value);
 
@@ -408,8 +448,8 @@ static int do_status_read(mdp_opna_session *session, uint8_t bank,
 
     /* Run one complete low/high pair on the copy so the core computes
      * read_bus -> o_data. Only the snapshot is mutated; it is discarded. */
-    FMOPNA_Clock(&snapshot, 0);
-    FMOPNA_Clock(&snapshot, 1);
+    FMOPNA_Clock_SEL0(&snapshot);
+    FMOPNA_Clock_SEL1(&snapshot);
 
     *out_value = (uint8_t)(snapshot.o_data & 0xff);
     return MDP_OPNA_OK;

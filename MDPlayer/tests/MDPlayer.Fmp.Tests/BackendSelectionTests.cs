@@ -160,6 +160,32 @@ public class BackendSelectionTests
         Assert.False(File.Exists(outPath));
     }
 
+    [Fact]
+    public void Render_DefaultBackend_NullOutputWav_DoesNotThrow()
+    {
+        // Regression: the default (MDSound) render with a null WAV path (the
+        // firmware-asset dump scenario) must not crash on WavWriter's
+        // File.Move(temp, null) — i.e. no 'destfile' ArgumentNullException.
+        string ovi = FindOviFixture();
+        if (ovi == null) return;
+
+        var assets = new FmpRuntimeAssets(FmpComPath);
+        var fileSystem = new FmpFileSystem(new[] { Path.GetDirectoryName(ovi) });
+        var renderer = new FmpRenderer(assets, fileSystem, 44100);
+        var opts = new FmpRenderer.Options
+        {
+            LoopCount = 1,
+            FadeSeconds = 0.5,
+            TailSeconds = 0.1,
+            MaxDurationSeconds = 1.0,
+        };
+
+        var result = renderer.RenderToWav(
+            File.ReadAllBytes(ovi), Path.GetFileName(ovi), outputWavPath: null, opts);
+
+        Assert.True(result.Success, result.LastError);
+    }
+
     // ---------------------------------------------------------------------
     // Fixture / helpers
     // ---------------------------------------------------------------------

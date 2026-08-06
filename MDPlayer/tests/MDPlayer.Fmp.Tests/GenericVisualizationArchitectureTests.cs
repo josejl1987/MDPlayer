@@ -38,7 +38,12 @@ public sealed class GenericVisualizationArchitectureTests
         Assert.Contains("RunCore", runner, StringComparison.Ordinal);
         Assert.False(File.Exists(Path.Combine(cliRoot, "VgmVisualizeCommand.cs")));
 
-        string[] production = Directory.EnumerateFiles(cliRoot, "*.cs").ToArray();
+        // SinglePassComposer and PanelOverlayRenderer are instantiated only in
+        // the application-layer composition stage (VisualizationComposition),
+        // which moved into MDPlayer.Fmp.Application so the GUI does not
+        // reference the CLI assembly.
+        string appRoot = Path.Combine(projectRoot, "src", "MDPlayer.Fmp.Application");
+        string[] production = Directory.EnumerateFiles(appRoot, "*.cs").ToArray();
         Assert.Single(production.SelectMany(file =>
             File.ReadLines(file).Where(line => line.Contains("new SinglePassComposer(", StringComparison.Ordinal))));
         Assert.Single(production.SelectMany(file =>

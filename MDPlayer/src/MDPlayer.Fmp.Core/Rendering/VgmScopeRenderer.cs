@@ -244,6 +244,59 @@ internal static class VgmScopeRenderer
                     1.0,
                     fmColors[channel],
                     $"ym2612.{instance}.fm.{channel + 1}"));
+
+            // YM2612's shared channel-6 DAC carries the PCM/sample stream. It
+            // is a separate stem (channel 6) that maps to the timeline's
+            // `pcm.dac` panel so sampled audio shows in corrscope independently
+            // of FM6 synthesis.
+            specs.Add(new StemSpec(
+                "ym2612-pcm",
+                "YM2612 PCM (DAC)",
+                ChipType.Ym2612,
+                6,
+                ScopeSemanticClass.Pcm,
+                26,
+                2,
+                1.0,
+                "#7fd0ff",
+                $"ym2612.{instance}.pcm.dac"));
+        }
+
+        if (document.Devices.Count(device => device.Id.Type == ChipType.Ym2151) == 1)
+        {
+            // OPM: 8 FM voices.
+            string[] opmColors = ["#ff665c", "#ffb44c", "#f2df5b", "#44cc44", "#44aaff", "#aa44ff", "#ff9fe0", "#7fd0ff"];
+            int instance = FirstInstance(document, ChipType.Ym2151);
+            for (int channel = 0; channel < 8; channel++)
+                specs.Add(new StemSpec(
+                    $"ym2151-fm{channel + 1}",
+                    $"YM2151 FM {channel + 1}",
+                    ChipType.Ym2151,
+                    channel,
+                    ScopeSemanticClass.FmEvolving,
+                    20 + channel,
+                    1,
+                    1.0,
+                    opmColors[channel],
+                    $"ym2151.{instance}.fm.{channel + 1}"));
+        }
+
+        if (document.Devices.Count(device => device.Id.Type == ChipType.Okim6295) == 1)
+        {
+            // OKIM6295 is a single sample/ADPCM voice (four attenuator steps on
+            // one output); emit one mono stem that carries all of its writes.
+            int instance = FirstInstance(document, ChipType.Okim6295);
+            specs.Add(new StemSpec(
+                $"okim6295-sample",
+                "OKIM6295 Sample",
+                ChipType.Okim6295,
+                0,
+                ScopeSemanticClass.Pcm,
+                40,
+                2,
+                1.0,
+                "#66b866",
+                $"okim6295.{instance}.pcm.1"));
         }
 
         if (document.Devices.Count(device => device.Id.Type == ChipType.Sn76489) == 1)
@@ -274,7 +327,100 @@ internal static class VgmScopeRenderer
                 $"sn76489.{instance}.noise.1"));
         }
 
+        AddFmChip(specs, document, ChipType.Ym2203, "ym2203", "YM2203", fmCount: 3, ssgCount: 3);
+        AddFmChip(specs, document, ChipType.Ym2610, "ym2610", "YM2610", fmCount: 4, ssgCount: 3);
+        AddOplChip(specs, document, ChipType.Ym2413, "ym2413", "YM2413", 9);
+        AddOplChip(specs, document, ChipType.Ym3526, "ym3526", "YM3526", 9);
+        AddOplChip(specs, document, ChipType.Ym3812, "ym3812", "YM3812", 9);
+        AddOplChip(specs, document, ChipType.Y8950, "y8950", "Y8950", 9);
+        AddOplChip(specs, document, ChipType.Ymf262, "ymf262", "YMF262", 18);
+        AddPsgChip(specs, document, ChipType.Ay8910, "ay8910", "AY8910", 3, hasNoise: true);
+        AddPsgChip(specs, document, ChipType.NesApu, "nes", "NES APU", 5, hasNoise: false);
+        AddPsgChip(specs, document, ChipType.Dmg, "dmg", "GB DMG", 4, hasNoise: false);
+        AddPsgChip(specs, document, ChipType.K051649, "k051649", "K051649", 6, hasNoise: false);
+
         return specs.ToArray();
+    }
+
+    private static void AddFmChip(List<StemSpec> specs, VgmDocument document, ChipType type, string slug, string label, int fmCount, int ssgCount)
+    {
+        string[] pulseColors = ["#62b8ff", "#3399ee", "#62b8ff"];
+        if (document.Devices.Count(device => device.Id.Type == type) != 1)
+            return;
+        int instance = FirstInstance(document, type);
+        string[] colors = ["#ff665c", "#ffb44c", "#f2df5b", "#44cc44"];
+        for (int channel = 0; channel < fmCount; channel++)
+            specs.Add(new StemSpec(
+                $"{slug}-fm{channel + 1}",
+                $"{label} FM {channel + 1}",
+                type,
+                channel,
+                ScopeSemanticClass.FmEvolving,
+                40 + channel,
+                1,
+                1.0,
+                colors[channel % colors.Length],
+                $"{slug}.{instance}.fm.{channel + 1}"));
+        for (int channel = 0; channel < ssgCount; channel++)
+            specs.Add(new StemSpec(
+                $"{slug}-ssg{channel + 1}",
+                $"{label} SSG {channel + 1}",
+                type,
+                fmCount + channel,
+                ScopeSemanticClass.PulseStable,
+                50 + channel,
+                1,
+                0.7,
+                pulseColors[channel % pulseColors.Length],
+                $"{slug}.{instance}.ssg.{channel + 1}"));
+    }
+
+    private static void AddOplChip(List<StemSpec> specs, VgmDocument document, ChipType type, string slug, string label, int channels)
+    {
+        if (document.Devices.Count(device => device.Id.Type == type) != 1)
+            return;
+        int instance = FirstInstance(document, type);
+        string[] colors =
+        [
+            "#ff665c", "#ffb44c", "#f2df5b", "#44cc44", "#44aaff", "#aa44ff",
+            "#ff9fe0", "#7fd0ff", "#ffd08a", "#8aff8a", "#ff8a8a", "#8ad0ff",
+            "#ffb3e0", "#b3ffb3", "#ffe08a", "#aaccff", "#ff9fd0", "#88cc88",
+        ];
+        for (int channel = 0; channel < channels; channel++)
+            specs.Add(new StemSpec(
+                $"{slug}-fm{channel + 1}",
+                $"{label} FM {channel + 1}",
+                type,
+                channel,
+                ScopeSemanticClass.FmEvolving,
+                60 + channel,
+                1,
+                1.0,
+                colors[channel % colors.Length],
+                $"{slug}.{instance}.fm.{channel + 1}"));
+    }
+
+    private static void AddPsgChip(List<StemSpec> specs, VgmDocument document, ChipType type, string slug, string label, int channels, bool hasNoise)
+    {
+        string[] pulseColors = ["#62b8ff", "#3399ee", "#62b8ff"];
+        if (document.Devices.Count(device => device.Id.Type == type) != 1)
+            return;
+        int instance = FirstInstance(document, type);
+        for (int channel = 0; channel < channels; channel++)
+        {
+            bool noise = hasNoise && channel == channels - 1;
+            specs.Add(new StemSpec(
+                noise ? $"{slug}-noise" : $"{slug}-ch{channel + 1}",
+                noise ? $"{label} Noise" : $"{label} Ch {channel + 1}",
+                type,
+                channel,
+                noise ? ScopeSemanticClass.Noise : ScopeSemanticClass.PulseStable,
+                70 + channel,
+                1,
+                noise ? 0.7 : 1.0,
+                noise ? "#3399ee" : pulseColors[channel % pulseColors.Length],
+                $"{slug}.{instance}.ch.{channel + 1}"));
+        }
     }
 
     private static int FirstInstance(VgmDocument document, ChipType type)

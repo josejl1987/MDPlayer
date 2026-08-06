@@ -6,7 +6,7 @@ internal sealed class VisualizationExecutionException : Exception
         : base(message)
     {
         ExitCode = exitCode;
-        Code = code ?? ProgressJsonlWriter.MapFailureCode(message, exitCode);
+        Code = code ?? FailureCodeMapper.MapFailureCode(message, exitCode);
     }
 
     public int ExitCode { get; }

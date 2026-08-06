@@ -1575,6 +1575,47 @@ internal sealed class VgmAudioRenderer : IDisposable
                 case ChipType.Ym2151:
                     WriteFilteredYm2151(write);
                     break;
+                case ChipType.Okim6295:
+                    WriteFilteredOkim6295(write);
+                    break;
+                case ChipType.Ym2203:
+                    WriteFilteredYm2203(write);
+                    break;
+                case ChipType.Ym2610:
+                    WriteFilteredYm2610(write);
+                    break;
+                case ChipType.Ym2413:
+                    WriteOpl(write, 9,
+                        (i, a, p, d) => _mds.WriteYM2413emu(i, (byte)a, (byte)d));
+                    break;
+                case ChipType.Ym3526:
+                    WriteOpl(write, 9,
+                        (i, a, p, d) => _mds.WriteYM3526(i, (byte)a, (byte)d));
+                    break;
+                case ChipType.Ym3812:
+                    WriteOpl(write, 9,
+                        (i, a, p, d) => _mds.WriteYM3812(i, (byte)a, (byte)d));
+                    break;
+                case ChipType.Y8950:
+                    WriteOpl(write, 9,
+                        (i, a, p, d) => _mds.WriteY8950(i, (byte)a, (byte)d));
+                    break;
+                case ChipType.Ymf262:
+                    WriteOpl(write, 18,
+                        (i, a, p, d) => _mds.WriteYMF262(i, (byte)p, (byte)a, (byte)d));
+                    break;
+                case ChipType.Ay8910:
+                    WriteFilteredAy8910(write);
+                    break;
+                case ChipType.NesApu:
+                    WriteFilteredNesApu(write);
+                    break;
+                case ChipType.Dmg:
+                    WriteFilteredDmg(write);
+                    break;
+                case ChipType.K051649:
+                    WriteFilteredK051649(write);
+                    break;
             }
             return;
         }
@@ -1694,19 +1735,14 @@ internal sealed class VgmAudioRenderer : IDisposable
 
     private void WriteFilteredYm2612(in TimedChipWrite write)
     {
-        // YM2612 DAC samples replace channel 6 on the Mega Drive. Keep them
-        // in the FM6/DAC stem, but do not leak the DAC stream into FM1-FM5.
-        if (write.Address == 0x2A)
+        // YM2612 DAC samples play through the shared channel-6 DAC on the Mega
+        // Drive. They are represented by a dedicated `ym2612-pcm` stem
+        // (channel 6), NOT the FM6 stem, so the PCM audio shows on the
+        // timeline's `pcm.dac` panel. Do not leak the DAC stream into FM1-FM6.
+        const int DacStemChannel = 6;
+        if (write.Address is 0x2A or 0x2B)
         {
-            if (_channelFilter == 5)
-                _mds.WriteYM2612((byte)write.Device.Instance, (byte)write.Port,
-                    (byte)write.Address, (byte)write.Data);
-            return;
-        }
-
-        if (write.Address == 0x2B)
-        {
-            if (_channelFilter == 5)
+            if (_channelFilter == DacStemChannel)
                 _mds.WriteYM2612((byte)write.Device.Instance, (byte)write.Port,
                     (byte)write.Address, (byte)write.Data);
             return;
@@ -1749,23 +1785,275 @@ internal sealed class VgmAudioRenderer : IDisposable
         // cannot overwrite it.
         if (address is >= 0x28 and <= 0x37)
         {
-            int channel = address - 0x28;
+            int channel = address & 0x07;
             if (channel == _channelFilter)
                 _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
             return;
         }
 
-        // OPM operator parameters live in a flat bank at 0x40-0xFF. Each
-        // operator occupies an 8-slot stride: op = address >> 3, and every
-        // channel owns 4 operators, so channel = op >> 2. Forward only the
-        // operators that belong to the isolated channel; writes for siblings
-        // never reach this stem.
-        if (address >= 0x40)
+        // Per-channel output mode (stereo/panning), 0x38-0x3F.
+        if (address is >= 0x38 and <= 0x3F)
         {
-            int channel = (address >> 3) >> 2;
+            int channel = address & 0x07;
             if (channel == _channelFilter)
                 _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+            return;
         }
+
+        // Operator parameters live in a flat 0x40-0xFF bank grouped by
+        // parameter. Each parameter occupies one byte per operator, and the 32
+        // operators are laid out as channel * 4 + local_op, so within each
+        // 32-byte parameter block the low 5 bits are the operator index and the
+        // channel is operator / 4. Forward only the operators owned by the
+        // isolated channel. (OPM/OPN packing differs here from YM2612 — using
+        // address >> 5 here would misroute every channel's loudness/envelope
+        // writes and mute the stem.)
+        if (address >= 0x40)
+        {
+            int channel = (address & 0x1F) >> 2;
+            if (channel == _channelFilter)
+                _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+            return;
+        }
+
+        // Remaining registers (0x00-0x27 apart from the 0x08 key trigger) are
+        // chip-wide setup: CSM/timer control (0x01), a/b control (0x02-0x07),
+        // LFO (0x14/0x18/0x19/0x1B), and reserved. Feed them to every stem so
+        // the emulator stays coherent across all isolated voices.
+        _mds.WriteYM2151((byte)write.Device.Instance, (byte)address, (byte)data);
+    }
+
+    private void WriteFilteredOkim6295(in TimedChipWrite write)
+    {
+        // OKIM6295 is a single sample/ADPCM voice: every write to the chip
+        // belongs to the one isolated stem, so forward them all.
+        _mds.WriteOKIM6295((byte)write.Device.Instance, (byte)write.Port, (byte)write.Data);
+    }
+
+    /// <summary>
+    /// Shared channel-routing for the OPL/OPLL/OPL2/OPL3 melodic FM chips
+    /// (YM2413, YM3526, YM3812, Y8950, YMF262). In the OPL register space every
+    /// per-channel register sits at address = block_base + channel with block
+    /// bases at 0x20/0x30/…/0xE8 (all multiples of 0x10), so the channel is the
+    /// low nibble of the address. 0xBD is the shared rhythm register and the
+    /// sub-0x20 registers are chip-wide setup — both go to every stem. OPL3
+    /// (YMF262) spans 18 channels across the two 0x10-aligned banks selected by
+    /// port. sink receives (instance, address, port, data) the caller forwards
+    /// to the MDSound path.
+    /// </summary>
+    private void WriteOpl(
+        in TimedChipWrite write,
+        int melodyChannels,
+        Action<byte, int, int, byte> sink)
+    {
+        byte data = (byte)write.Data;
+        byte instance = (byte)write.Device.Instance;
+        int port = write.Port;
+        byte address = (byte)write.Address;
+        int bank = port & 1;
+        int bankBase = bank * 9;
+        bool perChannel = address is >= 0x20 and <= 0xE8 && address != 0xBD;
+        if (!perChannel)
+        {
+            // Shared register (timer, AM/FM-depth, rhythm). Only the owning
+            // bank's stems should write OPL3 bank registers; single-bank OPL
+            // (melodyChannels == 9) lets all stems through but that is the
+            // shared portion, so it is safe.
+            if (melodyChannels > 9 && !(_channelFilter >= bankBase && _channelFilter < bankBase + 9))
+                return;
+            sink(instance, address, port, data);
+            return;
+        }
+        int mapped = bankBase + (address & 0x0F);
+        if (mapped == _channelFilter)
+            sink(instance, address, port, data);
+    }
+
+    private void WriteFilteredYm2203(in TimedChipWrite write)
+    {
+        // OPN (YM2203): 3 FM channels plus a 3-channel integrated SSG, both on
+        // port 0. FM: key-on at 0x28 (channel in data bits); operator/freq
+        // regs at 0x30-0xB6 / 0xA0-0xA6 (channel = low 2 bits). SSG lives in
+        // registers 0x00-0x0D.
+        int address = write.Address & 0xFF;
+        if (write.Port != 0)
+            return;
+        if (_channelFilter < 3)
+        {
+            int fmChannel = OpnFmChannel(address, write.Port, (byte)write.Data, fmCount: 3);
+            if (fmChannel == _channelFilter)
+                _mds.WriteYM2203((byte)write.Device.Instance, (byte)address, (byte)write.Data);
+            return;
+        }
+        int ssg = SsgChannel(address);
+        if (ssg == _channelFilter - 3 || IsSsgShared(address))
+            _mds.WriteYM2203((byte)write.Device.Instance, (byte)address, (byte)write.Data);
+    }
+
+    private void WriteFilteredYm2610(in TimedChipWrite write)
+    {
+        // OPN-A (YM2610): 4 FM + 3 SSG (SSG on port 0; FM channel 3's key-on and
+        // frequency registers live on port 1) + ADPCM-A. Filter index:
+        // 0..3 FM, 4..6 SSG, 7 = ADPCM-A.
+        int address = write.Address & 0xFF;
+        int channel = write.Port & 1;
+        if (channel == 1 && address == 0x28)
+        {
+            if (_channelFilter == 3) // channel 3 key-on on port 1
+                _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        if (write.Port == 0 && _channelFilter < 4)
+        {
+            int fmChannel = OpnFmChannel(address, 0, (byte)write.Data, fmCount: 4);
+            if (fmChannel == _channelFilter)
+                _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        if (write.Port == 1 && _channelFilter == 3) // channel 3 freq/operator regs on port 1
+        {
+            if (address == 0x28) return;
+            if (address is (>= 0xA0 and <= 0xA2) or (>= 0xA4 and <= 0xA6))
+                _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+            else if (address is >= 0x30 and <= 0xB6)
+                _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        if (_channelFilter is >= 4 and <= 6)
+        {
+            if (write.Port != 0) return;
+            int ssg = SsgChannel(address);
+            if (ssg == _channelFilter - 4 || IsSsgShared(address))
+                _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        // ADPCM-A combined stem (7): keep the chip's ADPCM control writes.
+        if (_channelFilter == 7 && write.Port == 0)
+            _mds.WriteYM2610((byte)write.Device.Instance, (byte)write.Port, (byte)write.Address, (byte)write.Data);
+    }
+
+    /// <summary>Derive the FM channel (0..fmCount-1) from an OPN/OPN-A FM register write.</summary>
+    private static int OpnFmChannel(int address, int port, byte data, int fmCount)
+    {
+        if (address == 0x28)
+            return data & 0x03;        // key-on channel (port 0)
+        if (address is >= 0x30 and <= 0xB6)
+            return address & 0x03;     // operator block, right 2 bits = channel
+        if (address is >= 0xA0 and <= 0xA6) return address & 0x03;
+        return -1;                     // global (LFO, timer, ...) -> never leaks
+    }
+
+    /// <summary>SSG/AY channel (0..2) for an address, or -1 if not tonal.</summary>
+    private static int SsgChannel(int address)
+    {
+        int r = address & 0x0F;
+        return r switch
+        {
+            0 or 1 => 0,
+            2 or 3 => 1,
+            4 or 5 => 2,
+            _ => -1,
+        };
+    }
+
+    private static bool IsSsgShared(int address) =>
+        (address & 0x0F) is 7 or 8 or 9 or 0x0A or 0x0B or 0x0D or 0x0E or 0x0F;
+
+    private void WriteFilteredAy8910(in TimedChipWrite write)
+    {
+        // AY-3-8910: 3 tonal channels + 1 noise. Registers 0/1=ch0 tone,
+        // 2/3=ch1, 4/5=ch2, 6=noise frequency, 7=mixer, 8/9/10=ch0/1/2 volume,
+        // 11-13=envelope (shared).
+        int r = write.Address & 0x0F;
+        if (_channelFilter < 3)
+        {
+            int mine = r switch
+            {
+                0 or 1 or 8 => 0,
+                2 or 3 or 9 => 1,
+                4 or 5 or 10 => 2,
+                _ => -1,
+            };
+            // Forward this channel's tone+volume regs, plus the shared
+            // mixer (7) and envelope (11-13) so each stem stays coherent.
+            if (mine == _channelFilter || r == 7 || r is >= 11 and <= 13)
+                _mds.WriteAY8910((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        // Noise channel (3): frequency (6) + mixer (7) + envelope shared.
+        if (_channelFilter == 3 && (r == 6 || r == 7 || r is >= 11 and <= 13 || r == 8))
+            _mds.WriteAY8910((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+    }
+
+    private void WriteFilteredNesApu(in TimedChipWrite write)
+    {
+        // NES APU: 0x4000-0x4003 pulse1 (ch0), 0x4004-0x4007 pulse2 (ch1),
+        // 0x4008-0x400B triangle (ch2), 0x400C-0x400F noise (ch3), 0x4010-0x4013
+        // DMC (ch4), 0x4015 status / 0x4017 frame (shared).
+        int a = write.Address & 0xFF;
+        int channel = a switch
+        {
+            >= 0x4000 and <= 0x4003 => 0,
+            >= 0x4004 and <= 0x4007 => 1,
+            >= 0x4008 and <= 0x400B => 2,
+            >= 0x400C and <= 0x400F => 3,
+            >= 0x4010 and <= 0x4013 => 4,
+            _ => -1,
+        };
+        if (channel == _channelFilter)
+            _mds.WriteNES((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+        else if (channel >= 0 && channel <= 4)
+            return; // sibling channel register never leaks
+        else if (a is 0x4015 or 0x4017) // status/frame shared
+            _mds.WriteNES((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+    }
+
+    private void WriteFilteredDmg(in TimedChipWrite write)
+    {
+        // Game Boy: write.Address is the full 0xFFxx register; reduce to the
+        // NR index (0x10-0x3F).
+        int nr = write.Address & 0x3F;
+        int channel = nr switch
+        {
+            >= 0x10 and <= 0x14 => 0,             // NR10-NR14 (pulse 1)
+            >= 0x16 and <= 0x1A => 1,             // NR20-NR24 (pulse 2; NR24=0x1A)
+            >= 0x1B and <= 0x1E => 2,             // NR31-NR34 (wave, 0xFF1B-0x1E)
+            >= 0x20 and <= 0x26 => 3,             // NR41-NR46 (noise)
+            _ => -1,
+        };
+        if (nr == 0x1A && _channelFilter == 2)
+        {
+            // 0xFF1A is NR24 (pulse-2 length) but also sits over the wave
+            // channel-3 header; forward to channel 3 too to keep it coherent.
+            _mds.WriteDMG((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+            return;
+        }
+        if (channel == _channelFilter)
+            _mds.WriteDMG((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+        else if (channel is >= 0 and <= 3)
+            return; // a sibling channel's register never leaks
+        else if (nr is 0x24 or 0x25 or 0x26) // NR50/NR51/NR52 global mix
+            _mds.WriteDMG((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+    }
+
+    private void WriteFilteredK051649(in TimedChipWrite write)
+    {
+        // K051649 / Konami SCC: 5 tone channels + 1 noise. Registers 0x00-0x09
+        // hold the 5 tone generators (2 regs each); 0x0A-0x0F are volume,
+        // mode and noise control shared across channels (routed to the tone
+        // channels so their state stays coherent; the noise stem keeps tone
+        // stays separate).
+        int a = write.Address & 0xFF;
+        if (a < 0x0A)
+        {
+            int channel = a / 2;
+            if (channel == _channelFilter)
+                _mds.WriteK051649((byte)write.Device.Instance, write.Address, (byte)write.Data);
+            return;
+        }
+        // 0x0A-0x0F shared: forward to melody stems (0..4); keep the noise
+        // stem (5) coherent with the shared state too.
+        _mds.WriteK051649((byte)write.Device.Instance, write.Address, (byte)write.Data);
     }
 
     private void WriteFilteredYm2608(in TimedChipWrite write)

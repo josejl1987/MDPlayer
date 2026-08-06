@@ -48,6 +48,12 @@ class RawFramesOutput(Output):
         self._expected = None
 
     def write_frame(self, frame):
+        if frame is None:
+            # Corrscope can report "no scope frame" for a tick (e.g. a frame
+            # boundary that falls in a gap with nothing to draw). That is not a
+            # corrupt stream: skip the tick instead of treating it as a malformed
+            # frame, which previously raised len(None) and aborted the render.
+            return None
         if self._expected is None:
             # Corrscope forces res_divisor to 1 before recording, so the
             # rendered frame is exactly width x height RGBA.
@@ -124,6 +130,8 @@ def main():
     except BrokenPipeError:
         return 0
     except BaseException as exc:  # noqa: BLE001 — surface any corrscope error
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         print(f"corrscope-frames error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 

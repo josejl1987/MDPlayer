@@ -12,9 +12,10 @@
  *   - real_fm_trace_has_144_clock_cadence:        the checked-in real FM trace stays at 144
  *
  * The 0x2E / 0x2F tests PASS only when the ABI detects and reports unsupported
- * cadence (they do not require successful audio resampling). Prescaler writes
- * are always executed through the production bus; they are never silently
- * ignored.
+ * cadence (they do not require successful audio resampling). With QW1 the
+ * write path rejects cadence-changing prescaler writes up front; otherwise
+ * they are executed through the production bus and the cadence guard latches
+ * the error on the next advance/drain. They are never silently ignored.
  *
  * The executable runs a single scenario when given `-t <key>` (used to register
  * each named CTest) or all scenarios when run bare.
@@ -76,8 +77,11 @@ static int run_window(mdp_opna_session *s, const char *prescaler_write,
     return non144;
 }
 
-/* 0x2E written through the production bus must make the cadence guard latch
- * MDP_OPNA_ERR_UNSUPPORTED_CADENCE on a subsequent advance/drain. */
+/* 0x2E / 0x2F written through the production bus must report
+ * MDP_OPNA_ERR_UNSUPPORTED_CADENCE. With QW1 the write itself is rejected up
+ * front (the fixed-144 contract is enforced at the write path); without QW1
+ * the write is honored through the bus and a subsequent advance/drain must
+ * surface the cadence error. */
 static void expect_unsupported(mdp_opna_open_options *opt, const char *tag,
                                unsigned reg)
 {
@@ -88,6 +92,17 @@ static void expect_unsupported(mdp_opna_open_options *opt, const char *tag,
         failures++;
         return;
     }
+#ifdef MDPLAYER_OPNA_QW1_FIXED_PRESCALER
+    /* QW1 fixed-144 contract: the prescaler-select write is rejected at the
+     * write path, before it reaches the bus, and the session latches the
+     * sticky cadence error. */
+    int rc = mdp_opna_write_register(s, 0, 0, (uint8_t)reg, 1);
+    CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
+          "prescaler write not rejected at clock 0");
+    rc = mdp_opna_advance_to(s, 4000);
+    CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
+          "sticky cadence error not surfaced on advance");
+#else
     /* Honor 0x2E/0x2F through the bus. */
     int rc = mdp_opna_write_register(s, 0, 0, (uint8_t)reg, 1);
     CHECK(rc == MDP_OPNA_OK, "prescaler write rejected at clock 0");
@@ -102,6 +117,7 @@ static void expect_unsupported(mdp_opna_open_options *opt, const char *tag,
     }
     CHECK(rc == MDP_OPNA_ERR_UNSUPPORTED_CADENCE,
           "0x%02X did not report unsupported cadence");
+#endif
     mdp_opna_close(s);
 }
 
