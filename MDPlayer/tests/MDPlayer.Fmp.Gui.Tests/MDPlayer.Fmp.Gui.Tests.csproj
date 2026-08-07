@@ -15,8 +15,11 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.3.18" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.18" />
+    <!-- Must float with the GUI's Avalonia (11.3.*) so the headless window
+         implementation matches the runtime version; a pinned older Headless
+         breaks against a newer Avalonia (TypeLoadException / SetHitTestVisible). -->
+    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.3.*" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.*" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,0 +1,149 @@
+#nullable enable
+
+namespace Fmp.Core.Timing;
+
+/// <summary>
+/// Canonical conversion from playback sample positions (the timeline clock, in
+/// source samples) to quarter-note musical positions and MIDI ticks. Every MIDI
+/// event — notes, pitch bends, rhythm/drums, loops, markers — MUST be converted
+/// through this single map so that tempo, beat phase and downbeats are aligned
+/// to the same grid.
+///
+/// Segments are ordered, non-overlapping and contiguous: the quarter position
+/// carried by a following segment equals the value produced by the previous
+/// segment at the same sample, so there is no discontinuity at boundaries.
+/// </summary>
+internal sealed class MusicalTimeMap
+{
+    private readonly IReadOnlyList<TempoSegment> _segments;
+
+    public MusicalTimeMap(
+        int sampleRate,
+        long startSample,
+        IReadOnlyList<TempoSegment> segments,
+        Meter? meter = null,
+        double? firstDownbeatQuarter = null)
+    {
+        if (sampleRate <= 0)
+            throw new ArgumentOutOfRangeException(nameof(sampleRate));
+        ArgumentNullException.ThrowIfNull(segments);
+        if (segments.Count == 0)
+            throw new ArgumentException("musical time map requires at least one tempo segment", nameof(segments));
+
+        SampleRate = sampleRate;
+        StartSample = startSample;
+        Meter = meter;
+        FirstDownbeatQuarter = firstDownbeatQuarter;
+        _segments = ValidateSegments(segments);
+    }
+
+    public int SampleRate { get; }
+
+    /// <summary>The first source sample the map is defined from (timeline StartSample).</summary>
+    public long StartSample { get; }
+
+    public IReadOnlyList<TempoSegment> Segments => _segments;
+
+    public Meter? Meter { get; }
+
+    /// <summary>
+    /// Absolute quarter-note position of the first known downbeat, when one is
+    /// established (driver bar info, user override, or high-confidence accent
+    /// inference). Null when unknown — the exporter must NOT invent a downbeat.
+    /// </summary>
+    public double? FirstDownbeatQuarter { get; }
+
+    /// <summary>First sample covered by any segment (inclusive).</summary>
+    public long FirstSample => _segments[0].StartSample;
+
+    /// <summary>Last sample covered by the final segment (exclusive).</summary>
+    public long EndSample => _segments[^1].EndSample;
+
+    /// <summary>
+    /// The absolute quarter-note position at a sample. Because segments are
+    /// contiguous this is continuous across segment boundaries; each event
+    /// therefore derives from its own absolute sample and cumulative rounding
+    /// drift cannot accumulate with song length.
+    /// </summary>
+    public double SampleToQuarterPosition(long sample)
+    {
+        TempoSegment segment = LocateSegment(sample);
+        return segment.QuarterPositionAt(sample);
+    }
+
+    /// <summary>
+    /// Converts an absolute sample to an absolute MIDI tick at the given PPQ,
+    /// computing from the absolute sample so no per-beat rounding accumulates.
+    /// </summary>
+    public long SampleToTick(long sample, int ppq) =>
+        QuarterPositionToTick(SampleToQuarterPosition(sample), ppq);
+
+    /// <summary>
+    /// Converts an absolute quarter-note position to an absolute MIDI tick.
+    /// Uses <see cref="MidpointRounding.AwayFromZero"/> so a beat anchor sitting
+    /// exactly on a quarter boundary maps to the exact tick and never drifts.
+    /// </summary>
+    public long QuarterPositionToTick(double quarter, int ppq)
+    {
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+        double ticks = quarter * ppq;
+        return (long)Math.Round(ticks, MidpointRounding.AwayFromZero);
+    }
+
+    /// <summary>Converts an absolute MIDI tick back to a quarter-note position (inverse).</summary>
+    public double TickToQuarterPosition(long tick, int ppq) =>
+        ppq <= 0 ? throw new ArgumentOutOfRangeException(nameof(ppq)) : (double)tick / ppq;
+
+    private TempoSegment LocateSegment(long sample)
+    {
+        if (sample < FirstSample)
+            return _segments[0];
+        if (sample >= EndSample)
+            return _segments[^1];
+        // Segments are ordered; binary search for the segment containing sample.
+        int low = 0;
+        int high = _segments.Count - 1;
+        while (low < high)
+        {
+            int mid = (low + high) / 2;
+            if (_segments[mid].EndSample <= sample)
+                low = mid + 1;
+            else
+                high = mid;
+        }
+        return _segments[low];
+    }
+
+    private static IReadOnlyList<TempoSegment> ValidateSegments(IReadOnlyList<TempoSegment> segments)
+    {
+        var sorted = segments.OrderBy(segment => segment.StartSample).ToArray();
+        for (int index = 0; index < sorted.Length; index++)
+        {
+            TempoSegment current = sorted[index];
+            if (current.SamplesPerQuarter <= 0 || !double.IsFinite(current.SamplesPerQuarter))
+                throw new ArgumentException($"segment {index} has invalid samples-per-quarter", nameof(segments));
+            if (current.BeatsPerMinute <= 0 || !double.IsFinite(current.BeatsPerMinute))
+                throw new ArgumentException($"segment {index} has invalid BPM", nameof(segments));
+            if (current.EndSample < current.StartSample)
+                throw new ArgumentException($"segment {index} end precedes start", nameof(segments));
+            if (index > 0)
+            {
+                TempoSegment previous = sorted[index - 1];
+                if (current.StartSample < previous.EndSample)
+                    throw new ArgumentException($"segment {index} overlaps segment {index - 1}", nameof(segments));
+                // Enforce explicit continuity: the following segment's quarter
+                // position at its start must equal the previous segment's value.
+                double expected = previous.QuarterPositionAt(current.StartSample);
+                if (Math.Abs(expected - current.QuarterPositionAtStart) > 1e-6)
+                {
+                    throw new ArgumentException(
+                        $"segment {index} breaks continuity at sample {current.StartSample}: " +
+                        $"expected quarter {expected:0.######}, got {current.QuarterPositionAtStart:0.######}",
+                        nameof(segments));
+                }
+            }
+        }
+        return sorted;
+    }
+}

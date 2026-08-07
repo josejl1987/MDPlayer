@@ -76,6 +76,29 @@ public sealed class FileDialogService
         return files.FirstOrDefault()?.TryGetLocalPath();
     }
 
+    public async Task<string?> SaveMidiFileAsync(string? suggestedName)
+    {
+        if (TopLevel is not { } top)
+            return null;
+
+        string fileStem = string.IsNullOrWhiteSpace(suggestedName)
+            ? "track"
+            : Path.GetFileNameWithoutExtension(suggestedName);
+        IStorageFile? file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export MIDI",
+            SuggestedFileName = fileStem + ".mid",
+            DefaultExtension = "mid",
+            FileTypeChoices = new[]
+            {
+                new FilePickerFileType("MIDI file") { Patterns = new[] { "*.mid", "*.midi" } },
+                FilePickerFileTypes.All,
+            },
+        });
+
+        return file?.TryGetLocalPath();
+    }
+
     public async Task<string?> PickFolderAsync()
     {
         if (TopLevel is not { } top)

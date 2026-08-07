@@ -1,0 +1,539 @@
+#nullable enable
+
+using Fmp.Core.Timing;
+using Fmp.Core.Visualization;
+
+namespace Fmp.Core.Midi;
+
+/// <summary>Optional export transforms. Timing accuracy is the default; quantization
+/// and drum mapping are opt-in, applied only after the musical-time conversion.</summary>
+internal sealed class MusicalMidiExportOptions
+{
+    public static readonly MusicalMidiExportOptions Default = new();
+
+    /// <summary>off | eighth | sixteenth | thirtysecond (grid snapping for note-ons).</summary>
+    public string Quantize { get; init; } = "off";
+
+    /// <summary>Assign percussive voices to MIDI channel 9 (GM percussion).</summary>
+    public bool UsePercussionChannel { get; init; } = true;
+
+    /// <summary>Base MIDI note assigned to the first distinct rhythm voice.</summary>
+    public int PercussionNoteBase { get; init; } = 36;
+
+    /// <summary>Emit pitch-bend for microtonal / intra-note pitch movement (Batch 4).</summary>
+    public bool EmitPitchBend { get; init; } = true;
+
+    /// <summary>Semitones of the configured pitch-bend range (RPN), default 2.</summary>
+    public int BendRangeSemitones { get; init; } = 2;
+
+    public bool EmitInstrumentMetadata { get; init; } = true;
+
+    /// <summary>Emit loop/section markers on the conductor track.</summary>
+    public bool EmitMarkers { get; init; } = true;
+
+    /// <summary>Emit conductor track name / source metadata / timing-confidence text.</summary>
+    public bool EmitConductorMetadata { get; init; } = true;
+
+    /// <summary>Default note velocity (1–127) when a voice override does not set one.</summary>
+    public int Velocity { get; init; } = 90;
+
+    /// <summary>Per-voice transforms keyed by <c>ChannelId</c>. A missing entry keeps defaults.</summary>
+    public IReadOnlyList<VoiceExportOverride> VoiceOverrides { get; init; } = Array.Empty<VoiceExportOverride>();
+
+    /// <summary>Resolve the override for a channel, or the voice's default if none.</summary>
+    public VoiceExportOverride OverrideFor(string channelId)
+    {
+        foreach (VoiceExportOverride vo in VoiceOverrides)
+        {
+            if (string.Equals(vo.ChannelId, channelId, StringComparison.Ordinal))
+                return vo;
+        }
+        return VoiceExportOverride.Default(channelId);
+    }
+}
+
+/// <summary>
+/// Per-voice export transform. All fields are optional floats/ints; a value of
+/// <c>null</c> means "leave whatever the exporter would otherwise do".
+/// </summary>
+internal sealed class VoiceExportOverride
+{
+    public static VoiceExportOverride Default(string channelId) => new(channelId);
+
+    public VoiceExportOverride(string channelId)
+    {
+        ChannelId = channelId;
+        Include = true;
+        Program = null;
+        Channel = null;
+        Velocity = null;
+        TransposeSemitones = 0;
+    }
+
+    public string ChannelId { get; }
+
+    /// <summary>False to exclude this voice from the export entirely (no track, no notes).</summary>
+    public bool Include { get; set; } = true;
+
+    /// <summary>GM program number (0–127) forced on this voice's track; null = no override.</summary>
+    public int? Program { get; set; }
+
+    /// <summary>MIDI channel (0–15) forced on this voice's track; null = default allocation.</summary>
+    public int? Channel { get; set; }
+
+    /// <summary>Note velocity (1–127); null = use option default.</summary>
+    public int? Velocity { get; set; }
+
+    /// <summary>Semitones to transpose this voice; 0 = none.</summary>
+    public int TransposeSemitones { get; set; }
+}
+
+/// <summary>The exported MIDI stream plus the events it was built from.</summary>
+internal sealed class MusicalMidiExportResult
+{
+    public required byte[] Bytes { get; init; }
+
+    public required IReadOnlyList<MidiTrack> Tracks { get; init; }
+
+    public required TimingDiagnostics Diagnostics { get; init; }
+}
+
+/// <summary>
+/// Turns a <see cref="VisualizationTimeline"/> into a Format 1 MIDI file by routing
+/// every event through the canonical <see cref="MusicalTimeMap"/>. This class holds
+/// NO timing logic of its own — it only maps samples to absolute ticks, applies the
+/// non-negative origin shift, and allocates tracks/channels (a separate policy).
+/// </summary>
+internal sealed class MusicalMidiExporter
+{
+    private readonly MusicalTimeMap _map;
+    private readonly int _ppq;
+    private readonly MusicalMidiExportOptions _options;
+
+    public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
+    {
+        _map = map ?? throw new ArgumentNullException(nameof(map));
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+        _ppq = ppq;
+        _options = (options ?? MusicalMidiExportOptions.Default);
+    }
+
+    /// <summary>Optional diagnostics (from the map's builder) surfaced on the result.</summary>
+    public TimingDiagnostics? Diagnostics { get; set; }
+
+    public MusicalMidiExportResult Export(VisualizationTimeline timeline)
+    {
+        ArgumentNullException.ThrowIfNull(timeline);
+        double originOffsetQuarters = ComputeOriginOffset(timeline);
+
+        var conductor = new List<MidiEventBase>();
+        BuildConductor(timeline, originOffsetQuarters, conductor);
+
+        TrackAllocator allocator = BuildTracks(timeline);
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note is null || note.EndSample <= note.StartSample)
+                continue;
+            TrackSlot slot = allocator.SlotFor(note.ChannelId);
+            if (slot is null)
+                continue;
+            EmitNote(slot, note, originOffsetQuarters);
+        }
+
+        // Rhythm voices → percussion pitches (Batch 4 drum allocation).
+        var drumNoteByVoice = new Dictionary<string, int>(StringComparer.Ordinal);
+        int nextDrum = _options.PercussionNoteBase;
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null)
+                continue;
+            TrackSlot slot = allocator.SlotFor(rhythm.ChannelId, percussive: true);
+            if (slot is null)
+                continue;
+            if (!drumNoteByVoice.TryGetValue(rhythm.ChannelId, out int note))
+            {
+                note = nextDrum++;
+                drumNoteByVoice[rhythm.ChannelId] = note;
+            }
+            slot.Track.Events.Add(new MidiNoteEvent(
+                MapTick(rhythm.SamplePosition, originOffsetQuarters),
+                slot.Index, slot.Channel, note, 100, NoteOn: true));
+            slot.Track.Events.Add(new MidiNoteEvent(
+                MapTick(rhythm.SamplePosition, originOffsetQuarters) + ShortHitTicks,
+                slot.Index, slot.Channel, note, 100, NoteOn: false));
+        }
+
+        ApplyQuantizationToGrid(allocator);
+
+        var writer = new MidiFileWriter(_ppq);
+        var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
+        byte[] bytes = writer.Write(conductor, tracks);
+        return new MusicalMidiExportResult
+        {
+            Bytes = bytes,
+            Tracks = tracks,
+            Diagnostics = Diagnostics ?? new TimingDiagnostics
+            {
+                AnchorCount = 0,
+                TempoSource = TimingSource.DriverBeatAnchors,
+                PhaseSource = TimingSource.DriverBeatAnchors,
+            },
+        };
+    }
+
+    private readonly TimingDiagnostics NullDiagnostics = new()
+    {
+        AnchorCount = 0,
+        TempoSource = TimingSource.DriverBeatAnchors,
+        PhaseSource = TimingSource.DriverBeatAnchors,
+    };
+
+    private long MapTick(long sample, double originOffsetQuarters) =>
+        _map.QuarterPositionToTick(_map.SampleToQuarterPosition(sample) + originOffsetQuarters, _ppq);
+
+    private int ShortHitTicks => Math.Max(1, _ppq / 32);
+
+    private void EmitNote(TrackSlot slot, NoteEvent note, double originOffsetQuarters)
+    {
+        VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
+        int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
+        int transpose = voiceOverride.TransposeSemitones;
+
+        bool needsBend = _options.EmitPitchBend
+            && (note.Pitch is { Count: > 0 }
+                || !double.IsFinite(note.InitialMidiNote)
+                || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6);
+
+        // When no bend is needed, emit a single note at the rounded pitch with no
+        // bend infrastructure at all (keeps constant-pitch output minimal and
+        // byte-identical to the pre-bend exporter for the common case).
+        IReadOnlyList<NotePlaybackSegment> segments = needsBend
+            ? BuildPlaybackSegments(note, _options.BendRangeSemitones)
+            : new[] { new NotePlaybackSegment(
+                note.StartSample, note.EndSample,
+                note.InitialMidiNote, Array.Empty<PitchChange>()) };
+
+        if (needsBend)
+        {
+            // The bend is always relative to the note's own playback pitch, so a
+            // +-range bend range suffices; monotonic, per-segment note numbers re-centre
+            // long contours into a run of short notes (glissando re-articulation).
+            slot.Track.Events.Add(new MidiBendRangeEvent(
+                MapTick(note.StartSample, originOffsetQuarters),
+                slot.Index, slot.Channel, _options.BendRangeSemitones));
+        }
+
+        foreach (NotePlaybackSegment segment in segments)
+        {
+            long segOn = MapTick(segment.StartSample, originOffsetQuarters);
+            long segOff = MapTick(segment.EndSample, originOffsetQuarters);
+            if (segOff <= segOn)
+                segOff = segOn + 1;
+            int pitch = (int)Math.Clamp(Math.Round(segment.BaseMidiNote) + transpose, 0, 127);
+            slot.Track.Events.Add(new MidiNoteEvent(segOn, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
+            slot.Track.Events.Add(new MidiNoteEvent(segOff, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
+
+            if (!needsBend)
+                continue;
+            // Initial fractional correction so the note starts at its true pitch.
+            double baseNote = segment.BaseMidiNote;
+            int initialBend = EncodeBend(baseNote - pitch, _options.BendRangeSemitones);
+            slot.Track.Events.Add(new MidiPitchBendEvent(segOn, slot.Index, slot.Channel, initialBend));
+            // Each change, relative to the segment's base note.
+            foreach (PitchChange change in segment.Changes)
+            {
+                if (!double.IsFinite(change.MidiNote))
+                    continue;
+                slot.Track.Events.Add(new MidiPitchBendEvent(
+                    MapTick(change.SamplePosition, originOffsetQuarters),
+                    slot.Index, slot.Channel,
+                    EncodeBend(change.MidiNote - baseNote, _options.BendRangeSemitones)));
+            }
+        }
+    }
+
+    /// <summary>7-bit bend value for a semitone offset within the configured range.</summary>
+    private static int EncodeBend(double semitones, int rangeSemitones)
+    {
+        if (!double.IsFinite(semitones))
+            return 0;
+        double halfRange = Math.Max(1, rangeSemitones);
+        double scaled = (semitones / halfRange) * 8191.0;
+        return Math.Clamp((int)Math.Round(scaled), -8192, 8191);
+    }
+
+    /// <summary>
+    /// Decomposes a possibly long-running pitch contour into a run of short notes.
+    /// One segment is emitted per pitch-change sample at which the contour leaves
+    /// the configured bend range; each segment keeps its pitch within ±range of its
+    /// own (rounded) base note, so no bend ever clips and the full contour is traced.
+    /// </summary>
+    private List<NotePlaybackSegment> BuildPlaybackSegments(NoteEvent note, int rangeSemitones)
+    {
+        double basePitch = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
+        var result = new List<NotePlaybackSegment>();
+        var changes = new List<PitchChange>();
+        double segBase = basePitch;
+        double segStart = note.StartSample;
+
+        void CloseSegment(double endSample)
+        {
+            result.Add(new NotePlaybackSegment(
+                (long)Math.Round(segStart), (long)Math.Round(endSample), segBase, changes.ToArray()));
+        }
+
+        foreach (PitchChange change in note.Pitch
+                     .OrderBy(p => p.SamplePosition)
+                     .ThenBy(p => p.MidiNote))
+        {
+            if (!double.IsFinite(change.MidiNote))
+                continue;
+            double needed = change.MidiNote - segBase;
+            if (Math.Abs(needed) > Math.Max(1, rangeSemitones))
+            {
+                // Contour left this segment's range: close it at this change's
+                // sample and start a fresh segment centred on the new pitch.
+                CloseSegment(change.SamplePosition);
+                segStart = change.SamplePosition;
+                segBase = change.MidiNote;
+                changes.Clear();
+                continue;
+            }
+            changes.Add(change);
+        }
+        CloseSegment(note.EndSample);
+        return result;
+    }
+
+    private readonly record struct NotePlaybackSegment(
+        long StartSample,
+        long EndSample,
+        double BaseMidiNote,
+        IReadOnlyList<PitchChange> Changes);
+
+    private void ApplyQuantizationToGrid(TrackAllocator allocator)
+    {
+        string mode = (_options.Quantize ?? "off").ToLowerInvariant();
+        int gridTicks = mode switch
+        {
+            "1/8" => _ppq / 2,
+            "1/16" => _ppq / 4,
+            "1/32" => _ppq / 8,
+            _ => 0,
+        };
+        if (gridTicks <= 0)
+            return;
+        foreach ((int index, MidiTrack track) in allocator.Tracks.OrderBy(pair => pair.Key))
+        {
+            foreach (MidiEventBase evt in track.Events)
+            {
+                if (evt is MidiNoteEvent note && note.NoteOn)
+                {
+                    // Quantize start to the nearest grid line; keep end duration.
+                    long group = (note.Tick + gridTicks / 2) / gridTicks * gridTicks;
+                    note.Tick = Math.Max(0, group);
+                }
+            }
+        }
+    }
+
+    private double ComputeOriginOffset(VisualizationTimeline timeline)
+    {
+        long minSample = long.MaxValue;
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note is null) continue;
+            minSample = Math.Min(minSample, note.StartSample);
+        }
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null) continue;
+            minSample = Math.Min(minSample, rhythm.SamplePosition);
+        }
+        if (minSample == long.MaxValue)
+            minSample = timeline.StartSample;
+        double minQuarter = _map.SampleToQuarterPosition(minSample);
+        double baseOffset = Math.Ceiling(-minQuarter);
+        Meter? meter = _map.Meter;
+        if (meter is not null)
+        {
+            double qpb = meter.QuartersPerBar;
+            if (qpb > 0)
+                baseOffset = Math.Ceiling(baseOffset / qpb) * qpb;
+        }
+        return baseOffset;
+    }
+
+    private void BuildConductor(VisualizationTimeline timeline, double originOffsetQuarters, List<MidiEventBase> conductor)
+    {
+        // Track name + source metadata text.
+        if (_options.EmitConductorMetadata)
+        {
+            conductor.Add(new MidiMetaTextEvent(0, 0x01, timeline.Source?.Title ?? "MDPlayer Export"));
+            if (!string.IsNullOrWhiteSpace(timeline.Source?.SourceFormat))
+                conductor.Add(new MidiMetaTextEvent(0, 0x01, $"src-format {timeline.Source.SourceFormat}"));
+            conductor.Add(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}"));
+        }
+
+        // Set Tempo per segment, at each segment's start tick.
+        foreach (TempoSegment segment in _map.Segments)
+        {
+            long tick = MapTick(segment.StartSample, originOffsetQuarters);
+            conductor.Add(new MidiTempoEvent(tick, segment.MicrosecondsPerQuarter));
+        }
+
+        // Time Signature when known; omit otherwise (DAW uses its default).
+        if (_map.Meter is Meter meter)
+        {
+            conductor.Add(new MidiTimeSignatureEvent(
+                MapTick(_map.FirstSample, originOffsetQuarters),
+                meter.Numerator, meter.Denominator));
+        }
+
+        // Markers.
+        if (_options.EmitMarkers)
+        {
+            conductor.Add(new MidiMarkerEvent(MapTick(_map.FirstSample, originOffsetQuarters), "SOURCE_START"));
+            if (_map.FirstDownbeatQuarter is double downbeat)
+            {
+                long downbeatTick = _map.QuarterPositionToTick(downbeat + originOffsetQuarters, _ppq);
+                conductor.Add(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT"));
+            }
+            foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
+            {
+                string name = loop.Kind switch
+                {
+                    LoopMarkerKind.Start => "LOOP_START",
+                    LoopMarkerKind.Restart => "LOOP_END",
+                    _ => "LOOP_MARK",
+                };
+                conductor.Add(new MidiMarkerEvent(MapTick(loop.SamplePosition, originOffsetQuarters), name));
+            }
+        }
+
+        // Timing-confidence text so the DAW/user sees what was inferred.
+        if (_options.EmitConductorMetadata)
+        {
+            conductor.Add(new MidiMetaTextEvent(
+                MapTick(_map.FirstSample, originOffsetQuarters),
+                0x01,
+                TimingConfidenceText()));
+        }
+    }
+
+    private string TimingConfidenceText()
+    {
+        var parts = new List<string>
+        {
+            $"tempo-source={_map.Segments[0].Source}",
+            $"segments={_map.Segments.Count}",
+            _map.Meter is not null ? $"meter={_map.Meter}" : "meter=unknown",
+            _map.FirstDownbeatQuarter is not null ? "downbeat=known" : "downbeat=unknown",
+            $"sample0-quarter={_map.SampleToQuarterPosition(_map.StartSample):0.###}",
+        };
+        return "timing " + string.Join(";", parts);
+    }
+
+    private TrackAllocator BuildTracks(VisualizationTimeline timeline)
+    {
+        var allocator = new TrackAllocator();
+        int index = 1;
+        var voiceNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (VoiceDescriptor voice in timeline.Voices ?? Array.Empty<VoiceDescriptor>())
+        {
+            if (voice is null) continue;
+            voiceNames[voice.Id.ToString()] = voice.Label ?? voice.Id.ToString();
+        }
+
+        // One track per channel that carries notes or rhythm.
+        var noteChannels = (timeline.Notes ?? Array.Empty<NoteEvent>())
+            .Where(n => n is not null)
+            .Select(n => n.ChannelId)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var rhythmChannels = (timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+            .Where(r => r is not null)
+            .Select(r => r.ChannelId)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var all = noteChannels.Concat(rhythmChannels).Distinct(StringComparer.Ordinal).ToList();
+        all.Sort(StringComparer.Ordinal);
+
+        foreach (string channelId in all)
+        {
+            VoiceExportOverride voiceOverride = _options.OverrideFor(channelId);
+            if (!voiceOverride.Include)
+                continue; // excluded voice: no track, no notes.
+            bool isPercussion = timeline.Rhythm is not null
+                && rhythmChannels.Contains(channelId, StringComparer.Ordinal);
+            string label = voiceNames.TryGetValue(channelId, out string? name)
+                ? (name ?? channelId)
+                : channelId;
+            allocator.Add(channelId, index++, label, isPercussion, _options, voiceOverride);
+        }
+        return allocator;
+    }
+
+    private sealed class TrackAllocator
+    {
+        public Dictionary<string, TrackSlot> _slots = new(StringComparer.Ordinal);
+        public Dictionary<int, MidiTrack> Tracks { get; } = new();
+
+        public void Add(string channelId, int index, string name, bool percussive, MusicalMidiExportOptions options, VoiceExportOverride voiceOverride)
+        {
+            var track = new MidiTrack { Name = name };
+            Tracks[index] = track;
+            int channel = voiceOverride.Channel ?? (percussive && options.UsePercussionChannel ? 9 : (index - 1) % 16);
+            _slots[channelId] = new TrackSlot(this, track, index, channel, percussive);
+            _slots[channelId].Override = voiceOverride;
+            if (!percussive)
+            {
+                // Assign a program so note-only exports still sound. An explicit
+                // per-voice program wins; otherwise use a generic default.
+                int program = voiceOverride.Program ?? 0;
+                track.Events.Add(new MidiProgramEvent(0, index, channel, program));
+            }
+        }
+
+        public TrackSlot? SlotFor(string channelId, bool percussive = false)
+        {
+            if (_slots.TryGetValue(channelId, out TrackSlot? slot))
+                return slot;
+            return null;
+        }
+
+        public IEnumerable<MidiTrack> Values => Tracks.Values;
+    }
+
+    private sealed class TrackSlot
+    {
+        private readonly TrackAllocator _owner;
+
+        public TrackSlot(TrackAllocator owner, MidiTrack track, int index, int channel, bool percussive)
+        {
+            _owner = owner;
+            Track = track;
+            Index = index;
+            Channel = channel;
+            Percussive = percussive;
+        }
+
+        public MidiTrack Track { get; }
+        public int Index { get; }
+        public int Channel { get; }
+        private bool Percussive { get; }
+
+        /// <summary>Per-voice override applied to this slot (default: include + program 0).</summary>
+        public VoiceExportOverride Override { get; set; } = null!;
+
+        public int PitchFor(NoteEvent note)
+        {
+            if (Percussive)
+                return (int)Math.Clamp(Math.Round(note.InitialMidiNote), 0, 127);
+            if (!double.IsFinite(note.InitialMidiNote))
+                return 60;
+            return (int)Math.Clamp((int)Math.Round(note.InitialMidiNote), 0, 127);
+        }
+    }
+}

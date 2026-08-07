@@ -321,3 +321,10 @@ MDPlayer/test-video-output/
 # Build executables at project root
 *.exe
 .worktrees/
+
+# Local Reasonix / agent tooling (not project source)
+.claude/
+.mcp.json
+.repowise/
+*.mid
+*.midi

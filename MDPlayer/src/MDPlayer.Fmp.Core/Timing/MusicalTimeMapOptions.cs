@@ -1,0 +1,39 @@
+#nullable enable
+
+namespace Fmp.Core.Timing;
+
+/// <summary>
+/// Tunables for <see cref="MusicalTimeMapBuilder"/>. Everything is optional;
+/// sensible defaults resolve to "use the strongest available evidence".
+/// </summary>
+internal sealed class MusicalTimeMapOptions
+{
+    /// <summary>How many quarter notes one <c>BeatIndex</c> step represents. Default 1.0
+    /// (beat == quarter note). Set explicitly when the driver beat unit differs.</summary>
+    public double QuartersPerBeat { get; init; } = 1.0;
+
+    /// <summary>Fixed tempo override (BPM). When set alongside anchors it fixes the
+    /// segment tempo; otherwise establishes a constant-tempo grid.</summary>
+    public double? FixedBpm { get; init; }
+
+    /// <summary>Absolute quarter position of sample zero (beat phase override).</summary>
+    public double? BeatOffsetQuarter { get; init; }
+
+    /// <summary>Beat offset expressed in samples (converted to quarters internally).</summary>
+    public long? BeatOffsetSamples { get; init; }
+
+    /// <summary>User-provided meter (time signature).</summary>
+    public Meter? Meter { get; init; }
+
+    /// <summary>Explicit downbeat (sample of the first bar start).</summary>
+    public long? FirstDownbeatSample { get; init; }
+
+    /// <summary>Force a specific timing source; null lets the builder auto-select.</summary>
+    public TimingSource? Source { get; init; }
+
+    /// <summary>Allow anchor-based tempo-change segmentation (Batch 2).</summary>
+    public bool DetectTempoChanges { get; init; }
+
+    /// <summary>When true, throw instead of guessing phase/tempo on insufficient evidence.</summary>
+    public bool StrictTiming { get; init; }
+}

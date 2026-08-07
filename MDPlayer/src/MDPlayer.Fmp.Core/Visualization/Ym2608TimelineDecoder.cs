@@ -38,6 +38,24 @@ internal sealed class Ym2608TimelineDecoder
         _masterClock = masterClock > 0 ? masterClock : DefaultMasterClock;
     }
 
+    /// <summary>
+    /// Computes a validated BPM from a YM2608 Timer-B register (<c>0x26</c>) value.
+    /// The OPNA Timer B interrupt period (in seconds) is
+    ///   ((0x100 - value) &lt;&lt; 4) / (masterClock / 144)
+    /// per the OPN timer core (see MNDRV FMTimer step = master/72/2). One timer
+    /// interrupt is treated as one quarter note. Returns null when the value maps to
+    /// a non-physical (zero/very fast) period — the consumer then falls back.
+    /// </summary>
+    private double? ComputeTimerBpm(int value)
+    {
+        long ticks = (0x100 - value) << 4;
+        if (ticks <= 0 || _masterClock <= 0)
+            return null;
+        double interruptHz = (_masterClock / 144.0) / ticks;
+        double bpm = 60.0 * interruptHz;
+        return bpm > 0 && bpm is >= 20 and <= 400 ? Math.Round(bpm, 2) : null;
+    }
+
     public void ApplyYm2608(int chipId, int port, int address, int value, long samplePosition)
     {
         if (_completed)
@@ -67,7 +85,7 @@ internal sealed class Ym2608TimelineDecoder
             ApplyRhythmKey(samplePosition, value);
 
         if (port == 0 && address == 0x26)
-            _timing.Add(new DriverTimingEvent(samplePosition, value, null));
+            _timing.Add(new DriverTimingEvent(samplePosition, value, ComputeTimerBpm(value)));
 
         if (port == 1 && address <= 0x0A)
             ApplyAdpcmB(samplePosition, address, value);

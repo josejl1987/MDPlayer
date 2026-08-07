@@ -1,0 +1,176 @@
+using Fmp.Application.Export;
+using Fmp.Core.Visualization;
+using Xunit;
+
+namespace MDPlayer.Fmp.Tests;
+
+/// <summary>
+/// Verifies the public GUI-facing <see cref="MidiExportService"/> (Application
+/// layer) which turns a persisted timeline into Format 1 MIDI bytes without
+/// shelling to the CLI. This is the in-process path the GUI "MIDI…" button uses.
+/// </summary>
+public sealed class MidiExportServiceTests
+{
+    private const int Sr = 44_100;
+
+    [Fact]
+    public void ExportFromTimelinePath_WritesValidSmf()
+    {
+        VisualizationTimeline timeline = BuildTimeline();
+        string timelinePath = WriteTimeline(timeline);
+
+        var service = new MidiExportService();
+        MidiExportResult result = service.ExportFromTimelinePath(timelinePath, new MidiExportRequest
+        {
+            Ppq = 960,
+            Meter = "4/4",
+        });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.NotNull(result.Bytes);
+        Assert.True(result.Bytes.Length >= 14, "SMF header + at least one chunk");
+        // MThd
+        Assert.Equal((byte)'M', result.Bytes[0]);
+        Assert.Equal((byte)'T', result.Bytes[1]);
+        Assert.Equal((byte)'h', result.Bytes[2]);
+        Assert.Equal((byte)'d', result.Bytes[3]);
+        // Format 1 (big-endian 0x0001 at bytes 8-9).
+        Assert.Equal(0, result.Bytes[8]);
+        Assert.Equal(1, result.Bytes[9]);
+        Assert.Equal(1, result.SegmentCount);
+        Assert.Contains(result.Report, line => line.Contains("tempo-source"));
+    }
+
+    [Fact]
+    public void ExportFromTimelinePath_MissingFile_FailsGracefully()
+    {
+        var service = new MidiExportService();
+        MidiExportResult result =
+            service.ExportFromTimelinePath(Path.Combine(Path.GetTempPath(), "no-such-lease", "timeline.json"),
+                new MidiExportRequest());
+
+        Assert.False(result.Succeeded);
+        Assert.False(string.IsNullOrEmpty(result.Error));
+        Assert.Null(result.Bytes);
+    }
+
+    [Fact]
+    public void ExportFromTimelinePath_FixedBpm_ReportsUserOverrideAndPhaseUnknown()
+    {
+        // A fixed BPM establishes tempo but not a beat phase; the report must
+        // surface that rather than pretend the grid is aligned.
+        VisualizationTimeline timeline = BuildTimeline(withBeats: false);
+        string timelinePath = WriteTimeline(timeline);
+
+        var service = new MidiExportService();
+        MidiExportResult result = service.ExportFromTimelinePath(timelinePath, new MidiExportRequest
+        {
+            Bpm = 120,
+        });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal("UserOverride", result.TempoSource);
+        Assert.True(result.PhaseUnknown, "fixed BPM alone must not claim a beat grid");
+        Assert.False(result.Trustworthy);
+        Assert.Contains(result.Report, line => line.Contains("phase unknown"));
+    }
+
+    [Fact]
+    public void ExportFromTimelinePath_DriverBeats_EstablishesPhase()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var service = new MidiExportService();
+        MidiExportResult result = service.ExportFromTimelinePath(timelinePath, new MidiExportRequest());
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.False(result.PhaseUnknown, "driver beat anchors establish the beat grid");
+        Assert.True(result.Trustworthy);
+    }
+
+    [Fact]
+    public void ProbeVoices_ReturnsVoiceDescriptors()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true, voices: new[] { "lead", "bass" });
+        string timelinePath = WriteTimeline(timeline);
+
+        MidiVoiceProbe probe = new MidiExportService().ProbeVoices(timelinePath);
+
+        Assert.True(probe.Succeeded, probe.Error);
+        Assert.Contains(probe.Voices, v => v.ChannelId == "lead");
+        Assert.Contains(probe.Voices, v => v.ChannelId == "bass");
+    }
+
+    [Fact]
+    public void ProbeVoices_MissingFile_FailsGracefully()
+    {
+        MidiVoiceProbe probe = new MidiExportService().ProbeVoices(
+            Path.Combine(Path.GetTempPath(), "no-such-lease", "timeline.json"));
+        Assert.False(probe.Succeeded);
+        Assert.False(string.IsNullOrEmpty(probe.Error));
+    }
+
+    [Fact]
+    public void ExportWithVoiceOptions_ExcludedVoice_RemovesItsNotes()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true, voices: new[] { "lead", "bass" });
+        string timelinePath = WriteTimeline(timeline);
+
+        var service = new MidiExportService();
+        MidiExportResult result = service.ExportFromTimelinePath(timelinePath, new MidiExportRequest
+        {
+            VoiceOptions = new[]
+            {
+                new MidiVoiceOption("lead"),
+                new MidiVoiceOption("bass") { Include = false },
+            },
+        });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.NotNull(result.Bytes);
+        Assert.True(result.Bytes.Length > 14);
+    }
+
+    /* ---- helpers (mirror the musical MIDI export tests) ---- */
+
+    private static VisualizationTimeline BuildTimeline(bool withBeats = true, string[]? voices = null)
+    {
+        double spq = Sr * 60.0 / 120.0;
+        string[] voiceIds = voices ?? new[] { "v" };
+        var notes = Enumerable.Range(0, 8)
+            .Select(i => new NoteEvent(
+                ChannelId: voiceIds[i % voiceIds.Length],
+                StartSample: (long)Math.Round(i * 4 * spq),
+                EndSample: (long)Math.Round(i * 4 * spq) + 2000,
+                InitialFrequencyHz: 440,
+                InitialMidiNote: 60 + i,
+                InstrumentId: "inst",
+                Mode: VisualizationNoteMode.Fm,
+                IsRetrigger: false,
+                Pitch: Array.Empty<PitchChange>()))
+            .ToArray();
+        return new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(8 * 4 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Beats = withBeats
+                ? Enumerable.Range(0, 40)
+                    .Select(i => new BeatEvent((long)Math.Round(i * spq), i))
+                    .ToArray()
+                : Array.Empty<BeatEvent>(),
+            Source = new TrackMetadata("vgz", "song", "chip", "song.vgz"),
+        };
+    }
+
+    /* ---- helpers (mirror the musical MIDI export tests) ---- */
+
+    private static string WriteTimeline(VisualizationTimeline timeline)
+    {
+        string path = Path.Combine(Path.GetTempPath(), "mdplayer-midi-" + Guid.NewGuid().ToString("N") + ".json");
+        VisualizationJsonWriter.Write(path, timeline);
+        return path;
+    }
+}

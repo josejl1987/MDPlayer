@@ -42,6 +42,8 @@ public class Program
                     return PreviewCommand.Handle(args.Skip(1).ToArray());
                 case "review":
                     return ReviewCommand.Handle(args.Skip(1).ToArray());
+                case "midi":
+                    return MidiCommand.Handle(args.Skip(1).ToArray());
                 default:
                     Console.Error.WriteLine($"error: unknown command '{command}'");
                     PrintUsage();
@@ -64,6 +66,7 @@ public class Program
         Console.WriteLine("  mdplayer-render preview <input> [--request-json PATH] [options]");
         Console.WriteLine("  mdplayer-render review --manifest PATH --output DIR [options]");
         Console.WriteLine("  mdplayer-render analyze <input> [options]");
+        Console.WriteLine("  mdplayer-render midi <input> --output PATH [options]");
         Console.WriteLine();
         Console.WriteLine("Render options:");
         Console.WriteLine("  -o, --output PATH          Output video path");
@@ -145,6 +148,22 @@ public class Program
         Console.WriteLine("  --analysis-detail minimal|standard|full");
         Console.WriteLine("  --analysis-force          Ignore an existing cache result");
         Console.WriteLine("  --analysis-timeout-minutes N  Worker timeout (default: 10)");
+        Console.WriteLine();
+        Console.WriteLine("MIDI options:");
+        Console.WriteLine("  -o, --output PATH         Output .mid file (required)");
+        Console.WriteLine("  --timeline PATH           Reuse an existing visualization timeline");
+        Console.WriteLine("  --ppq N                   Ticks per quarter note (default: 960)");
+        Console.WriteLine("  --tempo-source auto|driver|symbolic|fixed");
+        Console.WriteLine("  --bpm NUMBER             Fixed tempo override");
+        Console.WriteLine("  --beat-offset-samples N  Phase override (beat grid vs sample zero)");
+        Console.WriteLine("  --meter NUM/DEN          Time signature, e.g. 4/4");
+        Console.WriteLine("  --first-downbeat-sample N  Sample of the first bar start");
+        Console.WriteLine("  --quantize off|1/8|1/16|1/32  Grid snapping (default: off)");
+        Console.WriteLine("  --timing-report PATH     Write a JSON timing-confidence report");
+        Console.WriteLine("  --strict-timing          Fail on ambiguous tempo / unknown phase");
+        Console.WriteLine("  --no-pitch-bend          Disable pitch-bend export");
+        Console.WriteLine("  --bend-range SEMITONES   Pitch-bend depth via RPN (default: 2)");
+        Console.WriteLine("  --no-percussion-channel  Do not force channel 9 for drums");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  mdplayer-render analyze track.ovi --fmp-com /path/FMP.COM");

@@ -36,6 +36,63 @@ public sealed class MainWindowViewModelTests
     }
 
     [AvaloniaFact]
+    public async Task ExportMidi_CommandWiresCanExecuteChangedAndEnablesAfterOpen()
+    {
+        Harness h = Harness.Create();
+        try
+        {
+            Assert.NotNull(h.VM.ExportMidiCommand);
+            Assert.False(h.VM.ExportMidiCommand.CanExecute(null));
+
+            // Avalonia re-queries CanExecute only when the command raises
+            // CanExecuteChanged (e.g. from SetState on input open). Capture the
+            // event to prove the button will actually refresh instead of staying
+            // greyed out.
+            int changedEvents = 0;
+            h.VM.ExportMidiCommand.CanExecuteChanged += (_, _) => changedEvents++;
+
+            await h.OpenAsync();
+
+            Assert.True(h.VM.ExportMidiCommand.CanExecute(null));
+            Assert.True(changedEvents > 0,
+                "ExportMidiCommand must raise CanExecuteChanged when a file opens; " +
+                "otherwise Avalonia leaves the MIDI button disabled.");
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task MidiExportOptions_ExposeDefaultsAndTempoSourceSelection()
+    {
+        Harness h = Harness.Create();
+        try
+        {
+            Assert.Equal(960, h.VM.MidiPpq);
+            Assert.Equal("auto", h.VM.MidiTempoSource);
+            Assert.Equal("4/4", h.VM.MidiMeter);
+            Assert.Equal("off", h.VM.MidiQuantize);
+            Assert.True(h.VM.MidiPitchBend);
+            Assert.False(h.VM.IsFixedTempoSelected);
+
+            h.VM.MidiTempoSource = "fixed";
+            Assert.True(h.VM.IsFixedTempoSelected);
+            h.VM.MidiTempoSource = "auto";
+            Assert.False(h.VM.IsFixedTempoSelected);
+
+            Assert.Contains("fixed", h.VM.MidiTempoSourceOptions);
+            Assert.Contains("1/8", h.VM.MidiQuantizeOptions);
+            Assert.Contains(960, h.VM.MidiPpqOptions);
+        }
+        finally
+        {
+            await h.DisposeAsync();
+        }
+    }
+
+    [AvaloniaFact]
     public async Task OpenInputAsync_RunsSinglePlanThenInitialFrameAndRetainsImage()
     {
         Harness h = Harness.Create();

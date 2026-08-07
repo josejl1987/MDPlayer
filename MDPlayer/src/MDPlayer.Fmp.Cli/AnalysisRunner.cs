@@ -45,9 +45,8 @@ internal static class AnalysisRunner
         string metadataPath = ResolveCacheMetadataPath(options.AnalysisCache, outputDir);
         string detail = options.Detail.ToString().ToLowerInvariant();
 
-        VisualizationTimeline timeline = options.CapturedTimeline ?? (options.Timeline != null
-            ? VisualizationJsonWriter.Read(options.Timeline)
-            : CaptureTimeline(options));
+        VisualizationTimeline timeline = options.CapturedTimeline ?? TimelineCaptureService.Capture(
+            options.Input, options.Timeline, options, options.CaptureDependencies);
         AnalysisInput input = FmpSymbolicNormalizer.Normalize(timeline);
         string inputHash = AnalysisCacheKey.ComputeInputHash(input);
         Dictionary<string, string> captureOptions = BuildCaptureOptions(options);
@@ -146,89 +145,6 @@ internal static class AnalysisRunner
         AnalysisOutput result = AnalysisResultValidator.ReadAndValidate(outputPath, input);
         return new AnalysisExecutionResult(0, AnalysisCacheStatus.Miss, outputPath,
             new AnalysisExecutionMetrics(totalWatch.Elapsed, Encoding.UTF8.GetByteCount(canonicalInput), new FileInfo(outputPath).Length, false), result);
-    }
-
-    private static VisualizationTimeline CaptureTimeline(AnalyzeOptions options)
-    {
-        var input = new FileInfo(options.Input);
-        if (FmpFormat.IsSupportedExtension(input.Extension))
-            return CaptureFmpTimeline(options);
-
-        IReadOnlyList<string> searchPaths = VisualizationBackendResolver.BuildSearchPaths(input, options.SearchPaths, options.AssetsDir, options.FmpCom);
-        var environment = new PlaybackEnvironment(searchPaths, true, options.SampleRate);
-        string fmpCom = PlaybackBackendRegistry.ResolveFmpCom(options.FmpCom, searchPaths);
-        PlaybackBackendRegistry registry = PlaybackBackendRegistry.CreateDefault(environment, fmpCom);
-        if (!registry.TrySelect(
-                input,
-                environment,
-                "auto",
-                out IPlaybackBackend backend,
-                out PlaybackProbeResult probe))
-        {
-            string details = probe.Warnings.Count == 0
-                ? "no playback backend accepted the input"
-                : string.Join("; ", probe.Warnings);
-            throw new TrackPreparationException(
-                $"unsupported format: {input.Extension.ToLowerInvariant()} ({details})", 3);
-        }
-        if (!probe.Visualizable)
-            throw new TrackPreparationException(
-                "MDPlayer can play this track, but none of its active devices expose supported note data", 3);
-
-        options.CaptureDependencies["input"] = FileIdentity(input.FullName);
-        int timelineSampleRate = probe.NativeSampleRate > 0
-            ? probe.NativeSampleRate
-            : options.SampleRate;
-        var eventSink = new TimelineDecoderEventSink(timelineSampleRate);
-        using IPlaybackCaptureSession session = backend.Open(
-            input,
-            new PlaybackOptions(
-                options.Loops,
-                options.Fade,
-                options.Tail,
-                options.MaxDuration,
-                OutputAudioPath: null,
-                options.SampleRate,
-                WriteSpcStems: false,
-                SpcPitchMode.Estimate,
-                options.SsgGainDb),
-            eventSink);
-        session.Run();
-        VisualizationTimeline timeline = eventSink.Complete(
-            session.SamplePosition,
-            "completed",
-            new TrackMetadata(
-                input.Extension.TrimStart('.').ToLowerInvariant(),
-                Path.GetFileNameWithoutExtension(input.Name),
-                backend.Id,
-                input.Name));
-        if (!VisualizationContentAvailability.HasRenderableContent(timeline))
-            throw new TrackPreparationException(
-                "visualization capture contains neither semantic events nor waveform activity", 3);
-        return timeline;
-    }
-
-    private static VisualizationTimeline CaptureFmpTimeline(AnalyzeOptions options)
-    {
-        PreparedTrack track = TrackPreparation.Prepare(
-            options.Input, options.FmpCom, options.AssetsDir, options.SearchPaths);
-        options.CaptureDependencies["input"] = FileIdentity(track.Input.FullName);
-        options.CaptureDependencies["fmpCom"] = FileIdentity(track.Assets.FmpComPath);
-        options.CaptureDependencies["virtualFileSystem"] = string.Join("|", track.FileSystem.SearchPaths);
-        var capture = new VisualizationPipeline(track.Assets, track.FileSystem, options.SampleRate).Capture(
-            track.Data,
-            track.Input.FullName,
-            new VisualizationPipeline.Options
-            {
-                LoopCount = options.Loops,
-                FadeSeconds = options.Fade,
-                TailSeconds = options.Tail,
-                MaxDurationSeconds = options.MaxDuration,
-                TimeoutSeconds = options.Timeout,
-            });
-        if (!capture.Success || capture.Timeline == null)
-            throw new InvalidOperationException($"visualization capture failed: {capture.LastError}");
-        return capture.Timeline;
     }
 
     private static bool TryReadValidCache(
