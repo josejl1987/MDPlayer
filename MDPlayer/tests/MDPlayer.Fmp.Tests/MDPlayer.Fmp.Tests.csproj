@@ -38,6 +38,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\master-ninja.vgz</Link>
     </Content>
+    <!-- Real YM2612-DAC-heavy VGZ used by the DAC sample integration tests. -->
+    <Content Include="..\..\..\26 - Robotnik.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\robotnik-dac.vgz</Link>
+    </Content>
     <!-- Furnace TFI golden fixture (42-byte known-good instrument). -->
     <Content Include="PlaybackAssets\golden_instrument.tfi">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

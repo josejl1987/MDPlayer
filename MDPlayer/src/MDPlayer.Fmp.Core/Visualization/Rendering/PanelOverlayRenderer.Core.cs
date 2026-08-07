@@ -56,6 +56,11 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         public string Label = "";
         public VisualizationTrackKind TrackKind;
         public PreparedPanel Prepared;
+
+        /// <summary>Gutter labels, one per distinct sample identity (row order). Cached to keep the render hot path allocation-free.</summary>
+        public string[] SampleRowLabels = Array.Empty<string>();
+        /// <summary>Row index (index into <see cref="SampleRowLabels"/>) for each <see cref="PreparedPanel.SamplePlayback"/> entry.</summary>
+        public int[] SampleRowByPlaybackIndex = Array.Empty<int>();
     }
 
     private static readonly HashSet<int> BlackPitchClasses = new() { 1, 3, 6, 8, 10 };
@@ -1144,10 +1149,55 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 Label = prepared.Label,
                 TrackKind = prepared.Track.Kind,
                 Prepared = prepared,
+                SampleRowLabels = BuildSampleRowLabels(prepared),
+                SampleRowByPlaybackIndex = BuildSampleRowByPlaybackIndex(prepared),
             };
         }
         return panels;
     }
+
+    /// <summary>Precomputes one gutter label per distinct sample identity (row order).</summary>
+    private static string[] BuildSampleRowLabels(PreparedPanel prepared)
+    {
+        var rows = new List<string>();
+        foreach (SamplePlaybackEvent e in prepared.SamplePlayback)
+        {
+            if (string.IsNullOrEmpty(e.SampleId))
+                continue;
+            string label = ShortAssetLabel(
+                prepared.SamplesById.TryGetValue(e.SampleId, out SampleDefinition s) ? s.DisplayName : null,
+                e.SampleId);
+            if (!rows.Contains(label, StringComparer.Ordinal))
+                rows.Add(label);
+        }
+        rows.Sort(StringComparer.Ordinal);
+        return rows.ToArray();
+    }
+
+    /// <summary>Precomputes the row index per playback event (parallel to <see cref="PreparedPanel.SamplePlayback"/>).</summary>
+    private static int[] BuildSampleRowByPlaybackIndex(PreparedPanel prepared)
+    {
+        var playback = prepared.SamplePlayback;
+        string[] labels = BuildSampleRowLabels(prepared);
+        int[] rows = new int[playback.Length];
+        for (int i = 0; i < playback.Length; i++)
+        {
+            SamplePlaybackEvent e = playback[i];
+            int row = 0;
+            if (!string.IsNullOrEmpty(e.SampleId))
+            {
+                string label = ShortAssetLabel(
+                    prepared.SamplesById.TryGetValue(e.SampleId, out SampleDefinition s) ? s.DisplayName : null,
+                    e.SampleId);
+                row = Array.IndexOf(labels, label);
+                if (row < 0)
+                    row = 0;
+            }
+            rows[i] = row;
+        }
+        return rows;
+    }
+
     private PitchCamera[] BuildCameras()
     {
         var cameras = new PitchCamera[_panels.Length];

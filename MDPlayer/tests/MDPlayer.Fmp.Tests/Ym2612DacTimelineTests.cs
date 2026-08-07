@@ -6,7 +6,7 @@ namespace MDPlayer.Fmp.Tests;
 public sealed class Ym2612DacTimelineTests
 {
     [Fact]
-    public void Decoder_RepresentsDacBurstOnDedicatedPcmVoice()
+    public void Decoder_RepresentsDacBurstAsSamplePlaybackOnDacVoice()
     {
         VisualizationTimeline timeline = Decode(
             Write(0, 0x2B, 0x80),
@@ -15,11 +15,18 @@ public sealed class Ym2612DacTimelineTests
             Write(16, 0x2A, 0x30),
             Write(24, 0x2B, 0x00));
 
-        NoteEvent dac = Assert.Single(timeline.Notes.Where(note => note.Mode == VisualizationNoteMode.Pcm));
-        Assert.Equal("ym2612.0.pcm.dac", dac.ChannelId);
+        SamplePlaybackEvent dac = Assert.Single(timeline.SamplePlayback);
+        Assert.Equal("ym2612.0.pcm.dac", dac.VoiceId);
         Assert.Equal(0, dac.StartSample);
         Assert.Equal(24, dac.EndSample);
-        Assert.StartsWith("ym2612:dac:3:", dac.InstrumentId);
+        Assert.NotNull(dac.SampleId);
+
+        SampleDefinition sample = Assert.Single(timeline.Samples);
+        Assert.Equal(dac.SampleId, sample.Id);
+        Assert.Equal("DAC S000", sample.DisplayName);
+
+        // No pitched PCM note remains: the placeholder is removed.
+        Assert.DoesNotContain(timeline.Notes, note => note.Mode == VisualizationNoteMode.Pcm);
         Assert.Contains(timeline.Voices, voice =>
             voice.Id.ToString() == "ym2612.0.pcm.dac" && voice.DisplayName == "DAC");
         Assert.Contains(timeline.Devices, device =>
@@ -42,14 +49,10 @@ public sealed class Ym2612DacTimelineTests
             Write(116, 0x2A, 0x56),
             Write(124, 0x2B, 0x00));
 
-        NoteEvent[] dac = timeline.Notes
-            .Where(note => note.Mode == VisualizationNoteMode.Pcm)
-            .ToArray();
-        Assert.Equal(2, dac.Length);
-        Assert.Equal(dac[0].InstrumentId, dac[1].InstrumentId);
-        Assert.False(dac[0].IsRetrigger);
-        Assert.True(dac[1].IsRetrigger);
-        Assert.Single(timeline.Instruments.Where(instrument => instrument.Kind == "pcm"));
+        Assert.Equal(2, timeline.SamplePlayback.Length);
+        Assert.Equal(timeline.SamplePlayback[0].SampleId, timeline.SamplePlayback[1].SampleId);
+        Assert.True(timeline.SamplePlayback[1].Retrigger);
+        Assert.Single(timeline.Samples);
     }
 
     [Fact]
@@ -63,11 +66,11 @@ public sealed class Ym2612DacTimelineTests
             Write(208, 0x2A, 0x40),
             Write(216, 0x2B, 0x00));
 
-        NoteEvent[] dac = timeline.Notes
-            .Where(note => note.Mode == VisualizationNoteMode.Pcm)
-            .ToArray();
+        SamplePlaybackEvent[] dac = timeline.SamplePlayback;
         Assert.Equal(2, dac.Length);
-        Assert.Equal((0L, 16L), (dac[0].StartSample, dac[0].EndSample));
+        // First burst's event is closed when the next trigger begins (the
+        // observed timeline is authoritative, not the burst's natural duration).
+        Assert.Equal((0L, 200L), (dac[0].StartSample, dac[0].EndSample));
         Assert.Equal((200L, 216L), (dac[1].StartSample, dac[1].EndSample));
     }
 
@@ -84,7 +87,7 @@ public sealed class Ym2612DacTimelineTests
 
         NoteEvent fm6 = Assert.Single(timeline.Notes.Where(note => note.ChannelId == "ym2612.0.fm.6"));
         Assert.Equal(10, fm6.EndSample);
-        Assert.Single(timeline.Notes.Where(note => note.Mode == VisualizationNoteMode.Pcm));
+        Assert.Single(timeline.SamplePlayback);
     }
 
     private static VisualizationTimeline Decode(params TimedChipWrite[] writes)

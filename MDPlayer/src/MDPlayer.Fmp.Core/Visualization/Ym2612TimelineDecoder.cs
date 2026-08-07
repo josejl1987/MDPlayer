@@ -1,17 +1,18 @@
-using System.Security.Cryptography;
-
 namespace Fmp.Core.Visualization;
 
 /// <summary>
 /// YM2612 register-to-note decoder. It intentionally shares the normalized
 /// timeline contract with YM2608 while retaining YM2612-specific DAC and FM3
 /// special-mode semantics.
+///
+/// YM2612 DAC playback is analyzed by the shared <see cref="DacPlaybackTracker"/>
+/// and <see cref="DacSampleCatalog"/> into per-trigger sample events, rendered on
+/// a dedicated sample lane rather than a pitched note.
 /// </summary>
 internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 {
 	private const int RegisterBankSize = 0x100;
 	private const double FmDivider = 6.0;
-	private const double DacLaneMidiNote = 60.0;
 
     private readonly byte[] _registers = new byte[RegisterBankSize * 2];
     private readonly MutableNote?[] _fmNotes = new MutableNote?[6];
@@ -20,12 +21,10 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private bool _fm3SpecialMode;
-    private readonly List<byte> _dacBytes = [];
+    private readonly Ym2612DacNormalizer _dacNormalizer = new();
+    private readonly DacPlaybackTracker _dacTracker = new();
+    private readonly List<DacOperation> _dacOps = [];
     private bool _dacEnabled;
-    private long _dacStartSample;
-    private long _dacPreviousSample = -1;
-    private long _dacLastSample = -1;
-    private string _lastDacInstrumentId;
     private bool _completed;
 
     public ChipType ChipType => ChipType.Ym2612;
@@ -48,7 +47,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         _timeline.AddVoice(new VoiceDescriptor(
             DacVoice,
             "DAC",
-            VoicePresentationKind.Pitched,
+            VoicePresentationKind.Pcm,
             10,
             false,
             false,
@@ -67,12 +66,13 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         _registers[write.Port * RegisterBankSize + write.Address] = (byte)write.Data;
         if (write.Port == 0 && write.Address == 0x2B)
         {
-            ApplyDacEnable(write.SamplePosition, write.Data);
+            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data);
+            Fm6DacGate(write.SamplePosition);
             return;
         }
         if (write.Port == 0 && write.Address == 0x2A)
         {
-            ApplyDacWrite(write.SamplePosition, write.Data);
+            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data);
             return;
         }
         if (write.Port == 0 && write.Address == 0x27)
@@ -96,114 +96,98 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         if (endSample < 0)
             throw new ArgumentOutOfRangeException(nameof(endSample));
 
-        CloseDac(endSample);
         _completed = true;
         for (int channel = 0; channel < _fmNotes.Length; channel++)
             Close(ref _fmNotes[channel], endSample);
         for (int op = 0; op < _fm3Notes.Length; op++)
             Close(ref _fm3Notes[op], endSample);
+
+        EmitDacSamples(endSample);
     }
 
     private VoiceId DacVoice => new(_device.Id, VoiceKind.Pcm, 0, Name: "dac");
 
-    private long DacGapThresholdSamples => Math.Max(
-        32,
-        (long)Math.Round(64.0 * _timeline.SampleRate / 44_100.0, MidpointRounding.AwayFromZero));
-
-    private void ApplyDacEnable(long sample, int value)
+    /// <summary>
+    /// Feeds 0x2A/0x2B DAC writes through the normalizer state machine and
+    /// playback tracker. FM channel 6 gating on DAC enable is applied
+    /// separately by <see cref="Fm6DacGate"/>.
+    /// </summary>
+    private void ProcessDacRegisters(long sample, int port, int address, int value)
     {
-        bool enabled = (value & 0x80) != 0;
+        _dacNormalizer.Process(sample, port, address, value, _dacOps);
+        while (_dacOps.Count > 0)
+        {
+            _dacTracker.Add(_dacOps[0]);
+            _dacOps.RemoveAt(0);
+        }
+    }
+
+    private void Fm6DacGate(long sample)
+    {
+        bool enabled = (_registers[0x2B] & 0x80) != 0;
         if (enabled == _dacEnabled)
             return;
-
+        _dacEnabled = enabled;
         if (enabled)
-        {
             Close(ref _fmNotes[5], sample);
-            _dacEnabled = true;
-            return;
-        }
-
-        CloseDac(sample);
-        _dacEnabled = false;
     }
 
-    private void ApplyDacWrite(long sample, int value)
+    /// <summary>
+    /// Closes the DAC tracker at end-of-stream, builds the sample catalog, and
+    /// emits one <see cref="SampleDefinition"/> per deduplicated asset plus one
+    /// <see cref="SamplePlaybackEvent"/> per trigger onto the DAC sample voice.
+    /// </summary>
+    private void EmitDacSamples(long endSample)
     {
-        if (!_dacEnabled)
-            return;
+        _dacNormalizer.Complete(endSample, _dacOps);
+        foreach (DacOperation op in _dacOps)
+            _dacTracker.Add(op);
+        _dacOps.Clear();
 
-        if (_dacBytes.Count > 0 && sample - _dacLastSample > DacGapThresholdSamples)
-            CloseDac(EstimatedDacEnd(sample));
+        _dacTracker.Complete(endSample);
+        var catalog = new DacSampleCatalog().Build(_dacTracker.Candidates);
+        _dacTracker.ApplyAssetIds(catalog);
 
-        if (_dacBytes.Count == 0)
+        foreach (DacSampleAsset asset in catalog.Assets)
         {
-            _dacStartSample = sample;
-            _dacPreviousSample = -1;
-            _dacLastSample = sample;
+            _timeline.AddSample(new SampleDefinition(
+                asset.TimelineSampleId,
+                "pcm",
+                asset.Payload.Length,
+                NativeSampleRate: null,
+                LoopStart: null,
+                LoopEnd: null,
+                SampleLoopMode.None,
+                Array.Empty<WaveformEnvelopePoint>(),
+                asset.StableName)
+            {
+                IdentityKind = AssetIdentityKind.ContentHash,
+            });
         }
-        else
+
+        string lastEmittedSampleId = null;
+        foreach (DacPlaybackEvent evt in _dacTracker.PlaybackEvents)
         {
-            _dacPreviousSample = _dacLastSample;
-            _dacLastSample = sample;
+            if (evt.SampleId is null)
+                continue;
+            double playbackRate = evt.InitialRateHz is double rate && rate > 0
+                ? rate
+                : 1.0;
+            bool retrigger = string.Equals(evt.SampleId, lastEmittedSampleId, StringComparison.Ordinal)
+                || evt.StopReason is DacStopReason.Retriggered or DacStopReason.SourceDiscontinuity;
+            _timeline.AddSamplePlayback(new SamplePlaybackEvent(
+                DacVoice.ToString(),
+                evt.StartSample,
+                Math.Max(evt.StartSample + 1, evt.EndSample),
+                evt.SampleId,
+                MidiPitch: null,
+                playbackRate,
+                Gain: evt.Gain is double gain ? (float)gain : 1f,
+                Pan: evt.Pan is double pan ? (float)pan : 0f,
+                Retrigger: retrigger,
+                Looping: false));
+            lastEmittedSampleId = evt.SampleId;
         }
-        _dacBytes.Add((byte)value);
-    }
-
-    private long EstimatedDacEnd(long boundarySample)
-    {
-        if (_dacLastSample < 0)
-            return boundarySample;
-
-        long interval = _dacPreviousSample >= 0
-            ? Math.Max(1, _dacLastSample - _dacPreviousSample)
-            : 1;
-        interval = Math.Min(interval, DacGapThresholdSamples);
-        long naturalEnd = _dacLastSample > long.MaxValue - interval
-            ? long.MaxValue
-            : _dacLastSample + interval;
-        if (boundarySample <= _dacLastSample)
-            return naturalEnd;
-        return Math.Min(boundarySample, naturalEnd);
-    }
-
-    private void CloseDac(long boundarySample)
-    {
-        if (_dacBytes.Count == 0)
-            return;
-
-        long endSample = EstimatedDacEnd(boundarySample);
-        if (endSample <= _dacStartSample)
-            endSample = _dacStartSample + 1;
-
-        byte[] payload = _dacBytes.ToArray();
-        Span<byte> digest = stackalloc byte[32];
-        SHA256.HashData(payload, digest);
-        string fingerprint = Convert.ToHexString(digest[..8]).ToLowerInvariant();
-        string instrumentId = $"ym2612:dac:{payload.Length:x}:{fingerprint}";
-        _timeline.AddInstrument(new InstrumentDefinition(
-            instrumentId,
-            "pcm",
-            null,
-            null,
-            null,
-            null,
-            Array.Empty<FmOperatorDefinition>()));
-        _timeline.AddNote(
-            DacVoice,
-            _dacStartSample,
-            endSample,
-            DacLaneMidiNote,
-            0,
-            instrumentId,
-            VisualizationNoteMode.Pcm,
-            string.Equals(_lastDacInstrumentId, instrumentId, StringComparison.Ordinal),
-            Array.Empty<PitchChange>());
-        _lastDacInstrumentId = instrumentId;
-
-        _dacBytes.Clear();
-        _dacStartSample = 0;
-        _dacPreviousSample = -1;
-        _dacLastSample = -1;
     }
 
     private void ApplyKey(long sample, int value)

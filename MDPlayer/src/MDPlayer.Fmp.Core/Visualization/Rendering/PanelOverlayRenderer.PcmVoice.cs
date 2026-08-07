@@ -5,20 +5,38 @@ internal sealed partial class PanelOverlayRenderer
     private void DrawStaticPcmLanes(Span<byte> frame, PanelData panel, OverlayRect timeline)
     {
         FillRect(frame, new OverlayRect(timeline.X, timeline.Y, _layout.PitchLabelWidth, timeline.Height), HeaderBackground);
-        if (panel.Prepared.Rows.Length > 0)
+
+        // For sample lanes, one row per distinct sample identity (S000, S001,
+        // ...); otherwise fall back to the declared static rows.
+        string[] rows = panel.SampleRowLabels.Length > 0
+            ? panel.SampleRowLabels
+            : panel.Prepared.Rows.Length > 0
+                ? BuildDeclaredRowLabels(panel.Prepared)
+                : Array.Empty<string>();
+
+        if (rows.Length > 0)
         {
-            int rowHeight = Math.Max(1, timeline.Height / panel.Prepared.Rows.Length);
-            for (int row = 0; row < panel.Prepared.Rows.Length; row++)
+            int rowHeight = Math.Max(1, timeline.Height / rows.Length);
+            for (int row = 0; row < rows.Length; row++)
             {
                 int y = timeline.Y + row * rowHeight;
                 DrawHorizontalLine(frame, timeline.X + _layout.PitchLabelWidth, timeline.Right - 1, y, GridLine);
                 DrawGutterLabelRightAligned(
                     frame,
                     timeline,
-                    panel.Prepared.Rows[row].Label,
+                    rows[row],
                     y + Math.Max(1, (rowHeight - 7) / 2));
             }
         }
+    }
+
+    /// <summary>Copies the declared panel-row labels into a reusable array.</summary>
+    private static string[] BuildDeclaredRowLabels(PreparedPanel panel)
+    {
+        var labels = new string[panel.Rows.Length];
+        for (int i = 0; i < panel.Rows.Length; i++)
+            labels[i] = panel.Rows[i].Label;
+        return labels;
     }
 
     private void DrawStaticEventLane(Span<byte> frame, OverlayRect timeline)
@@ -45,6 +63,8 @@ internal sealed partial class PanelOverlayRenderer
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         SamplePlaybackEvent[] events = panel.Prepared.SamplePlayback;
+        int rowCount = Math.Max(1, panel.SampleRowLabels.Length);
+
         int first = LowerBoundPlayback(events, windowStart);
         for (int index = first; index < events.Length; index++)
         {
@@ -53,7 +73,10 @@ internal sealed partial class PanelOverlayRenderer
                 break;
             if (value.EndSample <= windowStart)
                 continue;
-            DrawSamplePlayback(frame, panel, value, lane, currentSample);
+            int row = index < panel.SampleRowByPlaybackIndex.Length
+                ? panel.SampleRowByPlaybackIndex[index]
+                : 0;
+            DrawSamplePlayback(frame, panel, value, lane, currentSample, row, rowCount);
         }
     }
 
@@ -62,14 +85,21 @@ internal sealed partial class PanelOverlayRenderer
         PanelData panel,
         SamplePlaybackEvent value,
         OverlayRect lane,
-        long currentSample)
+        long currentSample,
+        int rowIndex = 0,
+        int rowCount = 1)
     {
         double left = Math.Max(lane.X, _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
         double right = Math.Min(lane.Right, _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
         if (right <= left)
             return;
-        int height = Math.Max(12, lane.Height / 2);
-        int y = lane.Y + (lane.Height - height) / 2;
+
+        // Assign each distinct sample identity a horizontal row band within the
+        // lane (spec §19: one row per unique sample).
+        int rowHeight = Math.Max(10, lane.Height / Math.Max(1, rowCount));
+        int height = Math.Max(8, rowHeight - 2);
+        int y = lane.Y + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight + (rowHeight - height) / 2;
+
         OverlayColor accent = panel.Prepared.Accent;
         SampleDefinition sample = panel.Prepared.SamplesById.TryGetValue(value.SampleId, out SampleDefinition resolved)
             ? resolved
