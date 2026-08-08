@@ -43,8 +43,10 @@
         "api",
         "artifact-rendering"
       ],
-      "depends_on_lanes": [],
-      "parallel_group": 0
+      "depends_on_lanes": [
+        "lane-a"
+      ],
+      "parallel_group": 1
     },
     {
       "lane_id": "lane-c",
@@ -66,8 +68,10 @@
         "api",
         "artifact-rendering"
       ],
-      "depends_on_lanes": [],
-      "parallel_group": 0
+      "depends_on_lanes": [
+        "lane-a"
+      ],
+      "parallel_group": 1
     },
     {
       "lane_id": "lane-d",
@@ -86,8 +90,10 @@
         "artifact-rendering",
         "legacy-cleanup"
       ],
-      "depends_on_lanes": [],
-      "parallel_group": 0
+      "depends_on_lanes": [
+        "lane-c"
+      ],
+      "parallel_group": 2
     },
     {
       "lane_id": "lane-e",
@@ -105,8 +111,10 @@
         "api",
         "artifact-rendering"
       ],
-      "depends_on_lanes": [],
-      "parallel_group": 0
+      "depends_on_lanes": [
+        "lane-d"
+      ],
+      "parallel_group": 3
     },
     {
       "lane_id": "lane-f",
@@ -127,12 +135,16 @@
         "api",
         "artifact-rendering"
       ],
-      "depends_on_lanes": [],
-      "parallel_group": 0
+      "depends_on_lanes": [
+        "lane-c",
+        "lane-d",
+        "lane-e"
+      ],
+      "parallel_group": 4
     }
   ],
-  "computed_at": "2026-08-08T13:07:57.038246+00:00",
+  "computed_at": "2026-08-08T13:12:09.267882+00:00",
   "computed_from": "dependency_graph+ownership",
   "planning_artifact_wps": [],
-  "planning_commit_sha": "e9b1a381efe005b7a0318d5f465310106058f3e5"
+  "planning_commit_sha": "4ecba506dc69fa27ef2a4b53ee2fcf924f25fc45"
 }
