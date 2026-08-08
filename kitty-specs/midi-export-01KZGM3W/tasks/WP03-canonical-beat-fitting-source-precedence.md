@@ -1,7 +1,7 @@
 ---
 work_package_id: WP03
 title: Fitting, Source Precedence & Tempo Segments
-dependencies: []
+dependencies: ["WP01"]
 requirement_refs:
 - FR-001
 - FR-002

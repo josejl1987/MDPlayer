@@ -1,7 +1,7 @@
 ---
 work_package_id: WP02
 title: MusicalTimeMap & TempoSegment Invariants
-dependencies: []
+dependencies: ["WP01"]
 requirement_refs:
 - FR-001
 - FR-003

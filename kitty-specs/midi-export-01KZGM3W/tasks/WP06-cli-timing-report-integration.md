@@ -1,7 +1,7 @@
 ---
 work_package_id: WP06
 title: CLI, Timing Report & Integration Matrix
-dependencies: []
+dependencies: ["WP03", "WP04", "WP05"]
 requirement_refs:
 - FR-003
 - FR-004

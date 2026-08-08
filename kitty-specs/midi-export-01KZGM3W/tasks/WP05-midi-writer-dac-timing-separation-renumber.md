@@ -1,7 +1,7 @@
 ---
 work_package_id: WP05
 title: MIDI Writer & DAC Timing Separation
-dependencies: []
+dependencies: ["WP04"]
 requirement_refs:
 - FR-001
 - FR-003

@@ -1,7 +1,7 @@
 ---
 work_package_id: WP04
 title: MIDI Origin, Events, Ordering & Pitch
-dependencies: []
+dependencies: ["WP03"]
 requirement_refs:
 - FR-001
 - FR-003
