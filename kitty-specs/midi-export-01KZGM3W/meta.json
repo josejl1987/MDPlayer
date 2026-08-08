@@ -1,0 +1,14 @@
+{
+  "created_at": "2026-08-08T12:03:42.989303+00:00",
+  "flattened": false,
+  "friendly_name": "midi export",
+  "mission_id": "01KZGM3W8D1FQ14SMWDMPE4RA0",
+  "mission_number": null,
+  "mission_slug": "midi-export-01KZGM3W",
+  "mission_type": "software-dev",
+  "purpose_context": "This mission advances midi export on feature/linux-fmp-renderer so stakeholders can track the work from mission creation onward.",
+  "purpose_tldr": "midi export",
+  "slug": "midi-export-01KZGM3W",
+  "target_branch": "feature/linux-fmp-renderer",
+  "topology": "single_branch"
+}
