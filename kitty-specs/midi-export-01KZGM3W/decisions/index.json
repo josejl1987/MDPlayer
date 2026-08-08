@@ -1,0 +1,54 @@
+{
+  "entries": [
+    {
+      "created_at": "2026-08-08T12:06:13.390833Z",
+      "decision_id": "01KZGM8F4EH3X848Q923QVHHEF",
+      "final_answer": null,
+      "input_key": "spec_gate_action",
+      "mission_id": "01KZGM3W8D1FQ14SMWDMPE4RA0",
+      "mission_slug": "midi-export-01KZGM3W",
+      "opened_by": "cli",
+      "options": [
+        "Yes, add only distilled FR rows and commit",
+        "No, I will prepare the spec first",
+        "Other"
+      ],
+      "origin_flow": "plan",
+      "other_answer": false,
+      "question": "The authoritative spec is currently uncommitted and contains no substantive FR-### row, so setup-plan cannot proceed. May I add FR-### rows distilled only from its existing explicit requirements, commit spec.md on feature/linux-fmp-renderer, and continue planning?",
+      "rationale": null,
+      "resolved_at": null,
+      "resolved_by": null,
+      "slot_key": "plan.spec.functional-requirements",
+      "status": "open",
+      "step_id": null,
+      "summary_json": null
+    },
+    {
+      "created_at": "2026-08-08T12:20:23.718569Z",
+      "decision_id": "01KZGN2DH6C26YQ7NTXGCN4MT7",
+      "final_answer": "Use one explicit normalization adapter at the producer boundary, while rejecting ambiguous clocks.",
+      "input_key": "clock_normalization",
+      "mission_id": "01KZGM3W8D1FQ14SMWDMPE4RA0",
+      "mission_slug": "midi-export-01KZGM3W",
+      "opened_by": "cli",
+      "options": [
+        "Correct each producer at source",
+        "Use one explicit boundary normalizer",
+        "Other"
+      ],
+      "origin_flow": "plan",
+      "other_answer": false,
+      "question": "When the producer audit finds a timing producer on a clock that differs from the final playback/output sample clock, should the plan require correcting that producer at its source, or permit one explicit normalization adapter at the producer boundary while rejecting unsupported ambiguity?",
+      "rationale": null,
+      "resolved_at": "2026-08-08T12:20:56.419908Z",
+      "resolved_by": null,
+      "slot_key": "plan.architecture.clock-normalization",
+      "status": "resolved",
+      "step_id": null,
+      "summary_json": null
+    }
+  ],
+  "mission_id": "01KZGM3W8D1FQ14SMWDMPE4RA0",
+  "version": 1
+}
