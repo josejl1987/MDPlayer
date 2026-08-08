@@ -141,7 +141,8 @@ This WP delivers the user-facing surface and the end-to-end acceptance matrix (p
   2. Verify `driver` fails when authoritative driver timing is unavailable (throws `MusicalTimingException`), never silently switching to symbolic inference (§11).
   3. Verify `fixed` requires `Bpm`, and that a fixed BPM with no phase is reported as non-beat-aligned in diagnostics (§11, §49).
   4. Verify strict mode has **no** silent 120 BPM fallback (§16), and non-strict fallback (if retained) is explicit in `Warnings` and never labeled beat-aligned (§49).
-  5. Add CLI/service tests asserting: `auto` picks the strongest source; `driver` fails without authority; `fixed` without BPM fails; strict fails on unresolved alignment; fallback output is visibly reported.
+  5. Add spec §42 symbolic half/double-tempo ambiguity handling: when `--tempo-source symbolic` exposure surfaces candidate ambiguity (e.g. 70 vs 140 BPM describing the same onset pattern), the CLI must surface that ambiguity (not hide it behind arbitrary confidence). In strict mode, an unresolved symbolic ambiguity must fail export unless a user override (e.g. `--bpm`/`--beat-offset-samples`) resolves it.
+  6. Add CLI/service tests asserting: `auto` picks the strongest source; `driver` fails without authority; `fixed` without BPM fails; strict fails on unresolved alignment; fallback output is visibly reported; symbolic half/double-tempo ambiguity is surfaced and strict-rejected.
 - **Files**: `MDPlayer/src/MDPlayer.Fmp.Cli/MidiCommand.cs`, `MDPlayer/src/MDPlayer.Fmp.Core/Timing/TimingDiagnostics.cs` (coordination with WP03), `MDPlayer/tests/MDPlayer.Fmp.Tests/MidiExportServiceTests.cs`, `MDPlayer/tests/MDPlayer.Fmp.Tests/MidiCliOptionTests.cs`.
 - **Parallel?**: No — depends on T036 + WP03 diagnostics.
 - **Notes**: Error messages must say what is actually wrong (§76), e.g. "Cannot establish MIDI beat phase… Provide an explicit beat offset or disable strict timing."

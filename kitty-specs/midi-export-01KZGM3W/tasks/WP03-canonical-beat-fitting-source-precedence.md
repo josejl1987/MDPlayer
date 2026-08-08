@@ -151,7 +151,8 @@ And this WP turns validated tempo transitions into continuous piecewise `TempoSe
   1. Confirm the builder's current `BeatIndex * QuartersPerBeat` normalization is the single conversion point.
   2. If any other code multiplies/derives quarter fractions from `BeatIndex` (search the whole branch), route it through the builder's normalized path.
   3. Add a test asserting that a `QuartersPerBeat` scale (e.g. 0.5 for half-beats or 2 for subdivisions) produces the correct quarter grid.
-  4. Assert `MusicalMidiExporter` (later WPs) never interprets `BeatIndex` — this WP just locks the builder boundary.
+  4. Add the spec §53 nonzero-starting-`BeatIndex` regression: input `sample 0 → beat 128`, `sample 24000 → beat 129`, `sample 48000 → beat 130` must produce a grid matching `beat * QuartersPerBeat` (i.e. the relative musical timeline and phase are preserved). Do **not** treat the first `BeatIndex` as zero merely because it is the first event; a global MIDI origin translation (WP04) may shift output ticks, but intervals and phase relationships must be unchanged.
+  5. Assert `MusicalMidiExporter` (later WPs) never interprets `BeatIndex` — this WP just locks the builder boundary.
 - **Files**: `MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMapBuilder.cs`, `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`.
 - **Parallel?**: Yes — isolated from T012/T013.
 - **Notes**: The scale factor lives in `MusicalTimeMap` construction only, per spec.

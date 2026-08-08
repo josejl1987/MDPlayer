@@ -18,7 +18,7 @@ Execution root: repository checkout at `/home/jose/MDPlayer` on branch `feature/
 | T008 | TempoSegment continuity invariant (double precision; next origin threaded from previous) | WP02 | [P] |
 | T009 | Ten-minute constant-tempo no-drift test | WP02 | [P] |
 | T010 | Harden MusicalTimeMap.cs from discovered failures | WP02 | |
-| T011 | Normalize BeatIndex→quarter via explicit scale in builder | WP03 | [P] |
+| T011 | Normalize BeatIndex→quarter via explicit scale in builder; §53 nonzero-start test | WP03 | [P] |
 | T012 | Deduplicate identical anchors; reject/report conflicts (no averaging) | WP03 | [P] |
 | T013 | Harden BeatGridFitter robust fit: outliers, residuals, no per-beat tempo segments | WP03 | [P] |
 | T014 | Establish phase from anchors; use validated BPM as rate without destroying phase | WP03 | [P] |
@@ -44,7 +44,7 @@ Execution root: repository checkout at `/home/jose/MDPlayer` on branch `feature/
 | T034 | Byte-identical deterministic output regression | WP05 | [P] |
 | T035 | DAC identity→note independent of trigger→tick; DAC origin-shift fix + regression | WP05 | |
 | T036 | Extend CLI: --ppq/--tempo-source/--bpm/--beat-offset-samples/--meter/--first-downbeat-sample/--strict-timing | WP06 | [P] |
-| T037 | Wire source mapping; no silent 120 BPM; non-strict fallback reported | WP06 | [P] |
+| T037 | Wire source mapping; no silent 120 BPM; §42 symbolic-ambiguity strict handling; non-strict fallback reported | WP06 | [P] |
 | T038 | Integrate --timing-report with contracts/timing-report.schema.json | WP06 | [P] |
 | T039 | Align MidiExportService/MidiExportRequest to same map/options | WP06 | [P] |
 | T040 | End-to-end integration: parser round trip + FR-005 acceptance matrix | WP06 | |
