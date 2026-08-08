@@ -9,6 +9,9 @@ requirement_refs:
 planning_base_branch: feature/linux-fmp-renderer
 merge_target_branch: feature/linux-fmp-renderer
 branch_strategy: Planning artifacts for this mission were generated on feature/linux-fmp-renderer. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feature/linux-fmp-renderer unless the human explicitly redirects the landing branch.
+base_branch: kitty/mission-midi-export-01KZGM3W
+base_commit: 34efa5d4fff4726df3c793144347183d69b0ab22
+created_at: '2026-08-08T14:04:40.251065+00:00'
 subtasks:
 - T001
 - T002

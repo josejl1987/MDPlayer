@@ -10,5 +10,7 @@
   "purpose_tldr": "midi export",
   "slug": "midi-export-01KZGM3W",
   "target_branch": "feature/linux-fmp-renderer",
-  "topology": "single_branch"
+  "topology": "single_branch",
+  "vcs": "git",
+  "vcs_locked_at": "2026-08-08T14:04:40.123242+00:00"
 }

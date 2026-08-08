@@ -1,0 +1,18 @@
+project:
+  uuid: 85ba85bc-5ef7-4829-a1cb-91ece6d446d2
+  slug: mdplayer
+  node_id: 9bee2fa42d5b
+  build_id: 3c748c0c-852e-5bb3-83cf-112da0058b6d
+mission_type_activations:
+- software-dev
+- documentation
+- research
+- plan
+vcs:
+  type: git
+agents:
+  available:
+  - claude
+  auto_commit: true
+  lint_on_edit: false
+charter: .kittify/charter/charter.yaml
