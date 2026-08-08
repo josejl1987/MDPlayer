@@ -28,7 +28,8 @@
       "last_transition_at": "2026-08-08T15:27:18.174437+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
-        "Ready for review"
+        "Ready for review",
+        "Arbiter decision: Approved after 3 review cycles. Production code satisfies FR-002 (single normalization boundary over CLI + Application serialized paths; no MIDI compensation; StartSample range preserved; ambiguous rate rejected). Remaining test-breadth finding logged as follow-up, not a functional blocker."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
