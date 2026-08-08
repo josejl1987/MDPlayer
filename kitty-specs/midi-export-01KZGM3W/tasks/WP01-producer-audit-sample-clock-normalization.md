@@ -6,6 +6,9 @@ requirement_refs:
 - FR-001
 - FR-002
 - FR-005
+planning_base_branch: feature/linux-fmp-renderer
+merge_target_branch: feature/linux-fmp-renderer
+branch_strategy: Planning artifacts for this mission were generated on feature/linux-fmp-renderer. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feature/linux-fmp-renderer unless the human explicitly redirects the landing branch.
 subtasks:
 - T001
 - T002
@@ -22,7 +25,6 @@ authoritative_surface: MDPlayer/src/MDPlayer.Fmp.Core/Visualization/
 create_intent:
 - MDPlayer/src/MDPlayer.Fmp.Core/Visualization/ProducerClockNormalization.cs
 - MDPlayer/tests/MDPlayer.Fmp.Tests/ProducerClockNormalizationTests.cs
-- MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimingException.cs
 execution_mode: code_change
 model: ''
 owned_files:
@@ -32,7 +34,7 @@ owned_files:
 - MDPlayer/src/MDPlayer.Fmp.Core/Visualization/Ym2612TimelineDecoder.cs
 - MDPlayer/src/MDPlayer.Fmp.Core/Visualization/ChipTimelineDecoderRegistry.cs
 - MDPlayer/src/MDPlayer.Fmp.Core/Visualization/VisualizationJsonWriter.cs
-- MDPlayer/src/MDPlayer.Fmp.Core/Visualization/TimingSource.cs
+- MDPlayer/src/MDPlayer.Fmp.Core/Visualization/ProducerClockNormalization.cs
 - MDPlayer/tests/MDPlayer.Fmp.Tests/Ym2608TimelineDecoderTests.cs
 - MDPlayer/tests/MDPlayer.Fmp.Tests/Visualization/VisualizationV3ContractTests.cs
 - MDPlayer/tests/MDPlayer.Fmp.Tests/ProducerClockNormalizationTests.cs

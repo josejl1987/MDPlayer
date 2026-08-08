@@ -5,6 +5,9 @@ dependencies: []
 requirement_refs:
 - FR-001
 - FR-003
+planning_base_branch: feature/linux-fmp-renderer
+merge_target_branch: feature/linux-fmp-renderer
+branch_strategy: Planning artifacts for this mission were generated on feature/linux-fmp-renderer. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feature/linux-fmp-renderer unless the human explicitly redirects the landing branch.
 subtasks:
 - T006
 - T007
@@ -18,15 +21,14 @@ history:
   action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: MDPlayer/src/MDPlayer.Fmp.Core/Timing/
-create_intent: []
+create_intent:
+- MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs
 execution_mode: code_change
 model: ''
 owned_files:
 - MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMap.cs
 - MDPlayer/src/MDPlayer.Fmp.Core/Timing/TempoSegment.cs
-- MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMapBuilder.cs
-- MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimingException.cs
-- MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs
+- MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs
 role: implementer
 tags: []
 task_type: implement
@@ -93,7 +95,7 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
 
 - `MusicalTimeMap` (internal class): ctor `(sampleRate, startSample, segments, meter?, firstDownbeatQuarter?)`; validates sorted non-overlap (allows gaps), positive finite SPQ/BPM, and continuity ≤1e-6; `LocateSegment` binary search, extrapolates first/last outside bounds; `SampleToQuarterPosition` → `TempoSegment.QuarterPositionAt`; `QuarterPositionToTick` uses `Math.Round(AwayFromZero)`; `SampleToTick` direct absolute conversion (no accumulation); `Tick` inverse. Negative/fractional quarters already supported.
 - `TempoSegment` (record): `StartSample`, `EndSample` (exclusive), `QuarterPositionAtStart` (negative/fractional allowed), `SamplesPerQuarter`, `BeatsPerMinute`, `TimingSource`, `Confidence`; helpers `IsEmpty`, `MicrosecondsPerQuarter` (rounded/clamped), `QuarterPositionAtEnd`, `QuarterPositionAt` (inclusive EndSample).
-- Relevant existing tests live in `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`, which already builds direct `BeatAnchor[]` + `BeatGridFitter.Fit(Sr)` and direct `PiecewiseFit → TempoSegment[] → MusicalTimeMap`, including a long-drift test.
+- Relevant existing tests live in `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`, which already builds direct `BeatAnchor[]` + `BeatGridFitter.Fit(Sr)` and direct `PiecewiseFit → TempoSegment[] → MusicalTimeMap`, including a long-drift test. The map-level invariant tests added by this WP go in the new `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`.
 
 ## Branch Strategy
 
@@ -115,7 +117,7 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
   1. Add a test for the constant-tempo case: 48,000 Hz, 120 BPM → one quarter = 24,000 samples; with PPQ 960 assert `sample 0 → tick 0`, `sample 24000 → tick 960`, `sample 48000 → tick 1920`, `sample 72000 → tick 2880`.
   2. Add the nonzero-phase case: anchors `sample 12000 → quarter 0`, `36000 → quarter 1`, `60000 → quarter 2` at 48 kHz/120 BPM; assert `sample 0 → quarter -0.5` and the exported grid preserves the half-beat pickup.
   3. Assert `SampleToQuarterPosition` is exact (no accumulated error) across a broad sample range.
-- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`.
+- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`.
 - **Parallel?**: Yes — pure addition, independent of T008/T009.
 - **Notes**: Do **not** force sample zero to quarter zero in these tests; phase is independently represented.
 
@@ -126,7 +128,7 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
   1. Add tests querying a sample exactly at a segment `StartSample`, exactly at `EndSample - 1`, and at `EndSample` (which belongs to the next segment / may be extrapolation).
   2. Add tests for samples before the first segment start and after the last segment end, asserting deterministic extrapolation.
   3. Add tests for multi-segment maps with gaps, if the ctor allows them.
-- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`.
+- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`.
 - **Parallel?**: Yes.
 - **Notes**: `QuarterPositionAt(EndSample)` is documented as inclusive; verify the boundary convention is deterministic and test-locked.
 
@@ -137,7 +139,7 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
   1. Add an invariant test: for adjacent segments `A [startA, startB)` and `B [startB, …)`, assert `B.QuarterPositionAtStart == A.SampleToQuarterPosition(startB)` within `1e-6` (or the code's documented tolerance).
   2. Add a test that tolerates tiny floating-point drift (≤1e-6) but fails on a real discontinuity.
   3. If the map already validates continuity at construction, add an explicit coverage test; otherwise add the invariant check in debug/tests as the spec requires.
-- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`, `MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMap.cs` (only if a debug/test invariant is missing).
+- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`, `MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMap.cs` (only if a debug/test invariant is missing).
 - **Parallel?**: Yes.
 - **Notes**: Continuity must hold in double-precision musical time first; MIDI tick rounding happens afterwards and is not part of this invariant.
 
@@ -149,7 +151,7 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
   2. Create anchors throughout (e.g. every quarter).
   3. For every anchor assert `expectedTick = round(anchorQuarter * PPQ + originTickOffset)` and `abs(actualTick - expectedTick) <= 1`, including the final anchor.
   4. Assert the final beat is as accurate as the first (no error proportional to duration).
-- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`.
+- **Files**: `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`.
 - **Parallel?**: Yes.
 - **Notes**: This is the key regression that protects against incremental `currentTick += round(delta * ticksPerSample)` bugs.
 
@@ -169,12 +171,12 @@ This WP locks the absolute map's invariants (plan IC-03, spec §8, §9, §20, §
 
 ## Test Strategy
 
-All tests in this WP belong in `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs`, following the file's existing convention (direct `BeatAnchor[]` + `BeatGridFitter.Fit(Sr)` + `PiecewiseFit → TempoSegment[] → MusicalTimeMap`).
+All tests in this WP belong in `MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs`, following the existing `MusicalTimingTests.cs` convention (direct `BeatAnchor[]` + `BeatGridFitter.Fit(Sr)` + `PiecewiseFit → TempoSegment[] → MusicalTimeMap`).
 
 Run:
 
 ```bash
-cd /home/jose/MDPlayer && dotnet test tests/MDPlayer.Fmp.Tests/ --filter "FullyQualifiedName~MusicalTimingTests"
+cd /home/jose/MDPlayer && dotnet test tests/MDPlayer.Fmp.Tests/ --filter "FullyQualifiedName~MusicalTimeMapInvariantsTests"
 ```
 
 ## Risks & Mitigations

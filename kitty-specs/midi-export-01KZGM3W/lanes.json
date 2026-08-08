@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "mission_slug": "midi-export-01KZGM3W",
+  "mission_id": "01KZGM3W8D1FQ14SMWDMPE4RA0",
+  "mission_branch": "kitty/mission-midi-export-01KZGM3W",
+  "target_branch": "feature/linux-fmp-renderer",
+  "lanes": [
+    {
+      "lane_id": "lane-a",
+      "wp_ids": [
+        "WP01"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/ChipTimelineDecoderRegistry.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/ProducerClockNormalization.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/TimelineBuilder.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/VisualizationJsonWriter.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/VisualizationTimeline.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/Ym2608TimelineDecoder.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/Ym2612TimelineDecoder.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/ProducerClockNormalizationTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/Visualization/VisualizationV3ContractTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/Ym2608TimelineDecoderTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-b",
+      "wp_ids": [
+        "WP02"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMap.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/TempoSegment.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapInvariantsTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-c",
+      "wp_ids": [
+        "WP03"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/BeatAnchor.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/BeatGridFitter.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMapBuilder.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimeMapOptions.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/MusicalTimingException.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/TimingDiagnostics.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/TimingSource.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimeMapBuilderTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalTimingTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-d",
+      "wp_ids": [
+        "WP04"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/Midi/MidiEvent.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/Midi/MusicalMidiExporter.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MidiPitchAccuracyTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MusicalMidiExporterTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "app-shell",
+        "artifact-rendering",
+        "legacy-cleanup"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-e",
+      "wp_ids": [
+        "WP05"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Core/Timing/Midi/MidiFileWriter.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/Dac/DacMidiExporter.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Core/Visualization/Dac/MidiFileWriter.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/DacMidiExporterTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MidiFileWriterTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-f",
+      "wp_ids": [
+        "WP06"
+      ],
+      "write_scope": [
+        "MDPlayer/src/MDPlayer.Fmp.Application/Export/MidiExportRequest.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Application/Export/MidiExportService.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Cli/MidiCommand.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Cli/MidiOptions.cs",
+        "MDPlayer/src/MDPlayer.Fmp.Cli/TimelineCaptureService.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MidiCliOptionTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MidiExportServiceTests.cs",
+        "MDPlayer/tests/MDPlayer.Fmp.Tests/MidiIntegrationRoundTripTests.cs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    }
+  ],
+  "computed_at": "2026-08-08T13:07:57.038246+00:00",
+  "computed_from": "dependency_graph+ownership",
+  "planning_artifact_wps": [],
+  "planning_commit_sha": "e9b1a381efe005b7a0318d5f465310106058f3e5"
+}
