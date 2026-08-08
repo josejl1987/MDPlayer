@@ -63,7 +63,8 @@
       "notes": [
         "Cycle 2 fix",
         "Cycle 2 fix",
-        "Review passed: WP02 acceptance criteria met; BPM-inversion + tautology findings closed."
+        "Review passed: WP02 acceptance criteria met; BPM-inversion + tautology findings closed.",
+        "Review passed: WP02 map invariants meet acceptance; BPM-inversion + tautology findings closed; source-order writer coordination verified."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
