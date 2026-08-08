@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdplayer.local/contracts/midi-export-timing-report.schema.json",
+  "title": "MDPlayer MIDI export timing report",
+  "description": "Stable compact diagnostics emitted by the existing --timing-report option. This report describes resolved timing; it is not a second timing authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sampleRate",
+    "ppq",
+    "source",
+    "phaseAuthoritative",
+    "tempoAuthoritative",
+    "originTickOffset",
+    "meter",
+    "downbeatKnown",
+    "anchors",
+    "segments",
+    "warnings"
+  ],
+  "properties": {
+    "sampleRate": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ppq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32767
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phaseAuthoritative": {
+      "type": "boolean"
+    },
+    "tempoAuthoritative": {
+      "type": "boolean"
+    },
+    "originTickOffset": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "meter": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["numerator", "denominator"],
+          "properties": {
+            "numerator": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "denominator": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    },
+    "downbeatKnown": {
+      "type": "boolean"
+    },
+    "anchors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "accepted",
+        "rejected",
+        "rmsResidualSamples",
+        "maxResidualSamples"
+      ],
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejected": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rmsResidualSamples": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maxResidualSamples": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rejectedDetails": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rejectedAnchor"
+          }
+        }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startSample",
+        "quarterAtStart",
+        "bpm"
+      ],
+      "properties": {
+        "startSample": {
+          "type": "integer"
+        },
+        "endSample": {
+          "type": "integer"
+        },
+        "quarterAtStart": {
+          "type": "number"
+        },
+        "bpm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "source": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "rejectedAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample", "beatPosition", "residual", "reason"],
+      "properties": {
+        "sample": {
+          "type": "integer"
+        },
+        "beatPosition": {
+          "type": "number"
+        },
+        "residual": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
