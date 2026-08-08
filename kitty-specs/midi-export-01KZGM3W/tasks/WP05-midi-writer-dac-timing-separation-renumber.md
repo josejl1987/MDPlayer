@@ -230,3 +230,4 @@ Status is managed via `status.events.jsonl`. Use `spec-kitty agent tasks move-ta
 ### Optional Phase Subdirectories
 
 For large features, organize prompts under `tasks/` to keep bundles grouped while maintaining lexical ordering.
+- 2026-08-08T18:37:35Z – claude – shell_pid=1234854 – Ready for review: SourceOrder secondary-key writer sort; VLQ validation + range rejection; DAC refactor through MusicalTimeMap + shared non-negative origin (no sample→tick/BPM math); fixed DAC MThd length + WriteMetaText double-delta SMF bugs; new MidiFileWriterTests + DAC §67/§68/origin-gap regressions (T031-T035)
