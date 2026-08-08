@@ -1,7 +1,7 @@
 {
-  "event_count": 88,
-  "last_event_id": "01KZHEP4D2AT4NRVJN7BA8DRCS",
-  "materialized_at": "2026-08-08T19:48:04.130234+00:00",
+  "event_count": 90,
+  "last_event_id": "01KZHEQMCFNM0EXS133WXYWSFG",
+  "materialized_at": "2026-08-08T19:48:53.263236+00:00",
   "mission_number": "",
   "mission_slug": "midi-export-01KZGM3W",
   "mission_type": "software-dev",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
+    "in_progress": 1,
     "in_review": 0,
-    "planned": 1
+    "planned": 0
   },
   "work_packages": {
     "WP01": {
@@ -174,11 +174,14 @@
       }
     },
     "WP06": {
-      "actor": "finalize-tasks",
+      "actor": "claude",
+      "agent": "claude",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01KZGQGSAXBV2GRZABYM7K21MN",
-      "last_transition_at": "2026-08-08T13:03:11.709804+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01KZHEQMCFNM0EXS133WXYWSFG",
+      "last_transition_at": "2026-08-08T19:48:53.263236+00:00",
+      "shell_pid": 25832,
+      "shell_pid_created_at": "1786218425.7"
     }
   }
 }
