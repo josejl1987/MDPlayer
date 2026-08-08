@@ -64,6 +64,22 @@ internal sealed class TimingDiagnostics
     public void AddRejectedAnchor(BeatAnchor anchor, double residualQuarters, string reason) =>
         _rejectedAnchors.Add(new RejectedAnchorInfo(anchor.Sample, anchor.QuarterPosition, residualQuarters, reason));
 
+    /// <summary>
+    /// Clears residual + rejected-anchor state accumulated from a discarded
+    /// validated-tempo/alternative fit. Used when an anchors-first override
+    /// rebuilds the map (§10): the stale residual/rejection diagnostics from the
+    /// thrown-away fit must not poison IsTrustworthy / strict-mode gate.
+    /// </summary>
+    public void ResetAnchorDiagnostics()
+    {
+        _rejectedAnchors.Clear();
+        RejectedAnchorCount = 0;
+        MaxResidualQuarters = 0;
+        RmsResidualQuarters = 0;
+        RmsResidualSamples = 0;
+        MaxResidualSamples = 0;
+    }
+
     /// <summary>True when the phase is authoritative (anchors or explicit override), not inferred.</summary>
     public bool PhaseAuthoritative { get; set; }
 

@@ -404,9 +404,12 @@ internal static class BeatGridFitter
 
             if (!corroboratedByAnchors)
             {
-                // Anchor-derived rate over ALL clean anchor evidence.
+                // Anchor-derived rate over ALL clean anchor evidence. Pass fixedBpm:null
+                // so a fixed-BPM that merely mirrors the lone observation (e.g. auto
+                // resolved gridBpm = FirstValidatedBpm = the lone value) cannot defeat
+                // the anchors-first precedence check (§10).
                 (double anchorSpq, double anchorBpm) = RegionRate(
-                    clean, sampleRate, fixedBpm, changes[0].BeatsPerMinute);
+                    clean, sampleRate, fixedBpm: null, changes[0].BeatsPerMinute);
                 bool anchorsEstablishRate =
                     clean.Count >= 2 && double.IsFinite(anchorSpq) && anchorSpq > 0;
 
@@ -419,6 +422,10 @@ internal static class BeatGridFitter
                     SegmentFit anchorFit = MakeValidatedSegment(
                         domainStart, long.MaxValue, anchorSpq, anchorBpm, clean, sampleRate,
                         phaseQuarterAtSampleZero, diagnostics, isFirst: true, residuals: null);
+                    // The lone-observation validated fit that produced residual/rejected
+                    // state was discarded; clear it so IsTrustworthy/strict reflect only
+                    // the anchor-established result (§10 anchors-first).
+                    diagnostics.ResetAnchorDiagnostics();
                     return CollapseToSingle(anchorFit);
                 }
             }

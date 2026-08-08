@@ -238,6 +238,54 @@ public sealed class MusicalTimeMapBuilderTests
 
     // ---- T016/T017/T018: tempo transitions, continuity, jitter suppression ----
 
+    [Fact]
+    public void StrictMode_AnchorsFirstOverride_DoesNotRejectValidGrid()
+    {
+        // Valid constant 120-BPM anchors + ONE conflicting 150-BPM validated
+        // observation. §10 anchors-first: the map must use the anchor-derived 120
+        // grid, and the stale residual/rejection diagnostics from the discarded
+        // validated fit must NOT make strict mode reject the corrected grid.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 6)
+            .Select(i => new BeatEvent((long)Math.Round(i * spq), i))
+            .ToArray();
+        var timeline = Timeline(beats,
+            timing: new[] { new DriverTimingEvent(0, 0, 150.0) });
+
+        MusicalTimeMapBuildResult result = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { StrictTiming = true, Source = TimingSource.DriverValidatedTempo });
+
+
+        // Anchor grid preserved (one constant 120-BPM segment), and strict did NOT throw.
+        Assert.True(result.Diagnostics.IsTrustworthy,
+            "anchors-first override must leave IsTrustworthy true (stale residuals cleared)");
+        Assert.Single(result.Map.Segments);
+        Assert.True(Math.Abs(result.Map.Segments[0].BeatsPerMinute - 120.0) < 0.5,
+            $"expected 120 BPM anchor grid, got {result.Map.Segments[0].BeatsPerMinute}");
+    }
+
+    [Fact]
+    public void ValidatedTempo_OneAnchor_DerivesPhaseForStrict()
+    {
+        // One authoritative beat anchor supplies phase; validated BPM supplies the
+        // rate (§10). The builder must NOT force PhaseUnknown (or strict-fail) just
+        // because there is only one anchor when the validated path derived a phase.
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = Timeline(
+            new[] { new BeatEvent(12_000L, 0) },
+            timing: new[] { new DriverTimingEvent(0, 0, 120.0) });
+
+        MusicalTimeMapBuildResult result = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { StrictTiming = true, Source = TimingSource.DriverValidatedTempo });
+
+        Assert.False(result.Diagnostics.PhaseUnknown,
+            "single anchor + validated BPM derives a phase and must not be PhaseUnknown");
+        Assert.True(result.Diagnostics.IsTrustworthy,
+            "validated one-anchor fit with derived phase must be trustworthy in strict mode");
+        // The anchor at sample 12000 is quarter 0 (phase preserved).
+        Assert.Equal(0.0, result.Map.SampleToQuarterPosition(12_000), precision: 6);
+    }
+
     private static VisualizationTimeline TwoTempoTimeline()
     {
         double spqA = Sr * 60.0 / 120.0;

@@ -94,9 +94,13 @@ internal static class MusicalTimeMapBuilder
         }
         if (!HasPhaseOverride(options, beatOffsetQuarter))
         {
-            // Without an explicit phase, the anchor path owns phase; the constant
-            // path with no anchors reports phase unknown.
-            if (anchors.Length < 2)
+            // Without an explicit phase, the anchor path owns phase; a single beat
+            // anchor can still establish an authoritative phase when a validated
+            // BPM supplies the rate (§10 rate+phase rule). Only force PhaseUnknown
+            // when the fit genuinely has no phase evidence at all (no anchors and
+            // no derived phase) rather than whenever anchors.Length < 2 — the
+            // validated-tempo path derives phase from one anchor via the fitter.
+            if (anchors.Length < 2 && fit.Diagnostics.SampleZeroQuarter is null)
                 fit.Diagnostics.PhaseUnknown = true;
         }
 
