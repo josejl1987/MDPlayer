@@ -132,6 +132,149 @@ public sealed class MidiExportServiceTests
         Assert.True(result.Bytes.Length > 14);
     }
 
+    [Fact]
+    public void Export_Auto_SelectsDriverBeats_WhenAvailable()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Auto });
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal("DriverBeatAnchors", result.TempoSource);
+        Assert.False(result.PhaseUnknown);
+        Assert.True(result.Trustworthy);
+    }
+
+    [Fact]
+    public void Export_Driver_WithoutAuthority_Fails()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: false);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Driver });
+        Assert.False(result.Succeeded);
+        Assert.Contains("timing", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Export_Fixed_WithoutBpm_Fails()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Fixed });
+        Assert.False(result.Succeeded);
+        Assert.Contains("Bpm", result.Error);
+    }
+
+    [Fact]
+    public void Export_Fixed_NonPositiveBpm_Rejected()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Fixed, Bpm = 0 });
+        Assert.False(result.Succeeded);
+        Assert.Contains("BPM", result.Error);
+    }
+
+    [Fact]
+    public void Export_Strict_RejectsUnresolvedAlignment()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: false);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { Bpm = 120, StrictTiming = true });
+        Assert.False(result.Succeeded);
+        Assert.Contains("strict", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Export_FirstDownbeat_WithoutMeter_Fails()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { FirstDownbeatSample = 10_000 });
+        Assert.False(result.Succeeded);
+        Assert.Contains("meter", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Export_Symbolic_OverridesDriver_SameAsCli()
+    {
+        VisualizationTimeline timeline = BuildTimeline(withBeats: true);
+        string timelinePath = WriteTimeline(timeline);
+
+        var result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Symbolic });
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal("SymbolicInference", result.TempoSource);
+    }
+
+    [Fact]
+    public void ExportFromTimelinePath_AmbiguousSampleRate_IsRejectedNotGeneric()
+    {
+        // P1: the Application/GUI serialized path must route through the producer
+        // boundary. A timeline that lost its SampleRate must be rejected with an
+        // actionable MusicalTimingException (surfaced on the result), never a
+        // generic JSON/argument error — same as the CLI serialized path.
+        string path = Path.Combine(Path.GetTempPath(), "mdplayer-midi-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, """
+        {"schemaVersion":2,"sampleRate":0,"startSample":0,"endSample":1000,
+         "timing":[{"samplePosition":100,"timerBValue":66,"validatedBpm":120.0}]}
+        """);
+        try
+        {
+            var service = new MidiExportService();
+            MidiExportResult result = service.ExportFromTimelinePath(path, new MidiExportRequest());
+
+            Assert.False(result.Succeeded);
+            Assert.Contains("source rate unknown", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(result.Bytes);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ExportFromTimelinePath_PreservesSerializedStartRange()
+    {
+        // P1 + P2 on the Application path: reading a serialized timeline with a
+        // nonzero start and a valid rate routes through the boundary (pass-through
+        // destination = the timeline's own rate) and preserves the serialized
+        // [StartSample, EndSample] range — the map origin is not reset to 0.
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 5_000,
+            EndSample = 20_000,
+            Notes = new[]
+            {
+                new NoteEvent("v", 5_000, 7_000, 440, 60, "i", VisualizationNoteMode.Fm, false, []),
+            },
+            Beats = new[] { new BeatEvent(5_000, 0.0), new BeatEvent(8_000, 1.0) },
+        };
+        string timelinePath = WriteTimeline(timeline);
+
+        var service = new MidiExportService();
+        MidiExportResult result = service.ExportFromTimelinePath(timelinePath, new MidiExportRequest());
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.NotNull(result.Bytes);
+        // The serialized start range is preserved through the boundary.
+        Assert.Contains(result.Report, line => line.Contains("song: 5000–20000 samples @ " + Sr + " Hz"));
+    }
+
     /* ---- helpers (mirror the musical MIDI export tests) ---- */
 
     private static VisualizationTimeline BuildTimeline(bool withBeats = true, string[]? voices = null)

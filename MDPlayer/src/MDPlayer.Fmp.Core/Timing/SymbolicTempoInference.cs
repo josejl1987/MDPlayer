@@ -124,8 +124,16 @@ internal static class SymbolicTempoInference
             null);
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.SampleZeroQuarter = quarterAtStart;
-        if (!resolvedAmbiguity)
-            diagnostics.Warnings.Add(AmbiguityWarning(candidates, bestBpm));
+        string ambiguity = AmbiguityWarning(candidates, bestBpm);
+        if (!resolvedAmbiguity && ambiguity != "tempo appears unambiguous")
+        {
+            diagnostics.TempoAmbiguous = true;
+            diagnostics.Warnings.Add(ambiguity);
+        }
+        else if (!resolvedAmbiguity && ambiguity == "tempo appears unambiguous")
+        {
+            diagnostics.TempoAmbiguous = false;
+        }
         diagnostics.SegmentCount = 1;
         return new MusicalTimeMapBuildResult { Map = map, Diagnostics = diagnostics };
     }

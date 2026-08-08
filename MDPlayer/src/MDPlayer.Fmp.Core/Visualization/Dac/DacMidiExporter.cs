@@ -1,3 +1,5 @@
+using Fmp.Core.Timing;
+
 namespace Fmp.Core.Visualization;
 
 /// <summary>
@@ -19,42 +21,56 @@ internal sealed record DacMidiEvent(
 }
 
 /// <summary>
+/// A Set Tempo (FF 51) event on the DAC conductor track: the tempo value at the
+/// tick where a <see cref="MusicalTimeMap"/> tempo segment begins. One is emitted
+/// per distinct tempo segment so multi-segment maps change tempo at every boundary
+/// (mirrors the melodic conductor, §19).
+/// </summary>
+internal sealed record DacTempoEvent(long Tick, int MicrosecondsPerQuarter);
+
+/// <summary>
 /// Serializes a <see cref="DacAnalysisReport"/> into a deterministic
 /// standard MIDI file (format 1, single track group) that treats each DAC
 /// playback event as a sample trigger (spec §18). Playback rate is carried as
 /// metadata; the note sequence is identity-first with correct retrigger
 /// ordering (old note-off before new note-on).
+///
+/// Timing separation (spec §37/§38): this exporter owns NO timer. It receives an
+/// already-established <see cref="MusicalTimeMap"/> and applies exactly the same
+/// global non-negative origin policy as the melodic exporter, so a DAC trigger
+/// sample maps to the same musical tick as any identical melodic/rhythm trigger
+/// (§67). It never derives ticks from sample rate, a fixed BPM, or a local BPM
+/// default. DAC sample identity (raw PCM → canonical ID → MIDI note) is carried
+/// by the catalog assets and is fully independent of trigger→tick (§68).
 /// </summary>
 internal sealed class DacMidiExporter
 {
+    private readonly MusicalTimeMap _map;
     private readonly int _ppqn;
-    private readonly int _bpm;
-    private readonly int _sampleRate;
+    private readonly double _originOffsetQuarters;
+    // Identity policy only (§38): note base shifts the sample-ID→note label but
+    // never the trigger→tick conversion.
     private readonly int _noteBase;
-    private readonly int _notesPerBank;
+    // Mirrors the melodic exporter's EmitMarkers gate (§21): the first-downbeat
+    // quarter is folded into the origin ONLY when markers are emitted, so DAC and
+    // melodic/rhythm origins stay identical whether markers are on or off (§67).
+    private readonly bool _emitMarkers;
 
-    public DacMidiExporter(
-        int sampleRate,
-        int ppqn = 480,
-        int bpm = 120,
-        int noteBase = 0,
-        int notesPerBank = 128)
+    public DacMidiExporter(MusicalTimeMap map, int ppqn = 480, int noteBase = 0, bool emitMarkers = true)
     {
-        if (sampleRate <= 0)
-            throw new ArgumentOutOfRangeException(nameof(sampleRate));
+        _map = map ?? throw new ArgumentNullException(nameof(map));
         if (ppqn <= 0)
             throw new ArgumentOutOfRangeException(nameof(ppqn));
-        if (bpm <= 0)
-            throw new ArgumentOutOfRangeException(nameof(bpm));
-        _sampleRate = sampleRate;
+        if (noteBase is < 0 or > 127)
+            throw new ArgumentOutOfRangeException(nameof(noteBase));
         _ppqn = ppqn;
-        _bpm = bpm;
         _noteBase = noteBase;
-        _notesPerBank = notesPerBank;
+        _emitMarkers = emitMarkers;
+        _originOffsetQuarters = ComputeOriginOffset();
     }
 
-    /// <summary>Nominal ticks corresponding to one timeline sample position.</summary>
-    private double TicksPerSample => (double)_ppqn * _bpm / 60.0 / _sampleRate;
+    /// <summary>Identity offset applied to the asset's display note (never timing).</summary>
+    private int NoteFor(DacSampleAsset asset) => (_noteBase + asset.DisplayNote) & 0x7F;
 
     /// <summary>
     /// Produces the ordered MIDI trigger event stream for a report. Events are
@@ -79,20 +95,20 @@ internal sealed class DacMidiExporter
             int track = asset.DisplayBank / 16;
             int channel = asset.DisplayBank % 16;
 
-            long startTick = Ticks(evt.StartSample);
-            long endTick = Ticks(Math.Max(evt.StartSample, evt.EndSample));
+            long startTick = MapTick(evt.StartSample);
+            long endTick = MapTick(Math.Max(evt.StartSample, evt.EndSample));
 
             events.Add(new DacMidiEvent(
-                startTick, track, channel, NoteOn: true, asset.DisplayNote,
+                startTick, track, channel, NoteOn: true, NoteFor(asset),
                 Velocity: DefaultVelocity, Text: null));
             events.Add(new DacMidiEvent(
-                endTick, track, channel, NoteOn: false, asset.DisplayNote,
+                endTick, track, channel, NoteOn: false, NoteFor(asset),
                 Velocity: 0, Text: null));
 
             if (evt.InitialRateHz is double rate && rate > 0)
             {
                 events.Add(new DacMidiEvent(
-                    startTick, track, channel, NoteOn: false, asset.DisplayNote,
+                    startTick, track, channel, NoteOn: false, NoteFor(asset),
                     Velocity: 0, Text: $"{DacMidiEvent.RateMetaTextPrefix}{rate:0.###}"));
             }
         }
@@ -114,7 +130,31 @@ internal sealed class DacMidiExporter
         return MidiFileWriter.Write(
             _ppqn,
             events,
-            trackNames: TrackNames(report.Assets.Count));
+            trackNames: TrackNames(report.Assets.Count),
+            tempoEvents: BuildTempoEvents());
+    }
+
+    /// <summary>
+    /// Serializes a Set Tempo event for every tempo segment at its sample-derived
+    /// tick, deduping adjacent segments whose emitted µs/qn value is identical
+    /// (mirror of the melodic conductor, §19). BuildEvents maps triggers through
+    /// each segment's changing quarter position, so the conductor must switch tempo
+    /// at every later boundary or DAC playback tempo would diverge from the map.
+    /// </summary>
+    private IReadOnlyList<DacTempoEvent> BuildTempoEvents()
+    {
+        var tempoEvents = new List<DacTempoEvent>();
+        int? lastUsPerQuarter = null;
+        foreach (TempoSegment segment in _map.Segments)
+        {
+            int us = segment.MicrosecondsPerQuarter;
+            if (us == lastUsPerQuarter)
+                continue;
+            lastUsPerQuarter = us;
+            long tick = MapTick(segment.StartSample);
+            tempoEvents.Add(new DacTempoEvent(tick, us));
+        }
+        return tempoEvents;
     }
 
     private static int TrackCount(int assetCount)
@@ -130,7 +170,43 @@ internal sealed class DacMidiExporter
             .ToArray();
     }
 
-    private long Ticks(long sample) => (long)Math.Round(sample * TicksPerSample, MidpointRounding.AwayFromZero);
+    /// <summary>
+    /// Maps a DAC trigger sample to an absolute MIDI tick through the shared
+    /// <see cref="MusicalTimeMap"/> plus the same single global origin shift the
+    /// melodic exporter applies (spec §21, §37). No sample-rate/BPM math here —
+    /// this is the only path from a DAC trigger sample to a tick, so it can never
+    /// diverge from the musical grid.
+    /// </summary>
+    private long MapTick(long sample) =>
+        _map.QuarterPositionToTick(_map.SampleToQuarterPosition(sample) + _originOffsetQuarters, _ppqn);
+
+    /// <summary>
+    /// Computes the single global non-negative tick origin (spec §21) using the
+    /// same policy as <see cref="Fmp.Core.Midi.MusicalMidiExporter.ComputeOriginOffset"/>:
+    /// the map's FirstSample quarter is the lower bound (every DAC trigger sits at
+    /// or after it) and, mirroring the melodic exporter's EmitMarkers gate, the first
+    /// downbeat quarter is folded in only when markers are emitted (it may precede
+    /// the map start and is projected onto the conductor tick grid) — then ceil'd so
+    /// the earliest event maps to tick 0, and bar-aligning to the meter when one is
+    /// established. Having both exporters derive the origin from the same map keeps
+    /// a DAC trigger and an identical melodic or rhythm trigger at the same sample on
+    /// the same tick, whether markers are emitted or not (§67).
+    /// </summary>
+    private double ComputeOriginOffset()
+    {
+        double minQuarter = _map.SampleToQuarterPosition(_map.FirstSample);
+        if (_emitMarkers && _map.FirstDownbeatQuarter is double downbeat)
+            minQuarter = Math.Min(minQuarter, downbeat);
+        double baseOffset = Math.Max(0, Math.Ceiling(-minQuarter));
+        Meter? meter = _map.Meter;
+        if (meter is not null)
+        {
+            double qpb = meter.QuartersPerBar;
+            if (qpb > 0)
+                baseOffset = Math.Ceiling(baseOffset / qpb) * qpb;
+        }
+        return baseOffset;
+    }
 
     public const int DefaultVelocity = 100;
 }

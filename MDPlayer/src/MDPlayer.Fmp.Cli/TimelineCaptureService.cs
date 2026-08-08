@@ -26,13 +26,50 @@ internal static class TimelineCaptureService
         Dictionary<string, string>? captureDependencies = null)
     {
         if (timelinePath != null && File.Exists(timelinePath))
-            return VisualizationJsonWriter.Read(timelinePath);
+            return CaptureSerializedTimeline(timelinePath, settings);
 
         var input = new FileInfo(inputPath);
         if (FmpFormat.IsSupportedExtension(input.Extension))
             return CaptureFmpTimeline(input, settings, captureDependencies);
 
         return CaptureBackendTimeline(input, settings, captureDependencies);
+    }
+
+    /// <summary>
+    /// Loads a serialized timeline and routes it through the SAME producer-clock
+    /// normalization boundary as a decoder capture. The serialized timeline's
+    /// declared <see cref="VisualizationTimeline.SampleRate"/> is the producer
+    /// source clock; this capture's <c>settings.SampleRate</c> is the destination
+    /// playback/output clock. <see cref="TimelineBuilder.Merge"/> converts every
+    /// timed event family exactly once (spec §4.1) and rejects an ambiguous/unknown
+    /// source clock with an actionable <see cref="Fmp.Core.Timing.MusicalTimingException"/>
+    /// — never a silent clock-equality assumption.
+    /// </summary>
+    private static VisualizationTimeline CaptureSerializedTimeline(
+        string timelinePath,
+        BatchRenderSettings settings)
+    {
+        VisualizationTimeline loaded = VisualizationJsonWriter.Read(timelinePath);
+        // Merge validates/derives the clock converter up front, so an ambiguous
+        // source rate throws before any event is consumed.
+        var builder = new TimelineBuilder(settings.SampleRate);
+        builder.Merge(loaded);
+        long endSample = ProducerClockNormalization.ConvertSamplePosition(
+            "serialized-timeline",
+            loaded.EndSample,
+            loaded.SampleRate,
+            settings.SampleRate);
+        long startSample = ProducerClockNormalization.ConvertSamplePosition(
+            "serialized-timeline",
+            loaded.StartSample,
+            loaded.SampleRate,
+            settings.SampleRate);
+        // Preserve the serialized timeline's [StartSample, EndSample] range on the
+        // destination clock while every event sample was normalized through the
+        // same boundary above. Rebuilding with StartSample=0 would silently reset
+        // a valid nonzero serialized start range while event samples stay absolute
+        // (spec §4.1 song-range contract).
+        return builder.Build(endSample, loaded.StopReason, loaded.Source, startSample);
     }
 
     private static VisualizationTimeline CaptureFmpTimeline(

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Fmp.Application.Contracts;
 using Fmp.Cli;
 using Fmp.Core.Rendering;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 using MDPlayer.Fmp.Tests.Fixtures;
@@ -1047,6 +1048,87 @@ public sealed class VisualizationV3ContractTests
         TrackSelectionInfo rhythmTrack = Assert.Single(
             plan.Tracks, track => track.TrackId == "ym2608.0.rhythm");
         Assert.True(rhythmTrack.ActivityDetected);
+    }
+
+    [Fact]
+    public void AllTimedEventFamilies_ShareTheFinalTimelineSampleClock()
+    {
+        // Spec §4.1 audit guard: every timed event family (timing, beats, notes,
+        // pitch, rhythm, DAC, markers) must land on the final timeline/playback
+        // clock captured by VisualizationTimeline.SampleRate. A future producer
+        // on a different clock would be caught by the ProducerClockNormalization
+        // boundary rejecting/normalizing at ingestion; this asserts the
+        // destination clock is a single, positive value.
+        var builder = new TimelineBuilder(44_100);
+        builder.AddTiming(new DriverTimingEvent(0, 0x42, 120.0));
+        builder.AddBeat(new BeatEvent(0, 0));
+        builder.AddNote(new NoteEvent("v", 10, 100, 440, 69, "i", VisualizationNoteMode.Fm, false, []));
+        builder.AddRhythm(new RhythmEvent("bd", "ym2608.0.rhythm.bd", 20, 1.0f, 0, "ym2608.0.rhythm"));
+        builder.AddLoopMarker(new LoopMarker(30, LoopMarkerKind.Start, 0));
+        builder.AddSamplePlayback(new SamplePlaybackEvent(
+            "dac", 40, 50, "s", null, 1.0, 1.0f, 0, false, false));
+
+        VisualizationTimeline timeline = builder.Build(500, "test");
+        Assert.Equal(44_100, timeline.SampleRate);
+        Assert.Equal(0, Assert.Single(timeline.Timing).SamplePosition);
+        Assert.Equal(0, Assert.Single(timeline.Beats).SamplePosition);
+        Assert.Equal(10, Assert.Single(timeline.Notes).StartSample);
+        Assert.Equal(20, Assert.Single(timeline.Rhythm).SamplePosition);
+        Assert.Equal(30, Assert.Single(timeline.LoopMarkers).SamplePosition);
+        Assert.Equal(40, Assert.Single(timeline.SamplePlayback).StartSample);
+    }
+
+    [Fact]
+    public void SerializedTimeline_PreservesSampleRateMetadata()
+    {
+        // T005 guard: the sample-rate metadata must accompany a serialized
+        // timeline so the producer boundary can validate the clock on load.
+        var builder = new TimelineBuilder(48_000);
+        builder.AddTiming(new DriverTimingEvent(100, 0x42, 120.0));
+        builder.AddBeat(new BeatEvent(100, 0));
+        VisualizationTimeline timeline = builder.Build(20_000, "test");
+
+        string json = VisualizationJsonWriter.Serialize(timeline);
+        VisualizationTimeline reloaded = VisualizationJsonWriter.Read(
+            WriteTemp(json, out string path));
+        try
+        {
+            Assert.Equal(48_000, reloaded.SampleRate);
+            Assert.Equal(100, Assert.Single(reloaded.Timing).SamplePosition);
+            Assert.Equal(100, Assert.Single(reloaded.Beats).SamplePosition);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ProducerClockNormalizationBoundary_RejectsAmbiguousSerializedClock()
+    {
+        // A serialized timeline that has lost (or never carried) a positive
+        // SampleRate is ambiguous: the boundary must reject it rather than assume
+        // it matches the destination playback clock. This is wired through
+        // TimelineBuilder.Merge — the single producer-boundary ingestion point
+        // the MIDI path uses to load an external timeline.
+        var ambiguous = new VisualizationTimeline
+        {
+            SampleRate = 0,
+            StartSample = 0,
+            EndSample = 1_000,
+            Timing = [new DriverTimingEvent(100, 0x42, 120.0)],
+        };
+
+        var builderV3 = new TimelineBuilder(44_100);
+        Assert.Throws<MusicalTimingException>(() => builderV3.Merge(ambiguous));
+    }
+
+    private static string WriteTemp(string content, out string path)
+    {
+        path = Path.Combine(Path.GetTempPath(), "mdplayer-v3-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, content);
+        return path;
     }
 
     private static VisualizationLayoutCapabilities NewFullCapabilities() => new(

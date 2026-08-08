@@ -70,22 +70,27 @@ internal static class MusicalTimeMapBuilder
                 tempoChanges,
                 fixedBpm,
                 HasPhaseOverride(options, beatOffsetQuarter) ? beatOffsetQuarter : null,
-                options.DetectTempoChanges);
+                options.DetectTempoChanges,
+                timeline.StartSample);
         }
         else
         {
-            // Constant grid from validated BPM / override.
+            // Constant grid from validated BPM / override. When the driver supplied
+            // validated tempo transitions (≥2 credible changes), prefer building
+            // distinct continuous segments from them (T016), not just the first BPM.
             double? gridBpm = fixedBpm ?? FirstValidatedBpm(timeline);
             fit = BeatGridFitter.Fit(
                 anchors,
                 timeline.SampleRate,
-                tempoChanges: null,
+                tempoChanges: source == TimingSource.DriverValidatedTempo ? tempoChanges : null,
                 fixedBpm: gridBpm,
                 phaseQuarterAtSampleZero: HasPhaseOverride(options, beatOffsetQuarter) ? beatOffsetQuarter : null,
-                detectTempoChanges: false);
-            fit.Diagnostics.TempoSource = source == TimingSource.UserOverride
-                ? TimingSource.UserOverride
-                : TimingSource.DriverValidatedTempo;
+                detectTempoChanges: false,
+                timelineStartSample: timeline.StartSample);
+            if (fit.Diagnostics.TempoSource != TimingSource.DriverValidatedTempo)
+                fit.Diagnostics.TempoSource = source == TimingSource.UserOverride
+                    ? TimingSource.UserOverride
+                    : TimingSource.DriverValidatedTempo;
         }
         if (!HasPhaseOverride(options, beatOffsetQuarter))
         {
@@ -124,6 +129,12 @@ internal static class MusicalTimeMapBuilder
         }
 
         MusicalTimeMap map = AssembleMap(timeline, options, fit);
+
+        // Reflect meter/downbeat status so the diagnostics explain why alignment is
+        // (or is not) bar-aligned (§15).
+        fit.Diagnostics.MeterKnown = options.Meter is not null;
+        fit.Diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
+
         return new MusicalTimeMapBuildResult { Map = map, Diagnostics = fit.Diagnostics };
     }
 
@@ -131,6 +142,10 @@ internal static class MusicalTimeMapBuilder
     {
         if (diagnostics.PhaseUnknown)
             return "strict-timing: beat phase is unknown; supply --beat-offset-samples or --bpm with anchors";
+        if (diagnostics.HasConflictingAnchors)
+            return "strict-timing: conflicting beat anchors at the same sample; cannot align (no averaging performed)";
+        if (diagnostics.RejectedAnchors.Count > 0)
+            return "strict-timing: beat anchors were rejected as outliers; residuals are excessive or conflicting";
         return "strict-timing: tempo sources are ambiguous or residuals are excessive";
     }
 
@@ -206,6 +221,32 @@ internal static class MusicalTimeMapBuilder
         || beatOffsetQuarter is not null;
 
     /// <summary>
+    /// Validates that every segment's tempo is representable as a MIDI Set Tempo
+    /// 24-bit µs-per-quarter value (<c>round(60_000_000 / BPM)</c> in
+    /// [1, 0xFFFFFF]). Unrepresentable tempos (extreme BPM) fail with an
+    /// actionable error rather than being silently clamped (§19).
+    /// </summary>
+    private static void ValidateTempoRepresentation(SegmentFit[] fits)
+    {
+        const int MaxUsPerQuarter = 0xFFFFFF; // 16_777_215
+        foreach (SegmentFit fit in fits)
+        {
+            if (fit.BeatsPerMinute <= 0 || !double.IsFinite(fit.BeatsPerMinute))
+                throw new MusicalTimingException(
+                    $"cannot represent tempo: segment at sample {fit.StartSample} has invalid BPM " +
+                    $"{fit.BeatsPerMinute:0.###}");
+            double us = Math.Round(60_000_000.0 / fit.BeatsPerMinute);
+            if (us < 1 || us > MaxUsPerQuarter)
+            {
+                throw new MusicalTimingException(
+                    $"tempo {fit.BeatsPerMinute:0.####} BPM at sample {fit.StartSample} maps to " +
+                    $"{us:0} µs/quarter, outside the MIDI Set Tempo 24-bit range (1..{MaxUsPerQuarter}); " +
+                    "choose a tempo MIDI can represent");
+            }
+        }
+    }
+
+    /// <summary>
     /// Converts the fitted segments into a contiguous <see cref="MusicalTimeMap"/>,
     /// threading the quarter position at each boundary from the preceding segment so
     /// the map is continuous (and MusicalTimeMap's own continuity check passes).
@@ -215,6 +256,8 @@ internal static class MusicalTimeMapBuilder
         MusicalTimeMapOptions options,
         PiecewiseFit fit)
     {
+        ValidateTempoRepresentation(fit.Segments);
+
         SegmentFit[] fits = fit.Segments;
         var segments = new TempoSegment[fits.Length];
         long startSample = timeline.StartSample;

@@ -304,51 +304,203 @@ internal sealed class TimelineBuilder
     public void Merge(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
+
+        // Producer-clock normalization at the ingestion boundary (spec §4.1, plan
+        // IC-01, decision 01KZGN2DH6C26YQ7NTXGCN4MT7). The merged timeline's own
+        // SampleRate is the declared producer clock; this builder's SampleRate is
+        // the destination playback/output clock.
+        //
+        //  * Clocks equal (decoder-completion path, same capture): every event
+        //    passes through unchanged (Converter returns source samples verbatim).
+        //  * Clocks differ and both are explicit: EVERY timed event family is
+        //    converted exactly once so the whole merged timeline lands on the
+        //    destination clock (never a partial mix of clocks).
+        //  * Either clock unknown/ambiguous: the boundary rejects the timeline
+        //    with an actionable MusicalTimingException instead of silently
+        //    assuming clock equality.
+        //
+        // The MIDI path maps all of these through the same MusicalTimeMap and
+        // never performs independent sample-rate/BPM compensation (spec §7).
+        Func<long, long> convert = BuildClockConverter(timeline);
+
         foreach (DeviceDescriptor device in timeline.Devices)
             AddDevice(device);
         foreach (VoiceDescriptor voice in timeline.Voices)
             AddVoice(voice);
         foreach (NoteEvent note in timeline.Notes)
-            AddNote(note);
+            AddNote(NormalizeClock(note, convert));
         foreach (RhythmEvent rhythm in timeline.Rhythm)
-            AddRhythm(rhythm);
+            AddRhythm(NormalizeClock(rhythm, convert));
         foreach (Ppz8Event value in timeline.Ppz8)
-            AddPpz8(value);
+            AddPpz8(NormalizeClock(value, convert));
         foreach (AdpcmBEvent value in timeline.AdpcmB)
-            AddAdpcmB(value);
+            AddAdpcmB(NormalizeClock(value, convert));
         foreach (WaveformDefinition value in timeline.Waveforms)
             AddWaveform(value);
         foreach (SampleDefinition value in timeline.Samples)
             AddSample(value);
         foreach (WaveformChangeEvent value in timeline.WaveformChanges)
-            AddWaveformChange(value);
+            AddWaveformChange(NormalizeClock(value, convert));
         foreach (SamplePlaybackEvent value in timeline.SamplePlayback)
-            AddSamplePlayback(value);
+            AddSamplePlayback(NormalizeClock(value, convert));
         foreach (SpcVoiceStateEvent value in timeline.SpcVoiceStates)
-            AddSpcVoiceState(value);
+            AddSpcVoiceState(NormalizeClock(value, convert));
         foreach (NoiseStateEvent value in timeline.NoiseStates)
-            AddNoiseState(value);
+            AddNoiseState(NormalizeClock(value, convert));
         foreach (AggregateHitEvent value in timeline.AggregateHits)
-            AddAggregateHit(value);
+            AddAggregateHit(NormalizeClock(value, convert));
         foreach (DriverTimingEvent value in timeline.Timing)
-            AddTiming(value);
+            AddTiming(NormalizeClock(value, convert));
         foreach (BeatEvent value in timeline.Beats)
-            AddBeat(value);
+            AddBeat(NormalizeClock(value, convert));
         foreach (LoopMarker value in timeline.LoopMarkers)
-            AddLoopMarker(value);
+            AddLoopMarker(NormalizeClock(value, convert));
         foreach (InstrumentDefinition instrument in timeline.Instruments)
             AddInstrument(instrument);
         foreach (string warning in timeline.Warnings)
             AddWarning(warning);
     }
 
+    /// <summary>
+    /// Builds the single clock-normalization converter for everything entering via
+    /// <see cref="Merge"/>. Equal clocks yield an identity converter; an explicit
+    /// mismatch yields a one-shot deterministic converter; an unknown clock throws
+    /// <see cref="MusicalTimingException"/> up front via
+    /// <see cref="ProducerClockNormalization.ConvertSamplePosition"/>.
+    /// </summary>
+    private Func<long, long> BuildClockConverter(VisualizationTimeline timeline)
+    {
+        // Validate/reject the clock relationship immediately so an ambiguous
+        // producer is rejected at the boundary, before any event is consumed.
+        ProducerClockNormalization.ConvertSamplePosition(
+            ProducerId,
+            sourceSample: 0,
+            timeline.SampleRate,
+            SampleRate);
+        return sample => ProducerClockNormalization.ConvertSamplePosition(
+            ProducerId,
+            sample,
+            timeline.SampleRate,
+            SampleRate);
+    }
+
+    private NoteEvent NormalizeClock(NoteEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        PitchChange[] pitch = (value.Pitch ?? Array.Empty<PitchChange>())
+            .Select(point =>
+            {
+                long converted = convert(point.SamplePosition);
+                return converted == point.SamplePosition
+                    ? point
+                    : point with { SamplePosition = converted };
+            })
+            .ToArray();
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end, Pitch = pitch };
+    }
+
+    private RhythmEvent NormalizeClock(RhythmEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition ? value : value with { SamplePosition = sample };
+    }
+
+    private Ppz8Event NormalizeClock(Ppz8Event value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
+    private AdpcmBEvent NormalizeClock(AdpcmBEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
+    private WaveformChangeEvent NormalizeClock(WaveformChangeEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition ? value : value with { SamplePosition = sample };
+    }
+
+    private SamplePlaybackEvent NormalizeClock(SamplePlaybackEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
+    private SpcVoiceStateEvent NormalizeClock(SpcVoiceStateEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition ? value : value with { SamplePosition = sample };
+    }
+
+    private NoiseStateEvent NormalizeClock(NoiseStateEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
+    private AggregateHitEvent NormalizeClock(AggregateHitEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition ? value : value with { SamplePosition = sample };
+    }
+
+    private DriverTimingEvent NormalizeClock(DriverTimingEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition
+            ? value
+            : value with { SamplePosition = sample };
+    }
+
+    private BeatEvent NormalizeClock(BeatEvent value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition
+            ? value
+            : value with { SamplePosition = sample };
+    }
+
+    private LoopMarker NormalizeClock(LoopMarker value, Func<long, long> convert)
+    {
+        long sample = convert(value.SamplePosition);
+        return sample == value.SamplePosition ? value : value with { SamplePosition = sample };
+    }
+
+    /// <summary>
+    /// Producer identity used by the clock-normalization adapter when a timeline
+    /// enters through <see cref="Merge"/>. The merged timeline is the producer
+    /// whose clock is being audited against this builder's destination clock.
+    /// </summary>
+    private const string ProducerId = "serialized-timeline";
+
     public VisualizationTimeline Build(
         long endSample,
         string stopReason = "",
-        TrackMetadata source = null)
+        TrackMetadata source = null,
+        long startSample = 0)
     {
         if (endSample < 0)
             throw new ArgumentOutOfRangeException(nameof(endSample));
+        if (startSample < 0)
+            throw new ArgumentOutOfRangeException(nameof(startSample));
 
         foreach (ChipType external in _devices.Values
             .Select(device => device.Id.Type)
@@ -386,7 +538,7 @@ internal sealed class TimelineBuilder
         {
             SchemaVersion = 2,
             SampleRate = SampleRate,
-            StartSample = 0,
+            StartSample = startSample,
             EndSample = endSample,
             Source = source,
             StopReason = stopReason ?? "",

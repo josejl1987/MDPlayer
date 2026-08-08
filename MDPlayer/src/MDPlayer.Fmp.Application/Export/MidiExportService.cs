@@ -23,6 +23,17 @@ public sealed class MidiExportService
         ArgumentNullException.ThrowIfNull(timeline);
         ArgumentNullException.ThrowIfNull(request);
 
+        // GUI parity: the Application path enforces the same option semantics the
+        // CLI does, so the two entry points cannot drift (§11, plan IC-07).
+        try
+        {
+            ValidateRequest(request);
+        }
+        catch (ArgumentException ex)
+        {
+            return Failed($"Invalid timing input: {ex.Message}");
+        }
+
         MusicalTimeMapBuildResult build;
         try
         {
@@ -83,13 +94,63 @@ public sealed class MidiExportService
             return Failed($"Timeline file not found: {timelinePath}");
         try
         {
-            VisualizationTimeline timeline = VisualizationJsonWriter.Read(timelinePath);
+            VisualizationTimeline timeline = NormalizeSerializedTimeline(timelinePath);
             return Export(timeline, request);
+        }
+        catch (MusicalTimingException ex)
+        {
+            return Failed($"Cannot establish timing in '{timelinePath}': {ex.Message}");
         }
         catch (Exception ex)
         {
             return Failed($"Could not read timeline '{timelinePath}': {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Routes a serialized timeline through the SAME producer-clock normalization
+    /// boundary the CLI serialized path uses (<see cref="Fmp.Core.Visualization.TimelineBuilder.Merge"/>
+    /// → <see cref="Fmp.Core.Visualization.ProducerClockNormalization"/>), so a
+    /// serialized consumer is never outside the single-boundary invariant (spec
+    /// §4.1). The Application/GUI path has no separate playback clock, so the
+    /// producer's own declared rate is the destination: normalization is a
+    /// pass-through when that rate is present and explicit, and an ambiguous or
+    /// missing source rate is rejected with an actionable
+    /// <see cref="MusicalTimingException"/> — not a generic JSON/argument error.
+    /// The serialized [StartSample, EndSample] range is preserved on the rebuilt
+    /// timeline (the map origin is kept), while every event sample still passes
+    /// through the boundary.
+    /// </summary>
+    private static VisualizationTimeline NormalizeSerializedTimeline(string timelinePath)
+    {
+        VisualizationTimeline loaded = VisualizationJsonWriter.Read(timelinePath);
+
+        // Destination clock = the timeline's own declared rate. Validate it through
+        // the boundary up front so an ambiguous/missing source rate raises an
+        // actionable MusicalTimingException before TimelineBuilder is constructed
+        // (its ctor would otherwise reject a nonpositive rate with a generic
+        // ArgumentOutOfRangeException).
+        int destinationRate = loaded.SampleRate;
+        ProducerClockNormalization.ConvertSamplePosition(
+            "serialized-timeline",
+            sourceSample: 0,
+            loaded.SampleRate,
+            destinationRate);
+
+        var builder = new TimelineBuilder(destinationRate);
+        builder.Merge(loaded); // applies the boundary to every timed event family.
+
+        long startSample = ProducerClockNormalization.ConvertSamplePosition(
+            "serialized-timeline",
+            loaded.StartSample,
+            loaded.SampleRate,
+            destinationRate);
+        long endSample = ProducerClockNormalization.ConvertSamplePosition(
+            "serialized-timeline",
+            loaded.EndSample,
+            loaded.SampleRate,
+            destinationRate);
+        return builder.Build(endSample, loaded.StopReason, loaded.Source, startSample);
     }
 
     private static MidiExportResult Failed(string error) =>
@@ -170,6 +231,23 @@ public sealed class MidiExportService
             .ToList();
     }
 
+    private static void ValidateRequest(MidiExportRequest request)
+    {
+        if (request.Ppq <= 0 || request.Ppq > 32767)
+            throw new ArgumentException($"PPQ must be positive and at most 32767 (MIDI-valid division), got {request.Ppq}");
+        if (request.Bpm is double bpm)
+        {
+            if (!double.IsFinite(bpm))
+                throw new ArgumentException("BPM must be a finite number");
+            if (bpm <= 0)
+                throw new ArgumentException("BPM must be positive");
+        }
+        if (request.TempoSource == MidiTempoSource.Fixed && request.Bpm is null)
+            throw new ArgumentException("tempo-source Fixed requires Bpm");
+        if (request.FirstDownbeatSample is not null && string.IsNullOrWhiteSpace(request.Meter))
+            throw new ArgumentException("FirstDownbeatSample requires a meter (e.g. \"4/4\")");
+    }
+
     private static MusicalTimeMapOptions ToMapOptions(MidiExportRequest request) => new()
     {
         FixedBpm = request.Bpm,
@@ -178,7 +256,7 @@ public sealed class MidiExportService
         FirstDownbeatSample = request.FirstDownbeatSample,
         Source = ResolveSource(request.TempoSource),
         DetectTempoChanges = true,
-        StrictTiming = false, // GUI reports signals rather than throwing.
+        StrictTiming = request.StrictTiming,
     };
 
     private static TimingSource? ResolveSource(MidiTempoSource source) => source switch

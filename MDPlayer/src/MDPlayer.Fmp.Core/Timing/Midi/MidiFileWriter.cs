@@ -75,6 +75,7 @@ internal sealed class MidiFileWriter
         var ordered = conductor
             .OrderBy(e => e.Tick)
             .ThenBy(MidiEventOrder.Rank)
+            .ThenBy(e => e.SourceOrder)
             .ToList();
         long last = 0;
         foreach (MidiEventBase evt in ordered)
@@ -109,6 +110,7 @@ internal sealed class MidiFileWriter
         var ordered = track.Events
             .OrderBy(e => e.Tick)
             .ThenBy(MidiEventOrder.Rank)
+            .ThenBy(e => e.SourceOrder)
             .ToList();
         long lastTick = 0;
         foreach (MidiEventBase evt in ordered)
@@ -216,10 +218,20 @@ internal sealed class MidiFileWriter
 
     private void AppendEndOfTrack(List<byte> body) => WriteMeta(body, 0x2F, Array.Empty<byte>(), 0);
 
-    private static void WriteVlv(List<byte> body, long value)
+    /// <summary>
+    /// Encodes <paramref name="value"/> as a MIDI variable-length quantity and appends
+    /// it to <paramref name="body"/>. Values MUST be non-negative and fit in the
+    /// representable MIDI VLQ range ([0, 0x0FFFFFFF], ≤ 4 bytes); anything outside
+    /// that range is rejected with an exception rather than truncated (§44). The
+    /// writer therefore never silently emits a negative delta or an invalid
+    /// over-length quantity.
+    /// </summary>
+    internal static void WriteVlv(List<byte> body, long value)
     {
         if (value < 0)
-            value = 0;
+            throw new ArgumentOutOfRangeException(nameof(value), "VLQ value must be non-negative.");
+        if (value > 0x0FFFFFFF)
+            throw new ArgumentOutOfRangeException(nameof(value), "VLQ value exceeds the representable MIDI range (0x0FFFFFFF).");
         // Collect 7-bit groups little-endian, then emit big-endian with continuation.
         ulong working = (ulong)value;
         var groups = new byte[10];

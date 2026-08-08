@@ -7,10 +7,19 @@ namespace Fmp.Core.Visualization;
 /// header, a tempo/name meta track, and one MTrk per output track. Delta times
 /// use variable-length quantities; only note-on/note-off and text meta events
 /// are emitted, keeping the writer small and deterministic.
+///
+/// This helper is NOT a timing authority: it receives the per-segment Set Tempo
+/// events, as already established by the caller's <see cref="MusicalTimeMap"/>, and
+/// never infers a default BPM (§37). All event ticks are already resolved musical
+/// ticks.
 /// </summary>
 internal static class MidiFileWriter
 {
-    public static byte[] Write(int ppqn, IReadOnlyList<DacMidiEvent> events, IReadOnlyList<string> trackNames)
+    public static byte[] Write(
+        int ppqn,
+        IReadOnlyList<DacMidiEvent> events,
+        IReadOnlyList<string> trackNames,
+        IReadOnlyList<DacTempoEvent> tempoEvents)
     {
         if (ppqn <= 0)
             throw new ArgumentOutOfRangeException(nameof(ppqn));
@@ -19,8 +28,10 @@ internal static class MidiFileWriter
         var chunks = new List<byte[]>();
         chunks.Add(BuildHeader(ppqn, trackCount + 1)); // +1 tempo/meta track
 
-        // Tempo track: name + tempo (120 BPM = 500000 us/quarter).
-        chunks.Add(BuildMetaTrack(trackNames, ppqn, tempoMicrosPerQuarter: 500_000));
+        // Tempo track: name + the Set Tempo events already established by the shared
+        // map, one per distinct tempo segment (never a hardcoded 120 BPM default —
+        // §37).
+        chunks.Add(BuildMetaTrack(trackNames, tempoEvents));
 
         var byTrack = events
             .GroupBy(e => e.Track)
@@ -36,7 +47,7 @@ internal static class MidiFileWriter
         return Concatchains(chunks);
     }
 
-    private static byte[] BuildMetaTrack(IReadOnlyList<string> trackNames, int ppqn, int tempoMicrosPerQuarter)
+    private static byte[] BuildMetaTrack(IReadOnlyList<string> trackNames, IReadOnlyList<DacTempoEvent> tempoEvents)
     {
         var body = new List<byte>();
 
@@ -44,13 +55,24 @@ internal static class MidiFileWriter
         string conductor = trackNames.FirstOrDefault() ?? "DAC";
         WriteMetaText(body, 0x03, conductor, deltaTime: 0);
 
-        // Tempo meta (FF 51 03 tttttt)
-        WriteMeta(body, 0x51, new byte[]
+        // Set Tempo meta (FF 51 03 tttttt) per tempo segment, oldest-to-newest.
+        // The first tempo lands on tick 0; each later segment emits its tempo at its
+        // own delta from the previous tempo, matching the conductor of the melodic
+        // exporter so DAC playback tempo follows the full map (spec §19, §37).
+        long lastTick = 0;
+        foreach (DacTempoEvent tempo in tempoEvents.OrderBy(t => t.Tick))
         {
-            (byte)(tempoMicrosPerQuarter >> 16),
-            (byte)(tempoMicrosPerQuarter >> 8),
-            (byte)tempoMicrosPerQuarter,
-        }, deltaTime: 0);
+            long delta = tempo.Tick - lastTick;
+            if (delta < 0)
+                throw new ArgumentOutOfRangeException(nameof(tempoEvents), "tempo ticks must be non-decreasing.");
+            WriteMeta(body, 0x51, new byte[]
+            {
+                (byte)(tempo.MicrosecondsPerQuarter >> 16),
+                (byte)(tempo.MicrosecondsPerQuarter >> 8),
+                (byte)tempo.MicrosecondsPerQuarter,
+            }, deltaTime: delta);
+            lastTick = tempo.Tick;
+        }
 
         // End of track (FF 2F 00).
         AppendEndOfTrack(body);
@@ -68,15 +90,19 @@ internal static class MidiFileWriter
         foreach (DacMidiEvent evt in events.OrderBy(e => e.Tick))
         {
             long delta = evt.Tick - lastTick;
-            WriteVlv(body, delta);
             lastTick = evt.Tick;
 
             if (evt.Text is string text)
             {
-                WriteMetaText(body, 0x01, text, deltaTime: 0); // FF 01 len text
+                // Exactly ONE delta precedes the meta text (written by WriteMetaText,
+                // which emits delta then FF 01 len text). Never also emit the loop
+                // delta here, or a second zero delta would be consumed by the reader
+                // as a bogus status byte and malform the track (P1).
+                WriteMetaText(body, 0x01, text, deltaTime: delta);
                 continue;
             }
 
+            WriteVlv(body, delta);
             byte status = (byte)((evt.NoteOn ? 0x90 : 0x80) | (evt.Channel & 0x0F));
             body.Add(status);
             body.Add((byte)(evt.Note & 0x7F));
@@ -89,22 +115,21 @@ internal static class MidiFileWriter
 
     private static byte[] BuildHeader(int ppqn, int numTracks)
     {
-        // MThd <len=6> format=1 ntrks=numTracks division=ppqn
-        var data = new byte[8];
-        data[0] = 0; data[1] = 1; // format 1
-        data[2] = (byte)(numTracks >> 8); data[3] = (byte)numTracks;
-        data[4] = (byte)(ppqn >> 8); data[5] = (byte)ppqn;
-        data[6] = 0; data[7] = 0;
-        var bytes = new List<byte> { 0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06 };
-        bytes.AddRange(data);
-        return bytes.ToArray();
+        // MThd <len=6> format=1 ntrks=numTracks division=ppqn. The body MUST be
+        // exactly 6 bytes (2 format + 2 ntrks + 2 division) to match the declared
+        // length; no trailing padding.
+        return new byte[]
+        {
+            0x4D, 0x54, 0x68, 0x64,             // "MThd"
+            0x00, 0x00, 0x00, 0x06,             // body length = 6
+            0x00, 0x01,                         // format 1
+            (byte)(numTracks >> 8), (byte)numTracks,
+            (byte)(ppqn >> 8), (byte)ppqn,
+        };
     }
 
-    private static void WriteMetaText(List<byte> body, byte type, string text, long deltaTime)
-    {
-        WriteVlv(body, deltaTime);
-        WriteMeta(body, type, Encoding.ASCII.GetBytes(text));
-    }
+    private static void WriteMetaText(List<byte> body, byte type, string text, long deltaTime) =>
+        WriteMeta(body, type, Encoding.ASCII.GetBytes(text), deltaTime);
 
     private static void WriteMeta(List<byte> body, byte type, byte[] payload, long deltaTime = 0)
     {
@@ -127,6 +152,11 @@ internal static class MidiFileWriter
     {
         if (value < 0)
             throw new ArgumentOutOfRangeException(nameof(value), "delta time must be non-negative.");
+        // Reject values outside the standard MIDI VLQ range ([0, 0x0FFFFFFF], ≤ 4
+        // bytes). A larger delta would be emitted as a 5+ byte over-length quantity,
+        // which MIDI readers do not consume (P2) — matching the core writer (§44).
+        if (value > 0x0FFFFFFF)
+            throw new ArgumentOutOfRangeException(nameof(value), "delta time exceeds the representable MIDI range (0x0FFFFFFF).");
         // Compute number of bytes.
         int count = 1;
         long v = (value >> 7);

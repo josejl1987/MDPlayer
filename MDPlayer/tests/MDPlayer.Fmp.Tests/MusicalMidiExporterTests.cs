@@ -347,6 +347,663 @@ public sealed class MusicalMidiExporterTests
         Assert.Equal(0, qTick % (Ppq / 4));
     }
 
+    [Fact]
+    public void Export_NegativePickup_PreservedAfterGlobalShift()
+    {
+        // §54: first note at quarter -0.5, first downbeat at quarter 0. Sample zero is
+        // one quarter BEFORE the first downbeat (beat 0 at sample spq => sample 0 is
+        // quarter -1). After the global origin shift every tick must be nonnegative and
+        // the pickup must stay 0.5 quarter before the downbeat, never snapped to it.
+        double spq = Sr * 60.0 / 120.0;
+        var notes = new[] { NewNote("v", (long)Math.Round(0.5 * spq), (long)Math.Round(0.5 * spq) + 2000, 60) };
+        var beats = Enumerable.Range(0, 8)
+            .Select(i => new BeatEvent((long)Math.Round((i + 1) * spq), i))
+            .ToArray();
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(8 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Beats = beats,
+        };
+        var state = new TimelineState { Timeline = timeline };
+
+        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        {
+            Meter = new Meter(4, 4),
+            FirstDownbeatSample = (long)Math.Round(spq),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        ParsedMidi parsed = Parser.Parse(exporter.Export(state.Timeline).Bytes);
+
+        // Every exported note-on/off and bend tick is nonnegative (§21).
+        Assert.All(parsed.Notes, n => Assert.True(n.On >= 0 && n.Off >= 0, "note ticks must be nonnegative"));
+        Assert.All(parsed.Bends, b => Assert.True(b.Tick >= 0, "bend ticks must be nonnegative"));
+
+        // The pickup sits exactly 0.5 quarter (480 ticks) before the FIRST_DOWNBEAT.
+        long noteOn = parsed.Notes[0].On;
+        Marker? downbeat = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "FIRST_DOWNBEAT");
+        Assert.NotNull(downbeat);
+        Assert.Equal(Ppq / 2, downbeat!.Tick - noteOn);
+        // Half-quarter phase preserved — never snapped to a whole quarter/bar.
+        Assert.Equal(Ppq / 2, noteOn % Ppq);
+        Assert.NotEqual(0, noteOn % Ppq);
+    }
+
+    [Fact]
+    public void Export_NoteCrossingTempoChange_IndependentEndpointTicks()
+    {
+        // §60: note starts quarter 15.5, ends quarter 16.5, tempo change at quarter 16.
+        // Both endpoint ticks derive independently from their source samples. A
+        // "startTick + converted duration" implementation would convert the second half
+        // at the wrong tempo and land on 15744 instead of 15840.
+        double spqA = Sr * 60.0 / 120.0;
+        double spqB = Sr * 60.0 / 150.0;
+        long boundary = (long)Math.Round(16 * spqA);
+        var beats = new List<BeatEvent>();
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatEvent((long)Math.Round(i * spqA), i));
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatEvent(boundary + (long)Math.Round(i * spqB), 16 + i));
+        var note = new NoteEvent(
+            ChannelId: "v",
+            StartSample: (long)Math.Round(15.5 * spqA),
+            EndSample: boundary + (long)Math.Round(0.5 * spqB),
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60,
+            InstrumentId: "inst",
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: Array.Empty<PitchChange>());
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = boundary + (long)Math.Round(16 * spqB) + 10_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+            Beats = beats.ToArray(),
+            Timing = new[] { new DriverTimingEvent(boundary, 0, 150.0) },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(Export(state));
+
+        ParsedPitchNote n = parsed.Notes[0];
+        Assert.Equal((long)Math.Round(15.5 * Ppq), n.On); // 14880
+        Assert.Equal((long)Math.Round(16.5 * Ppq), n.Off); // 15840
+        Assert.True(n.Off > n.On);
+    }
+
+    [Fact]
+    public void Export_PitchAtTempoBoundary_CorrectTickAndNoDiscontinuity()
+    {
+        // §61: a pitch change whose sample exactly equals the tempo-segment boundary
+        // must land on the correct absolute tick with no one-tick discontinuity.
+        double spqA = Sr * 60.0 / 120.0;
+        double spqB = Sr * 60.0 / 150.0;
+        long boundary = (long)Math.Round(16 * spqA);
+        var beats = new List<BeatEvent>();
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatEvent((long)Math.Round(i * spqA), i));
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatEvent(boundary + (long)Math.Round(i * spqB), 16 + i));
+        long start = (long)Math.Round(15 * spqA);
+        var change = new PitchChange(boundary, 440 * Math.Pow(2, 1.0 / 12), 61.0);
+        var note = new NoteEvent(
+            "v", start, boundary + (long)Math.Round(2 * spqB), 440, 60,
+            "inst", VisualizationNoteMode.Fm, false, new[] { change });
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = boundary + (long)Math.Round(4 * spqB) + 10_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+            Beats = beats.ToArray(),
+            Timing = new[] { new DriverTimingEvent(boundary, 0, 150.0) },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(Export(state));
+
+        // The boundary bend maps to exactly quarter 16 => tick 16*PPQ (no offset).
+        Assert.Contains(parsed.Bends, b => b.Tick == 16 * Ppq);
+        // Note-start bend sits exactly one quarter earlier (15*PPQ): no discontinuity.
+        long onBend = parsed.Bends.OrderBy(b => b.Tick).First().Tick;
+        Assert.Equal(15 * Ppq, onBend);
+    }
+
+    [Fact]
+    public void Export_PositiveDurationRoundsToSameTick_MinimumDuration()
+    {
+        // §29/§62: EndSample > StartSample but both map to one integer MIDI tick =>
+        // endTick forced to startTick + 1 (a per-note minimum, never a global
+        // quantization of surrounding events).
+        double spq = Sr * 60.0 / 120.0; // one tick ≈ 22050/960 ≈ 22.97 samples
+        long start = (long)Math.Round(spq); // quarter 1 => tick 960
+        var note = NewNote("v", start, start + 5, 60); // 5 samples later => still tick 960
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = start + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+            Beats = new[] { new BeatEvent(0, 0.0), new BeatEvent((long)Math.Round(spq), 1.0) },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(Export(state));
+
+        Assert.Single(parsed.Notes);
+        Assert.Equal(960, parsed.Notes[0].On);
+        Assert.Equal(parsed.Notes[0].On + 1, parsed.Notes[0].Off);
+    }
+
+    [Fact]
+    public void Export_SameVoiceRetrigger_SameTick_NoteOffBeforeNoteOn()
+    {
+        // §63: same voice/pitch, old note ends tick 960, new begins tick 960 => the
+        // encoded order is Note-Off then Note-On (explicit, never insertion/hash
+        // dependent). Exact origin 0 because beat 0 is at sample 0.
+        double spq = Sr * 60.0 / 120.0;
+        var notes = new[]
+        {
+            NewNote("v", 0, (long)Math.Round(spq), 60), // quarter 0→1, off at 960
+            NewNote("v", (long)Math.Round(spq), (long)Math.Round(2 * spq), 60), // on at 960
+        };
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(3 * spq) + 10_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Beats = new[] { new BeatEvent(0, 0.0), new BeatEvent((long)Math.Round(spq), 1.0) },
+        };
+        ParsedMidi parsed = Parser.Parse(Export(new TimelineState { Timeline = timeline }));
+
+        // Exactly one note-on sits at tick 960 (the old note's off is a 0x80 there).
+        Assert.Equal(1, parsed.NoteOns.Count(n => n.Tick == 960));
+
+        // Walk raw statuses on the single musical track; note-off (0x80) precedes
+        // note-on (0x90) at tick 960.
+        byte[] bytes = Export(new TimelineState { Timeline = timeline });
+        var occurrences = WalkNoteStatus(bytes).Where(o => o.Tick == 960).ToList();
+        Assert.Equal(2, occurrences.Count);
+        Assert.Equal(0x80, occurrences[0].Status);
+        Assert.Equal(0x90, occurrences[1].Status);
+    }
+
+    [Fact]
+    public void Export_UnknownMeter_OmitsTimeSignature()
+    {
+        // §64: excellent beat/tempo anchors but no bar information => correct beat
+        // alignment and NO fabricated 4/4 Time Signature.
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(8 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("v", (long)Math.Round(spq), (long)Math.Round(spq) + 2000, 60) },
+            Beats = Enumerable.Range(0, 40).Select(i => new BeatEvent((long)Math.Round(i * spq), i)).ToArray(),
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(ExportNoMeter(state));
+        Assert.Empty(parsed.TimeSignatures);
+    }
+
+    [Fact]
+    public void Export_KnownMeter_EmitsTimeSignatureWithBarPhase()
+    {
+        // §65: authoritative 4/4 + firstDownbeatSample => valid Time Signature with the
+        // correct bar phase after the origin shift; note timing is NOT changed to force
+        // a convenient bar 1.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 8)
+            .Select(i => new BeatEvent((long)Math.Round((i + 1) * spq), i))
+            .ToArray();
+        var note = NewNote("v", (long)Math.Round(0.5 * spq), (long)Math.Round(0.5 * spq) + 2000, 60);
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(8 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+            Beats = beats,
+        };
+        var state = new TimelineState { Timeline = timeline };
+        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        {
+            Meter = new Meter(4, 4),
+            FirstDownbeatSample = (long)Math.Round(spq),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        ParsedMidi parsed = Parser.Parse(exporter.Export(state.Timeline).Bytes);
+
+        Assert.Single(parsed.TimeSignatures);
+        Assert.Equal(4, parsed.TimeSignatures[0].Numerator);
+        Assert.Equal(4, parsed.TimeSignatures[0].Denominator);
+
+        // Bar phase: sample0 = quarter -1 (pickup), so after the bar-aligned origin the
+        // pickup must stay half a quarter before the downbeat — not snapped to bar 1.
+        long noteOn = parsed.Notes[0].On;
+        Marker? downbeat = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "FIRST_DOWNBEAT");
+        Assert.NotNull(downbeat);
+        Assert.Equal(Ppq / 2, downbeat!.Tick - noteOn);
+        Assert.True(noteOn > 0);
+    }
+
+    [Fact]
+    public void Export_LoopMarker_OffBeat_PreservesExactTick()
+    {
+        // §66/§40: loop markers map through the same map + origin and are never
+        // quantized — an off-beat marker keeps its exact recovered musical position.
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(16 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("v", (long)Math.Round(4 * spq), (long)Math.Round(4 * spq) + 2000, 60) },
+            Beats = Enumerable.Range(0, 40).Select(i => new BeatEvent((long)Math.Round(i * spq), i)).ToArray(),
+            LoopMarkers = new[]
+            {
+                new LoopMarker((long)Math.Round(4.5 * spq), LoopMarkerKind.Start, 0),   // quarter 4.5 off-beat
+                new LoopMarker((long)Math.Round(8 * spq), LoopMarkerKind.Restart, 0),   // quarter 8 on-beat
+            },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(Export(state));
+
+        Marker? start = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "LOOP_START");
+        Marker? end = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "LOOP_END");
+        Assert.NotNull(start);
+        Assert.NotNull(end);
+        Assert.Equal((long)Math.Round(4.5 * Ppq), start!.Tick); // 4320 — off-beat preserved
+        Assert.Equal((long)(8 * Ppq), end!.Tick);     // 7680 — on-beat
+        Assert.Equal(Ppq / 2, start!.Tick % Ppq);
+    }
+
+    [Fact]
+    public void Export_MarkerAndPitchEarlierThanFirstNote_AllTicksNonnegative()
+    {
+        // §21 regression: the global origin offset must cover EVERY event family —
+        // loop markers and pitch changes included — not just notes/rhythm/first-sample.
+        // A loop marker at sample 0 and a pitch change before the first note sit in the
+        // negative pickup phase (sample 0 = quarter -1 when the first downbeat is at
+        // sample spq). After export every note, bend, and marker tick must be
+        // nonnegative — no family may clamp a negative delta.
+        double spq = Sr * 60.0 / 120.0;
+        long noteStart = (long)Math.Round(2 * spq);          // quarter 2
+        long pitchAt = (long)Math.Round(0.75 * spq);         // quarter -0.25, BEFORE the note
+        long S = (long)Math.Round(0.5 * spq);                // loop marker at quarter -0.5
+        var note = new NoteEvent(
+            ChannelId: "v",
+            StartSample: noteStart,
+            EndSample: noteStart + (long)Math.Round(1 * spq),
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60,
+            InstrumentId: "inst",
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: new[] { new PitchChange(pitchAt, 440 * Math.Pow(2, 1.0 / 12), 61.0) });
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(8 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+            Beats = Enumerable.Range(0, 8)
+                .Select(i => new BeatEvent((long)Math.Round((i + 1) * spq), i))
+                .ToArray(),
+            LoopMarkers = new[] { new LoopMarker(S, LoopMarkerKind.Start, 0) },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        {
+            Meter = new Meter(4, 4),
+            FirstDownbeatSample = (long)Math.Round(spq),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        ParsedMidi parsed = Parser.Parse(exporter.Export(state.Timeline).Bytes);
+
+        // The earliest exported family is the loop marker at quarter -0.5; with a
+        // bar-conserving origin it must map to a nonnegative tick and cap the shift so
+        // no family lands negative.
+        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "LOOP_START");
+        Assert.All(parsed.ConductorMarkers, m => Assert.True(m.Tick >= 0, $"marker {m.Name} tick must be nonnegative"));
+        // No pitch bend (or note) may clamp a negative delta.
+        Assert.All(parsed.Notes, n => Assert.True(n.On >= 0 && n.Off >= 0, "note ticks must be nonnegative"));
+        Assert.All(parsed.Bends, b => Assert.True(b.Tick >= 0, "bend ticks must be nonnegative"));
+        // The pitch change (quarter -0.25) is present as a bend before the note-on.
+        ParsedBend? preNote = parsed.Bends.OrderBy(b => b.Tick).FirstOrDefault();
+        Assert.NotNull(preNote);
+        Assert.True(preNote!.Tick >= 0);
+    }
+
+    [Fact]
+    public void Export_MarkersDisabled_DownbeatBeforeMapStart_DoesNotShiftOrigin()
+    {
+        // P2 (cycle 2): ComputeOriginOffset must include the first-downbeat/secondary
+        // marker elements ONLY when those events are actually emitted (EmitMarkers).
+        // Here a first-downbeat marker sits four quarters BEFORE the map start (sample
+        // zero = quarter 0) and a loop marker precedes the first note. With markers
+        // disabled they are NOT emitted, so they must not push the origin back — the
+        // first Set Tempo must land on tick 0, leaving no leading ticks at the DAW's
+        // default tempo.
+        var map = new MusicalTimeMap(44100, 0, new[]
+        {
+            new TempoSegment(0, 100_000, 0.0, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: null, firstDownbeatQuarter: -4.0);
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 200_000,
+            Notes = new[] { NewNote("v", (long)Math.Round(5000.0), (long)Math.Round(5000.0) + 4000, 60) },
+            LoopMarkers = new[] { new LoopMarker(2000, LoopMarkerKind.Start, 0) }, // before the first note
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true, EmitMarkers = false });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        // No markers emitted.
+        Assert.Empty(parsed.ConductorMarkers);
+        // The origin is unchanged by the excluded downbeat/marker: the first Set
+        // Tempo lands exactly on tick 0 (no leading default-tempo ticks).
+        Assert.NotEmpty(parsed.ConductorTempo);
+        Assert.Equal(0, parsed.ConductorTempo[0].Tick);
+    }
+
+    [Fact]
+    public void Export_MarkersEnabled_DownbeatBeforeMapStart_OriginStillCoversIt()
+    {
+        // Mirror of the P2 case: with EmitMarkers=true the first-downbeat marker IS
+        // emitted, so the origin must still cover it — the downbeat (quarter -4) maps
+        // back to tick 0 rather than a negative tick, and the conductor is shifted by
+        // exactly the downbeat's four quarters.
+        var map = new MusicalTimeMap(44100, 0, new[]
+        {
+            new TempoSegment(0, 100_000, 0.0, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: null, firstDownbeatQuarter: -4.0);
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 200_000,
+            Notes = new[] { NewNote("v", (long)Math.Round(5000.0), (long)Math.Round(5000.0) + 4000, 60) },
+            LoopMarkers = new[] { new LoopMarker(2000, LoopMarkerKind.Start, 0) },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true, EmitMarkers = true });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        Marker? downbeat = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "FIRST_DOWNBEAT");
+        Assert.NotNull(downbeat);
+        Assert.Equal(0, downbeat!.Tick); // -4 + 4 → tick 0, never negative
+        // The conductor (incl. the first Set Tempo) is shifted by the downbeat's four
+        // quarters so no emitted event lands negative.
+        Assert.NotEmpty(parsed.ConductorTempo);
+        Assert.Equal(4 * Ppq, parsed.ConductorTempo[0].Tick);
+    }
+
+    [Fact]
+    public void Export_PitchBendDisabled_EarlyPitchChangeDoesNotShiftOrigin()
+    {
+        // P2 (final, definitive): ComputeOriginOffset must derive the global origin
+        // ONLY from families that will actually be emitted. Here EmitPitchBend=false,
+        // so no bend is ever serialized; a pitch change sitting before the map's
+        // start sample must therefore not be folded into the origin. Pre-fix it was —
+        // pushing the pitch's sample through SampleToQuarterPosition of a sample
+        // before the first segment (which threw), and in any case dragging the origin
+        // away from the first real event. With bends disabled the first Set Tempo must
+        // land exactly on tick 0.
+        var map = new MusicalTimeMap(44100, 0, new[]
+        {
+            new TempoSegment(0, 100_000, 0.0, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: null, firstDownbeatQuarter: null);
+        var note = new NoteEvent(
+            ChannelId: "v",
+            StartSample: 0,
+            EndSample: 5000,
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60,
+            InstrumentId: "inst",
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: new[] { new PitchChange(-1000, 440 * Math.Pow(2, 1.0 / 12), 61.0) }); // before map start
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 200_000,
+            Notes = new[] { note },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = false });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        // No bends are emitted and the origin is untouched: the first Set Tempo lands
+        // exactly on tick 0 (no leading default-tempo ticks).
+        Assert.Empty(parsed.Bends);
+        Assert.NotEmpty(parsed.ConductorTempo);
+        Assert.Equal(0, parsed.ConductorTempo[0].Tick);
+    }
+
+    [Fact]
+    public void Export_SkippedNote_EarlyPitchChangeDoesNotShiftOrigin()
+    {
+        // P2 (final, definitive): a note Export drops (EndSample <= StartSample) emits
+        // no note and no bend, so neither its start sample nor its pitch changes may
+        // contribute to the global origin. Pre-fix the skipped note's early pitch was
+        // still scanned and dragged the origin (a sample before the map's first segment
+        // even threw through SampleToQuarterPosition). With the note skipped the first
+        // Set Tempo must land exactly on tick 0.
+        var map = new MusicalTimeMap(44100, 0, new[]
+        {
+            new TempoSegment(0, 100_000, 0.0, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: null, firstDownbeatQuarter: null);
+        var note = new NoteEvent(
+            ChannelId: "v",
+            StartSample: 0,
+            EndSample: 0, // EndSample == StartSample => skipped by Export
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60,
+            InstrumentId: "inst",
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: new[] { new PitchChange(-1000, 440 * Math.Pow(2, 1.0 / 12), 61.0) }); // before map start
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 200_000,
+            Notes = new[] { note },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        // The skipped note emits nothing; the origin is untouched and the first Set
+        // Tempo lands exactly on tick 0.
+        Assert.Empty(parsed.Notes);
+        Assert.Empty(parsed.Bends);
+        Assert.NotEmpty(parsed.ConductorTempo);
+        Assert.Equal(0, parsed.ConductorTempo[0].Tick);
+    }
+
+    [Fact]
+    public void Export_ExcludedRhythm_EarlyTriggerDoesNotShiftOrigin()
+    {
+        // P2 (final, definitive): ComputeOriginOffset must derive the global origin
+        // ONLY from rhythm triggers that will actually be emitted. Export/BuildTracks
+        // drop a rhythm channel whose VoiceExportOverride.Include=false (no track, no
+        // events), so its triggers must not contribute to the origin either. Pre-fix
+        // the excluded channel's early trigger was still min()ed and dragged the origin
+        // forward into the emitted note/conductor (a sample before the map's first
+        // segment even yields a negative quarter), delaying the first real event/tempo
+        // off tick 0. With the channel excluded the first Set Tempo must land exactly
+        // on tick 0.
+        var map = new MusicalTimeMap(44100, 10000, new[]
+        {
+            new TempoSegment(10000, 100_000, 0.0, 50000, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: null, firstDownbeatQuarter: null);
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 100_000,
+            // Emitted melodic note, later in the map.
+            Notes = new[] { NewNote("v", 20000, 24000, 60) },
+            // Excluded rhythm channel whose trigger precedes every emitted event.
+            Rhythm = new[] { new RhythmEvent("excluded", "excl", 0, 1.0f, 0f) },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+            VoiceOverrides = new[] { new VoiceExportOverride("excl") { Include = false } },
+        });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        // The excluded rhythm emits no percussion; the origin is untouched and the first
+        // Set Tempo lands exactly on tick 0 (no leading default-tempo ticks).
+        Assert.Empty(parsed.NoteOns.Where(n => n.Note == 36));
+        Assert.NotEmpty(parsed.ConductorTempo);
+        Assert.Equal(0, parsed.ConductorTempo[0].Tick);
+    }
+
+    [Fact]
+    public void Export_SameSample_MelodicRhythmAndMapShareTick()
+    {
+        // §67 (melodic + rhythm legs; DAC leg owned by WP05): a melodic NoteEvent and a
+        // rhythm trigger at the same sample S must map through the SAME MusicalTimeMap +
+        // origin to the same musical tick — no independent samples-per-tick math. The
+        // shared map's SampleToTick is asserted equal, which is the invariant a DAC
+        // trigger routed through the same map must also satisfy (§37).
+        double spq = Sr * 60.0 / 120.0;
+        long S = (long)Math.Round(8 * spq);
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(16 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("v", S, S + 4000, 60) },
+            Rhythm = new[] { new RhythmEvent("bd", "rhythm.bd", S, 1.0f, 0f) },
+            Beats = Enumerable.Range(0, 40).Select(i => new BeatEvent((long)Math.Round(i * spq), i)).ToArray(),
+        };
+        var state = new TimelineState { Timeline = timeline };
+        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        {
+            Meter = new Meter(4, 4),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        ParsedMidi parsed = Parser.Parse(exporter.Export(state.Timeline).Bytes);
+
+        ParsedPitchNote melodic = parsed.Notes.First(n => n.Channel == 1);
+        long noteOn = melodic.On;
+        Assert.Equal(8 * Ppq, noteOn); // melodic note at quarter 8 via shared map
+
+        // Rhythm trigger at the same sample => same tick (shared map, no per-family math).
+        var rhythmOn = parsed.NoteOns.FirstOrDefault(n => n.Note == 36); // first rhythm voice
+        Assert.NotNull(rhythmOn);
+        Assert.Equal(noteOn, rhythmOn!.Tick);
+
+        // The shared map yields the same tick for any event routed at sample S (§37).
+        Assert.Equal(noteOn, build.Map.SampleToTick(S, Ppq));
+    }
+
+    [Fact]
+    public void Export_AdjacentSegments_SameMicrosecondsPerQuarter_SingleTempoEvent()
+    {
+        // §19: adjacent tempo segments whose emitted µs/qn value (the MIDI integer, not
+        // raw BPM) is identical emit ONE Set Tempo event.
+        var map = new MusicalTimeMap(44100, 0, new[]
+        {
+            new TempoSegment(0, 1000, 0.0, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+            new TempoSegment(1000, 2000, 1000.0 / 22050, 22050, 120, TimingSource.DriverBeatAnchors, 1.0),
+        }, meter: new Meter(4, 4));
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = 44100,
+            StartSample = 0,
+            EndSample = 3000,
+            Notes = new[] { NewNote("v", 0, 500, 60) },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true });
+        ParsedMidi parsed = Parser.Parse(exporter.Export(timeline).Bytes);
+
+        Assert.Single(parsed.ConductorTempo);
+        Assert.Equal(500_000, parsed.ConductorTempo[0].MicrosecondsPerQuarter);
+    }
+
+    [Fact]
+    public void Export_BendRangeRpn_EmittedOncePerChannel()
+    {
+        // §32: the RPN pitch-bend-range setup is emitted once per (track, channel),
+        // NOT before every note. Two bend-needing notes on one channel => a single RPN.
+        double spq = Sr * 60.0 / 120.0;
+        var notes = new[]
+        {
+            new NoteEvent("v", (long)Math.Round(spq), (long)Math.Round(spq) + 20_000, 440, 60.3,
+                "inst", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+            new NoteEvent("v", (long)Math.Round(2 * spq), (long)Math.Round(2 * spq) + 20_000, 440, 60.3,
+                "inst", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+        };
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = (long)Math.Round(6 * spq) + 20_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Beats = BuildBeats(120),
+        };
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions { Meter = new Meter(4, 4), DetectTempoChanges = true });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true, BendRangeSemitones = 2 })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        MusicalMidiExportResult result = exporter.Export(timeline);
+
+        var rangeEvents = result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().ToList();
+        // Both notes share one channel → one RPN setup (§32, not re-sent per note).
+        Assert.Single(rangeEvents);
+    }
+
+    [Fact]
+    public void Export_BendOffset_OutOfRange_ClampsNotWraps()
+    {
+        // §33: a 20-semitone jump while the range is ±2 semitones is re-articulated to
+        // the nearest representable base note and every bend stays in [-8192, 8191] —
+        // never wrapped/overflowed.
+        double spq = Sr * 60.0 / 120.0;
+        long start = (long)Math.Round(spq);
+        var changes = new[] { new PitchChange(start + 5000, 440 * Math.Pow(2, 20.0 / 12), 80.0) };
+        var note = new NoteEvent("v", start, start + 60_000, 440, 60,
+            "inst", VisualizationNoteMode.Fm, false, changes);
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = start + 100_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+        };
+        var state = new TimelineState { Timeline = timeline };
+        ParsedMidi parsed = Parser.Parse(Export(state));
+
+        Assert.All(parsed.Bends, b => Assert.InRange(b.Bend, -8192, 8191));
+        // Nearest representable base note re-centred near the target pitch.
+        Assert.Contains(parsed.NoteOns, n => n.Note >= 76);
+    }
+
     /* ---------- helpers ---------- */
 
     private sealed class TimelineState
@@ -453,6 +1110,25 @@ public sealed class MusicalMidiExporterTests
             DetectTempoChanges = true,
         });
         var exporter = new MusicalMidiExporter(build.Map, Ppq, options)
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        return exporter.Export(state.Timeline).Bytes;
+    }
+
+    /// <summary>Exports with NO meter so the unknown-meter (§64) path is exercised.</summary>
+    private static byte[] ExportNoMeter(TimelineState state)
+    {
+        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = state.FixedBpm,
+            Meter = null,
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+        })
         {
             Diagnostics = build.Diagnostics,
         };
@@ -613,6 +1289,8 @@ internal sealed class ParsedMidi
     public int PitchBendCount;
     public List<ParsedBend> Bends = new();
 
+    public List<ParsedTimeSignature> TimeSignatures { get; } = new();
+
     // Tempo events sorted by tick.
     public List<long> ConductorTempoTicks => ConductorTempo.Select(t => t.Tick).ToList();
     public List<ParsedMidiNote> NoteOns { get; } = new();
@@ -622,6 +1300,8 @@ internal sealed class ParsedMidi
 }
 
 internal sealed record ParsedBend(long Tick, int Channel, int Bend);
+
+internal sealed record ParsedTimeSignature(int Numerator, int Denominator);
 
 internal sealed record TempoAtTick(long Tick, int MicrosecondsPerQuarter);
 
@@ -679,6 +1359,10 @@ internal static class Parser
                     else if (type == 0x06)
                     {
                         result.ConductorMarkers.Add(new Marker { Tick = absTick, Name = System.Text.Encoding.ASCII.GetString(payload) });
+                    }
+                    else if (type == 0x58 && payload.Length >= 2)
+                    {
+                        result.TimeSignatures.Add(new ParsedTimeSignature(payload[0], 1 << payload[1]));
                     }
                     continue;
                 }

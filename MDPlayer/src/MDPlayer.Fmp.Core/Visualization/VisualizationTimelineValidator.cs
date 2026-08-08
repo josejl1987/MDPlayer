@@ -5,10 +5,25 @@ namespace Fmp.Core.Visualization;
 /// <summary>Validates bounded generic visualization data at the JSON boundary.</summary>
 internal static class VisualizationTimelineValidator
 {
-    public static void Validate(VisualizationTimeline timeline)
+    /// <summary>
+    /// Validates bounded generic visualization data at the JSON boundary.
+    /// </summary>
+    /// <param name="requirePositiveSampleRate">
+    /// When true (the default for <see cref="VisualizationJsonWriter.Write"/> and
+    /// <see cref="VisualizationJsonWriter.Serialize"/>) a missing/ambiguous sample
+    /// clock is rejected here as a malformed payload. When false (the
+    /// serialized-timeline read path) the structural bounds are still checked but
+    /// sample-clock positivity is deferred to the producer-clock normalization
+    /// boundary (<see cref="TimelineBuilder.Merge"/> →
+    /// <see cref="ProducerClockNormalization"/>), which rejects an ambiguous clock
+    /// with an actionable <see cref="Fmp.Core.Timing.MusicalTimingException"/>.
+    /// </param>
+    public static void Validate(VisualizationTimeline timeline, bool requirePositiveSampleRate = true)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        if (timeline.SampleRate <= 0 || timeline.StartSample < 0 || timeline.EndSample < timeline.StartSample)
+        if (timeline.StartSample < 0 || timeline.EndSample < timeline.StartSample)
+            throw new JsonException("Invalid visualization timeline bounds.");
+        if (requirePositiveSampleRate && timeline.SampleRate <= 0)
             throw new JsonException("Invalid visualization timeline bounds.");
 
         var waveforms = new Dictionary<string, WaveformDefinition>(StringComparer.Ordinal);

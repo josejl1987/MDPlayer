@@ -67,6 +67,16 @@ internal sealed class MusicalTimeMap
     /// </summary>
     public double SampleToQuarterPosition(long sample)
     {
+        // Deterministic out-of-range behavior: clamp to the edge segment's
+        // boundary value, mirroring ComputeSampleToQuarter in the builder.
+        // (LocateSegment already returns the first/last segment outside range,
+        // but QuarterPositionAt throws for out-of-range samples, so handle them
+        // explicitly rather than relying on the segment accessor.)
+        if (sample < FirstSample)
+            return _segments[0].QuarterPositionAtStart;
+        if (sample >= EndSample)
+            return _segments[^1].QuarterPositionAtEnd;
+
         TempoSegment segment = LocateSegment(sample);
         return segment.QuarterPositionAt(sample);
     }

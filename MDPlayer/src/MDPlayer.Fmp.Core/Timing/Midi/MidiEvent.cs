@@ -14,6 +14,15 @@ internal abstract record MidiEventBase
     protected MidiEventBase(long tick) => Tick = tick;
 
     public long Tick { get; set; }
+
+    /// <summary>
+    /// Deterministic secondary ordering key for equal-priority events sharing a
+    /// tick. Populated by the exporter from the source event sequence so the
+    /// writer's absolute-tick sort is fully deterministic and never depends on
+    /// insertion order, dictionary enumeration, hash codes, object identity, or
+    /// thread scheduling (§34, §45, §73). Lower values sort first.
+    /// </summary>
+    public int SourceOrder { get; set; }
 }
 
 /// <summary>Note on/off. Note-off uses velocity from the paired note; retriggers

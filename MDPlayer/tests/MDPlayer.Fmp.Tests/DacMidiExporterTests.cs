@@ -1,15 +1,23 @@
+using Fmp.Core.Midi;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Phase-5 tests for the identity-first MIDI sample-trigger export (spec §18)
-/// and the deduplicated sample asset/WAV + manifest export (spec §29).
+/// Phase-5 tests for the identity-first MIDI sample-trigger export (spec §18),
+/// the deduplicated sample asset/WAV + manifest export (spec §29), and the
+/// DAC timing separation (spec §37/§38): the exporter receives an already-
+/// established <see cref="MusicalTimeMap"/> (no independent sample→tick math,
+/// no local BPM default), applies the shared non-negative origin, and keeps
+/// DAC sample identity fully independent of trigger→tick (§67, §68).
 /// </summary>
 public sealed class DacMidiExporterTests
 {
     private const int Src = 3;
+    private const int Sr = 44_100;
+    private const int Ppq = 480;
 
     [Fact]
     public void BuildEvents_EmitsNoteOnNoteOffPerTrigger()
@@ -20,7 +28,7 @@ public sealed class DacMidiExporterTests
             Play(ops, 200, [0xAA, 0xBB]);   // asset 1
         });
 
-        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(44_100).BuildEvents(report);
+        IReadOnlyList<DacMidiEvent> events = ExportEvents(report);
 
         var ons = events.Where(e => e.NoteOn).ToArray();
         var offs = events.Where(e => e.NoteOn == false && e.Text is null).ToArray();
@@ -44,7 +52,7 @@ public sealed class DacMidiExporterTests
             Play(ops, 110, a);              // retrigger at 110
         });
 
-        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(44_100).BuildEvents(report);
+        IReadOnlyList<DacMidiEvent> events = ExportEvents(report);
 
         // The retrigger note-on and the prior note-off share the same tick (110
         // mapped to ticks). The note-off must be sorted before that note-on.
@@ -71,7 +79,7 @@ public sealed class DacMidiExporterTests
             Play(ops, 100, [0xAA, 0xBB]);
         });
 
-        byte[] midi = new DacMidiExporter(44_100).Write(report);
+        byte[] midi = new DacMidiExporter(MakeMap()).Write(report);
 
         // "MThd" + length 6, format 1, at least one track marker "MTrk".
         Assert.Equal(0x4D, midi[0]); // M
@@ -95,12 +103,287 @@ public sealed class DacMidiExporterTests
             Play(ops, 10, [0x10], rate: 8000);
         });
 
-        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(44_100).BuildEvents(report);
+        IReadOnlyList<DacMidiEvent> events = ExportEvents(report);
         Assert.Contains(events, e =>
             e.Text != null && e.Text.StartsWith(DacMidiEvent.RateMetaTextPrefix + "8000"));
     }
 
+    /// <summary>P1 — a rate-metadata text event must serialize to a WELL-FORMED SMF
+    /// data track: exactly ONE VLQ delta precedes each FF 01 text meta, with no
+    /// spurious second delta byte consumed as a status byte. The whole track must
+    /// parse as a valid event stream to its End of Track.</summary>
+    [Fact]
+    public void Write_RateMetadata_ProducesValidDacTrackWithSingleDeltaPerMeta()
+    {
+        DacAnalysisReport report = MakeReport(ops =>
+        {
+            Play(ops, 10, [0x10], rate: 8000);
+            Play(ops, 1000, [0xAA, 0xBB], rate: 11_025);
+        });
+
+        byte[] midi = new DacMidiExporter(MakeMap(), Ppq).Write(report);
+        List<(long Delta, string Kind)> events = ParseDacTrackEvents(midi);
+
+        // At least one rate meta text event and one note event survived intact.
+        var rateTexts = events.Where(e => e.Kind.StartsWith("text:"));
+        Assert.Contains(rateTexts, e => e.Kind.EndsWith("DACRATE:8000"));
+        Assert.Contains(events, e => e.Kind == "note-on" || e.Kind == "note-off");
+
+        // Every meta-text event must be preceded by exactly one delta (via the
+        // parser reading delta+status+meta) — the parse itself proves no stray or
+        // missing delta byte; otherwise ParseDacTrackEvents would record a bogus
+        // channel-status event for the consumed 0x00 or throw.
+        Assert.True(events.Count >= 4, "note on/off + rate metas must all be parsed");
+        // The P1 double-delta bug consumed a zero byte as a status byte -> a
+        // spurious "chan0"/"chanN" event. Fixed code must never emit one.
+        Assert.DoesNotContain(events, e => e.Kind.StartsWith("chan"));
+    }
+
+    /// <summary>P2 — a Set Tempo whose serialized VLQ delta exceeds the representable
+    /// MIDI range (0x0FFFFFFF) must be REJECTED, not emitted as a 5+ byte over-length
+    /// quantity. The DAC writer mirrors the core writer's bound (§44).</summary>
+    [Fact]
+    public void Write_TempoDeltaBeyondVlqRange_IsRejected()
+    {
+        // A single-segment 120 BPM map runs to a huge sample count; its Set Tempo
+        // sits at tick 0, but we need a SECOND tempo whose delta from tick 0 exceeds
+        // 0x0FFFFFFF. Build a two-segment map whose boundary lands past that tick.
+        long boundarySamples = 13_000_000_000L;
+        double spq = Sr * 60.0 / 120.0;
+        double boundaryQuarter = boundarySamples / spq;
+        var map = new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, boundarySamples, 0.0, spq, 120, TimingSource.UserOverride, 1.0),
+                new TempoSegment(boundarySamples, boundarySamples + 1, boundaryQuarter, spq, 90, TimingSource.UserOverride, 1.0),
+            },
+            meter: null);
+
+        DacAnalysisReport report = MakeReport(ops => Play(ops, 0, [0x10, 0x20]));
+
+        // The second tempo's delta (its own tick − 0) exceeds 0x0FFFFFFF, so the
+        // writer must throw instead of serializing an over-long VLQ.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DacMidiExporter(map, Ppq).Write(report));
+    }
+
+    /// <summary>§67 — melodic + DAC + rhythm at the same sample map to the same tick.</summary>
+    [Fact]
+    public void BuildEvents_SharedSample_MapsToSameTickAsMelodicAndRhythm()
+    {
+        DacAnalysisReport report = MakeReport(ops =>
+        {
+            Play(ops, 1000, [0x10, 0x20]);
+        });
+
+        IReadOnlyList<DacMidiEvent> events = ExportEvents(report);
+        var dacOn = events.First(e => e.NoteOn);
+        long sharedSample = 1000;
+
+        // Build a timeline with a melodic note and a rhythm trigger at the SAME
+        // source sample, export through the shared musical exporter (same map +
+        // origin), and read back the note-on tick. All three must align.
+        var map = MakeMap();
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 5_000_000,
+            SampleRate = Sr,
+            Notes = new[]
+            {
+                new NoteEvent(
+                    "melodic", sharedSample, sharedSample + 2000, 440, 69, "inst",
+                    VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+            },
+            Rhythm = new[]
+            {
+                new RhythmEvent("drums", "drums", sharedSample, 1.0f, 0.5f),
+            },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq);
+        var result = exporter.Export(timeline);
+        using var ms = new MemoryStream(result.Bytes);
+        using var br = new BinaryReader(ms);
+        var noteTicks = ParseNoteOnTicks(br);
+
+        // The melodic note-on and the rhythm note-on both land on the same tick as
+        // the DAC trigger at the identical source sample.
+        Assert.Contains(dacOn.Tick, noteTicks);
+        Assert.True(noteTicks.All(t => t == dacOn.Tick), "melodic/rhythm ticks must match the DAC tick");
+    }
+
+    /// <summary>§68 — two distinct sample-ID→note maps → same ticks, same tempo track.</summary>
+    [Fact]
+    public void Write_TwoNoteMappings_SameTicksAndTempoTrack()
+    {
+        // Same timed DAC sequence under two different note bases. Only the
+        // identity→note mapping differs; ticks and tempo must be identical.
+        DacAnalysisReport report = MakeReport(ops =>
+        {
+            Play(ops, 100, [0x10, 0x20]);
+            Play(ops, 500, [0xAA, 0xBB]);
+        });
+
+        var mapA = MakeMap();
+        var mapB = MakeMap();
+
+        // Different note bases change only the identity→note mapping.
+        byte[] midiA = new DacMidiExporter(mapA, Ppq, noteBase: 0).Write(report);
+        byte[] midiB = new DacMidiExporter(mapB, Ppq, noteBase: 30).Write(report);
+
+        // Note numbers may differ (identity independent), ticks + tempo identical.
+        var parsedA = ParseTicksAndTempo(midiA);
+        var parsedB = ParseTicksAndTempo(midiB);
+
+        Assert.Equal(parsedA.Ticks, parsedB.Ticks);
+        Assert.Equal(parsedA.Tempi, parsedB.Tempi);
+    }
+
+    /// <summary>§19 — a multi-segment tempo map serializes a Set Tempo at EVERY
+    /// segment boundary on the DAC conductor, not just the first segment.</summary>
+    [Fact]
+    public void Write_MultiSegmentTempoMap_EmitsTempoAtEveryBoundary()
+    {
+        var map = MakeMultiSegmentMap(firstDownbeatQuarter: null);
+        DacAnalysisReport report = MakeReport(ops => Play(ops, 1000, [0x10, 0x20]));
+
+        byte[] midi = new DacMidiExporter(map, Ppq).Write(report); // format 1, conductor track 0
+        List<(long Tick, int Us)> tempos = ParseConductorTempos(midi);
+
+        // One Set Tempo per distinct segment: segment 0 at its start (tick 0) and
+        // segment 1 at the later boundary's sample-derived tick.
+        Assert.Equal(2, tempos.Count);
+        Assert.NotEqual(tempos[0].Us, tempos[1].Us);
+        Assert.Equal(0, tempos[0].Tick);
+        Assert.True(tempos[1].Tick > tempos[0].Tick, "the 2nd tempo must sit at the later boundary");
+    }
+
+    /// <summary>§67 + §19 — first-downbeat-before-map-start AND a multi-segment map:
+    /// DAC, melodic and rhythm triggers at the same sample map to the SAME tick
+    /// (shared non-negative origin incl. the downbeat) and the DAC conductor carries
+    /// the full tempo sequence at matching ticks.</summary>
+    [Fact]
+    public void Write_DownbeatBeforeMapStart_MultiSegment_SharedOriginAndFullTempoSequence()
+    {
+        var map = MakeMultiSegmentMap(firstDownbeatQuarter: -4.0);
+        long sharedSample = 1000;
+        DacAnalysisReport report = MakeReport(ops => Play(ops, sharedSample, [0x10, 0x20]));
+
+        // DAC: same exporter + map → same origin as the melodic exporter.
+        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(map, Ppq).BuildEvents(report);
+        var dacOn = events.First(e => e.NoteOn);
+
+        // Melodic + rhythm at the SAME source sample through the shared map.
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 5_000_000,
+            SampleRate = Sr,
+            Notes = new[]
+            {
+                new NoteEvent(
+                    "melodic", sharedSample, sharedSample + 2000, 440, 69, "inst",
+                    VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+            },
+            Rhythm = new[]
+            {
+                new RhythmEvent("drums", "drums", sharedSample, 1.0f, 0.5f),
+            },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq); // EmitMarkers default true
+        var result = exporter.Export(timeline);
+        using var ms = new MemoryStream(result.Bytes);
+        using var br = new BinaryReader(ms);
+        List<long> noteTicks = ParseNoteOnTicks(br);
+
+        // First-downbeat before map start shifts the origin: the shared sample does
+        // NOT land on tick 0 — it lands on the same 1920+ tick for all three.
+        Assert.True(dacOn.Tick > 0, "downbeat-before-map-start must push the shared tick past 0");
+        Assert.Contains(dacOn.Tick, noteTicks);
+        Assert.True(noteTicks.All(t => t == dacOn.Tick),
+            "melodic/rhythm ticks must match the DAC tick on the shared origin");
+
+        // The DAC conductor has the FULL tempo sequence at the same sample-derived
+        // ticks the melodic conductor used (0? NO — offset by the downbeat origin).
+        byte[] dacMidi = new DacMidiExporter(map, Ppq).Write(report);
+        List<(long Tick, int Us)> dacTempos = ParseConductorTempos(dacMidi);
+        Assert.Equal(2, dacTempos.Count);
+        Assert.True(dacTempos[0].Tick > 0, "the first Set Tempo is shifted by the downbeat origin");
+        Assert.True(dacTempos[1].Tick > dacTempos[0].Tick);
+    }
+
+    /// <summary>§67 + §21 (cycle 2 fix) — with EmitMarkers=false, a first-downbeat
+    /// BEFORE the map start must NOT be folded into the DAC origin (mirroring the
+    /// melodic exporter's gate), so a shared sample maps to the SAME tick for DAC,
+    /// melodic and rhythm — no origin divergence from the marker-disabled melodic
+    /// export, and no leading default-tempo ticks at the DAW.</summary>
+    [Fact]
+    public void BuildEvents_MarkersDisabled_DownbeatBeforeMapStart_SharedTickAcrossDacMelodicRhythm()
+    {
+        var map = MakeMultiSegmentMap(firstDownbeatQuarter: -4.0);
+        long sharedSample = 1000;
+        DacAnalysisReport report = MakeReport(ops => Play(ops, sharedSample, [0x10, 0x20]));
+
+        // DAC, markers disabled: the downbeat is NOT folded, so the shared sample maps
+        // to the melodic/rhythm tick (not a downbeat-shifted DAC-only tick).
+        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(map, Ppq, emitMarkers: false).BuildEvents(report);
+        var dacOn = events.First(e => e.NoteOn);
+
+        // Melodic + rhythm at the SAME source sample through the shared map, markers
+        // disabled on the melodic side too.
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 5_000_000,
+            SampleRate = Sr,
+            Notes = new[]
+            {
+                new NoteEvent(
+                    "melodic", sharedSample, sharedSample + 2000, 440, 69, "inst",
+                    VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+            },
+            Rhythm = new[]
+            {
+                new RhythmEvent("drums", "drums", sharedSample, 1.0f, 0.5f),
+            },
+        };
+        var exporter = new MusicalMidiExporter(map, Ppq,
+            new MusicalMidiExportOptions { EmitPitchBend = true, EmitMarkers = false });
+        var result = exporter.Export(timeline);
+        using var ms = new MemoryStream(result.Bytes);
+        using var br = new BinaryReader(ms);
+        List<long> noteTicks = ParseNoteOnTicks(br);
+
+        // Markers disabled → the origin is NOT shifted by the excluded downbeat, so
+        // the shared sample maps to a NON-downbeat tick (the melodic conductor's
+        // first Set Tempo lands on tick 0) — and it is the SAME tick for all three.
+        Assert.Contains(dacOn.Tick, noteTicks);
+        Assert.True(noteTicks.All(t => t == dacOn.Tick),
+            "melodic/rhythm ticks must match the DAC tick with markers disabled");
+    }
+
+    /// <summary>§37 — a negative source trigger yields a nonnegative tick after the shared origin.</summary>
+    [Fact]
+    public void BuildEvents_NegativeSourceQuarter_YieldsNonnegativeTick()
+    {
+        // A map whose musical origin is negative at sample 0 (a pickup): the DAC
+        // exporter must apply the same non-negative origin so no trigger emits a
+        // negative tick — it must include the conductor origin, not leave a gap.
+        var map = MakeNegativeOriginMap();
+        IReadOnlyList<DacMidiEvent> events = new DacMidiExporter(map, Ppq).BuildEvents(
+            MakeReport(ops => Play(ops, 0, [0x10, 0x20])));
+
+        Assert.NotEmpty(events);
+        Assert.All(events, e => Assert.True(e.Tick >= 0, $"tick {e.Tick} must be non-negative"));
+        // The first emitted event lands on tick 0 (origin aligned), not a hidden gap.
+        Assert.Contains(events, e => e.Tick == 0);
+    }
+
     // ---- helpers ----
+
+    private static IReadOnlyList<DacMidiEvent> ExportEvents(DacAnalysisReport report) =>
+        new DacMidiExporter(MakeMap(), Ppq).BuildEvents(report);
 
     private static DacAnalysisReport MakeReport(Action<List<DacOperation>> build)
     {
@@ -120,4 +403,284 @@ public sealed class DacMidiExporterTests
             ops.Add(new DacOperation.DacByteConsumed(start + i, Src, i, payload[i]));
         ops.Add(new DacOperation.DacPlaybackStopped(start + 10, DacStopReason.ExplicitStop));
     }
+
+    /// <summary>120 BPM map from sample 0, quarter 0.</summary>
+    private static MusicalTimeMap MakeMap()
+    {
+        double spq = Sr * 60.0 / 120.0;
+        return new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, 5_000_000, 0, spq, 120, TimingSource.UserOverride, 1.0),
+            },
+            meter: null);
+    }
+
+    /// <summary>A map whose quarter position at sample 0 is negative (pickup ≈ 2 beats).</summary>
+    private static MusicalTimeMap MakeNegativeOriginMap()
+    {
+        double spq = Sr * 60.0 / 120.0;
+        // Quarter position at sample 0 == -2.0 (a two-quarter pickup before the bar).
+        return new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, 5_000_000, -2.0, spq, 120, TimingSource.UserOverride, 1.0),
+            },
+            meter: null);
+    }
+
+    /// <summary>
+    /// A two-segment tempo map: 120 BPM from sample 0 to 200000, then 90 BPM from
+    /// 200000 onward, quarter-continuous. FirstDownbeatQuarter may place a downbeat
+    /// before the map start (quarter -4) when requested.
+    /// </summary>
+    private static MusicalTimeMap MakeMultiSegmentMap(double? firstDownbeatQuarter)
+    {
+        double spq120 = Sr * 60.0 / 120.0;
+        double spq90 = Sr * 60.0 / 90.0;
+        long boundary = 200_000;
+        // Segment 1 (90 BPM) begins exactly where segment 0 (120 BPM) ends, so the
+        // quarter position continues without a discontinuity.
+        double boundaryQuarter = 0.0 + (boundary - 0) / spq120;
+        return new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, boundary, 0.0, spq120, 120, TimingSource.UserOverride, 1.0),
+                new TempoSegment(boundary, 5_000_000, boundaryQuarter, spq90, 90, TimingSource.UserOverride, 1.0),
+            },
+            meter: null,
+            firstDownbeatQuarter: firstDownbeatQuarter);
+    }
+
+    /// <summary>
+    /// Parses the (absolute tick, µs/qn) Set Tempo events on the conductor track —
+    /// track 0 of this format-1 stream — in serialized order. The conductor track is
+    /// the first MTrk chunk.
+    /// </summary>
+    /// <summary>
+    /// Parses every event (delta, kind) on the DAC data track — the LAST MTrk
+    /// chunk(s) of this format-1 stream — and throws if the track is malformed
+    /// (an invalid status byte, an unterminated meta, or missing EOT). This is the
+    /// P1 guard: the old double-delta bug emitted a stray 0x00 where a status byte
+    /// is required, which would fail here.
+    /// </summary>
+    private static List<(long Delta, string Kind)> ParseDacTrackEvents(byte[] midi)
+    {
+        var found = new List<(long, string)>();
+        using var ms = new MemoryStream(midi);
+        using var br = new BinaryReader(ms);
+        br.ReadBytes(4);               // MThd
+        ReadInt32BE(br);               // MThd len
+        br.ReadInt16();                // format
+        int ntrks = ReadInt16BE(br);
+        br.ReadInt16();                // division
+        int trackIndex = 0;
+        for (int t = 0; t < ntrks; t++)
+        {
+            br.ReadBytes(4);           // MTrk
+            int len = ReadInt32BE(br);
+            long trackEnd = ms.Position + len;
+            while (ms.Position < trackEnd)
+            {
+                long delta = ReadVlv(br);
+                if (ms.Position >= trackEnd)
+                    Assert.Fail("delta consumed past track end: malformed track");
+                byte status = br.ReadByte();
+                if (status == 0xFF)
+                {
+                    byte type = br.ReadByte();
+                    long metaLen = ReadVlv(br);
+                    var payload = br.ReadBytes((int)metaLen);
+                    // End of Track must be the final event in the chunk.
+                    if (type == 0x2F)
+                        Assert.True(ms.Position == trackEnd, $"trailing data after EOT (pos {ms.Position}, end {trackEnd})");
+                    else if (type == 0x01)
+                        found.Add((delta, "text:" + System.Text.Encoding.ASCII.GetString(payload)));
+                    continue;
+                }
+                if ((status & 0xF0) == 0xF0)
+                {
+                    Assert.Fail("unexpected sysex in DAC data track");
+                }
+                int dataBytes = (status & 0xF0) is 0xC0 or 0xD0 ? 1 : 2;
+                byte[] data = new byte[dataBytes];
+                for (int i = 0; i < dataBytes; i++)
+                {
+                    if (ms.Position >= trackEnd)
+                        Assert.Fail("data byte past track end: malformed track");
+                    data[i] = br.ReadByte();
+                }
+                string kind = (status & 0xF0) switch
+                {
+                    0x90 when data[1] != 0 => "note-on",
+                    0x90 => "note-off00",
+                    0x80 => "note-off",
+                    _ => $"chan{(status & 0x0F)}",
+                };
+                found.Add((delta, kind));
+            }
+            trackIndex++;
+        }
+        return found;
+    }
+
+    private static List<(long Tick, int Us)> ParseConductorTempos(byte[] midi)
+    {
+        var tempos = new List<(long, int)>();
+        using var ms = new MemoryStream(midi);
+        using var br = new BinaryReader(ms);
+        br.ReadBytes(4);               // MThd
+        ReadInt32BE(br);               // MThd len
+        br.ReadInt16();                // format
+        int ntrks = ReadInt16BE(br);
+        br.ReadInt16();                // division
+        for (int t = 0; t < ntrks; t++)
+        {
+            br.ReadBytes(4);           // MTrk
+            int len = ReadInt32BE(br);
+            long trackEnd = ms.Position + len;
+            long abs = 0;
+            while (ms.Position < trackEnd)
+            {
+                abs += ReadVlv(br);
+                byte status = br.ReadByte();
+                if ((status & 0xFF) == 0xFF)
+                {
+                    byte type = br.ReadByte();
+                    long metaLen = ReadVlv(br);
+                    var payload = br.ReadBytes((int)metaLen);
+                    if (type == 0x51 && t == 0) // Set Tempo on the conductor
+                        tempos.Add((abs, (payload[0] << 16) | (payload[1] << 8) | payload[2]));
+                    continue;
+                }
+                if ((status & 0xF0) == 0xF0)
+                {
+                    long sysexLen = ReadVlv(br);
+                    for (long i = 0; i < sysexLen; i++)
+                        br.ReadByte();
+                    continue;
+                }
+                int dataBytes = (status & 0xF0) is 0xC0 or 0xD0 ? 1 : 2;
+                for (int i = 0; i < dataBytes; i++)
+                    br.ReadByte();
+            }
+        }
+        return tempos;
+    }
+
+    /// <summary>Parses the absolute tick of every note-on (0x90 vel&gt;0) in a format-1 stream.</summary>
+    private static List<long> ParseNoteOnTicks(BinaryReader br)
+    {
+        br.ReadBytes(4); ReadInt32BE(br); br.ReadInt16();
+        int ntrks = ReadInt16BE(br); br.ReadInt16();
+        var ticks = new List<long>();
+        for (int t = 0; t < ntrks; t++)
+        {
+            br.ReadBytes(4);
+            int len = ReadInt32BE(br);
+            long trackEnd = br.BaseStream.Position + len;
+            long abs = 0;
+            while (br.BaseStream.Position < trackEnd)
+            {
+                long delta = ReadVlv(br);
+                abs += delta;
+                byte status = br.ReadByte();
+                if (status == 0xFF)
+                {
+                    br.ReadByte();
+                    long metaLen = ReadVlv(br);
+                    for (long i = 0; i < metaLen; i++)
+                        br.ReadByte();
+                }
+                else if ((status & 0xF0) == 0xF0)
+                {
+                    long sysexLen = ReadVlv(br);
+                    for (long i = 0; i < sysexLen; i++)
+                        br.ReadByte();
+                }
+                else
+                {
+                    int d0 = br.ReadByte();
+                    int d1 = (status & 0xF0) is 0xC0 or 0xD0 ? -1 : br.ReadByte();
+                    if ((status & 0xF0) == 0x90 && d1 != 0)
+                        ticks.Add(abs);
+                }
+            }
+        }
+        return ticks;
+    }
+
+    private static (List<long> Ticks, List<long> Tempi) ParseTicksAndTempo(byte[] midi)
+    {
+        // Walk each MTrk, decode the VLQ delta stream and collect absolute ticks,
+        // and the tempo bytes on the conductor (first) track.
+        var ticks = new List<long>();
+        var tempi = new List<long>();
+        using var ms = new MemoryStream(midi);
+        using var br = new BinaryReader(ms);
+        br.ReadBytes(4);            // MThd
+        ReadInt32BE(br);            // MThd len
+        br.ReadInt16();             // format
+        int ntrks = ReadInt16BE(br);
+        br.ReadInt16();             // division
+        for (int t = 0; t < ntrks; t++)
+        {
+            br.ReadBytes(4);        // MTrk
+            int len = ReadInt32BE(br);
+            long trackEnd = ms.Position + len;
+            long abs = 0;
+            while (ms.Position < trackEnd)
+            {
+                long delta = ReadVlv(br);
+                abs += delta;
+                byte status = br.ReadByte();
+                if ((status & 0xFF) == 0xFF)
+                {
+                    byte type = br.ReadByte();
+                    long metaLen = ReadVlv(br);
+                    var payload = br.ReadBytes((int)metaLen);
+                    if (type == 0x51) // Set Tempo
+                        tempi.Add((payload[0] << 16) | (payload[1] << 8) | payload[2]);
+                    continue;
+                }
+                switch (status & 0xF0)
+                {
+                    case 0x80:
+                    case 0x90:
+                        ticks.Add(abs);
+                        br.ReadByte();
+                        br.ReadByte();
+                        break;
+                    default:
+                        br.ReadByte();
+                        br.ReadByte();
+                        break;
+                }
+            }
+        }
+        return (ticks, tempi);
+    }
+
+    private static long ReadVlv(BinaryReader br)
+    {
+        long value = 0;
+        byte b;
+        do
+        {
+            b = br.ReadByte();
+            value = (value << 7) | (uint)(b & 0x7F);
+        } while ((b & 0x80) != 0);
+        return value;
+    }
+
+    private static int ReadInt16BE(BinaryReader br) => (br.ReadByte() << 8) | br.ReadByte();
+
+    private static int ReadInt32BE(BinaryReader br) =>
+        (br.ReadByte() << 24) | (br.ReadByte() << 16) | (br.ReadByte() << 8) | br.ReadByte();
 }

@@ -194,6 +194,231 @@ public sealed class MusicalTimingTests
         Assert.True(fit.Diagnostics.AnchorCount == 0);
     }
 
+    [Fact]
+    public void RateFromValidatedBpm_DoesNotDestroyAnchorPhase()
+    {
+        // Anchors establish sample 12000 = quarter 0. Adding a validated BPM supplies
+        // only the rate; the fitted phase must be preserved (§10 combination rule).
+        // Specifically the map must NOT be rebuilt "from BPM starting at quarter zero"
+        // (which would put quarter 0 at sample zero instead of sample 12000).
+        double spq = Sr * 60.0 / 120.0;
+        var anchors = Enumerable.Range(0, 6)
+            .Select(i => new BeatAnchor((long)Math.Round(12000 + i * spq), i))
+            .ToArray();
+        PiecewiseFit fit = BeatGridFitter.Fit(
+            anchors, Sr,
+            tempoChanges: new[] { new TempoChangePoint(12000, 120, TimingSource.DriverValidatedTempo) });
+
+        // Phase preserved: sample 12000 stays at quarter 0 (a single validated segment).
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 4);
+        // Quarter at sample 12000 must be 0 — proving the phase was not shifted to
+        // sample zero via the "validated BPM ⇒ quarter 0 at sample 0" rebuild.
+        Assert.Equal(0.0,
+            fit.Segments[0].QuarterAtStart + (12000 - fit.Segments[0].StartSample) / fit.Segments[0].SamplesPerQuarter,
+            precision: 9);
+    }
+
+    [Fact]
+    public void ConflictingAnchors_Reported_NotAveraged()
+    {
+        // §56: a sample claimed as two different beats. Never average; report.
+        double spq = Sr * 60.0 / 120.0;
+        long s1 = (long)Math.Round(spq);                       // "beat 1" sample
+        var anchors = new List<BeatAnchor>
+        {
+            new(0, 0),
+            new(s1, 1),
+            new(s1, 1),     // exact duplicate: harmless, dedup
+            new(s1, 2),     // conflicting: same sample, beat 2
+            new((long)Math.Round(2 * spq), 2),
+            new((long)Math.Round(3 * spq), 3),
+        };
+        PiecewiseFit fit = Fit(anchors.ToArray());
+
+        Assert.True(fit.Diagnostics.HasConflictingAnchors);
+        // The conflict is surfaced in the warning text, never silently averaged.
+        Assert.Contains(fit.Diagnostics.Warnings, w => w.Contains("conflicting anchors"));
+        Assert.Equal(0.0, fit.Diagnostics.SampleZeroQuarter!.Value, precision: 6);
+    }
+
+    [Fact]
+    public void LoneConflictingValidatedObservation_DoesNotSplitAnchorRate()
+    {
+        // §10 anchors-first precedence: anchors prove a constant 120 BPM. A single
+        // mid-source DriverTimingEvent reporting 150 BPM is an observation, not
+        // evidence of a sustained transition (no second corroborating value), so it
+        // must NOT split the grid or override the anchor-derived rate.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 40)
+            .Select(i => new BeatAnchor((long)Math.Round(i * spq), i))
+            .ToArray();
+        long loneSample = (long)Math.Round(20 * spq);
+        PiecewiseFit fit = Fit(beats, changes:
+            new TempoChangePoint(loneSample, 150, TimingSource.DriverValidatedTempo));
+
+        // One constant grid kept at the anchor-established 120 BPM — no pre/post split.
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.Equal(0, fit.Segments[0].StartSample);
+    }
+
+    [Fact]
+    public void LoneConflictingValidatedObservation_AtSampleZero_KeepsAnchorRate()
+    {
+        // §10 anchors-first precedence, single-segment case: anchors prove a constant
+        // 120 BPM and ONE validated observation reports 150 BPM exactly at Sample=0.
+        // Because the change sits at the domain start no "before" segment is emitted,
+        // so the fit yields a single segment carrying the observation's BPM across the
+        // whole domain. The lone conflicting reading must still not override the
+        // authoritative anchor-derived rate: the map stays at 120 BPM, never 150.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 40)
+            .Select(i => new BeatAnchor((long)Math.Round(i * spq), i))
+            .ToArray();
+        PiecewiseFit fit = Fit(beats, changes:
+            new TempoChangePoint(0, 150, TimingSource.DriverValidatedTempo));
+
+        // One constant grid kept at the anchor-established 120 BPM — the sample-0
+        // observation does not split it and does not supply the rate.
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.Equal(0L, fit.Segments[0].StartSample);
+        Assert.Equal(long.MaxValue, fit.Segments[0].EndSample);
+    }
+
+    [Fact]
+    public void LoneConflictingValidatedObservation_AtFirstBeatBoundary_KeepsAnchorRate()
+    {
+        // §10 anchors-first precedence, P1 finding: anchors prove a constant 120 BPM
+        // and ONE validated observation reports 150 BPM exactly at sample 22050 — the
+        // sample of the FIRST BEAT (the second anchor). The head region contains only
+        // the single anchor at sample 0, so it can neither establish nor corroborate a
+        // rate; the decision must come from ALL anchor evidence and the distinct-value
+        // count, never from a segment whose head has too few anchors. The lone 150
+        // value is an observation, not a transition, and must not override the
+        // anchor-derived 120 BPM for the whole domain.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 40)
+            .Select(i => new BeatAnchor((long)Math.Round(i * spq), i))
+            .ToArray();
+        long firstBeat = (long)Math.Round(spq); // 22050 samples/quarter at 120 BPM
+        PiecewiseFit fit = Fit(beats, changes:
+            new TempoChangePoint(firstBeat, 150, TimingSource.DriverValidatedTempo));
+
+        // One constant grid kept at the anchor-established 120 BPM — the observation
+        // at a first-beat boundary does not split it and does not supply the rate.
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.Equal(0L, fit.Segments[0].StartSample);
+        Assert.Equal(long.MaxValue, fit.Segments[0].EndSample);
+    }
+
+    [Fact]
+    public void ValidatedTempoChange_Sustained_ProducesContinuousSegments_NotJitterSpam()
+    {
+        // §59: 120 BPM for 16 quarters, then 150 BPM. Exactly the required transition;
+        // jitter around each tempo must NOT spawn extra segments.
+        double spqA = Sr * 60.0 / 120.0;
+        double spqB = Sr * 60.0 / 150.0;
+        long boundary = (long)Math.Round(16 * spqA);
+        var rand = new Random(7);
+
+        var beats = new List<BeatAnchor>();
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatAnchor((long)Math.Round(i * spqA) + rand.Next(-2, 3), i));
+        for (int i = 0; i < 16; i++)
+            beats.Add(new BeatAnchor(boundary + (long)Math.Round(i * spqB) + rand.Next(-2, 3), 16 + i));
+
+        PiecewiseFit fit = Fit(beats.ToArray(), changes:
+            new TempoChangePoint(boundary, 150, TimingSource.DriverValidatedTempo));
+
+        // Exactly two segments (one per tempo), no per-beat fragmentation.
+        Assert.Equal(2, fit.Segments.Length);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.Equal(150.0, fit.Segments[1].BeatsPerMinute, precision: 2);
+        Assert.Equal(boundary, fit.Segments[1].StartSample);
+    }
+
+    [Fact]
+    public void JitterAroundOneTempo_Suppressed_NoPerBeatSegments()
+    {
+        // §17/§18: many tiny validated BPM perturbations around one tempo must yield
+        // ONE segment, not a segment per change.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 40)
+            .Select(i => new BeatAnchor((long)Math.Round(i * spq), i))
+            .ToArray();
+        var jitterChanges = Enumerable.Range(0, 40)
+            .Select(i => new TempoChangePoint((long)Math.Round(i * spq), 120, TimingSource.DriverValidatedTempo))
+            .ToArray();
+        PiecewiseFit fit = Fit(beats.ToArray(), changes: jitterChanges);
+
+        // All identical µs/qn values collapse to one segment.
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 3);
+    }
+
+    [Fact]
+    public void NearIdenticalBpm_JitterCollapsesToOneSegment()
+    {
+        // §17: 120.0, 120.1, 120.05 are sampling/timer jitter around one tempo. Even
+        // though the rounded µs/qn differ (120.0→500000, 120.1→499583, 120.05→499792),
+        // the sustained-change filter must collapse them into ONE segment, not a
+        // per-observation fragmentation.
+        double spq = Sr * 60.0 / 120.0;
+        var beats = Enumerable.Range(0, 12)
+            .Select(i => new BeatAnchor((long)Math.Round(i * spq), i))
+            .ToArray();
+        PiecewiseFit fit = BeatGridFitter.Fit(beats, Sr, tempoChanges: new[]
+        {
+            new TempoChangePoint(0, 120.0, TimingSource.DriverValidatedTempo),
+            new TempoChangePoint((long)Math.Round(4 * spq), 120.1, TimingSource.DriverValidatedTempo),
+            new TempoChangePoint((long)Math.Round(8 * spq), 120.05, TimingSource.DriverValidatedTempo),
+        });
+
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 3);
+    }
+
+    [Fact]
+    public void ValidatedPath_AssignsResiduals_RmsReflectsOutlier()
+    {
+        // Findings 2/4: on the validated-tempo path residuals were computed but never
+        // assigned, so RMS stayed 0 and IsTrustworthy stayed true regardless of a
+        // severe outlier. A bad anchor must now push the reported residuals (and thus
+        // IsTrustworthy) beyond the trust threshold.
+        double spq = Sr * 60.0 / 120.0;
+        var list = Anchors(120, 9).ToList();
+        list[4] = new BeatAnchor((long)Math.Round(8 * spq), 4); // sample of beat 8, beat 4
+        PiecewiseFit fit = Fit(list.ToArray(), changes:
+            new TempoChangePoint(0, 120, TimingSource.DriverValidatedTempo));
+
+        Assert.Single(fit.Segments);
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 3);
+        // The outlier was recorded as rejected on the validated path.
+        Assert.Contains(fit.Diagnostics.RejectedAnchors, r => r.Sample == (long)Math.Round(8 * spq));
+        // Residuals are now surfaced: RMS exceeds the 0.25 trust threshold and the
+        // maximum residual reflects the outlier's ~4-quarter error.
+        Assert.True(fit.Diagnostics.RmsResidualQuarters > 0.25);
+        Assert.True(fit.Diagnostics.MaxResidualQuarters >= 3.0);
+        Assert.False(fit.Diagnostics.IsTrustworthy);
+    }
+
+    [Fact]
+    public void OutlierAnchor_RecordedInDiagnostics_WithReason()
+    {
+        double spq = Sr * 60.0 / 120.0;
+        var list = Anchors(120, 9).ToList();
+        list[4] = new BeatAnchor((long)Math.Round(6 * spq), 5); // late callback → outlier
+        PiecewiseFit fit = Fit(list.ToArray());
+
+        Assert.Equal(120.0, fit.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.True(fit.Diagnostics.RejectedAnchorCount >= 1);
+        Assert.Contains(fit.Diagnostics.RejectedAnchors,
+            r => r.Sample == list[4].Sample && !string.IsNullOrEmpty(r.Reason));
+    }
+
     private static TempoSegment[] ConvertToTempoSegments(PiecewiseFit fit)
     {
         var result = new TempoSegment[fit.Segments.Length];

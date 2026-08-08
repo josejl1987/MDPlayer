@@ -96,6 +96,15 @@ internal sealed class MusicalMidiExportResult
     public required IReadOnlyList<MidiTrack> Tracks { get; init; }
 
     public required TimingDiagnostics Diagnostics { get; init; }
+
+    /// <summary>
+    /// The global origin shift applied to make every exported tick nonnegative
+    /// (section 21), in quarter notes. The first emitted event maps to tick 0
+    /// (rounded); a conductor tempo at the map start, an early pitch bend, a
+    /// rhythm trigger, or a downbeat/loop marker can nudge this above zero.
+    /// Exposed so the timing report can print the configured-PPQ origin tick.
+    /// </summary>
+    public double OriginOffsetQuarters { get; init; }
 }
 
 /// <summary>
@@ -109,6 +118,11 @@ internal sealed class MusicalMidiExporter
     private readonly MusicalTimeMap _map;
     private readonly int _ppq;
     private readonly MusicalMidiExportOptions _options;
+
+    /// <summary>Deterministic monotonic source-sequence key assigned to every exported
+    /// event (conductor, program, note, bend, …) so the writer's equal-tick/equal-rank
+    /// sort can be fully deterministic via <see cref="MidiEventBase.SourceOrder"/>.</summary>
+    private int _sourceOrder;
 
     public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
     {
@@ -131,14 +145,19 @@ internal sealed class MusicalMidiExporter
         BuildConductor(timeline, originOffsetQuarters, conductor);
 
         TrackAllocator allocator = BuildTracks(timeline);
+        // One RPN pitch-bend-range setup per (track, channel) the first time that
+        // channel emits a bend (§32): DAW playback must not depend on a coincidental
+        // bend range, but the setup is not re-sent for every note on an unchanged
+        // channel.
+        var bendRangeChannels = new HashSet<(int Track, int Channel)>();
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
-            if (note is null || note.EndSample <= note.StartSample)
+            if (!IsNoteEmitted(note))
                 continue;
             TrackSlot slot = allocator.SlotFor(note.ChannelId);
             if (slot is null)
                 continue;
-            EmitNote(slot, note, originOffsetQuarters);
+            EmitNote(slot, note, originOffsetQuarters, bendRangeChannels);
         }
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation).
@@ -146,7 +165,7 @@ internal sealed class MusicalMidiExporter
         int nextDrum = _options.PercussionNoteBase;
         foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
         {
-            if (rhythm is null)
+            if (!IsRhythmEmitted(rhythm))
                 continue;
             TrackSlot slot = allocator.SlotFor(rhythm.ChannelId, percussive: true);
             if (slot is null)
@@ -156,10 +175,10 @@ internal sealed class MusicalMidiExporter
                 note = nextDrum++;
                 drumNoteByVoice[rhythm.ChannelId] = note;
             }
-            slot.Track.Events.Add(new MidiNoteEvent(
+            AddTrackEvent(slot.Track, new MidiNoteEvent(
                 MapTick(rhythm.SamplePosition, originOffsetQuarters),
                 slot.Index, slot.Channel, note, 100, NoteOn: true));
-            slot.Track.Events.Add(new MidiNoteEvent(
+            AddTrackEvent(slot.Track, new MidiNoteEvent(
                 MapTick(rhythm.SamplePosition, originOffsetQuarters) + ShortHitTicks,
                 slot.Index, slot.Channel, note, 100, NoteOn: false));
         }
@@ -179,6 +198,7 @@ internal sealed class MusicalMidiExporter
                 TempoSource = TimingSource.DriverBeatAnchors,
                 PhaseSource = TimingSource.DriverBeatAnchors,
             },
+            OriginOffsetQuarters = originOffsetQuarters,
         };
     }
 
@@ -194,16 +214,48 @@ internal sealed class MusicalMidiExporter
 
     private int ShortHitTicks => Math.Max(1, _ppq / 32);
 
-    private void EmitNote(TrackSlot slot, NoteEvent note, double originOffsetQuarters)
+    /// <summary>Single source of truth for whether a note is actually emitted (§21).
+    /// Export emits a note only when it has positive duration AND its voice is
+    /// included (excluded voices get no track/slot). ComputeOriginOffset must derive
+    /// the global origin from EXACTLY the same set, so the two share this predicate —
+    /// a note either side drops (non-positive duration or voice-excluded) emits no
+    /// tick and must never push the origin back.</summary>
+    private bool IsNoteEmitted(NoteEvent note) =>
+        note is not null && note.EndSample > note.StartSample && _options.OverrideFor(note.ChannelId).Include;
+
+    /// <summary>Single source of truth for whether a rhythm trigger is emitted (§21).
+    /// Export/BuildTracks drop rhythm channels whose VoiceExportOverride.Include is
+    /// false (no track, no slot, no events); ComputeOriginOffset must apply the same
+    /// predicate so an excluded channel's early trigger cannot delay the origin.</summary>
+    private bool IsRhythmEmitted(RhythmEvent rhythm) =>
+        rhythm is not null && _options.OverrideFor(rhythm.ChannelId).Include;
+
+    /// <summary>Single source of truth for whether a note serializes a pitch-bend
+    /// family (§21). Used by BOTH EmitNote (to decide bend emission) and
+    /// ComputeOriginOffset (to decide whether the note's pitch changes may contribute
+    /// to the origin), so the two can never diverge. A note emits bends only when
+    /// EmitPitchBend is set AND it has pitch changes OR a fractional / non-finite
+    /// initial note (an initial bend so it sounds at its true pitch); any other note
+    /// produces a single round-pitch note with no bend infrastructure — and must not
+    /// fold pitch-change samples into the origin.</summary>
+    private bool ShouldFoldPitch(NoteEvent note)
+    {
+        if (!_options.EmitPitchBend)
+            return false;
+        if (note.Pitch is { Count: > 0 })
+            return true;
+        return !double.IsFinite(note.InitialMidiNote)
+            || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6;
+    }
+
+    private void EmitNote(TrackSlot slot, NoteEvent note, double originOffsetQuarters,
+        HashSet<(int Track, int Channel)> bendRangeChannels)
     {
         VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
         int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
         int transpose = voiceOverride.TransposeSemitones;
 
-        bool needsBend = _options.EmitPitchBend
-            && (note.Pitch is { Count: > 0 }
-                || !double.IsFinite(note.InitialMidiNote)
-                || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6);
+        bool needsBend = ShouldFoldPitch(note);
 
         // When no bend is needed, emit a single note at the rounded pitch with no
         // bend infrastructure at all (keeps constant-pitch output minimal and
@@ -214,12 +266,13 @@ internal sealed class MusicalMidiExporter
                 note.StartSample, note.EndSample,
                 note.InitialMidiNote, Array.Empty<PitchChange>()) };
 
-        if (needsBend)
+        if (needsBend && bendRangeChannels.Add((slot.Index, slot.Channel)))
         {
-            // The bend is always relative to the note's own playback pitch, so a
-            // +-range bend range suffices; monotonic, per-segment note numbers re-centre
-            // long contours into a run of short notes (glissando re-articulation).
-            slot.Track.Events.Add(new MidiBendRangeEvent(
+            // Emit the RPN pitch-bend-range setup once per (track, channel), at the
+            // first bend-needing note's start (§32): the DAW's range must come from
+            // an explicit RPN, not a coincidental default, but it is not re-sent for
+            // every note on an unchanged channel.
+            AddTrackEvent(slot.Track, new MidiBendRangeEvent(
                 MapTick(note.StartSample, originOffsetQuarters),
                 slot.Index, slot.Channel, _options.BendRangeSemitones));
         }
@@ -231,26 +284,40 @@ internal sealed class MusicalMidiExporter
             if (segOff <= segOn)
                 segOff = segOn + 1;
             int pitch = (int)Math.Clamp(Math.Round(segment.BaseMidiNote) + transpose, 0, 127);
-            slot.Track.Events.Add(new MidiNoteEvent(segOn, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
-            slot.Track.Events.Add(new MidiNoteEvent(segOff, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
+            AddTrackEvent(slot.Track, new MidiNoteEvent(segOn, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
+            AddTrackEvent(slot.Track, new MidiNoteEvent(segOff, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
 
             if (!needsBend)
                 continue;
             // Initial fractional correction so the note starts at its true pitch.
             double baseNote = segment.BaseMidiNote;
             int initialBend = EncodeBend(baseNote - pitch, _options.BendRangeSemitones);
-            slot.Track.Events.Add(new MidiPitchBendEvent(segOn, slot.Index, slot.Channel, initialBend));
+            AddTrackEvent(slot.Track, new MidiPitchBendEvent(segOn, slot.Index, slot.Channel, initialBend));
             // Each change, relative to the segment's base note.
             foreach (PitchChange change in segment.Changes)
             {
                 if (!double.IsFinite(change.MidiNote))
                     continue;
-                slot.Track.Events.Add(new MidiPitchBendEvent(
+                AddTrackEvent(slot.Track, new MidiPitchBendEvent(
                     MapTick(change.SamplePosition, originOffsetQuarters),
                     slot.Index, slot.Channel,
                     EncodeBend(change.MidiNote - baseNote, _options.BendRangeSemitones)));
             }
         }
+    }
+
+    /// <summary>Assigns the next deterministic source-sequence key and returns the event.</summary>
+    private MidiEventBase WithSourceOrder(MidiEventBase evt)
+    {
+        evt.SourceOrder = _sourceOrder++;
+        return evt;
+    }
+
+    /// <summary>Appends an event to a track with a deterministic source-sequence key.</summary>
+    private void AddTrackEvent(MidiTrack track, MidiEventBase evt)
+    {
+        evt.SourceOrder = _sourceOrder++;
+        track.Events.Add(evt);
     }
 
     /// <summary>7-bit bend value for a semitone offset within the configured range.</summary>
@@ -340,21 +407,68 @@ internal sealed class MusicalMidiExporter
 
     private double ComputeOriginOffset(VisualizationTimeline timeline)
     {
-        long minSample = long.MaxValue;
+        // The global origin must make every exported tick nonnegative (§21). The
+        // map's FirstSample is the earliest sample any conductor event (tempo /
+        // time signature / source marker) covers, and every note/rhythm sample sits
+        // at or after it, so its quarter position is the lower bound. Include it
+        // (plus any earlier downbeat marker) so a conductor tempo at the map start
+        // is never left at a negative tick — a note/rhythm-only origin would miss it.
+        double minQuarter = _map.SampleToQuarterPosition(_map.FirstSample);
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
-            if (note is null) continue;
-            minSample = Math.Min(minSample, note.StartSample);
+            // The origin must derive ONLY from events that will actually be emitted
+            // (§21). Export emits a note only when it has positive duration AND its
+            // voice is included (excluded voices get no track/slot). Shared via
+            // IsNoteEmitted so the origin can never drift from emission — a dropped
+            // early note would otherwise push back the origin and delay the first
+            // tempo/event off tick 0.
+            if (!IsNoteEmitted(note))
+                continue;
+            minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(note.StartSample));
+            // Pitch bends are emitted at every pitch-change sample (which may sit
+            // before the note's own start), so the global origin must cover them too
+            // (§21) — but ONLY when bends are actually serialized (ShouldFoldPitch).
+            // When EmitPitchBend is off or the note carries no pitch changes, no bend
+            // is emitted, so non-finite/early pitch changes must not shift the origin.
+            if (!ShouldFoldPitch(note))
+                continue;
+            foreach (PitchChange change in note.Pitch)
+            {
+                if (!double.IsFinite(change.MidiNote))
+                    continue;
+                minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(change.SamplePosition));
+            }
         }
         foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
         {
-            if (rhythm is null) continue;
-            minSample = Math.Min(minSample, rhythm.SamplePosition);
+            // The origin must derive ONLY from rhythm triggers that are actually
+            // emitted (§21). Export/BuildTracks drop rhythm channels whose
+            // VoiceExportOverride.Include is false (no track, no events); shared via
+            // IsRhythmEmitted so an excluded channel's early trigger can never delay
+            // the origin off tick 0.
+            if (!IsRhythmEmitted(rhythm))
+                continue;
+            minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(rhythm.SamplePosition));
         }
-        if (minSample == long.MaxValue)
-            minSample = timeline.StartSample;
-        double minQuarter = _map.SampleToQuarterPosition(minSample);
-        double baseOffset = Math.Ceiling(-minQuarter);
+        // Loop/section markers and the first-downbeat marker are projected onto the
+        // conductor ONLY when EmitMarkers is set; they may precede the first
+        // note/rhythm and must never map to a negative tick (§21). When markers are
+        // disabled they are not emitted, so they must not push the origin back —
+        // otherwise a marker before the map start would shift every real event and
+        // leave leading ticks at the DAW's default tempo.
+        if (_options.EmitMarkers)
+        {
+            foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
+            {
+                if (loop is null) continue;
+                minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(loop.SamplePosition));
+            }
+            if (_map.FirstDownbeatQuarter is double downbeat)
+                minQuarter = Math.Min(minQuarter, downbeat);
+        }
+
+        // origin must be nonnegative (§21); ceil so the minimum event maps to tick 0.
+        double baseOffset = Math.Max(0, Math.Ceiling(-minQuarter));
         Meter? meter = _map.Meter;
         if (meter is not null)
         {
@@ -370,35 +484,42 @@ internal sealed class MusicalMidiExporter
         // Track name + source metadata text.
         if (_options.EmitConductorMetadata)
         {
-            conductor.Add(new MidiMetaTextEvent(0, 0x01, timeline.Source?.Title ?? "MDPlayer Export"));
+            conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, timeline.Source?.Title ?? "MDPlayer Export")));
             if (!string.IsNullOrWhiteSpace(timeline.Source?.SourceFormat))
-                conductor.Add(new MidiMetaTextEvent(0, 0x01, $"src-format {timeline.Source.SourceFormat}"));
-            conductor.Add(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}"));
+                conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"src-format {timeline.Source.SourceFormat}")));
+            conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}")));
         }
 
-        // Set Tempo per segment, at each segment's start tick.
+        // Set Tempo per segment, at each segment's start tick. Adjacent segments
+        // whose emitted µs/qn value (the MIDI integer actually written) is identical
+        // produce ONE Set Tempo event (§19) — the raw BPM is never compared.
+        int? lastUsPerQuarter = null;
         foreach (TempoSegment segment in _map.Segments)
         {
+            int us = segment.MicrosecondsPerQuarter;
+            if (us == lastUsPerQuarter)
+                continue;
+            lastUsPerQuarter = us;
             long tick = MapTick(segment.StartSample, originOffsetQuarters);
-            conductor.Add(new MidiTempoEvent(tick, segment.MicrosecondsPerQuarter));
+            conductor.Add(WithSourceOrder(new MidiTempoEvent(tick, us)));
         }
 
         // Time Signature when known; omit otherwise (DAW uses its default).
         if (_map.Meter is Meter meter)
         {
-            conductor.Add(new MidiTimeSignatureEvent(
+            conductor.Add(WithSourceOrder(new MidiTimeSignatureEvent(
                 MapTick(_map.FirstSample, originOffsetQuarters),
-                meter.Numerator, meter.Denominator));
+                meter.Numerator, meter.Denominator)));
         }
 
         // Markers.
         if (_options.EmitMarkers)
         {
-            conductor.Add(new MidiMarkerEvent(MapTick(_map.FirstSample, originOffsetQuarters), "SOURCE_START"));
+            conductor.Add(WithSourceOrder(new MidiMarkerEvent(MapTick(_map.FirstSample, originOffsetQuarters), "SOURCE_START")));
             if (_map.FirstDownbeatQuarter is double downbeat)
             {
                 long downbeatTick = _map.QuarterPositionToTick(downbeat + originOffsetQuarters, _ppq);
-                conductor.Add(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT"));
+                conductor.Add(WithSourceOrder(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT")));
             }
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
             {
@@ -408,17 +529,17 @@ internal sealed class MusicalMidiExporter
                     LoopMarkerKind.Restart => "LOOP_END",
                     _ => "LOOP_MARK",
                 };
-                conductor.Add(new MidiMarkerEvent(MapTick(loop.SamplePosition, originOffsetQuarters), name));
+                conductor.Add(WithSourceOrder(new MidiMarkerEvent(MapTick(loop.SamplePosition, originOffsetQuarters), name)));
             }
         }
 
         // Timing-confidence text so the DAW/user sees what was inferred.
         if (_options.EmitConductorMetadata)
         {
-            conductor.Add(new MidiMetaTextEvent(
+            conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
                 MapTick(_map.FirstSample, originOffsetQuarters),
                 0x01,
-                TimingConfidenceText()));
+                TimingConfidenceText())));
         }
     }
 
@@ -470,7 +591,7 @@ internal sealed class MusicalMidiExporter
             string label = voiceNames.TryGetValue(channelId, out string? name)
                 ? (name ?? channelId)
                 : channelId;
-            allocator.Add(channelId, index++, label, isPercussion, _options, voiceOverride);
+            allocator.Add(channelId, index++, label, isPercussion, _options, voiceOverride, WithSourceOrder);
         }
         return allocator;
     }
@@ -480,7 +601,7 @@ internal sealed class MusicalMidiExporter
         public Dictionary<string, TrackSlot> _slots = new(StringComparer.Ordinal);
         public Dictionary<int, MidiTrack> Tracks { get; } = new();
 
-        public void Add(string channelId, int index, string name, bool percussive, MusicalMidiExportOptions options, VoiceExportOverride voiceOverride)
+        public void Add(string channelId, int index, string name, bool percussive, MusicalMidiExportOptions options, VoiceExportOverride voiceOverride, Func<MidiEventBase, MidiEventBase> withOrder)
         {
             var track = new MidiTrack { Name = name };
             Tracks[index] = track;
@@ -492,7 +613,7 @@ internal sealed class MusicalMidiExporter
                 // Assign a program so note-only exports still sound. An explicit
                 // per-voice program wins; otherwise use a generic default.
                 int program = voiceOverride.Program ?? 0;
-                track.Events.Add(new MidiProgramEvent(0, index, channel, program));
+                track.Events.Add(withOrder(new MidiProgramEvent(0, index, channel, program)));
             }
         }
 

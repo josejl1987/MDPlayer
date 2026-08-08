@@ -42,6 +42,17 @@ internal static class VisualizationJsonWriter
         return JsonSerializer.Serialize(Ordered(timeline), Options);
     }
 
+    /// <summary>
+    /// Reads a serialized <see cref="VisualizationTimeline"/>. Structural bounds
+    /// are validated here, but the sample clock is deliberately NOT required to be
+    /// positive: an ambiguous/missing clock must reach
+    /// <see cref="TimelineBuilder.Merge"/> and be rejected there by
+    /// <see cref="ProducerClockNormalization"/> with an actionable
+    /// <see cref="Fmp.Core.Timing.MusicalTimingException"/> (the producer
+    /// boundary), not a generic JSON error. Consumers that read a timeline without
+    /// routing it through the producer boundary must pass a positive-rate timeline
+    /// (or reject it themselves).
+    /// </summary>
     public static VisualizationTimeline Read(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -61,7 +72,7 @@ internal static class VisualizationJsonWriter
         }
         VisualizationTimeline timeline = JsonSerializer.Deserialize<VisualizationTimeline>(root.ToJsonString(), Options)
             ?? throw new JsonException("Visualization timeline is empty.");
-        VisualizationTimelineValidator.Validate(timeline);
+        VisualizationTimelineValidator.Validate(timeline, requirePositiveSampleRate: false);
         return timeline;
     }
 

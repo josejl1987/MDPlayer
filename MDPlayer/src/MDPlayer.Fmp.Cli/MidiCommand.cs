@@ -99,58 +99,68 @@ internal static class MidiCommand
         File.WriteAllBytes(options.Output, result.Bytes);
 
         output.WriteLine($"wrote {System.IO.Path.GetFullPath(options.Output)} ({result.Bytes.Length} bytes)");
-        output.WriteLine($"tempo: {diagnostics.TempoSource}, {build.Map.Segments.Count} segment(s); " +
-            $"phase: {diagnostics.PhaseSource}, {build.Map.SampleToQuarterPosition(build.Map.StartSample):0.###} quarter(s) at sample 0");
+        // Report the resolved timing source explicitly - for auto this is the source
+        // that was actually selected, so the user can see the choice (section 48).
+        string mode = options.TempoSource == MidiTempoSource.Auto ? "auto-selected" : "forced";
+        output.WriteLine($"timing source: {diagnostics.TempoSource} ({mode}); " +
+            $"{build.Map.Segments.Count} segment(s)");
+        output.WriteLine($"tempo: {diagnostics.TempoSource}, phase: {diagnostics.PhaseSource}, " +
+            $"{build.Map.SampleToQuarterPosition(build.Map.StartSample):0.###} quarter(s) at sample 0 " +
+            $"[{(diagnostics.PhaseUnknown ? "not beat-aligned; phase unknown" : diagnostics.PhaseAuthoritative ? "beat-aligned" : "not beat-aligned; phase inferred")}]");
         foreach (string warning in diagnostics.Warnings)
             output.WriteLine($"warning: {warning}");
 
         if (!string.IsNullOrWhiteSpace(options.TimingReport))
-            WriteTimingReport(options.TimingReport, timeline, build);
+            WriteTimingReport(options.TimingReport, timeline, build, result, options.Ppq);
 
         return 0;
     }
 
-    private static void WriteTimingReport(string path, VisualizationTimeline timeline, MusicalTimeMapBuildResult build)
+    private static void WriteTimingReport(
+        string path,
+        VisualizationTimeline timeline,
+        MusicalTimeMapBuildResult build,
+        MusicalMidiExportResult export,
+        int ppq)
     {
+        TimingDiagnostics diagnostics = build.Diagnostics;
+        int inputAnchors = Math.Max(diagnostics.AnchorCount, diagnostics.RawAnchorCount);
+        int accepted = Math.Max(0, inputAnchors - diagnostics.RejectedAnchorCount);
         var report = new
         {
             sampleRate = build.Map.SampleRate,
-            ppq = 0,
+            ppq = ppq, // the CONFIGURED PPQ, never a placeholder (section 50)
+            source = diagnostics.TempoSource.ToString(),
+            phaseAuthoritative = diagnostics.PhaseAuthoritative,
+            tempoAuthoritative = diagnostics.TempoAuthoritative,
+            originTickOffset = (long)Math.Round(export.OriginOffsetQuarters * ppq),
+            meter = build.Map.Meter is { } m ? new { numerator = m.Numerator, denominator = m.Denominator } : (object?)null,
+            downbeatKnown = build.Map.FirstDownbeatQuarter is not null,
+            anchors = new
+            {
+                input = inputAnchors,
+                accepted = accepted,
+                rejected = diagnostics.RejectedAnchorCount,
+                rmsResidualSamples = diagnostics.RmsResidualSamples,
+                maxResidualSamples = diagnostics.MaxResidualSamples,
+                rejectedDetails = diagnostics.RejectedAnchors.Select(r => new
+                {
+                    sample = r.Sample,
+                    beatPosition = r.QuarterPosition,
+                    residual = r.ResidualQuarters,
+                    reason = r.Reason,
+                }).ToArray(),
+            },
             segments = build.Map.Segments.Select(s => new
             {
-                s.StartSample,
-                s.EndSample,
-                s.QuarterPositionAtStart,
-                s.SamplesPerQuarter,
+                startSample = s.StartSample,
+                endSample = s.EndSample,
+                quarterAtStart = s.QuarterPositionAtStart,
                 bpm = s.BeatsPerMinute,
                 source = s.Source.ToString(),
-                s.Confidence,
+                confidence = s.Confidence,
             }).ToArray(),
-            meter = build.Map.Meter?.ToString(),
-            firstDownbeatQuarter = build.Map.FirstDownbeatQuarter,
-            startSample = build.Map.StartSample,
-            endSample = build.Map.EndSample,
-            diagnostics = new
-            {
-                build.Diagnostics.AnchorCount,
-                build.Diagnostics.RejectedAnchorCount,
-                build.Diagnostics.SegmentCount,
-                build.Diagnostics.MaxResidualQuarters,
-                build.Diagnostics.RmsResidualQuarters,
-                tempoSource = build.Diagnostics.TempoSource.ToString(),
-                phaseSource = build.Diagnostics.PhaseSource.ToString(),
-                build.Diagnostics.PhaseUnknown,
-                sampleZeroQuarter = build.Diagnostics.SampleZeroQuarter,
-                build.Diagnostics.IsTrustworthy,
-                warnings = build.Diagnostics.Warnings,
-                timelineAnnotations = new
-                {
-                    notes = timeline.Notes.Count,
-                    beats = timeline.Beats.Length,
-                    timing = timeline.Timing.Length,
-                    rhythm = timeline.Rhythm.Count,
-                },
-            },
+            warnings = diagnostics.Warnings,
         };
         string json = System.Text.Json.JsonSerializer.Serialize(
             report,

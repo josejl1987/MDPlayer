@@ -45,6 +45,12 @@ public sealed class MidiExportRequest
     /// <summary>Semitones of the pitch-bend range written as an RPN (default 2).</summary>
     public int BendRangeSemitones { get; init; } = 2;
 
+    /// <summary>When true, an unresolved timing ambiguity (no beat phase, conflicting/
+    /// anchors, pathological residual) fails the export instead of proceeding with an
+    /// inferred/unaligned grid — mirroring the CLI --strict-timing. Default false: the
+    /// GUI reports the signal on the result rather than throwing.</summary>
+    public bool StrictTiming { get; init; }
+
     /// <summary>Place percussive voices on MIDI channel 9 (GM percussion).</summary>
     public bool UsePercussionChannel { get; init; } = true;
 
