@@ -275,6 +275,14 @@ public sealed class GenericVisualizationArchitectureTests
         ];
 
         StemPlan vgm = ScopePlanner.Plan("vgm", vgmDevices, vgmVoices, "auto");
+        // Real VGM timelines advertise the FMP-shared YM2608 decoder's phantom
+        // PPZ8 companion device. It must not block per-channel stems: VGM never
+        // contains PPZ8 data, and the VGM stem renderer has no PPZ8 stems.
+        StemPlan vgmOpna = ScopePlanner.Plan(
+            "vgm",
+            [VisualizationDeviceCatalog.Ym2608(), VisualizationDeviceCatalog.Ppz8()],
+            VisualizationDeviceCatalog.Ym2608Voices(),
+            "auto");
         StemPlan rejected = ScopePlanner.Plan("mdplayer", vgmDevices, vgmVoices, "channel");
         StemPlan device = ScopePlanner.Plan("vgm", vgmDevices, vgmVoices, "device");
         StemPlan fmp = ScopePlanner.Plan(
@@ -285,6 +293,10 @@ public sealed class GenericVisualizationArchitectureTests
 
         Assert.Equal(StemStrategy.VgmRenderedStems, vgm.Strategy);
         Assert.True(vgm.Supported);
+        // YM2608-only VGM files (e.g. Master Ninja) must get per-channel stems,
+        // not the master fallback. The VGM stem renderer fully supports OPNA.
+        Assert.Equal(StemStrategy.VgmRenderedStems, vgmOpna.Strategy);
+        Assert.True(vgmOpna.Supported);
         Assert.False(rejected.Supported);
         Assert.False(device.Supported);
         Assert.Equal(StemStrategy.FmpParallelSynthesis, fmp.Strategy);

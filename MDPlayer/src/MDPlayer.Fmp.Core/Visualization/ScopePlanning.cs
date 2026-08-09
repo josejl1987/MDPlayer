@@ -118,18 +118,31 @@ internal static class ScopePlanner
     {
         if (devices.Count == 0)
             return Unsupported(ScopeSupport.Channel, "no active devices");
-        if (devices.GroupBy(device => device.Id.Type).Any(group => group.Count() != 1)
-            || devices.Any(device => !IsVgmStemDevice(device.Id.Type)))
+
+        // VGM never carries PPZ8 data: a PPZ8 device in a VGM timeline is the
+        // FMP-shared YM2608 decoder's phantom companion (it unconditionally
+        // advertises Ppz8 alongside every Ym2608 device). The VGM stem
+        // renderer builds no PPZ8 stems, so ignore it for planning; otherwise
+        // every YM2608-only VGM (e.g. Master Ninja) would silently degrade to
+        // the master-waveform fallback.
+        DeviceDescriptor[] stemDevices = devices
+            .Where(device => device.Id.Type != ChipType.Ppz8)
+            .ToArray();
+        if (stemDevices.Length == 0)
+            return Unsupported(ScopeSupport.Channel, "no active devices");
+        if (stemDevices.GroupBy(device => device.Id.Type).Any(group => group.Count() != 1)
+            || stemDevices.Any(device => !IsVgmStemDevice(device.Id.Type)))
         {
             return Unsupported(
                 ScopeSupport.Channel,
                 "the VGM stem renderer requires one supported instance per active device");
         }
 
-        int streams = 1 + devices.Sum(device => device.Id.Type switch
+        int streams = 1 + stemDevices.Sum(device => device.Id.Type switch
         {
             ChipType.Huc6280 => 6,
             ChipType.Ym2612 => 6,
+            ChipType.Ym2608 => 11,
             ChipType.Ym2151 => 8,
             ChipType.Sn76489 => 4,
             ChipType.Okim6295 => 1,
@@ -167,7 +180,7 @@ internal static class ScopePlanner
     }
 
     private static bool IsVgmStemDevice(ChipType type) =>
-        type is ChipType.Huc6280 or ChipType.Ym2612 or ChipType.Ym2151 or ChipType.Sn76489 or ChipType.Okim6295
+        type is ChipType.Huc6280 or ChipType.Ym2612 or ChipType.Ym2608 or ChipType.Ym2151 or ChipType.Sn76489 or ChipType.Okim6295
             or ChipType.Ym2203 or ChipType.Ym2610 or ChipType.Ym2413 or ChipType.Ym3526 or ChipType.Ym3812
             or ChipType.Y8950 or ChipType.Ymf262 or ChipType.Ay8910 or ChipType.NesApu or ChipType.Dmg
             or ChipType.K051649;
