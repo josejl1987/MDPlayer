@@ -154,26 +154,29 @@ internal sealed class MusicalMidiExporter
         {
             if (!IsNoteEmitted(note))
                 continue;
-            TrackSlot slot = allocator.SlotFor(note.ChannelId);
+            TrackSlot slot = allocator.SlotFor(TrackKeyFor(note));
             if (slot is null)
                 continue;
             EmitNote(slot, note, originOffsetQuarters, bendRangeChannels);
         }
 
-        // Rhythm voices → percussion pitches (Batch 4 drum allocation).
-        var drumNoteByVoice = new Dictionary<string, int>(StringComparer.Ordinal);
+        // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
+        // track is keyed by its instrument identity (R9), and the percussion pitch is
+        // allocated per identity so distinct instruments get distinct drum notes.
+        var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>();
         int nextDrum = _options.PercussionNoteBase;
         foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
         {
             if (!IsRhythmEmitted(rhythm))
                 continue;
-            TrackSlot slot = allocator.SlotFor(rhythm.ChannelId, percussive: true);
+            MidiTrackKey rhythmKey = RhythmKeyFor(rhythm);
+            TrackSlot slot = allocator.SlotFor(rhythmKey);
             if (slot is null)
                 continue;
-            if (!drumNoteByVoice.TryGetValue(rhythm.ChannelId, out int note))
+            if (!drumNoteByIdentity.TryGetValue(rhythmKey, out int note))
             {
                 note = nextDrum++;
-                drumNoteByVoice[rhythm.ChannelId] = note;
+                drumNoteByIdentity[rhythmKey] = note;
             }
             AddTrackEvent(slot.Track, new MidiNoteEvent(
                 MapTick(rhythm.SamplePosition, originOffsetQuarters),
@@ -560,69 +563,177 @@ internal sealed class MusicalMidiExporter
     {
         var allocator = new TrackAllocator();
         int index = 1;
-        var voiceNames = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (VoiceDescriptor voice in timeline.Voices ?? Array.Empty<VoiceDescriptor>())
+
+        // Deterministic, source-order-independent enumeration of the distinct
+        // MidiTrackKey values carried by emitted notes + rhythm triggers. Building
+        // the full key set up front (not lazily) lets us sort keys into a stable
+        // cross-run order, so track indices, MIDI channels and names are repeatable.
+        // Each key remembers the ORIGINAL source ChannelId that produced it: voice
+        // overrides (VoiceExportOverride) are registered per ChannelId, so the
+        // override must resolve against that real channel — not a synthetic key.
+        var keyOrder = new List<MidiTrackKey>();
+        var representativeByKey = new Dictionary<MidiTrackKey, string>();
+        var seen = new HashSet<MidiTrackKey>();
+        void AddKey(MidiTrackKey key, string channelId)
         {
-            if (voice is null) continue;
-            voiceNames[voice.Id.ToString()] = voice.Label ?? voice.Id.ToString();
+            if (seen.Add(key))
+            {
+                keyOrder.Add(key);
+                representativeByKey[key] = channelId;
+            }
         }
-
-        // One track per channel that carries notes or rhythm.
-        var noteChannels = (timeline.Notes ?? Array.Empty<NoteEvent>())
-            .Where(n => n is not null)
-            .Select(n => n.ChannelId)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        var rhythmChannels = (timeline.Rhythm ?? Array.Empty<RhythmEvent>())
-            .Where(r => r is not null)
-            .Select(r => r.ChannelId)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        var all = noteChannels.Concat(rhythmChannels).Distinct(StringComparer.Ordinal).ToList();
-        all.Sort(StringComparer.Ordinal);
-
-        foreach (string channelId in all)
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
+            if (note is null || !IsNoteEmitted(note))
+                continue;
+            AddKey(TrackKeyFor(note), note.ChannelId);
+        }
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null || !IsRhythmEmitted(rhythm))
+                continue;
+            AddKey(RhythmKeyFor(rhythm), rhythm.ChannelId);
+        }
+        keyOrder.Sort(CompareTrackKeys);
+
+        foreach (MidiTrackKey key in keyOrder)
+        {
+            string channelId = representativeByKey[key];
             VoiceExportOverride voiceOverride = _options.OverrideFor(channelId);
             if (!voiceOverride.Include)
                 continue; // excluded voice: no track, no notes.
-            bool isPercussion = timeline.Rhythm is not null
-                && rhythmChannels.Contains(channelId, StringComparer.Ordinal);
-            string label = voiceNames.TryGetValue(channelId, out string? name)
-                ? (name ?? channelId)
-                : channelId;
-            allocator.Add(channelId, index++, label, isPercussion, _options, voiceOverride, WithSourceOrder);
+            allocator.Add(key, index++, channelId, voiceOverride, _options, WithSourceOrder);
         }
         return allocator;
     }
 
+    /// <summary>Deterministic total order over keys (chip, then identity family,
+    /// then canonical instrument string, then source channel).</summary>
+    private static int CompareTrackKeys(MidiTrackKey a, MidiTrackKey b)
+    {
+        int c = a.Chip.CompareTo(b.Chip);
+        if (c != 0) return c;
+        c = a.Instrument.Family.CompareTo(b.Instrument.Family);
+        if (c != 0) return c;
+        c = string.CompareOrdinal(a.Instrument.Canonical, b.Instrument.Canonical);
+        if (c != 0) return c;
+        return a.SourceChannel.CompareTo(b.SourceChannel);
+    }
+
+    /// <summary>The MIDI track key owning a source note. The note is owned by the
+    /// instrument active at its NoteOn for its ENTIRE lifetime (R4) — a register
+    /// change mid-note never retargets the note to another track.</summary>
+    private MidiTrackKey TrackKeyFor(NoteEvent note)
+    {
+        if (!TryParseSourceChannel(note.ChannelId, out ChipType chip, out int sourceChannel)
+            || !InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
+            return PlaceholderKey(note.ChannelId);
+        return new MidiTrackKey(chip, sourceChannel, instrument);
+    }
+
+    /// <summary>The MIDI track key owning a rhythm trigger, keyed by the rhythm
+    /// instrument identity (R9). The exporter works from the identity — never from
+    /// the raw voice-name string — so a future rename cannot change grouping.</summary>
+    private MidiTrackKey RhythmKeyFor(RhythmEvent rhythm)
+    {
+        if (!TryParseSourceChannel(rhythm.ChannelId, out ChipType chip, out int sourceChannel)
+            || !InstrumentIdentity.TryParse(rhythm.InstrumentId, out InstrumentIdentity instrument))
+            return PlaceholderKey(rhythm.ChannelId);
+        return new MidiTrackKey(chip, sourceChannel, instrument);
+    }
+
+    /// <summary>Reads the source chip + channel from a VoiceId-style ChannelId
+    /// (e.g. "ym2608.0.fm.2" → Ym2608, channel 1). The numeric suffix is 1-based;
+    /// we fold it to zero-based SourceChannel so (Chip, SourceChannel) identifies a
+    /// source voice, and cross-Kind separation (FM vs SSG on the same numbered
+    /// channel) comes from InstrumentIdentity.Family in the key.</summary>
+    private static bool TryParseSourceChannel(string channelId, out ChipType chip, out int sourceChannel)
+    {
+        chip = ChipType.Unknown;
+        sourceChannel = 0;
+        if (string.IsNullOrWhiteSpace(channelId))
+            return false;
+        string[] parts = channelId.Split('.');
+        if (parts.Length < 4)
+            return false;
+        if (!DeviceId.TryParse(parts[0] + "." + parts[1], out DeviceId device))
+            return false;
+        string suffix = parts[^1];
+        if (!int.TryParse(suffix, out int n) || n < 1)
+            return false;
+        chip = device.Type;
+        sourceChannel = n - 1;
+        return true;
+    }
+
+    /// <summary>Collapses notes whose instrument identity could not be resolved to a
+    /// single per-source-channel placeholder track (R11). The key is stable within a
+    /// ChannelId and otherwise unique, so all placeholder notes on one channel share
+    /// exactly one track and never leak per-instrument tracks.</summary>
+    private static MidiTrackKey PlaceholderKey(string channelId) =>
+        new(ChipType.Unknown, StableIndex(channelId), InstrumentIdentity.Empty);
+
+    private static int StableIndex(string channelId)
+    {
+        uint h = 2166136261;
+        foreach (char c in channelId)
+            h = (h ^ c) * 16777619;
+        return (int)(h & 0x7FFFFFFF);
+    }
+
     private sealed class TrackAllocator
     {
-        public Dictionary<string, TrackSlot> _slots = new(StringComparer.Ordinal);
+        public Dictionary<MidiTrackKey, TrackSlot> _slots = new();
         public Dictionary<int, MidiTrack> Tracks { get; } = new();
 
-        public void Add(string channelId, int index, string name, bool percussive, MusicalMidiExportOptions options, VoiceExportOverride voiceOverride, Func<MidiEventBase, MidiEventBase> withOrder)
+        public void Add(MidiTrackKey key, int index, string channelId, VoiceExportOverride voiceOverride,
+            MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder)
         {
+            TrackSlot? existing = SlotFor(key);
+            if (existing is not null)
+                return; // key already allocated (defensive; BuildTracks dedupes).
+            bool percussive = key.Instrument.Family == IdentityFamily.Rhythm;
+            string name = IdentityNameFor(key, percussive, channelId);
             var track = new MidiTrack { Name = name };
             Tracks[index] = track;
-            int channel = voiceOverride.Channel ?? (percussive && options.UsePercussionChannel ? 9 : (index - 1) % 16);
-            _slots[channelId] = new TrackSlot(this, track, index, channel, percussive);
-            _slots[channelId].Override = voiceOverride;
+            int channel = ResolveChannel(key, index, percussive, options, voiceOverride);
+            _slots[key] = new TrackSlot(this, track, index, channel, percussive)
+            {
+                Override = voiceOverride,
+            };
             if (!percussive)
             {
-                // Assign a program so note-only exports still sound. An explicit
-                // per-voice program wins; otherwise use a generic default.
+                // One STABLE instrument per track: a single program is assigned at
+                // track creation and never changed mid-track (R7). This initial
+                // setup is also the captured "silent-period state" — no silence-only
+                // track is created (R6).
                 int program = voiceOverride.Program ?? 0;
                 track.Events.Add(withOrder(new MidiProgramEvent(0, index, channel, program)));
             }
         }
 
-        public TrackSlot? SlotFor(string channelId, bool percussive = false)
+        private static int ResolveChannel(MidiTrackKey key, int index, bool percussive,
+            MusicalMidiExportOptions options, VoiceExportOverride voiceOverride)
         {
-            if (_slots.TryGetValue(channelId, out TrackSlot? slot))
-                return slot;
-            return null;
+            if (voiceOverride.Channel is int oc)
+                return oc;
+            if (percussive)
+                return options.UsePercussionChannel ? 9 : (key.SourceChannel % 16);
+            // MIDI channel tracks the source channel (R3): all (CH2, instrument*)
+            // tracks share one MIDI channel. Unknown/placeholder keys preserve the
+            // historical index-based channel so per-channel behaviour is unchanged.
+            if (key.Chip == ChipType.Unknown)
+                return (index - 1) % 16;
+            return key.SourceChannel % 16;
         }
+
+        private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId) =>
+            key.Instrument.IsEmpty
+                ? channelId
+                : percussive ? key.Instrument.Canonical : key.Instrument.DisplayName;
+
+        public TrackSlot? SlotFor(MidiTrackKey key) =>
+            _slots.TryGetValue(key, out TrackSlot? slot) ? slot : null;
 
         public IEnumerable<MidiTrack> Values => Tracks.Values;
     }
