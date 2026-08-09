@@ -727,10 +727,35 @@ internal sealed class MusicalMidiExporter
             return key.SourceChannel % 16;
         }
 
-        private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId) =>
-            key.Instrument.IsEmpty
-                ? channelId
-                : percussive ? key.Instrument.Canonical : key.Instrument.DisplayName;
+        private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId)
+        {
+            // Placeholder / unresolved instruments keep the per-channel name.
+            if (key.Instrument.IsEmpty)
+                return channelId;
+            string instrument = percussive ? key.Instrument.Canonical : key.Instrument.DisplayName;
+            // Deterministic, source-channel-aware prefix: "<CHIP> CH<n>" where n is
+            // the 1-based source channel. Distinct (chip, channel, instrument) keys
+            // therefore always get distinct names.
+            string chip = key.Chip == ChipType.Unknown ? "CH" : $"{ChipPrefix(key.Chip)} CH";
+            return $"{chip}{key.SourceChannel + 1} - {instrument}";
+        }
+
+        private static string ChipPrefix(ChipType chip) => chip switch
+        {
+            ChipType.Ym2203 => "YM2203",
+            ChipType.Ym2608 => "YM2608",
+            ChipType.Ym2610 => "YM2610",
+            ChipType.Ym2612 => "YM2612",
+            ChipType.Ym2151 => "YM2151",
+            ChipType.Ym2413 => "YM2413",
+            ChipType.Ym3526 => "YM3526",
+            ChipType.Ym3812 => "YM3812",
+            ChipType.Y8950 => "Y8950",
+            ChipType.Ymf262 => "YMF262",
+            ChipType.Ymf278b => "YMF278B",
+            ChipType.Ymz280b => "YMZ280B",
+            _ => chip.ToString().ToUpperInvariant(),
+        };
 
         public TrackSlot? SlotFor(MidiTrackKey key) =>
             _slots.TryGetValue(key, out TrackSlot? slot) ? slot : null;
