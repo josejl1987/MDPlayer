@@ -204,10 +204,13 @@ internal static class MusicalTimeMapBuilder
         if (options.Source is TimingSource forced)
             return forced;
 
-        // A fixed-BPM override is a user override regardless of anchors.
-        if (options.FixedBpm is not null
-            || options.BeatOffsetQuarter is not null
-            || options.BeatOffsetSamples is not null)
+        // A fixed-BPM override is a user override regardless of anchors. A beat-phase
+        // override (BeatOffsetQuarter / BeatOffsetSamples) selects the phase dimension
+        // ONLY; it must never convert authoritative driver tempo into UserOverride
+        // (D005). BeatGridFitter consumes the phase separately (PhaseSource=UserOverride)
+        // while this method still picks the tempo source from the strongest timing
+        // evidence (driver anchors > validated BPM > inference).
+        if (options.FixedBpm is not null)
             return TimingSource.UserOverride;
 
         if (anchors.Length >= 2)

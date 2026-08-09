@@ -163,6 +163,50 @@ public sealed class MusicalTimeMapBuilderTests
         Assert.Equal(-12000.0 / spq, map.SampleToQuarterPosition(0), precision: 6);
     }
 
+    // ---- D005: tempo source decoupled from beat-phase override ----
+
+    [Fact]
+    public void PhaseOverride_KeepsDriverBeatAnchorsTempo_ReportsPhaseSourceSeparately()
+    {
+        // D005: an explicit beat-phase override must select the PHASE dimension ONLY.
+        // It must never convert authoritative driver beat-anchor tempo into
+        // TimingSource.UserOverride. The driver encodes 120 BPM purely via its beat
+        // anchors (no validated tempo events); an explicit phase override applied on
+        // top must keep TempoSource = DriverBeatAnchors with the identical recovered
+        // BPM, while PhaseSource reports the user override separately. Pre-fix, ANY
+        // phase override forced ResolveSource() to UserOverride, discarding the
+        // anchor-tempo evidence and mislabeling the grid as a user tempo.
+        double spq = Sr * 60.0 / 120.0; // 22050 samples/quarter → 120 BPM
+        // Beat i sits at i*spq and maps to quarter i+1 (one-quarter-leading index), so
+        // sample 0 holds quarter 1 and the anchors are exactly consistent with the
+        // declared phase override below (no rejected/outlier anchors).
+        var beats = Enumerable.Range(0, 12)
+            .Select(i => new BeatEvent((long)Math.Round(i * spq), i + 1))
+            .ToArray();
+        var options = new MusicalTimeMapOptions
+        {
+            DetectTempoChanges = true,
+            // Explicit phase override: quarter 1 at sample 0 (an offset, not null).
+            BeatOffsetQuarter = 1.0,
+        };
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(
+            Timeline(beats, endSample: (long)Math.Round(13 * spq)), options);
+
+        // Tempo source stays DRIVER (anchors), NOT demoted to the phase override.
+        Assert.Equal(TimingSource.DriverBeatAnchors, build.Diagnostics.TempoSource);
+        // The phase dimension is the user override, reported independently.
+        Assert.Equal(TimingSource.UserOverride, build.Diagnostics.PhaseSource);
+        // The driver tempo survives: one continuous segment recovered at 120 BPM.
+        Assert.Single(build.Map.Segments);
+        Assert.Equal(120.0, build.Map.Segments[0].BeatsPerMinute, precision: 2);
+        // The phase override is honoured: quarter 1 at sample 0.
+        Assert.Equal(1.0, build.Map.SampleToQuarterPosition(0), precision: 6);
+        // No anchors rejected: the grid is clean and trustworthy.
+        Assert.Equal(0, build.Diagnostics.RejectedAnchorCount);
+        Assert.True(build.Diagnostics.IsTrustworthy);
+    }
+
     // ---- T015: strict-mode failures ----
 
     [Fact]
