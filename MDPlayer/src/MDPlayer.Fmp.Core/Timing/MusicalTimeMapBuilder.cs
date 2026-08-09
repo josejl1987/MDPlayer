@@ -41,11 +41,21 @@ internal static class MusicalTimeMapBuilder
             // Convert samples→quarters using the best-known tempo so far. The offset
             // is SIGNED and any set value (including 0) is an explicit phase override:
             // negative lands a pickup before quarter 0, +0 pins quarter 0 at sample 0,
-            // positive pushes quarter 0 ahead of sample 0. (No derivable tempo keeps
-            // beatOffsetQuarter null and is raised as a separate error by the caller.)
+            // positive pushes quarter 0 ahead of sample 0. Samples cannot be converted
+            // without a derivable tempo, so rather than silently dropping the override
+            // (MEM009) we fail with an actionable error naming the missing input.
             double? spq = EffectiveSamplesPerQuarter(timeline, options);
             if (spq is > 0)
+            {
                 beatOffsetQuarter = options.BeatOffsetSamples.Value / spq.Value;
+            }
+            else
+            {
+                throw new MusicalTimingException(
+                    $"cannot apply --beat-offset-samples: no derivable tempo to convert sample " +
+                    $"offset {options.BeatOffsetSamples.Value} to a quarter position (supply --bpm " +
+                    "or a driver-validated BPM)");
+            }
         }
 
         // Convert beat events into quarter-position anchors.
@@ -311,11 +321,10 @@ internal static class MusicalTimeMapBuilder
         double? firstDownbeatQuarter = null;
         if (options.FirstDownbeatSample is long downbeatSample && meter is not null)
         {
-            // Compute the quarter position of the downbeat from the map, snapped to
-            // the nearest bar boundary in this meter.
-            double downbeatQuarter = ComputeSampleToQuarter(segments, downbeatSample);
-            double quartersPerBar = meter.QuartersPerBar;
-            firstDownbeatQuarter = Math.Round(downbeatQuarter / quartersPerBar) * quartersPerBar;
+            // The downbeat's quarter position is the exact position of the sample on
+            // the assembled map — no snapping to the nearest meter multiple. Bars are
+            // relative to it, so an explicit 2.37 downbeat stays 2.37 (§15).
+            firstDownbeatQuarter = ComputeSampleToQuarter(segments, downbeatSample);
         }
 
         return new MusicalTimeMap(

@@ -286,6 +286,56 @@ public sealed class MusicalTimeMapBuilderTests
         Assert.True(build.Map.SampleToQuarterPosition(0) < 0);
     }
 
+    // ---- T3: exact downbeat (no bar snapping) + MEM009 tempo-less offset throw ----
+
+    [Fact]
+    public void FirstDownbeatSample_ExactQuarter_NoBarSnapping()
+    {
+        // §15: FirstDownbeatSample must become an EXACT downbeat with NO bar
+        // snapping. A downbeat landing at quarter 2.37 must stay 2.37 (bars are
+        // relative to it) instead of being snapped to the nearest meter multiple
+        // (which would yield 4.0 in a 4/4 bar).
+        double bpm = 120;
+        double spq = Sr * 60.0 / bpm; // 22050 samples/quarter at 120 BPM
+        long downbeatSample = 52_259; // quarter ≈ 2.37 on the 120-BPM grid
+        var timeline = Timeline(Array.Empty<BeatEvent>(),
+            endSample: downbeatSample + (long)spq);
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = bpm,
+            Meter = new Meter(4, 4),
+            BeatOffsetSamples = 0,            // explicit phase: quarter 0 at sample 0
+            FirstDownbeatSample = downbeatSample,
+        }).Map;
+
+        Assert.NotNull(map.FirstDownbeatQuarter);
+        double expected = downbeatSample / spq;                 // 2.37002...
+        double snappedToBar = Math.Round(expected / 4.0) * 4.0; // old behavior: 4.0
+        // Exact downbeat: stays at its computed quarter position (not snapped).
+        Assert.Equal(expected, map.FirstDownbeatQuarter!.Value, precision: 6);
+        // Explicitly NOT snapped to the nearest 4-quarter bar boundary.
+        Assert.NotEqual(snappedToBar, map.FirstDownbeatQuarter.Value, precision: 6);
+    }
+
+    [Fact]
+    public void BeatOffsetSamples_NoDerivableTempo_ThrowsActionableMusicalTimingException()
+    {
+        // MEM009: a signed sample offset cannot be converted to quarters without a
+        // derivable tempo. Previously the phase override silently no-opped (the grid
+        // ignored the offset); now it must throw an actionable MusicalTimingException
+        // telling the caller how to supply the tempo.
+        var timeline = Timeline(Array.Empty<BeatEvent>());
+
+        var ex = Assert.Throws<MusicalTimingException>(() =>
+            MusicalTimeMapBuilder.Build(timeline,
+                new MusicalTimeMapOptions { BeatOffsetSamples = -12_345 }));
+
+        Assert.Contains("derivable tempo", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("--bpm", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("sample offset", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ---- T015: strict-mode failures ----
 
     [Fact]
