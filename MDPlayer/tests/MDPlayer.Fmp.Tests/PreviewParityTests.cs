@@ -13,9 +13,22 @@ using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
-/// <summary>PR5 acceptance tests for the shared frame renderer and preview session.</summary>
-public sealed class PreviewParityTests
+/// <summary>
+/// PR5 acceptance tests for the shared frame renderer and preview session.
+/// A shared <see cref="PreviewParityFixture"/> opens one in-process preview
+/// session against the checked-in <c>master-ninja.vgz</c> so the expensive
+/// python3+ffmpeg capture runs once across the heavy real-vgz tests instead of
+/// once per test.
+/// </summary>
+public sealed class PreviewParityTests : IClassFixture<PreviewParityFixture>
 {
+    private readonly PreviewParityFixture _fixture;
+
+    public PreviewParityTests(PreviewParityFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     // ---- Fixtures ----
 
     private static VisualizationRequest FixtureRequest(string input = "fixture.ovi")
@@ -381,23 +394,18 @@ public sealed class PreviewParityTests
     [SkippableFact]
     public async Task InProcessPreviewSession_RendersFramesOnRealVgz()
     {
-        bool hasPy = IsCommandAvailable("python3");
-        bool hasFf = IsCommandAvailable("ffmpeg");
-        Skip.IfNot(
-            hasPy && hasFf,
-            $"real .vgz preview smoke test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+        Skip.IfNot(_fixture.HasPrereqs, _fixture.SkipReason);
 
-        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        string input = _fixture.VgzPath;
         Assert.True(File.Exists(input), $"expected vgz fixture at {input}");
 
-        string sessionRoot = Path.Combine(
-            Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(sessionRoot);
+        IVisualizationPreviewSession session = _fixture.Session
+            ?? throw new InvalidOperationException("shared session unavailable despite prereqs present");
 
         VisualizationRequest request = new()
         {
             InputPath = input,
-            OutputPath = Path.Combine(sessionRoot, "preview.mp4"),
+            OutputPath = Path.Combine(Path.GetTempPath(), "preview.mp4"),
             Composition = CompositionKind.Diagnostic,
             Output = new OutputSettings
             {
@@ -409,35 +417,26 @@ public sealed class PreviewParityTests
             Presentation = new PresentationSettings { Title = "Smoke" },
         };
 
-        var factory = new InProcessVisualizationPreviewSessionFactory();
-        await using (IVisualizationPreviewSession session =
-               await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+        VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
+        Assert.NotNull(plan);
+
+        foreach (double time in new[] { 0.0, 1.0, 2.0 })
         {
-            VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
-            Assert.NotNull(plan);
+            PreviewFrameResult frame = await session.RenderFrameAsync(
+                request,
+                new PreviewFrameRequest
+                {
+                    TimeSeconds = time,
+                    Fidelity = PreviewFidelity.AccurateStill,
+                    Width = 1280,
+                    Height = 720,
+                },
+                CancellationToken.None);
 
-            foreach (double time in new[] { 0.0, 1.0, 2.0 })
-            {
-                PreviewFrameResult frame = await session.RenderFrameAsync(
-                    request,
-                    new PreviewFrameRequest
-                    {
-                        TimeSeconds = time,
-                        Fidelity = PreviewFidelity.AccurateStill,
-                        Width = 1280,
-                        Height = 720,
-                    },
-                    CancellationToken.None);
-
-                Assert.NotNull(frame.PngBytes);
-                Assert.True(frame.PngBytes!.Length > 0,
-                    $"frame at t={time} produced an empty PNG");
-            }
+            Assert.NotNull(frame.PngBytes);
+            Assert.True(frame.PngBytes!.Length > 0,
+                $"frame at t={time} produced an empty PNG");
         }
-
-        // Session workspace can be cleaned up once disposed.
-        try { Directory.Delete(sessionRoot, recursive: true); }
-        catch (IOException) { /* best-effort cleanup */ }
     }
 
     [Fact]
@@ -463,148 +462,116 @@ public sealed class PreviewParityTests
     [SkippableFact]
     public async Task InProcessSession_AcquirePublishesReusableManifest()
     {
-        bool hasPy = IsCommandAvailable("python3");
-        bool hasFf = IsCommandAvailable("ffmpeg");
-        Skip.IfNot(
-            hasPy && hasFf,
-            $"real .vgz acquire test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+        Skip.IfNot(_fixture.HasPrereqs, _fixture.SkipReason);
 
-        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        string input = _fixture.VgzPath;
         if (!File.Exists(input))
             return;
 
-        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
+        IVisualizationPreviewSession session = _fixture.Session
+            ?? throw new InvalidOperationException("shared session unavailable despite prereqs present");
+
+        VisualizationRequest request = new()
         {
-            VisualizationRequest request = new()
+            InputPath = input,
+            OutputPath = Path.Combine(Path.GetTempPath(), "preview.mp4"),
+            Composition = CompositionKind.Diagnostic,
+            Output = new OutputSettings
             {
-                InputPath = input,
-                OutputPath = Path.Combine(root, "preview.mp4"),
-                Composition = CompositionKind.Diagnostic,
-                Output = new OutputSettings
-                {
-                    Width = 1280,
-                    Height = 720,
-                    FpsNumerator = 30,
-                    FpsDenominator = 1,
-                },
-                Presentation = new PresentationSettings { Title = "Acquire" },
+                Width = 1280,
+                Height = 720,
+                FpsNumerator = 30,
+                FpsDenominator = 1,
+            },
+            Presentation = new PresentationSettings { Title = "Acquire" },
+        };
+
+        VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
+        Assert.NotNull(plan);
+
+        await using (ReusableCaptureLease lease =
+               await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+        {
+            string manifestPath = Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName);
+            Assert.True(File.Exists(manifestPath), "acquire must write capture-manifest.json");
+
+            string json = await File.ReadAllTextAsync(manifestPath);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(1, doc.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(lease.CaptureKey, doc.RootElement.GetProperty("captureKey").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(lease.CaptureKey));
+
+            // Every path in the manifest must be bundle-relative (not rooted, no "..").
+            string[] pathProps =
+            {
+                "timelinePath", "masterAudioPath", "scopeMetadataPath",
             };
-
-            var factory = new InProcessVisualizationPreviewSessionFactory();
-            await using (IVisualizationPreviewSession session =
-                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+            foreach (string prop in pathProps)
             {
-                VisualizationPlanResult plan = await session.PlanAsync(request, CancellationToken.None);
-                Assert.NotNull(plan);
-
-                await using (ReusableCaptureLease lease =
-                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
-                {
-                    string manifestPath = Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName);
-                    Assert.True(File.Exists(manifestPath), "acquire must write capture-manifest.json");
-
-                    string json = await File.ReadAllTextAsync(manifestPath);
-                    using var doc = JsonDocument.Parse(json);
-                    Assert.Equal(1, doc.RootElement.GetProperty("schemaVersion").GetInt32());
-                    Assert.Equal(lease.CaptureKey, doc.RootElement.GetProperty("captureKey").GetString());
-                    Assert.False(string.IsNullOrWhiteSpace(lease.CaptureKey));
-
-                    // Every path in the manifest must be bundle-relative (not rooted, no "..").
-                    string[] pathProps =
-                    {
-                        "timelinePath", "masterAudioPath", "scopeMetadataPath",
-                    };
-                    foreach (string prop in pathProps)
-                    {
-                        string value = doc.RootElement.GetProperty(prop).GetString()!;
-                        Assert.False(Path.IsPathRooted(value), $"manifest {prop} must be relative, got '{value}'");
-                        Assert.DoesNotContain("..", value);
-                    }
-
-                    // Stable key: acquiring again for the same timeline key yields the same key.
-                    await using (ReusableCaptureLease lease2 =
-                           await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
-                    {
-                        Assert.Equal(lease.CaptureKey, lease2.CaptureKey);
-                    }
-                }
+                string value = doc.RootElement.GetProperty(prop).GetString()!;
+                Assert.False(Path.IsPathRooted(value), $"manifest {prop} must be relative, got '{value}'");
+                Assert.DoesNotContain("..", value);
             }
-        }
-        finally
-        {
-            try { Directory.Delete(root, recursive: true); }
-            catch (IOException) { /* best-effort cleanup */ }
+
+            // Stable key: acquiring again for the same timeline key yields the same key.
+            await using (ReusableCaptureLease lease2 =
+                   await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+            {
+                Assert.Equal(lease.CaptureKey, lease2.CaptureKey);
+            }
         }
     }
 
     [SkippableFact]
     public async Task PublishedBundle_LoadsPreparedCaptureForReuse()
     {
-        bool hasPy = IsCommandAvailable("python3");
-        bool hasFf = IsCommandAvailable("ffmpeg");
-        Skip.IfNot(
-            hasPy && hasFf,
-            $"real .vgz reuse test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+        Skip.IfNot(_fixture.HasPrereqs, _fixture.SkipReason);
 
-        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        string input = _fixture.VgzPath;
         if (!File.Exists(input))
             return;
 
-        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
+        IVisualizationPreviewSession session = _fixture.Session
+            ?? throw new InvalidOperationException("shared session unavailable despite prereqs present");
+
+        VisualizationRequest request = new()
         {
-            VisualizationRequest request = new()
+            InputPath = input,
+            OutputPath = Path.Combine(Path.GetTempPath(), "preview.mp4"),
+            Composition = CompositionKind.Diagnostic,
+            Output = new OutputSettings
             {
-                InputPath = input,
-                OutputPath = Path.Combine(root, "preview.mp4"),
-                Composition = CompositionKind.Diagnostic,
-                Output = new OutputSettings
-                {
-                    Width = 1280,
-                    Height = 720,
-                    FpsNumerator = 30,
-                    FpsDenominator = 1,
-                },
-                Presentation = new PresentationSettings { Title = "Reuse" },
-            };
+                Width = 1280,
+                Height = 720,
+                FpsNumerator = 30,
+                FpsDenominator = 1,
+            },
+            Presentation = new PresentationSettings { Title = "Reuse" },
+        };
 
-            var factory = new InProcessVisualizationPreviewSessionFactory();
-            await using (IVisualizationPreviewSession session =
-                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
-            {
-                _ = await session.PlanAsync(request, CancellationToken.None);
+        _ = await session.PlanAsync(request, CancellationToken.None);
 
-                await using (ReusableCaptureLease lease =
-                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
-                {
-                    string manifestJson = await File.ReadAllTextAsync(
-                        Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
-                    using var manifestDoc = JsonDocument.Parse(manifestJson);
-                    string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
-
-                    PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
-                        lease.DirectoryPath,
-                        lease.CaptureKey,
-                        request,
-                        backendId,
-                        CancellationToken.None);
-
-                    Assert.NotNull(reuse.Timeline);
-                    Assert.True(
-                        reuse.Timeline.Devices.Any() || reuse.Timeline.Voices.Any(),
-                        "reused timeline must carry at least one device or voice");
-                    Assert.False(string.IsNullOrWhiteSpace(reuse.MasterAudioPath));
-                    Assert.True(File.Exists(reuse.MasterAudioPath));
-                }
-            }
-        }
-        finally
+        await using (ReusableCaptureLease lease =
+               await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
         {
-            try { Directory.Delete(root, recursive: true); }
-            catch (IOException) { /* best-effort cleanup */ }
+            string manifestJson = await File.ReadAllTextAsync(
+                Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
+            using var manifestDoc = JsonDocument.Parse(manifestJson);
+            string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
+
+            PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                lease.DirectoryPath,
+                lease.CaptureKey,
+                request,
+                backendId,
+                CancellationToken.None);
+
+            Assert.NotNull(reuse.Timeline);
+            Assert.True(
+                reuse.Timeline.Devices.Any() || reuse.Timeline.Voices.Any(),
+                "reused timeline must carry at least one device or voice");
+            Assert.False(string.IsNullOrWhiteSpace(reuse.MasterAudioPath));
+            Assert.True(File.Exists(reuse.MasterAudioPath));
         }
     }
 
@@ -620,74 +587,58 @@ public sealed class PreviewParityTests
     [SkippableFact]
     public async Task PublishedVgmBundle_LoadsPreparedCaptureWithScopesEnabled()
     {
-        bool hasPy = IsCommandAvailable("python3");
-        bool hasFf = IsCommandAvailable("ffmpeg");
-        Skip.IfNot(
-            hasPy && hasFf,
-            $"real .vgz scope-reuse test requires python3 and ffmpeg on PATH (py={hasPy}, ff={hasFf})");
+        Skip.IfNot(_fixture.HasPrereqs, _fixture.SkipReason);
 
-        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "master-ninja.vgz");
+        string input = _fixture.VgzPath;
         if (!File.Exists(input))
             return;
 
-        string root = Path.Combine(Path.GetTempPath(), "MDPlayer", "Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        try
+        IVisualizationPreviewSession session = _fixture.Session
+            ?? throw new InvalidOperationException("shared session unavailable despite prereqs present");
+
+        VisualizationRequest request = new()
         {
-            VisualizationRequest request = new()
+            InputPath = input,
+            OutputPath = Path.Combine(Path.GetTempPath(), "preview.mp4"),
+            Composition = CompositionKind.Diagnostic,
+            Output = new OutputSettings
             {
-                InputPath = input,
-                OutputPath = Path.Combine(root, "preview.mp4"),
-                Composition = CompositionKind.Diagnostic,
-                Output = new OutputSettings
-                {
-                    Width = 1280,
-                    Height = 720,
-                    FpsNumerator = 30,
-                    FpsDenominator = 1,
-                },
-                Presentation = new PresentationSettings { Title = "Reuse" },
-            };
+                Width = 1280,
+                Height = 720,
+                FpsNumerator = 30,
+                FpsDenominator = 1,
+            },
+            Presentation = new PresentationSettings { Title = "Reuse" },
+        };
 
-            var factory = new InProcessVisualizationPreviewSessionFactory();
-            await using (IVisualizationPreviewSession session =
-                   await factory.OpenWithTimelineAsync(input, null, CancellationToken.None))
+        _ = await session.PlanAsync(request, CancellationToken.None);
+
+        await using (ReusableCaptureLease lease =
+               await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
+        {
+            string manifestJson = await File.ReadAllTextAsync(
+                Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
+            using var manifestDoc = JsonDocument.Parse(manifestJson);
+            string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
+
+            PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
+                lease.DirectoryPath,
+                lease.CaptureKey,
+                request,
+                backendId,
+                CancellationToken.None);
+
+            // The crux of the regression: VGM isolated stems ARE the
+            // scope, so scopes must be enabled whenever isolated stems
+            // are present — even though no `metadata.json` is bundled.
+            Assert.False(string.IsNullOrWhiteSpace(backendId));
+            if (reuse.Scope.HasIsolatedStems)
             {
-                _ = await session.PlanAsync(request, CancellationToken.None);
-
-                await using (ReusableCaptureLease lease =
-                       await session.AcquireReusableCaptureAsync(request, CancellationToken.None))
-                {
-                    string manifestJson = await File.ReadAllTextAsync(
-                        Path.Combine(lease.DirectoryPath, VisualizationCaptureBundle.ManifestFileName));
-                    using var manifestDoc = JsonDocument.Parse(manifestJson);
-                    string backendId = manifestDoc.RootElement.GetProperty("backendId").GetString()!;
-
-                    PreparedCapture reuse = await VisualizationCaptureBundle.LoadPreparedCaptureAsync(
-                        lease.DirectoryPath,
-                        lease.CaptureKey,
-                        request,
-                        backendId,
-                        CancellationToken.None);
-
-                    // The crux of the regression: VGM isolated stems ARE the
-                    // scope, so scopes must be enabled whenever isolated stems
-                    // are present — even though no `metadata.json` is bundled.
-                    Assert.False(string.IsNullOrWhiteSpace(backendId));
-                    if (reuse.Scope.HasIsolatedStems)
-                    {
-                        Assert.True(
-                            reuse.Scope.Enabled,
-                            "a register-log capture with isolated stems must preserve scope-enable "
-                            + "through bundle publish/reuse, even without an FMP metadata.json");
-                    }
-                }
+                Assert.True(
+                    reuse.Scope.Enabled,
+                    "a register-log capture with isolated stems must preserve scope-enable "
+                    + "through bundle publish/reuse, even without an FMP metadata.json");
             }
-        }
-        finally
-        {
-            try { Directory.Delete(root, recursive: true); }
-            catch (IOException) { /* best-effort cleanup */ }
         }
     }
 
@@ -1001,36 +952,6 @@ public sealed class PreviewParityTests
             });
         File.WriteAllText(
             Path.Combine(dir, VisualizationCaptureBundle.ManifestFileName), json);
-    }
-
-    private static bool IsCommandAvailable(string name)
-    {
-        try
-        {
-            using var probe = Process.Start(new ProcessStartInfo
-            {
-                FileName = name,
-                Arguments = "--version",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-            if (probe is null)
-                return false;
-            // Drain pipes so a chatty child (e.g. ffmpeg on stderr) cannot
-            // block on a full pipe buffer.
-            string _ = probe.StandardOutput.ReadToEnd();
-            string __ = probe.StandardError.ReadToEnd();
-            probe.WaitForExit(5000);
-            // Presence is what matters; some builds (e.g. headless ffmpeg)
-            // return a nonzero "shown help/version" code, so don't require 0.
-            return probe.HasExited;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private static bool SpanEquals(byte[] a, byte[] b)
