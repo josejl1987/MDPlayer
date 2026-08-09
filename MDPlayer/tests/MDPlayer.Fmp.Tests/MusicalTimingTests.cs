@@ -419,6 +419,146 @@ public sealed class MusicalTimingTests
             r => r.Sample == list[4].Sample && !string.IsNullOrEmpty(r.Reason));
     }
 
+    // ---- Producer boundary: BeatIndex quarter-note convention (S01/T1) ----
+    // Locked convention (FR-009): BeatIndex increment-1 == one MIDI quarter note,
+    // scaled by MusicalTimeMapOptions.QuartersPerBeat (default 1.0) exactly once in
+    // MusicalTimeMapBuilder.BuildAnchors (quarter = BeatIndex * QuartersPerBeat).
+    // These tests drive the same BeatEvent -> BuildAnchors -> BeatGridFitter ->
+    // MusicalTimeMap path the MIDI exporter consumes; no exporter-side conversion
+    // exists and none is allowed.
+
+    private static VisualizationTimeline BeatTimeline(double samplesPerBeatStep, int count)
+        => new()
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr * 100,
+            Beats = Enumerable.Range(0, count)
+                .Select(i => new BeatEvent((long)Math.Round(i * samplesPerBeatStep), i))
+                .ToArray(),
+        };
+
+    [Fact]
+    public void ProducerBoundary_QpbOne_BeatIndexIncrementIsOneQuarterNote()
+    {
+        // BeatEvent i at sample i*22050 with BeatIndex i must land on quarter i at
+        // the default QuartersPerBeat = 1.0 (increment-1 == one quarter note).
+        double spq = Sr * 60.0 / 120.0; // 22050 samples/quarter at 44.1 kHz
+        var timeline = BeatTimeline(spq, count: 9);
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(
+            timeline, new MusicalTimeMapOptions()).Map;
+
+        for (int i = 0; i < 9; i++)
+            Assert.Equal(i, map.SampleToQuarterPosition((long)Math.Round(i * spq)), precision: 6);
+    }
+
+    [Fact]
+    public void ProducerBoundary_QpbN_BeatIndexScalesToQuarter()
+    {
+        // QuartersPerBeat = 2.0 (one BeatIndex step == two quarter notes): beat i at
+        // sample i*44100 (22050*2) maps to quarter i*2 — the FR-009 scale factor is
+        // applied at the producer boundary, not in the exporter.
+        double spq = Sr * 60.0 / 120.0;
+        const double qpb = 2.0;
+        var timeline = BeatTimeline(spq * qpb, count: 5);
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(
+            timeline, new MusicalTimeMapOptions { QuartersPerBeat = qpb }).Map;
+
+        for (int i = 0; i < 5; i++)
+            Assert.Equal(i * qpb, map.SampleToQuarterPosition((long)Math.Round(i * spq * qpb)), precision: 6);
+    }
+
+    [Fact]
+    public void ProducerBoundary_NonIntegerBeatIndex_AllowedAndPreserved()
+    {
+        // Fractional BeatIndex (off-beat / half-step drivers) is legal: quarter
+        // = BeatIndex * QuartersPerBeat, so 0.5, 1.5, 2.5 pass through unchanged.
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr * 100,
+            Beats = new[]
+            {
+                new BeatEvent(0, 0.5),
+                new BeatEvent((long)Math.Round(spq), 1.5),
+                new BeatEvent((long)Math.Round(2 * spq), 2.5),
+            },
+        };
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(
+            timeline, new MusicalTimeMapOptions()).Map;
+
+        Assert.Equal(0.5, map.SampleToQuarterPosition(0), precision: 6);
+        Assert.Equal(1.5, map.SampleToQuarterPosition((long)Math.Round(spq)), precision: 6);
+        Assert.Equal(2.5, map.SampleToQuarterPosition((long)Math.Round(2 * spq)), precision: 6);
+    }
+
+    [Fact]
+    public void ProducerBoundary_NonFiniteBeatIndex_FilteredAtBoundary()
+    {
+        // NaN/Infinity is not a legal producer value: BuildAnchors filters non-finite
+        // BeatIndex at the boundary instead of crashing the fit or polluting the grid.
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr * 100,
+            Beats = new[]
+            {
+                new BeatEvent(0, 0.0),
+                new BeatEvent((long)Math.Round(spq), double.NaN),
+                new BeatEvent((long)Math.Round(2 * spq), 2.0),
+            },
+        };
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(
+            timeline, new MusicalTimeMapOptions()).Map;
+
+        // The NaN anchor is dropped; the surviving pair still yields a valid grid.
+        Assert.Equal(0.0, map.SampleToQuarterPosition(0), precision: 6);
+        Assert.Equal(2.0, map.SampleToQuarterPosition((long)Math.Round(2 * spq)), precision: 6);
+    }
+
+    [Fact]
+    public void ProducerBoundary_MergeReplay_SerializedBeatsPreserveConvention()
+    {
+        // Full runtime producer path: TimelineBuilder.AddBeat -> Build -> serialized
+        // timeline JSON ({"sample": N, "beat": I}) -> Merge (NormalizeClock) ->
+        // AddBeat. The clock may be converted, but BeatIndex passes through untouched
+        // and the replayed timeline produces the same quarter grid.
+        double spq = Sr * 60.0 / 120.0;
+        var source = new TimelineBuilder(Sr);
+        for (int i = 0; i < 6; i++)
+            source.AddBeat(new BeatEvent((long)Math.Round(i * spq), i));
+        VisualizationTimeline produced = source.Build(Sr * 100);
+
+        // Serialized shape uses the JSON contract names "sample" and "beat".
+        string json = VisualizationJsonWriter.Serialize(produced);
+        Assert.Contains("\"beat\"", json);
+        Assert.Contains("\"sample\"", json);
+
+        var merged = new TimelineBuilder(Sr);
+        merged.Merge(produced);
+        VisualizationTimeline replayed = merged.Build(Sr * 100);
+
+        Assert.Equal(produced.Beats.Length, replayed.Beats.Length);
+        for (int i = 0; i < produced.Beats.Length; i++)
+        {
+            Assert.Equal(produced.Beats[i].SamplePosition, replayed.Beats[i].SamplePosition);
+            Assert.Equal(produced.Beats[i].BeatIndex, replayed.Beats[i].BeatIndex);
+        }
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(
+            replayed, new MusicalTimeMapOptions()).Map;
+        for (int i = 0; i < 6; i++)
+            Assert.Equal(i, map.SampleToQuarterPosition((long)Math.Round(i * spq)), precision: 6);
+    }
+
     private static TempoSegment[] ConvertToTempoSegments(PiecewiseFit fit)
     {
         var result = new TempoSegment[fit.Segments.Length];

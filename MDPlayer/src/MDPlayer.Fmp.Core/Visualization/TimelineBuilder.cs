@@ -276,6 +276,15 @@ internal sealed class TimelineBuilder
         _timing.Add(value);
     }
 
+    /// <summary>
+    /// Adds a driver beat. Together with <see cref="Merge"/> this is the complete
+    /// AddBeat producer surface: <c>AddBeat</c> is the programmatic ingestion point
+    /// and <c>Merge</c> replays serialized timeline JSON (<c>{"sample": N, "beat": I}</c>)
+    /// through <c>NormalizeClock</c> before calling this method. The <c>BeatIndex</c>
+    /// unit is the MIDI quarter note (increment-1 == one quarter note, FR-009); it
+    /// is interpreted by <c>MusicalTimeMapBuilder.BuildAnchors</c> — never converted
+    /// here or in the exporter.
+    /// </summary>
     public void AddBeat(BeatEvent value)
     {
         ArgumentNullException.ThrowIfNull(value);

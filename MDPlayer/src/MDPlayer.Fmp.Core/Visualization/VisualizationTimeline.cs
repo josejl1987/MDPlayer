@@ -172,6 +172,20 @@ internal sealed record TimingEvent(
     int TimerB,
     double? BeatsPerMinute);
 
+/// <summary>
+/// A driver-observed beat at an absolute sample. The <c>BeatIndex</c> unit is the
+/// MIDI quarter note (locked producer-boundary convention, FR-009): an increment
+/// of 1.0 equals exactly one quarter note, scaled by
+/// <c>MusicalTimeMapOptions.QuartersPerBeat</c> (default 1.0) when the driver beat
+/// unit differs. The scale is applied exactly once — in
+/// <c>MusicalTimeMapBuilder.BuildAnchors</c> (quarter = BeatIndex * QuartersPerBeat);
+/// the MIDI exporter performs no further conversion. Fractional (non-integer)
+/// BeatIndex values are legal; non-finite values are filtered at the boundary.
+/// Serialized as <c>{"sample": N, "beat": I}</c>. Producers:
+/// <c>TimelineBuilder.AddBeat</c> (programmatic) and <c>TimelineBuilder.Merge</c>
+/// (serialized-JSON replay — clock-normalized, BeatIndex preserved); tests
+/// construct these records directly as fixtures.
+/// </summary>
 internal sealed record BeatEvent(
     [property: JsonPropertyName("sample")] long SamplePosition,
     [property: JsonPropertyName("beat")] double BeatIndex);

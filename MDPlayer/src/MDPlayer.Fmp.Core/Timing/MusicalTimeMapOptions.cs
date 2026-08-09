@@ -8,8 +8,12 @@ namespace Fmp.Core.Timing;
 /// </summary>
 internal sealed class MusicalTimeMapOptions
 {
-    /// <summary>How many quarter notes one <c>BeatIndex</c> step represents. Default 1.0
-    /// (beat == quarter note). Set explicitly when the driver beat unit differs.</summary>
+    /// <summary>How many quarter notes one <c>BeatIndex</c> step represents. The locked
+    /// producer-boundary convention (FR-009) is that a BeatIndex increment of 1.0
+    /// equals exactly one MIDI quarter note; this scale factor adapts that when the
+    /// driver beat unit differs. It is applied exactly once, at the producer
+    /// boundary, in <c>MusicalTimeMapBuilder.BuildAnchors</c>
+    /// (quarter = BeatIndex * QuartersPerBeat). Default 1.0 (beat == quarter note).</summary>
     public double QuartersPerBeat { get; init; } = 1.0;
 
     /// <summary>Fixed tempo override (BPM). When set alongside anchors it fixes the

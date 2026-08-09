@@ -184,6 +184,9 @@
       "last_event_id": "01KZHMFNG19BFCDHC9DSWRRSWQ",
       "last_transition_at": "2026-08-08T21:29:23.713340+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "Done override: Mission merged to feature/linux-fmp-renderer (commit df710dd)"
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 25832,
