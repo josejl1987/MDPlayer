@@ -1022,8 +1022,17 @@ public sealed class PanelOverlayRendererTests
         int offset = (y * width + x) * 4;
         int max = Math.Max(frame[offset], Math.Max(frame[offset + 1], frame[offset + 2]));
         int min = Math.Min(frame[offset], Math.Min(frame[offset + 1], frame[offset + 2]));
+        // A ribbon column must clearly differ from the rake of dark lane
+        // backgrounds beneath it (canvas/timeline at sum<=57, black-key bands
+        // at sum<=44). The energy-reduced ribbon is semi-transparent and
+        // alpha-composites over that backdrop, so on a black-key band its blend
+        // can sit near 220 — the old >220 bound reported a false "gap" whenever
+        // a continuous ribbon crossed a black-key band (note bends landing on a
+        // C#/D#/F#/G#/A#). Require a comfortable margin above every background
+        // while keeping gap detection: any genuine fill is >=150.
+        int sum = frame[offset] + frame[offset + 1] + frame[offset + 2];
         return frame[offset + 3] > 0
-            && frame[offset] + frame[offset + 1] + frame[offset + 2] > 220
+            && sum > 150
             && max - min > 25;
     }
 
