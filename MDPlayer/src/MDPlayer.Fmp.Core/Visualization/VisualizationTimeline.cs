@@ -38,7 +38,8 @@ internal sealed record RhythmEvent(
     long SamplePosition,
     float Strength,
     float Pan,
-    [property: JsonPropertyName("parentVoiceId")] string ParentVoiceId = null);
+    [property: JsonPropertyName("parentVoiceId")] string ParentVoiceId = null,
+    string InstrumentId = "");
 
 internal sealed record Ppz8Event(
     int Channel,

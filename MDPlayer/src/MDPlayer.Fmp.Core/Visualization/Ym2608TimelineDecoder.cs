@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Fmp.Core.PlaybackAssets.Opn;
 
 namespace Fmp.Core.Visualization;
 
@@ -26,6 +27,7 @@ internal sealed class Ym2608TimelineDecoder
     private readonly List<DriverTimingEvent> _timing = [];
     private MutableAdpcmB _adpcmCurrent;
     private readonly Dictionary<string, InstrumentDefinition> _instruments = new(StringComparer.Ordinal);
+    private readonly DeterministicIdentityTable _identityTable = new();
 
     private int _fmDivider = 6;
     private double _ssgMultiplier = 1.0;
@@ -664,7 +666,8 @@ internal sealed class Ym2608TimelineDecoder
                 samplePosition,
                 Math.Clamp(totalGain * voiceGain, 0, 1),
                 pan,
-                "ym2608.0.rhythm"));
+                "ym2608.0.rhythm",
+                $"rhythm:{name}"));
         }
     }
 
@@ -672,34 +675,9 @@ internal sealed class Ym2608TimelineDecoder
     {
         int portOffset = channel >= 3 ? RegisterBankSize : 0;
         int localChannel = channel % 3;
-        var bytes = new List<byte>(30);
 
-        foreach (int opOffset in OperatorOffsets)
-        {
-            int offset = opOffset + localChannel;
-            bytes.Add(_registers[portOffset + 0x30 + offset]);
-            bytes.Add(_registers[portOffset + 0x40 + offset]);
-            bytes.Add(_registers[portOffset + 0x50 + offset]);
-            bytes.Add(_registers[portOffset + 0x60 + offset]);
-            bytes.Add(_registers[portOffset + 0x70 + offset]);
-            bytes.Add(_registers[portOffset + 0x80 + offset]);
-            bytes.Add(_registers[portOffset + 0x90 + offset]);
-        }
-
-        int algorithmFeedback = _registers[portOffset + 0xB0 + localChannel] & 0x3F;
-        int amsFms = _registers[portOffset + 0xB4 + localChannel] & 0x37;
-        bytes.Add((byte)algorithmFeedback);
-        bytes.Add((byte)amsFms);
-
-        string id = "ym2608:" + Convert.ToHexString(SHA256.HashData(bytes.ToArray()))[..16].ToLowerInvariant();
-        if (_instruments.TryGetValue(id, out var existing))
-            return existing;
-
-        int algorithm = algorithmFeedback & 0x07;
-        int feedback = (algorithmFeedback >> 3) & 0x07;
-        int ams = (amsFms >> 4) & 0x03;
-        int fms = amsFms & 0x07;
-        var operators = new FmOperatorDefinition[4];
+        var operatorsByOp = new OpnFmOperator[4];
+        int setByIdentity = 0; // bitmask of initialized operator slots
 
         for (int op = 0; op < 4; op++)
         {
@@ -712,24 +690,87 @@ internal sealed class Ym2608TimelineDecoder
             int sustainRelease = _registers[portOffset + 0x80 + offset];
             int ssgEnvelope = _registers[portOffset + 0x90 + offset];
 
+            operatorsByOp[op] = new OpnFmOperator
+            {
+                Multiplier = (byte)(dtMul & 0x0F),
+                DetuneRegister = (byte)((dtMul >> 4) & 0x07),
+                TotalLevel = (byte)(totalLevel & 0x7F),
+                RateScaling = (byte)((keyAttack >> 6) & 0x03),
+                AttackRate = (byte)(keyAttack & 0x1F),
+                DecayRate = (byte)(amDecay & 0x1F),
+                SustainRate = (byte)(sustainRate & 0x1F),
+                ReleaseRate = (byte)(sustainRelease & 0x0F),
+                SustainLevel = (byte)((sustainRelease >> 4) & 0x0F),
+                SsgEg = (byte)(ssgEnvelope & 0x0F),
+            };
+            setByIdentity |= 1 << op;
+        }
+
+        int algorithmFeedback = _registers[portOffset + 0xB0 + localChannel] & 0x3F;
+        int amsFms = _registers[portOffset + 0xB4 + localChannel] & 0x37;
+        int algorithm = algorithmFeedback & 0x07;
+        int feedback = (algorithmFeedback >> 3) & 0x07;
+        int ams = (amsFms >> 4) & 0x03;
+        int fms = amsFms & 0x07;
+
+        var snapshot = new OpnFmInstrument
+        {
+            Algorithm = (byte)algorithm,
+            Feedback = (byte)feedback,
+            Op1 = operatorsByOp[(int)OpnOperator.Op1] ?? OpnFmOperator.Empty,
+            Op2 = operatorsByOp[(int)OpnOperator.Op2] ?? OpnFmOperator.Empty,
+            Op3 = operatorsByOp[(int)OpnOperator.Op3] ?? OpnFmOperator.Empty,
+            Op4 = operatorsByOp[(int)OpnOperator.Op4] ?? OpnFmOperator.Empty,
+        };
+
+        // TL-agnostic normalized identity via the OPN writer (reused read-only),
+        // with AMS/FMS folded in so those sensitivity bits remain significant —
+        // identical normalized patches (modulo carrier-TL) dedupe across chips.
+        byte[] identityBytes = OpnFmTimbreIdentityWriter.Write(snapshot);
+        var identityStream = new List<byte>(identityBytes.Length + 2);
+        identityStream.AddRange(identityBytes);
+        identityStream.Add((byte)ams);
+        identityStream.Add((byte)fms);
+        string identityHash = DeterministicIdentityTable.HashBytes(identityStream.ToArray());
+
+        InstrumentIdentity identity = _identityTable.GetOrAdd(IdentityFamily.Fm, identityHash, "fm");
+        string id = identity.Canonical;
+        if (_instruments.TryGetValue(id, out var existing))
+            return existing;
+
+        // Canonical normalized operators (loudest carrier at TL=0) for the
+        // timeline's InstrumentDefinition list.
+        OpnFmInstrument canonical = OpnFmAlgorithm.Canonicalize(snapshot);
+        var operators = new FmOperatorDefinition[4];
+        for (int op = 0; op < 4; op++)
+        {
+            OpnFmOperator o = canonical.GetOperator(operatorOf(op));
             operators[op] = new FmOperatorDefinition(
-                keyAttack & 0x1F,
-                amDecay & 0x1F,
-                sustainRate & 0x1F,
-                sustainRelease & 0x0F,
-                (sustainRelease >> 4) & 0x0F,
-                totalLevel & 0x7F,
-                (keyAttack >> 6) & 0x03,
-                dtMul & 0x0F,
-                (dtMul >> 4) & 0x07,
-                (amDecay & 0x80) != 0,
-                ssgEnvelope & 0x0F);
+                o.AttackRate,
+                o.DecayRate,
+                o.SustainRate,
+                o.ReleaseRate,
+                o.SustainLevel,
+                o.TotalLevel,
+                o.RateScaling,
+                o.Multiplier,
+                o.DetuneRegister,
+                (o.DecayRate & 0) != 0, // AM bit not tracked in the identity model
+                o.SsgEg);
         }
 
         var created = new InstrumentDefinition(id, "fm", algorithm, feedback, ams, fms, operators);
         _instruments.Add(id, created);
         return created;
     }
+
+    private static OpnOperator operatorOf(int op) => op switch
+    {
+        0 => OpnOperator.Op1,
+        1 => OpnOperator.Op2,
+        2 => OpnOperator.Op3,
+        _ => OpnOperator.Op4,
+    };
 
     private void GetOrAddSsgInstrument(string id)
     {

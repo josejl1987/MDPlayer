@@ -29,9 +29,9 @@ internal static class RhythmTimelineFixture
                 // Three bd hits at the same onset, different pans and strengths.
                 // Same voice+sample means the impact blocks share an x; only the
                 // pan tick differs (§15.3).
-                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample, 1.0f, -1f),
-                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample + 600, 1.0f, 0f),
-                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample + 1200, 1.0f, 1f),
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample, 1.0f, -1f, InstrumentId: "rhythm:bd"),
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample + 600, 1.0f, 0f, InstrumentId: "rhythm:bd"),
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", OnsetSample + 1200, 1.0f, 1f, InstrumentId: "rhythm:bd"),
             ],
         };
     }

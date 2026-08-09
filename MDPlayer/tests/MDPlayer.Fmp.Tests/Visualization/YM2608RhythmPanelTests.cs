@@ -33,7 +33,8 @@ public sealed class YM2608RhythmPanelTests
                     500 + index * 60,
                     Strength: 0.8f,
                     Pan: 0,
-                    ParentVoiceId: "ym2608.0.rhythm"))
+                    ParentVoiceId: "ym2608.0.rhythm",
+                    InstrumentId: $"rhythm:{instrument}"))
                 .ToArray(),
         };
 

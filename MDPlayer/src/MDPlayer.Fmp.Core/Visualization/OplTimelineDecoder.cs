@@ -11,6 +11,7 @@ internal sealed class OplTimelineDecoder : IChipTimelineDecoder
     private readonly int _channelCount;
     private readonly byte[,] _registers = new byte[2, 256];
     private readonly MutableNote?[] _notes;
+    private readonly DeterministicIdentityTable _identityTable = new();
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
     private bool _completed;
@@ -102,20 +103,86 @@ internal sealed class OplTimelineDecoder : IChipTimelineDecoder
         if (pitch.MidiNote < 0)
             return;
 
-        string instrumentId = $"{_chipType.ToString().ToLowerInvariant()}:{_device.Id.Instance}:{channel}";
+        // Real 2-operator identity (OPL algorithms 0..3). Unlike OPN four-op FM,
+        // the algorithm-7 Op1-feedback exception does not exist here (OPL has no
+        // feedback loop equivalent), so only the CARRIER operator TL offset is
+        // normalized away; the modulator TL and every other operator parameter
+        // remain significant. Deduped by the global deterministic identity table.
+        int port = channel / 9;
+        int local = channel % 9;
+        int c0 = _registers[port, 0xC0 + local];
+        int algorithm = (c0 >> 1) & 7;
+        int feedback = c0 & 1;
+
+        byte[] identityBytes = WriteOplIdentity(port, local, algorithm, feedback);
+        string identityHash = DeterministicIdentityTable.HashBytes(identityBytes);
+        InstrumentIdentity identity = _identityTable.GetOrAdd(IdentityFamily.Fm, identityHash, "fm");
+        string instrumentId = identity.Canonical;
         _timeline.AddInstrument(new InstrumentDefinition(
             instrumentId,
             "opl",
-            _registers[channel / 9, 0xC0 + channel % 9] >> 1 & 7,
-            _registers[channel / 9, 0xC0 + channel % 9] & 1,
+            algorithm,
+            feedback,
             null,
             null,
-            Array.Empty<FmOperatorDefinition>()));
+            BuildOplOperators(port, local)));
         _notes[channel] = new MutableNote(
             new VoiceId(_device.Id, VoiceKind.Fm, channel),
             sample,
             pitch,
             instrumentId);
+    }
+
+    /// <summary>
+    /// Serializes a normalized 2-operator identity for OPL2/OPL3. Operator slot 0
+    /// is the modulator, slot 1 the carrier. The 2-op operator bank sits at base
+    /// 0x20 (op1) / 0x40 (op2); within each bank: +0x00 KSL/TL, +0x20 AR,
+    /// +0x40 DR, +0x60 SL+RR, and +0x80 for the OPL3 operator-eight slot. Only the
+    /// carrier (slot 1) TL is rewritten to 0; the modulator TL is significant.
+    /// </summary>
+    private byte[] WriteOplIdentity(int port, int local, int algorithm, int feedback)
+    {
+        var outBytes = new List<byte>(2 + 2 * 8);
+        outBytes.Add((byte)algorithm);
+        outBytes.Add((byte)feedback);
+        for (int slot = 0; slot < 2; slot++)
+        {
+            int bank = slot == 0 ? 0x20 : 0x40;
+            int tlksl = _registers[port, bank + local];
+            int cmd = _registers[port, bank + 0x20 + local]; // AM/VIB/EG/KS/MULT
+            int slrr = _registers[port, bank + 0x60 + local]; // SL (high) + RR (low)
+            outBytes.Add((byte)((tlksl >> 6) & 0x03)); // ksl
+            outBytes.Add(slot == 0 ? (byte)(tlksl & 0x3F) : (byte)0); // carrier TL normalized to 0
+            outBytes.Add((byte)(cmd & 0x9F)); // AM + VIB + EG + KS + MULT
+            outBytes.Add((byte)(cmd & 0x1F)); // ar
+            outBytes.Add((byte)(_registers[port, bank + 0x40 + local] & 0x1F)); // dr
+            outBytes.Add((byte)slrr); // sl (msb) + rr (lsb)
+        }
+        return outBytes.ToArray();
+    }
+
+    /// <summary>Builds the two-operator FmOperatorDefinition list for a channel.</summary>
+    private FmOperatorDefinition[] BuildOplOperators(int port, int local)
+    {
+        var ops = new FmOperatorDefinition[2];
+        for (int slot = 0; slot < 2; slot++)
+        {
+            int bank = slot == 0 ? 0x20 : 0x40;
+            int tl = _registers[port, bank + local] & 0x3F;
+            int ksl = (_registers[port, bank + local] >> 6) & 0x03;
+            int cmd = _registers[port, bank + 0x20 + local]; // AM/VIB/EG/KS/MULT
+            int ar = cmd & 0x1F;
+            bool am = (cmd & 0x80) != 0;
+            bool vib = (cmd & 0x40) != 0;
+            int mult = cmd & 0x0F;
+            int dr = _registers[port, bank + 0x40 + local] & 0x1F;
+            int slrr = _registers[port, bank + 0x60 + local];
+            int sl = slrr & 0x0F;
+            int rr = (slrr >> 4) & 0x0F;
+            ops[slot] = new FmOperatorDefinition(
+                ar, dr, 0, rr, sl, tl, ksl, mult, 0, am || vib, 0);
+        }
+        return ops;
     }
 
     private void Close(int channel, long sample)

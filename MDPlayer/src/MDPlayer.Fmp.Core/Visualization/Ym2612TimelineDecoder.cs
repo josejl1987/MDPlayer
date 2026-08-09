@@ -1,3 +1,5 @@
+using Fmp.Core.PlaybackAssets.Opn;
+
 namespace Fmp.Core.Visualization;
 
 /// <summary>
@@ -24,6 +26,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     private readonly Ym2612DacNormalizer _dacNormalizer = new();
     private readonly DacPlaybackTracker _dacTracker = new();
     private readonly List<DacOperation> _dacOps = [];
+    private readonly DeterministicIdentityTable _identityTable = new();
     private bool _dacEnabled;
     private bool _completed;
 
@@ -290,8 +293,15 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     private MutableNote OpenFm(int channel, long sample, bool retrigger)
     {
         Pitch pitch = DecodeFmPitch(channel);
-        string instrumentId = $"ym2612:fm:{channel + 1}";
-        AddInstrument(instrumentId);
+        string instrumentId = FmInstrumentId(channel);
+        _timeline.AddInstrument(new InstrumentDefinition(
+            instrumentId,
+            "fm",
+            null,
+            null,
+            null,
+            null,
+            Array.Empty<FmOperatorDefinition>()));
         var note = new MutableNote(
             new VoiceId(_device.Id, VoiceKind.Fm, channel),
             sample,
@@ -305,8 +315,15 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     private MutableNote OpenFm3(int op, long sample, bool retrigger)
     {
         Pitch pitch = DecodeFm3Pitch(op);
-        const string instrumentId = "ym2612:fm3";
-        AddInstrument(instrumentId);
+        string instrumentId = FmInstrumentId(2); // FM3 operators share channel 2's patch
+        _timeline.AddInstrument(new InstrumentDefinition(
+            instrumentId,
+            "fm",
+            null,
+            null,
+            null,
+            null,
+            Array.Empty<FmOperatorDefinition>()));
         return new MutableNote(
             new VoiceId(_device.Id, VoiceKind.Fm3Operator, op),
             sample,
@@ -316,16 +333,72 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
             retrigger);
     }
 
-    private void AddInstrument(string id)
+    // YM2612 operator slot offsets (logical Op1/2/3/4), identical to OPN OPNA.
+    private static readonly int[] FmOperatorOffsets = [0, 8, 4, 12];
+
+    /// <summary>
+    /// Resolves the canonical normalized FM identity for a YM2612 channel. The
+    /// OPN operator/channel registers (0x30..0x9F operands, 0xB0 algorithm/feedback,
+    /// 0xB4 AMS/FMS) mirror the YM2608 OPNA layout, so the same read-only
+    /// TL-agnostic normalization applies: carrier TL offset deduped, modulator TL +
+    /// all non-TL parameters significant, algorithm-7 Op1-feedback exception honored.
+    /// </summary>
+    private string FmInstrumentId(int channel)
     {
-        _timeline.AddInstrument(new InstrumentDefinition(
-            id,
-            "fm",
-            null,
-            null,
-            null,
-            null,
-            Array.Empty<FmOperatorDefinition>()));
+        int port = channel >= 3 ? 1 : 0;
+        int local = channel % 3;
+        int portOffset = port * RegisterBankSize;
+
+        var operators = new OpnFmOperator[4];
+        for (int op = 0; op < 4; op++)
+        {
+            int offset = FmOperatorOffsets[op] + local;
+            int dtMul = _registers[portOffset + 0x30 + offset];
+            int totalLevel = _registers[portOffset + 0x40 + offset];
+            int keyAttack = _registers[portOffset + 0x50 + offset];
+            int amDecay = _registers[portOffset + 0x60 + offset];
+            int sustainRate = _registers[portOffset + 0x70 + offset];
+            int sustainRelease = _registers[portOffset + 0x80 + offset];
+            int ssgEnvelope = _registers[portOffset + 0x90 + offset];
+
+            operators[op] = new OpnFmOperator
+            {
+                Multiplier = (byte)(dtMul & 0x0F),
+                DetuneRegister = (byte)((dtMul >> 4) & 0x07),
+                TotalLevel = (byte)(totalLevel & 0x7F),
+                RateScaling = (byte)((keyAttack >> 6) & 0x03),
+                AttackRate = (byte)(keyAttack & 0x1F),
+                DecayRate = (byte)(amDecay & 0x1F),
+                SustainRate = (byte)(sustainRate & 0x1F),
+                ReleaseRate = (byte)(sustainRelease & 0x0F),
+                SustainLevel = (byte)((sustainRelease >> 4) & 0x0F),
+                SsgEg = (byte)(ssgEnvelope & 0x0F),
+            };
+        }
+
+        // AMS/FMS channel sensitivity bits remain identity-significant.
+        int algFb = _registers[portOffset + 0xB0 + local] & 0x3F;
+        int amsFms = _registers[portOffset + 0xB4 + local] & 0x37;
+        int algorithm = algFb & 0x07;
+        int feedback = (algFb >> 3) & 0x07;
+
+        var snapshot = new OpnFmInstrument
+        {
+            Algorithm = (byte)algorithm,
+            Feedback = (byte)feedback,
+            Op1 = operators[(int)OpnOperator.Op1] ?? OpnFmOperator.Empty,
+            Op2 = operators[(int)OpnOperator.Op2] ?? OpnFmOperator.Empty,
+            Op3 = operators[(int)OpnOperator.Op3] ?? OpnFmOperator.Empty,
+            Op4 = operators[(int)OpnOperator.Op4] ?? OpnFmOperator.Empty,
+        };
+
+        byte[] identityBytes = OpnFmTimbreIdentityWriter.Write(snapshot);
+        var stream = new List<byte>(identityBytes.Length + 1);
+        stream.AddRange(identityBytes);
+        stream.Add((byte)amsFms);
+        string hash = DeterministicIdentityTable.HashBytes(stream.ToArray());
+        InstrumentIdentity identity = _identityTable.GetOrAdd(IdentityFamily.Fm, hash, "fm");
+        return identity.Canonical;
     }
 
     private void AddPitch(MutableNote? note, long sample, Pitch pitch)
