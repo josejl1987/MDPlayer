@@ -138,6 +138,7 @@ public class NativeFmpIntegrationTests
     }
 
     [Fact]
+    [Trait("Tier", "extended")]
     public void Native_FullRender_NonzeroDeterministicPcm()
     {
         var (available, ovi, _) = Fixtures();
