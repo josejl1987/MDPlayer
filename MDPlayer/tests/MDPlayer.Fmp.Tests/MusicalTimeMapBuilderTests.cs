@@ -207,6 +207,85 @@ public sealed class MusicalTimeMapBuilderTests
         Assert.True(build.Diagnostics.IsTrustworthy);
     }
 
+    // ---- T2: signed BeatOffsetSamples (negative/zero/positive) as explicit phase ----
+
+    [Fact]
+    public void SignedOffset_Negative_LandsPickupBeforeQuarterZero()
+    {
+        // T2: BeatOffsetSamples is SIGNED — negative means a pickup before quarter 0.
+        // With the ADD-to-sample convention, quarter(s) = (s+offset)/spq, so quarter 0
+        // is reached at sample -offset = +N; sample 0 therefore sits N samples shy of
+        // quarter 0 (an anacrusis / pickup), not inside positive quarters.
+        double spq = Sr * 60.0 / 120.0; // 22050 samples/quarter at 120 BPM
+        long n = (long)Math.Round(spq);
+        var timeline = Timeline(Array.Empty<BeatEvent>(), endSample: 8 * n);
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { FixedBpm = 120, BeatOffsetSamples = -n }).Map;
+
+        Assert.True(map.SampleToQuarterPosition(0) < 0,
+            "negative offset must place sample 0 before quarter 0 (pickup)");
+        Assert.Equal(-1.0, map.SampleToQuarterPosition(0), precision: 6);
+        Assert.Equal(0.0, map.SampleToQuarterPosition(n), precision: 6); // quarter 0 at +N
+    }
+
+    [Fact]
+    public void SignedOffset_Zero_IsExplicitQuarterZeroAtSampleZero()
+    {
+        // T2: a zero sample offset is an EXPLICIT phase, not "no phase". Quarter 0
+        // must land exactly at sample 0 and the grid must NOT be PhaseUnknown — only
+        // null (unset) means "no explicit phase".
+        var timeline = Timeline(Array.Empty<BeatEvent>());
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { FixedBpm = 120, BeatOffsetSamples = 0 });
+
+        Assert.Equal(0.0, build.Map.SampleToQuarterPosition(0), precision: 9);
+        Assert.False(build.Diagnostics.PhaseUnknown,
+            "explicit zero offset pins quarter 0 at sample 0; phase is known");
+        Assert.Equal(TimingSource.UserOverride, build.Diagnostics.PhaseSource);
+        Assert.Equal(TimingSource.UserOverride, build.Diagnostics.TempoSource);
+    }
+
+    [Fact]
+    public void SignedOffset_Positive_QuarterZeroAheadOfSampleZero()
+    {
+        // T2: positive offset pushes quarter 0 ahead of sample 0 (quarter 0 at sample
+        // -N); sample 0 maps to a positive quarter position and each quarter stays one
+        // sample-period apart.
+        double spq = Sr * 60.0 / 120.0;
+        long n = (long)Math.Round(spq);
+        var timeline = Timeline(Array.Empty<BeatEvent>(), endSample: 8 * n);
+
+        MusicalTimeMap map = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { FixedBpm = 120, BeatOffsetSamples = n }).Map;
+
+        Assert.Equal(1.0, map.SampleToQuarterPosition(0), precision: 6);
+        Assert.Equal(2.0, map.SampleToQuarterPosition(n), precision: 6);
+    }
+
+    [Fact]
+    public void SignedOffset_DriverTempoSurvivesExplicitPhase()
+    {
+        // T2/D005: a signed sample offset overrides ONLY the phase dimension. The
+        // driver-validated BPM rate must survive with the identical recovered BPM and
+        // all tempo segments preserved, while PhaseSource reports the user override.
+        double spq = Sr * 60.0 / 120.0;
+        long n = (long)Math.Round(spq);
+        var timeline = Timeline(Array.Empty<BeatEvent>(),
+            timing: new[] { new DriverTimingEvent(0, 0, 120.0) },
+            endSample: 8 * n);
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { BeatOffsetSamples = -n });
+
+        Assert.Equal(TimingSource.DriverValidatedTempo, build.Diagnostics.TempoSource);
+        Assert.Equal(TimingSource.UserOverride, build.Diagnostics.PhaseSource);
+        Assert.Single(build.Map.Segments);
+        Assert.Equal(120.0, build.Map.Segments[0].BeatsPerMinute, precision: 2);
+        Assert.True(build.Map.SampleToQuarterPosition(0) < 0);
+    }
+
     // ---- T015: strict-mode failures ----
 
     [Fact]

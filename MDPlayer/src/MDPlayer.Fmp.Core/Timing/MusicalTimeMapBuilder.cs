@@ -36,9 +36,13 @@ internal static class MusicalTimeMapBuilder
 
         // Phase override priority: explicit quarter wins; else samples converted.
         double? beatOffsetQuarter = options.BeatOffsetQuarter;
-        if (beatOffsetQuarter is null && options.BeatOffsetSamples is > 0)
+        if (beatOffsetQuarter is null && options.BeatOffsetSamples is not null)
         {
-            // Convert samples→quarters using the best-known tempo so far.
+            // Convert samples→quarters using the best-known tempo so far. The offset
+            // is SIGNED and any set value (including 0) is an explicit phase override:
+            // negative lands a pickup before quarter 0, +0 pins quarter 0 at sample 0,
+            // positive pushes quarter 0 ahead of sample 0. (No derivable tempo keeps
+            // beatOffsetQuarter null and is raised as a separate error by the caller.)
             double? spq = EffectiveSamplesPerQuarter(timeline, options);
             if (spq is > 0)
                 beatOffsetQuarter = options.BeatOffsetSamples.Value / spq.Value;
@@ -224,7 +228,7 @@ internal static class MusicalTimeMapBuilder
 
     private static bool HasPhaseOverride(MusicalTimeMapOptions options, double? beatOffsetQuarter) =>
         options.BeatOffsetQuarter is not null
-        || options.BeatOffsetSamples is > 0
+        || options.BeatOffsetSamples is not null
         || beatOffsetQuarter is not null;
 
     /// <summary>

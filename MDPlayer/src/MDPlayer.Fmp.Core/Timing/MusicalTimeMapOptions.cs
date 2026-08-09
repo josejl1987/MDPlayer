@@ -23,7 +23,11 @@ internal sealed class MusicalTimeMapOptions
     /// <summary>Absolute quarter position of sample zero (beat phase override).</summary>
     public double? BeatOffsetQuarter { get; init; }
 
-    /// <summary>Beat offset expressed in samples (converted to quarters internally).</summary>
+    /// <summary>Beat offset expressed in samples (converted to quarters internally).
+    /// The offset is SIGNED and any set value (including 0) is an explicit phase
+    /// (D005/T2): negative lands a pickup before quarter 0, +0 pins quarter 0 at
+    /// sample 0, positive pushes quarter 0 ahead of sample 0. Only null (unset)
+    /// means "no explicit phase".</summary>
     public long? BeatOffsetSamples { get; init; }
 
     /// <summary>User-provided meter (time signature).</summary>

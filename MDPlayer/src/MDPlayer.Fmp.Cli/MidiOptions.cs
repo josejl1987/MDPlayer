@@ -35,9 +35,12 @@ internal sealed class MidiOptions : BatchRenderSettings
     /// MusicalTimeMapOptions.BeatOffsetSamples): the offset is ADDED to each
     /// sample position before converting to quarter notes, so the map maps sample
     /// s - quarter (s + BeatOffsetSamples)/samplesPerQuarter and quarter
-    /// position zero is reached at sample -BeatOffsetSamples. 0/unset means
-    /// "no explicit phase" and the grid is not claimed aligned. This is the single
-    /// phase-override option - no synonymous phase options.
+    /// position zero is reached at sample -BeatOffsetSamples. The offset is SIGNED
+    /// and any set value (including 0) is an explicit phase override: negative lands
+    /// a pickup before quarter 0, +0 pins quarter 0 at sample 0, positive pushes
+    /// quarter 0 ahead of sample 0. Only unset (null) means "no explicit phase" and
+    /// the grid is not claimed aligned. This is the single phase-override option -
+    /// no synonymous phase options.
     /// </summary>
     public long? BeatOffsetSamples { get; set; }
 
