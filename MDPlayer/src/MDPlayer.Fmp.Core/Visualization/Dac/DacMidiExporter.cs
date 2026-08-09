@@ -162,11 +162,13 @@ internal sealed class DacMidiExporter
 
     private static string[] TrackNames(int assetCount)
     {
+        // One track per DAC source channel, named deterministically from the
+        // canonical dac: identity (unified with the melodic exporter's scheme, R8).
         int tracks = Math.Max(1, TrackCount(assetCount));
         if (tracks == 1)
-            return ["YM2612 DAC Samples"];
+            return ["YM2612 DAC"];
         return Enumerable.Range(1, tracks)
-            .Select(i => $"YM2612 DAC Samples {i}")
+            .Select(i => $"YM2612 DAC dac:{i:000}")
             .ToArray();
     }
 
