@@ -47,7 +47,7 @@ internal sealed class DacMidiExporter
 {
     private readonly MusicalTimeMap _map;
     private readonly int _ppqn;
-    private readonly double _originOffsetQuarters;
+    private readonly long _originShiftTicks;
     // Identity policy only (§38): note base shifts the sample-ID→note label but
     // never the trigger→tick conversion.
     private readonly int _noteBase;
@@ -66,7 +66,7 @@ internal sealed class DacMidiExporter
         _ppqn = ppqn;
         _noteBase = noteBase;
         _emitMarkers = emitMarkers;
-        _originOffsetQuarters = ComputeOriginOffset();
+        _originShiftTicks = ComputeOriginShiftTicks();
     }
 
     /// <summary>Identity offset applied to the asset's display note (never timing).</summary>
@@ -180,35 +180,22 @@ internal sealed class DacMidiExporter
     /// diverge from the musical grid.
     /// </summary>
     private long MapTick(long sample) =>
-        _map.SampleToTick(sample, _ppqn)
-        + _map.QuarterPositionToTick(_originOffsetQuarters, _ppqn);
+        _map.SampleToTick(sample, _ppqn) + _originShiftTicks;
 
     /// <summary>
-    /// Computes the single global non-negative tick origin (spec §21) using the
-    /// same policy as <see cref="Fmp.Core.Midi.MusicalMidiExporter.ComputeOriginOffset"/>:
-    /// the map's FirstSample quarter is the lower bound (every DAC trigger sits at
-    /// or after it) and, mirroring the melodic exporter's EmitMarkers gate, the first
-    /// downbeat quarter is folded in only when markers are emitted (it may precede
-    /// the map start and is projected onto the conductor tick grid) — then ceil'd so
-    /// the earliest event maps to tick 0, and bar-aligning to the meter when one is
-    /// established. Having both exporters derive the origin from the same map keeps
-    /// a DAC trigger and an identical melodic or rhythm trigger at the same sample on
-    /// the same tick, whether markers are emitted or not (§67).
+    /// Computes the single global non-negative integer tick origin (spec §21) using
+    /// the same policy as the melodic exporter: the map's FirstSample tick is the
+    /// lower bound (every DAC trigger sits at or after it) and, mirroring the
+    /// melodic exporter's EmitMarkers gate, the first downbeat is folded in only
+    /// when markers are emitted. The shift is the minimal whole tick that makes
+    /// every emitted trigger nonnegative — never aligned to quarter/bar.
     /// </summary>
-    private double ComputeOriginOffset()
+    private long ComputeOriginShiftTicks()
     {
-        double minQuarter = _map.SampleToQuarterPosition(_map.FirstSample);
+        long minTick = _map.SampleToTick(_map.FirstSample, _ppqn);
         if (_emitMarkers && _map.FirstDownbeatQuarter is double downbeat)
-            minQuarter = Math.Min(minQuarter, downbeat);
-        double baseOffset = Math.Max(0, Math.Ceiling(-minQuarter));
-        Meter? meter = _map.Meter;
-        if (meter is not null)
-        {
-            double qpb = meter.QuartersPerBar;
-            if (qpb > 0)
-                baseOffset = Math.Ceiling(baseOffset / qpb) * qpb;
-        }
-        return baseOffset;
+            minTick = Math.Min(minTick, _map.QuarterPositionToTick(downbeat, _ppqn));
+        return Math.Max(0, -minTick);
     }
 
     public const int DefaultVelocity = 100;

@@ -42,8 +42,9 @@ public sealed class MidiExportRequest
     /// <summary>Emit continuous pitch-bend for intra-note pitch movement.</summary>
     public bool EmitPitchBend { get; init; } = true;
 
-    /// <summary>Semitones of the pitch-bend range written as an RPN (default 2).</summary>
-    public int BendRangeSemitones { get; init; } = 2;
+    /// <summary>Semitones of the pitch-bend range written as an RPN (default 24). Not
+    /// auto-expanded: an offset beyond it re-anchors or fails.</summary>
+    public int BendRangeSemitones { get; init; } = 24;
 
     /// <summary>When true, an unresolved timing ambiguity (no beat phase, conflicting/
     /// anchors, pathological residual) fails the export instead of proceeding with an

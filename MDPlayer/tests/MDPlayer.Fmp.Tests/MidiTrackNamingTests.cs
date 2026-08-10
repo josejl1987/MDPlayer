@@ -77,11 +77,12 @@ public sealed class MidiTrackNamingTests
         Assert.Equal("YM2612 CH2 - FM 003", names[0]);
         Assert.Equal("YM2612 CH2 - FM 007", names[1]);
 
-        // Same MIDI channel for both (channel tracks source channel).
+        // Each track gets a UNIQUE MIDI endpoint (Patch A: one track → one endpoint),
+        // so the two instrument tracks use distinct channels — never a shared one.
         var chunks = MidiRoundTrip.TrackChunks(bytes).Skip(1).ToList();
         var ch0 = chunks[0].Events.OfType<DryNote>().First().Channel;
         var ch1 = chunks[1].Events.OfType<DryNote>().First().Channel;
-        Assert.Equal(ch0, ch1);
+        Assert.NotEqual(ch0, ch1);
     }
 
     [Fact]
@@ -118,16 +119,27 @@ public sealed class MidiTrackNamingTests
     }
 
     [Fact]
-    public void IndependentDomains_ExhaustChannelsWithoutWrappingOrReuse()
+    public void IndependentDomains_GetUniqueEndpoints_AcrossPorts()
     {
+        // 16 distinct FM domains each get a UNIQUE (port, channel) endpoint. Melodic
+        // channels 0-8 & 10-15 give 15 per port, so the 16th rolls onto port 1
+        // (Patch A: port>255 exhausts, but never channel wrapping/reuse).
         var notes = Enumerable.Range(0, 16)
             .Select(instance => Note($"ym2608.{instance}.fm.1", "fm:1", 0, 1000)
                 with { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, instance), VoiceKind.Fm, 0) })
             .ToArray();
 
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Export(notes));
-        Assert.Contains("channel exhaustion", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("without wrapping or merging", error.Message, StringComparison.OrdinalIgnoreCase);
+        var result = Export(notes);
+        var endpoints = MidiRoundTrip.Read(result.Bytes).GetTrackChunks()
+            .Skip(1)
+            .Select(c => (port: c.Events.OfType<PortPrefixEvent>().FirstOrDefault()?.Port ?? 0,
+                          channel: c.Events.OfType<DryNote>().First().Channel))
+            .ToArray();
+        Assert.Equal(16, endpoints.Length);
+        // All endpoints distinct — no wrapping or reuse.
+        Assert.Equal(16, endpoints.Distinct().Count());
+        // The 16th rolled onto a second port.
+        Assert.Equal(2, endpoints.Select(e => e.port).Distinct().Count());
     }
 
     [Fact]
@@ -164,9 +176,13 @@ public sealed class MidiTrackNamingTests
 
         var chunks = MidiRoundTrip.TrackChunks(result.Bytes).Skip(1).ToList();
         Assert.Equal(2, chunks.Count);
-        Assert.Equal(1, chunks.Select(c => c.Events.OfType<DryNote>().Single().Channel).Distinct().Count());
-        Assert.Single(result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>());
-        Assert.Equal(7, result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().Single().Semitones);
+        // Each instrument track gets a UNIQUE endpoint (Patch A), so the two tracks
+        // use different channels.
+        Assert.Equal(2, chunks.Select(c => c.Events.OfType<DryNote>().Single().Channel).Distinct().Count());
+        // Only the track that actually emitted a bend gets the fixed RPN setup (7).
+        var ranges = result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().ToList();
+        Assert.Single(ranges); // the fm:1 note bends; the fm:2 note is constant-pitch
+        Assert.Equal(7, ranges[0].Semitones);
     }
 
     [Fact]

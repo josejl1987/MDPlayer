@@ -23,8 +23,10 @@ internal sealed class MusicalMidiExportOptions
     /// <summary>Emit pitch-bend for microtonal / intra-note pitch movement (Batch 4).</summary>
     public bool EmitPitchBend { get; init; } = true;
 
-    /// <summary>Semitones of the configured pitch-bend range (RPN), default 2.</summary>
-    public int BendRangeSemitones { get; init; } = 2;
+    /// <summary>Semitones of the configured fixed pitch-bend range (RPN), default 24.
+    /// No auto-expansion: an offset outside this range triggers a tick-domain
+    /// re-anchor, and an offset that cannot be represented fails loudly.</summary>
+    public int BendRangeSemitones { get; init; } = 24;
 
     public bool EmitInstrumentMetadata { get; init; } = true;
 
@@ -101,13 +103,12 @@ internal sealed class MusicalMidiExportResult
     public required TimingDiagnostics Diagnostics { get; init; }
 
     /// <summary>
-    /// The global origin shift applied to make every exported tick nonnegative
-    /// (section 21), in quarter notes. The first emitted event maps to tick 0
-    /// (rounded); a conductor tempo at the map start, an early pitch bend, a
-    /// rhythm trigger, or a downbeat/loop marker can nudge this above zero.
-    /// Exposed so the timing report can print the configured-PPQ origin tick.
+    /// The global minimal integer origin shift applied to every time-domain event
+    /// (notes, bends, rhythm, markers, later tempo events) so no exported tick is
+    /// negative (Patch C §21). Setup events — the first Set Tempo, Time Signature,
+    /// RPN, program and bank — stay at their logical tick 0 and are NOT shifted.
     /// </summary>
-    public double OriginOffsetQuarters { get; init; }
+    public long OriginShiftTicks { get; init; }
 }
 
 /// <summary>
@@ -127,6 +128,11 @@ internal sealed class MusicalMidiExporter
     /// sort can be fully deterministic via <see cref="MidiEventBase.SourceOrder"/>.</summary>
     private int _sourceOrder;
 
+    /// <summary>Number of source voices that fell back to a placeholder track (Patch
+    /// E.3). Recorded so the timing report surfaces genuine unknowns rather than
+    /// silently collapsing them.</summary>
+    private int _placeholderCount;
+
     public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
     {
         _map = map ?? throw new ArgumentNullException(nameof(map));
@@ -144,15 +150,15 @@ internal sealed class MusicalMidiExporter
     public MusicalMidiExportResult Export(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        double originOffsetQuarters = ComputeOriginOffset(timeline);
+        long originShiftTicks = ComputeOriginShiftTicks(timeline);
 
         var conductor = new List<MidiEventBase>();
-        BuildConductor(timeline, originOffsetQuarters, conductor);
+        BuildConductor(timeline, originShiftTicks, conductor);
 
         TrackAllocator allocator = BuildTracks(timeline);
-        Dictionary<MidiChannelDomain, int> domainBendRanges = BuildDomainBendRanges(timeline, allocator);
-        EmitDomainBendRanges(allocator, domainBendRanges);
+
         var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>();
+        var plannable = new List<PlannableNote>();
         foreach (NoteEvent note in (timeline.Notes ?? Array.Empty<NoteEvent>())
                      .Where(IsNoteEmitted)
                      .OrderBy(n => TrackKeyFor(n), Comparer<MidiTrackKey>.Create(CompareTrackKeys))
@@ -161,14 +167,23 @@ internal sealed class MusicalMidiExporter
                      .ThenBy(n => n.InitialMidiNote))
         {
             MidiTrackKey key = TrackKeyFor(note);
-            TrackSlot slot = allocator.SlotFor(key);
+            TrackSlot? slot = allocator.SlotFor(key);
             if (slot is null)
                 continue;
-            // One source-time collision has one musical decision. The ordering above
-            // makes the winner independent of decoder encounter order.
-            if (!emittedNoteTicks.Add((key, MapTick(note.StartSample, originOffsetQuarters))))
+            if (!emittedNoteTicks.Add((key, TimeTick(note.StartSample))))
                 continue;
-            EmitNote(slot, note, originOffsetQuarters, domainBendRanges);
+            plannable.Add(new PlannableNote(slot, note));
+        }
+
+        // Pitch/note planning happens once per note, in ENDPOINT order, so the
+        // per-endpoint pitch-bend state (lastEncodedBend) is consistent and bend
+        // resets are decided deterministically. This also steps through the MIDI
+        // tick domain AFTER same-tick pitch collapse so re-anchors never fabricate
+        // synthetic 1-tick internal notes.
+        Dictionary<MidiEndpoint, int> lastBendByEndpoint = new();
+        foreach (PlannableNote pn in plannable.OrderBy(p => p.Slot.Index).ThenBy(p => p.Note.StartSample))
+        {
+            EmitNote(pn.Slot, pn.Note, originShiftTicks, lastBendByEndpoint);
         }
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
@@ -192,15 +207,27 @@ internal sealed class MusicalMidiExporter
                         $"Percussion note exhaustion: rhythm domain '{rhythmKey}' cannot be assigned a MIDI note.");
                 drumNoteByIdentity[rhythmKey] = note;
             }
-            AddTrackEvent(slot.Track, new MidiNoteEvent(
-                MapTick(rhythm.SamplePosition, originOffsetQuarters),
-                slot.Index, slot.Channel, note, 100, NoteOn: true));
-            AddTrackEvent(slot.Track, new MidiNoteEvent(
-                MapTick(rhythm.SamplePosition, originOffsetQuarters) + ShortHitTicks,
-                slot.Index, slot.Channel, note, 100, NoteOn: false));
+            long on = TimeTick(rhythm.SamplePosition) + originShiftTicks;
+            AddTrackEvent(slot.Track, new MidiNoteEvent(on, slot.Index, slot.Channel, note, 100, NoteOn: true));
+            AddTrackEvent(slot.Track, new MidiNoteEvent(on + ShortHitTicks, slot.Index, slot.Channel, note, 100, NoteOn: false));
         }
 
+        // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
+        // that actually serialized a bend (Patch B): none on percussion or on tracks
+        // whose notes required no bend infrastructure.
+        EmitBendRangeSetup(allocator);
+
         ApplyQuantizationToGrid(allocator);
+
+        // Endpoint uniqueness is enforced as a hard invariant across the exported
+        // track set, in addition to the writer's own guard.
+        var uniqueEndpoints = new HashSet<MidiEndpoint>();
+        foreach (MidiTrack track in allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value))
+        {
+            if (!uniqueEndpoints.Add(track.Endpoint))
+                throw new InvalidOperationException(
+                    $"Duplicate MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) allocated to more than one track.");
+        }
 
         var writer = new MidiFileWriter(_ppq);
         var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
@@ -209,13 +236,8 @@ internal sealed class MusicalMidiExporter
         {
             Bytes = bytes,
             Tracks = tracks,
-            Diagnostics = Diagnostics ?? new TimingDiagnostics
-            {
-                AnchorCount = 0,
-                TempoSource = TimingSource.DriverBeatAnchors,
-                PhaseSource = TimingSource.DriverBeatAnchors,
-            },
-            OriginOffsetQuarters = originOffsetQuarters,
+            Diagnostics = Diagnostics ?? NullDiagnostics,
+            OriginShiftTicks = originShiftTicks,
         };
     }
 
@@ -226,36 +248,26 @@ internal sealed class MusicalMidiExporter
         PhaseSource = TimingSource.DriverBeatAnchors,
     };
 
-    private long MapTick(long sample, double originOffsetQuarters) =>
-        _map.SampleToTick(sample, _ppq)
-        + _map.QuarterPositionToTick(originOffsetQuarters, _ppq);
+    /// <summary>The unshifted absolute MIDI tick of a source sample (may be negative).</summary>
+    private long TimeTick(long sample) => _map.SampleToTick(sample, _ppq);
 
     private int ShortHitTicks => Math.Max(1, _ppq / 32);
 
-    /// <summary>Single source of truth for whether a note is actually emitted (§21).
-    /// Export emits a note only when it has positive duration AND its voice is
-    /// included (excluded voices get no track/slot). ComputeOriginOffset must derive
-    /// the global origin from EXACTLY the same set, so the two share this predicate —
-    /// a note either side drops (non-positive duration or voice-excluded) emits no
-    /// tick and must never push the origin back.</summary>
+    /// <summary>Single source of truth for whether a note is actually emitted (§21).</summary>
     private bool IsNoteEmitted(NoteEvent note) =>
         note is not null && note.EndSample > note.StartSample && _options.OverrideFor(note.ChannelId).Include;
 
-    /// <summary>Single source of truth for whether a rhythm trigger is emitted (§21).
-    /// Export/BuildTracks drop rhythm channels whose VoiceExportOverride.Include is
-    /// false (no track, no slot, no events); ComputeOriginOffset must apply the same
-    /// predicate so an excluded channel's early trigger cannot delay the origin.</summary>
+    /// <summary>Single source of truth for whether a rhythm trigger is emitted (§21).</summary>
     private bool IsRhythmEmitted(RhythmEvent rhythm) =>
         rhythm is not null && _options.OverrideFor(rhythm.ChannelId).Include;
 
     /// <summary>Single source of truth for whether a note serializes a pitch-bend
     /// family (§21). Used by BOTH EmitNote (to decide bend emission) and
-    /// ComputeOriginOffset (to decide whether the note's pitch changes may contribute
-    /// to the origin), so the two can never diverge. A note emits bends only when
-    /// EmitPitchBend is set AND it has pitch changes OR a fractional / non-finite
-    /// initial note (an initial bend so it sounds at its true pitch); any other note
-    /// produces a single round-pitch note with no bend infrastructure — and must not
-    /// fold pitch-change samples into the origin.</summary>
+    /// ComputeOriginShiftTicks (to decide whether the note's pitch changes may
+    /// contribute to the origin), so the two can never diverge. A note emits bends
+    /// only when EmitPitchBend is set AND it has pitch changes OR a fractional /
+    /// non-finite initial note; any other note produces a single round-pitch note
+    /// with no bend infrastructure.</summary>
     private bool ShouldFoldPitch(NoteEvent note)
     {
         if (!_options.EmitPitchBend)
@@ -266,57 +278,184 @@ internal sealed class MusicalMidiExporter
             || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6;
     }
 
-    private void EmitNote(TrackSlot slot, NoteEvent note, double originOffsetQuarters,
-        IReadOnlyDictionary<MidiChannelDomain, int> domainBendRanges)
+    private void EmitNote(TrackSlot slot, NoteEvent note, long originShift,
+        Dictionary<MidiEndpoint, int> lastBendByEndpoint)
     {
         VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
         int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
         int transpose = voiceOverride.TransposeSemitones;
-
         bool needsBend = ShouldFoldPitch(note);
-        int bendRange = needsBend ? domainBendRanges[slot.Domain] : 0;
+        int bendRange = _options.BendRangeSemitones;
+        // Validate the source pitch domain regardless of bend emission (§ B.3 /
+        // cross-cutting fail-loudly): a note whose true pitch is outside MIDI 0..127
+        // is rejected even when it needs no bend infrastructure.
+        ValidateSourcePitch(note);
 
-        // When no bend is needed, emit a single note at the rounded pitch with no
-        // bend infrastructure at all (keeps constant-pitch output minimal and
-        // byte-identical to the pre-bend exporter for the common case).
-        IReadOnlyList<NotePlaybackSegment> segments = needsBend
-            ? new[] { new NotePlaybackSegment(note.StartSample, note.EndSample,
-                double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60,
-                note.Pitch.OrderBy(p => p.SamplePosition).ThenBy(p => p.MidiNote).ToArray()) }
-            : new[] { new NotePlaybackSegment(
-                note.StartSample, note.EndSample,
-                note.InitialMidiNote, Array.Empty<PitchChange>()) };
-
-        foreach (NotePlaybackSegment segment in segments)
+        if (!needsBend)
         {
-            long segOn = MapTick(segment.StartSample, originOffsetQuarters);
-            long segOff = MapTick(segment.EndSample, originOffsetQuarters);
-            if (segOff <= segOn)
-                segOff = segOn + 1;
-            int pitch = (int)Math.Clamp(Math.Round(segment.BaseMidiNote) + transpose, 0, 127);
-            AddTrackEvent(slot.Track, new MidiNoteEvent(segOn, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
-            AddTrackEvent(slot.Track, new MidiNoteEvent(segOff, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
-
-            if (!needsBend)
-                continue;
-            // Initial fractional correction so the note starts at its true pitch.
-            double baseNote = segment.BaseMidiNote;
-            int initialBend = EncodeBend(baseNote + transpose - pitch, bendRange);
-            ValidateEffectivePitch(note, segment.StartSample, baseNote + transpose, pitch, initialBend, bendRange);
-            AddTrackEvent(slot.Track, new MidiPitchBendEvent(segOn, slot.Index, slot.Channel, initialBend));
-            // Each change, relative to the segment's base note.
-            foreach (PitchChange change in segment.Changes)
+            // Single round-pitch note, no bend infrastructure. The note-on must
+            // still sound at its true (integer) pitch, so reset any residual bend
+            // left by a prior note on this endpoint back to 0 (never assume NoteOff
+            // restores 0 — Patch B.8).
+            long on = TimeTick(note.StartSample) + originShift;
+            long off = TimeTick(note.EndSample) + originShift;
+            if (off <= on)
+                off = on + 1;
+            int pitch = Math.Clamp((int)Math.Round(note.InitialMidiNote) + transpose, 0, 127);
+            ValidateNotePitch(note, pitch);
+            var noBendEndpoint = slot.Track.Endpoint;
+            if (lastBendByEndpoint.TryGetValue(noBendEndpoint, out int lastBend) && lastBend != 0)
             {
-                if (!double.IsFinite(change.MidiNote))
-                    continue;
-                AddTrackEvent(slot.Track, new MidiPitchBendEvent(
-                    MapTick(change.SamplePosition, originOffsetQuarters),
-                    slot.Index, slot.Channel,
-                    EncodeBend(change.MidiNote + transpose - pitch, bendRange)));
-                ValidateEffectivePitch(note, change.SamplePosition, change.MidiNote + transpose,
-                    pitch, EncodeBend(change.MidiNote + transpose - pitch, bendRange), bendRange);
+                AddTrackEvent(slot.Track, new MidiPitchBendEvent(on, slot.Index, slot.Channel, 0));
+                lastBendByEndpoint[noBendEndpoint] = 0;
             }
+            AddTrackEvent(slot.Track, new MidiNoteEvent(on, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
+            AddTrackEvent(slot.Track, new MidiNoteEvent(off, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
+            return;
         }
+
+        // Build the pitch anchor list: folded-initial + causal changes, "final wins"
+        // at the same sample, transposed exactly once, collapsed to same-tick.
+        double initialSource = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
+        var anchors = BuildPitchAnchors(note, initialSource, transpose);
+
+        long startTick = TimeTick(note.StartSample);
+        long endTick = TimeTick(note.EndSample);
+        if (note.EndSample > note.StartSample && endTick == startTick)
+            endTick = startTick + 1; // real collapsed note: minimum 1 tick (§29).
+
+        int baseNote = SelectBaseNote(anchors[0].Target, bendRange, note);
+        var pitchStates = new List<PlannedPitchState>();
+        MidiEndpoint endpoint = slot.Track.Endpoint;
+
+        // Re-anchor loop over the pitch states in tick order. Between the current
+        // base and the next re-anchor, every state is encoded against the current
+        // base. When a state exits baseNote +- range, re-anchor at that tick.
+        long currentBaseFrom = startTick;
+        int currentBase = baseNote;
+        var reanchors = new List<(long Tick, int OldBase, int NewBase, int InitialBend)>();
+        for (int i = 1; i < anchors.Count; i++)
+        {
+            (long tick, double target, _) = anchors[i];
+            if (tick < currentBaseFrom)
+                continue; // defensive; anchors are sorted ascending
+            double offset = target - currentBase;
+            if (offset > bendRange || offset < -bendRange)
+            {
+                int newBase = SelectBaseNote(target, bendRange, note);
+                int rebend = EncodeBend(target - newBase, bendRange, note);
+                reanchors.Add((tick, currentBase, newBase, rebend));
+                // The re-anchor's initial bend is the effective bend at that tick.
+                pitchStates.Add(new PlannedPitchState(tick, target, rebend));
+                currentBase = newBase;
+                currentBaseFrom = tick;
+                continue;
+            }
+            int bend = EncodeBend(offset, bendRange, note);
+            // Dedup: skip a consecutive bend equal to the previous state's bend.
+            if (pitchStates.Count > 0 && pitchStates[^1].EncodedBend == bend && pitchStates[^1].Tick < tick)
+                continue;
+            pitchStates.Add(new PlannedPitchState(tick, target, bend));
+        }
+
+        // Initial bend for the note-on (base note at the folded-initial target).
+        // Always relative to the note's STARTING base (baseNote), never the current
+        // re-anchored base — the note begins sounding on baseNote.
+        int initialBend = EncodeBend(anchors[0].Target - baseNote, bendRange, note);
+        // Replace any state sitting at the note-start tick with the initial bend
+        // (a change at StartSample was already folded into the initial pitch).
+        pitchStates.RemoveAll(s => s.Tick == startTick);
+
+        // Per-endpoint bend reset: before the note-on, ensure the current bend
+        // equals this note's required initial bend (never assume NoteOff restores 0).
+        int beforeOn = lastBendByEndpoint.TryGetValue(endpoint, out int last) ? last : 0;
+        if (beforeOn != initialBend)
+            AddTrackEvent(slot.Track, new MidiPitchBendEvent(startTick + originShift, slot.Index, slot.Channel, initialBend));
+        lastBendByEndpoint[endpoint] = initialBend;
+
+        AddTrackEvent(slot.Track, new MidiNoteEvent(startTick + originShift, slot.Index, slot.Channel, baseNote, vel, NoteOn: true));
+
+        // Topological emission: pitch states (incl. re-anchor initial bends) in
+        // tick order; a re-anchor additionally notes-off the old base and notes-on
+        // the new base at the re-anchor tick (order NoteOff, PitchBend, NoteOn via
+        // the writer's rank).
+        int reIdx = 0;
+        foreach (PlannedPitchState state in pitchStates.OrderBy(s => s.Tick).ThenBy(s => s.EncodedBend))
+        {
+            long t = state.Tick;
+            if (reIdx < reanchors.Count && reanchors[reIdx].Tick <= t)
+            {
+                var re = reanchors[reIdx];
+                if (re.Tick == t)
+                {
+                    AddTrackEvent(slot.Track, new MidiNoteEvent(t + originShift, slot.Index, slot.Channel, re.OldBase, vel, NoteOn: false));
+                    AddTrackEvent(slot.Track, new MidiPitchBendEvent(t + originShift, slot.Index, slot.Channel, re.InitialBend));
+                    AddTrackEvent(slot.Track, new MidiNoteEvent(t + originShift, slot.Index, slot.Channel, re.NewBase, vel, NoteOn: true));
+                    lastBendByEndpoint[endpoint] = re.InitialBend;
+                    reIdx++;
+                    continue;
+                }
+            }
+            AddTrackEvent(slot.Track, new MidiPitchBendEvent(t + originShift, slot.Index, slot.Channel, state.EncodedBend));
+            lastBendByEndpoint[endpoint] = state.EncodedBend;
+        }
+
+        // Final note-off on the current base.
+        AddTrackEvent(slot.Track, new MidiNoteEvent(endTick + originShift, slot.Index, slot.Channel, currentBase, vel, NoteOn: false));
+    }
+
+    private List<(long Tick, double Target, int Order)> BuildPitchAnchors(
+        NoteEvent note, double initialSource, int transpose)
+    {
+        ValidateSourcePitch(note);
+        // Initial pitch first, then each causal finite change that occurs strictly
+        // after the note start (at/after StartSample fold into the initial pitch)
+        // and before/at the note end. Transpose applied exactly once.
+        var pts = new List<(long Sample, double Target, int Order)>();
+        pts.Add((note.StartSample, initialSource + transpose, -1));
+        int seq = 0;
+        foreach (PitchChange c in note.Pitch)
+        {
+            if (!double.IsFinite(c.MidiNote))
+                continue;
+            // Ignore changes before note start and at/after NoteOff.
+            if (c.SamplePosition < note.StartSample || c.SamplePosition >= note.EndSample)
+                continue;
+            pts.Add((c.SamplePosition, c.MidiNote + transpose, seq++));
+        }
+        // Same-sample collapse: final (highest source order) wins, source order kept.
+        List<(long Sample, double Target, int Order)> collapsed = pts
+            .GroupBy(p => p.Sample)
+            .Select(g => g.OrderBy(p => p.Order).Last())
+            .OrderBy(p => p.Sample)
+            .ThenBy(p => p.Order)
+            .ToList();
+        // Same-tick collapse in the MIDI tick domain: final (latest source order) wins.
+        List<(long Tick, double Target, int Order)> byTick = collapsed
+            .Select(p => (Tick: TimeTick(p.Sample), p.Target, p.Order))
+            .OrderBy(p => p.Tick)
+            .ThenBy(p => p.Order)
+            .ToList();
+        var collapsedByTick = byTick
+            .GroupBy(p => p.Tick)
+            .Select(g => g.OrderBy(p => p.Order).Last())
+            .OrderBy(p => p.Tick)
+            .ToList();
+        return collapsedByTick;
+    }
+
+    private int SelectBaseNote(double target, int range, NoteEvent note)
+    {
+        int lo = (int)Math.Ceiling(target - range);
+        int hi = (int)Math.Floor(target + range);
+        lo = Math.Max(0, lo);
+        hi = Math.Min(127, hi);
+        if (lo > hi)
+            throw new InvalidOperationException(
+                $"No legal MIDI base note represents target pitch {target:0.###} within bend range {range} for " +
+                $"source note '{note.ChannelId}' at sample {note.StartSample}.");
+        int rounded = (int)Math.Round(target, MidpointRounding.AwayFromZero);
+        return Math.Clamp(rounded, lo, hi);
     }
 
     /// <summary>Assigns the next deterministic source-sequence key and returns the event.</summary>
@@ -333,29 +472,36 @@ internal sealed class MusicalMidiExporter
         track.Events.Add(evt);
     }
 
-    /// <summary>7-bit bend value for a semitone offset within the configured range.</summary>
-    private static int EncodeBend(double semitones, int rangeSemitones)
+    /// <summary>Sign-symmetric 14-bit bend for a semitone offset within the fixed range:
+    /// negative offsets map to [0,-8192), positive to [0,+8191]. Non-finite or
+    /// out-of-range offsets fail loudly — no Math.Clamp to hide a planner bug.</summary>
+    private static int EncodeBend(double offset, int range, NoteEvent note)
     {
-        if (!double.IsFinite(semitones))
-            return 0;
-        double halfRange = Math.Max(1, rangeSemitones);
-        double scaled = (semitones / halfRange) * 8191.0;
-        return Math.Clamp((int)Math.Round(scaled), -8192, 8191);
+        if (!double.IsFinite(offset))
+            throw new InvalidOperationException(
+                $"Non-finite pitch-bend offset for source note '{note.ChannelId}': {offset}.");
+        if (offset < -range || offset > range)
+            throw new InvalidOperationException(
+                $"Pitch offset {offset:0.###} exceeds the fixed bend range of {range} semitones for source note " +
+                $"'{note.ChannelId}'; expected a tick-domain re-anchor to resolve this.");
+        double scaled = offset < 0 ? offset / range * 8192.0 : offset / range * 8191.0;
+        int bend = (int)Math.Round(scaled, MidpointRounding.AwayFromZero);
+        if (bend < -8192 || bend > 8191)
+            throw new InvalidOperationException(
+                $"Encoded bend {bend} is outside [-8192, 8191] for source note '{note.ChannelId}'.");
+        return bend;
     }
 
-    private int RequiredBendRange(NoteEvent note)
+    /// <summary>Sign-symmetric bend decode (inverse of <see cref="EncodeBend"/>): negative
+    /// bend / 8192 * range, positive bend / 8191 * range.</summary>
+    private static double DecodeBend(int bend, int range) =>
+        bend < 0 ? bend / 8192.0 * range : bend / 8191.0 * range;
+
+    private static void ValidateNotePitch(NoteEvent note, int midiNote)
     {
-        ValidateSourcePitch(note);
-        double basePitch = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
-        double max = note.Pitch.Where(p => double.IsFinite(p.MidiNote))
-            .Select(p => Math.Abs(p.MidiNote - Math.Round(basePitch)))
-            .Append(Math.Abs(basePitch - Math.Round(basePitch)))
-            .DefaultIfEmpty(0).Max();
-        int required = Math.Max(_options.BendRangeSemitones, (int)Math.Ceiling(max));
-        if (required > 127)
+        if (midiNote < 0 || midiNote > 127)
             throw new InvalidOperationException(
-                $"Source note '{note.ChannelId}' requires a pitch-bend range of {required} semitones; MIDI supports at most 127.");
-        return Math.Max(1, required);
+                $"Source note '{note.ChannelId}' at sample {note.StartSample} maps to invalid MIDI note {midiNote}.");
     }
 
     private static void ValidateSourcePitch(NoteEvent note)
@@ -364,73 +510,17 @@ internal sealed class MusicalMidiExporter
             throw new InvalidOperationException(
                 $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid initial MIDI pitch " +
                 $"'{note.InitialMidiNote}'. Expected a finite value in [0, 127].");
-        foreach (PitchChange change in note.Pitch)
+        if (note.Pitch is { Count: > 0 })
         {
-            if (!double.IsFinite(change.MidiNote) || change.MidiNote is < 0 or > 127)
-                throw new InvalidOperationException(
-                    $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid pitch " +
-                    $"'{change.MidiNote}' at sample {change.SamplePosition}. Expected a finite value in [0, 127].");
-        }
-    }
-
-    private static void ValidateEffectivePitch(NoteEvent note, long sample, double planned,
-        int midiNote, int bend, int range)
-    {
-        double reconstructed = midiNote + bend / 8191.0 * range;
-        double tolerance = Math.Max(0.01, range / 8191.0 * 1.5);
-        if (Math.Abs(reconstructed - planned) > tolerance)
-            throw new InvalidOperationException(
-                $"Pitch reconstruction failed for source note '{note.ChannelId}' at sample {sample}: " +
-                $"planned {planned:0.###}, MIDI note {midiNote}, bend {bend}, range {range}, " +
-                $"reconstructed {reconstructed:0.###}.");
-    }
-
-    /// <summary>
-    /// Legacy helper retained for callers compiled against the previous planner.
-    /// Semantic export now emits one note and selects a domain-wide bend range.
-    /// </summary>
-    private List<NotePlaybackSegment> BuildPlaybackSegments(NoteEvent note, int rangeSemitones)
-    {
-        double basePitch = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
-        var result = new List<NotePlaybackSegment>();
-        var changes = new List<PitchChange>();
-        double segBase = basePitch;
-        double segStart = note.StartSample;
-
-        void CloseSegment(double endSample)
-        {
-            result.Add(new NotePlaybackSegment(
-                (long)Math.Round(segStart), (long)Math.Round(endSample), segBase, changes.ToArray()));
-        }
-
-        foreach (PitchChange change in note.Pitch
-                     .OrderBy(p => p.SamplePosition)
-                     .ThenBy(p => p.MidiNote))
-        {
-            if (!double.IsFinite(change.MidiNote))
-                continue;
-            double needed = change.MidiNote - segBase;
-            if (Math.Abs(needed) > Math.Max(1, rangeSemitones))
+            foreach (PitchChange change in note.Pitch)
             {
-                // Contour left this segment's range: close it at this change's
-                // sample and start a fresh segment centred on the new pitch.
-                CloseSegment(change.SamplePosition);
-                segStart = change.SamplePosition;
-                segBase = change.MidiNote;
-                changes.Clear();
-                continue;
+                if (!double.IsFinite(change.MidiNote) || change.MidiNote is < 0 or > 127)
+                    throw new InvalidOperationException(
+                        $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid pitch " +
+                        $"'{change.MidiNote}' at sample {change.SamplePosition}. Expected a finite value in [0, 127].");
             }
-            changes.Add(change);
         }
-        CloseSegment(note.EndSample);
-        return result;
     }
-
-    private readonly record struct NotePlaybackSegment(
-        long StartSample,
-        long EndSample,
-        double BaseMidiNote,
-        IReadOnlyList<PitchChange> Changes);
 
     private void ApplyQuantizationToGrid(TrackAllocator allocator)
     {
@@ -458,81 +548,60 @@ internal sealed class MusicalMidiExporter
         }
     }
 
-    private double ComputeOriginOffset(VisualizationTimeline timeline)
+    /// <summary>
+    /// Computes the minimal integer origin shift over every time-domain event that
+    /// is actually emitted: notes, pitch bends, rhythm triggers, loop markers,
+    /// SOURCE_START/FIRST_DOWNBEAT markers (when emitted), and later tempo events.
+    /// Setup events (the first Set Tempo, Time Signature, RPN, program/bank) stay at
+    /// their logical tick 0 and are not shifted. The shift is the smallest whole tick
+    /// that makes every time-domain tick nonnegative — NOT aligned to quarter/bar.
+    /// </summary>
+    private long ComputeOriginShiftTicks(VisualizationTimeline timeline)
     {
-        // The global origin must make every exported tick nonnegative (§21). The
-        // map's FirstSample is the earliest sample any conductor event (tempo /
-        // time signature / source marker) covers, and every note/rhythm sample sits
-        // at or after it, so its quarter position is the lower bound. Include it
-        // (plus any earlier downbeat marker) so a conductor tempo at the map start
-        // is never left at a negative tick — a note/rhythm-only origin would miss it.
-        double minQuarter = _map.SampleToQuarterPosition(_map.FirstSample);
+        long minTick = TimeTick(_map.FirstSample);
+        void Consider(long tick) { if (tick < minTick) minTick = tick; }
+
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
-            // The origin must derive ONLY from events that will actually be emitted
-            // (§21). Export emits a note only when it has positive duration AND its
-            // voice is included (excluded voices get no track/slot). Shared via
-            // IsNoteEmitted so the origin can never drift from emission — a dropped
-            // early note would otherwise push back the origin and delay the first
-            // tempo/event off tick 0.
             if (!IsNoteEmitted(note))
                 continue;
-            minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(note.StartSample));
-            // Pitch bends are emitted at every pitch-change sample (which may sit
-            // before the note's own start), so the global origin must cover them too
-            // (§21) — but ONLY when bends are actually serialized (ShouldFoldPitch).
-            // When EmitPitchBend is off or the note carries no pitch changes, no bend
-            // is emitted, so non-finite/early pitch changes must not shift the origin.
+            Consider(TimeTick(note.StartSample));
             if (!ShouldFoldPitch(note))
                 continue;
             foreach (PitchChange change in note.Pitch)
             {
-                if (!double.IsFinite(change.MidiNote))
-                    continue;
-                minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(change.SamplePosition));
+                if (change is null || !double.IsFinite(change.MidiNote)) continue;
+                Consider(TimeTick(change.SamplePosition));
             }
         }
         foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
         {
-            // The origin must derive ONLY from rhythm triggers that are actually
-            // emitted (§21). Export/BuildTracks drop rhythm channels whose
-            // VoiceExportOverride.Include is false (no track, no events); shared via
-            // IsRhythmEmitted so an excluded channel's early trigger can never delay
-            // the origin off tick 0.
-            if (!IsRhythmEmitted(rhythm))
+            if (rhythm is null || !IsRhythmEmitted(rhythm))
                 continue;
-            minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(rhythm.SamplePosition));
+            Consider(TimeTick(rhythm.SamplePosition));
         }
-        // Loop/section markers and the first-downbeat marker are projected onto the
-        // conductor ONLY when EmitMarkers is set; they may precede the first
-        // note/rhythm and must never map to a negative tick (§21). When markers are
-        // disabled they are not emitted, so they must not push the origin back —
-        // otherwise a marker before the map start would shift every real event and
-        // leave leading ticks at the DAW's default tempo.
         if (_options.EmitMarkers)
         {
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
             {
                 if (loop is null) continue;
-                minQuarter = Math.Min(minQuarter, _map.SampleToQuarterPosition(loop.SamplePosition));
+                Consider(TimeTick(loop.SamplePosition));
             }
+            Consider(TimeTick(timeline.StartSample)); // SOURCE_START
             if (_map.FirstDownbeatQuarter is double downbeat)
-                minQuarter = Math.Min(minQuarter, downbeat);
+                Consider(_map.QuarterPositionToTick(downbeat, _ppq));
         }
-
-        // origin must be nonnegative (§21); ceil so the minimum event maps to tick 0.
-        double baseOffset = Math.Max(0, Math.Ceiling(-minQuarter));
-        Meter? meter = _map.Meter;
-        if (meter is not null)
+        // Later tempo events at shifted segment start ticks (the first tempo is the
+        // setup event at logical tick 0 so its segment start is not covered here).
+        if (_map.Segments.Count > 1)
         {
-            double qpb = meter.QuartersPerBar;
-            if (qpb > 0)
-                baseOffset = Math.Ceiling(baseOffset / qpb) * qpb;
+            for (int i = 1; i < _map.Segments.Count; i++)
+                Consider(TimeTick(_map.Segments[i].StartSample));
         }
-        return baseOffset;
+        return Math.Max(0, -minTick);
     }
 
-    private void BuildConductor(VisualizationTimeline timeline, double originOffsetQuarters, List<MidiEventBase> conductor)
+    private void BuildConductor(VisualizationTimeline timeline, long originShift, List<MidiEventBase> conductor)
     {
         // Track name + source metadata text.
         if (_options.EmitConductorMetadata)
@@ -543,18 +612,21 @@ internal sealed class MusicalMidiExporter
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}")));
         }
 
-        // Set Tempo per segment, at each segment's start tick. Adjacent segments
-        // whose emitted µs/qn value (the MIDI integer actually written) is identical
-        // produce ONE Set Tempo event (§19) — the raw BPM is never compared.
-        int? lastUsPerQuarter = null;
-        foreach (TempoSegment segment in _map.Segments)
+        // First Set Tempo at tick 0 UNCONDITIONALLY (so no leading ticks run under an
+        // implicit 120 BPM). Later tempo events sit at their shifted segment-start
+        // tick; adjacent segments whose µs/qn match yield one event (§19).
+        if (_map.Segments.Count == 0)
+            throw new InvalidOperationException("Cannot build a conductor without any tempo segments.");
+        conductor.Add(WithSourceOrder(new MidiTempoEvent(0, _map.Segments[0].MicrosecondsPerQuarter)));
+        int? lastUsPerQuarter = _map.Segments[0].MicrosecondsPerQuarter;
+        for (int i = 1; i < _map.Segments.Count; i++)
         {
+            TempoSegment segment = _map.Segments[i];
             int us = segment.MicrosecondsPerQuarter;
             if (us == lastUsPerQuarter)
                 continue;
             lastUsPerQuarter = us;
-            long tick = MapTick(segment.StartSample, originOffsetQuarters);
-            conductor.Add(WithSourceOrder(new MidiTempoEvent(tick, us)));
+            conductor.Add(WithSourceOrder(new MidiTempoEvent(TimeTick(segment.StartSample) + originShift, us)));
         }
 
         // Time Signature when known; omit otherwise (DAW uses its default).
@@ -568,10 +640,10 @@ internal sealed class MusicalMidiExporter
         // Markers.
         if (_options.EmitMarkers)
         {
-            conductor.Add(WithSourceOrder(new MidiMarkerEvent(MapTick(_map.FirstSample, originOffsetQuarters), "SOURCE_START")));
+            conductor.Add(WithSourceOrder(new MidiMarkerEvent(TimeTick(timeline.StartSample) + originShift, "SOURCE_START")));
             if (_map.FirstDownbeatQuarter is double downbeat)
             {
-                long downbeatTick = _map.QuarterPositionToTick(downbeat + originOffsetQuarters, _ppq);
+                long downbeatTick = _map.QuarterPositionToTick(downbeat, _ppq) + originShift;
                 conductor.Add(WithSourceOrder(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT")));
             }
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
@@ -582,7 +654,7 @@ internal sealed class MusicalMidiExporter
                     LoopMarkerKind.Restart => "LOOP_END",
                     _ => "LOOP_MARK",
                 };
-                conductor.Add(WithSourceOrder(new MidiMarkerEvent(MapTick(loop.SamplePosition, originOffsetQuarters), name)));
+                conductor.Add(WithSourceOrder(new MidiMarkerEvent(TimeTick(loop.SamplePosition) + originShift, name)));
             }
         }
 
@@ -590,7 +662,7 @@ internal sealed class MusicalMidiExporter
         if (_options.EmitConductorMetadata)
         {
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
-                MapTick(_map.FirstSample, originOffsetQuarters),
+                TimeTick(_map.FirstSample) + originShift,
                 0x01,
                 TimingConfidenceText())));
         }
@@ -659,43 +731,25 @@ internal sealed class MusicalMidiExporter
         return allocator;
     }
 
-    private Dictionary<MidiChannelDomain, int> BuildDomainBendRanges(
-        VisualizationTimeline timeline, TrackAllocator allocator)
+    /// <summary>
+    /// Emits the fixed pitch-bend-range RPN setup (Patch B) once per melodic track
+    /// that actually emits bends, at logical tick 0. A track that emits no bends
+    /// gets no RPN setup. The range is the configured fixed value (default 24) —
+    /// never auto-expanded.
+    /// </summary>
+    private void EmitBendRangeSetup(TrackAllocator allocator)
     {
-        var ranges = new Dictionary<MidiChannelDomain, int>();
-        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        int range = _options.BendRangeSemitones;
+        if (range is < 1 or > 127)
+            throw new ArgumentOutOfRangeException(nameof(_options), "Bend range must be in [1, 127].");
+        foreach ((MidiTrackKey key, TrackSlot slot) in allocator.Slots.OrderBy(pair => pair.Value.Index))
         {
-            if (!IsNoteEmitted(note))
+            if (slot.Percussive)
                 continue;
-            ValidateSourcePitch(note);
-            if (!ShouldFoldPitch(note))
+            // Only emit the RPN setup on tracks that actually serialized a bend; a
+            // constant-pitch melodic track needs no bend infrastructure.
+            if (!slot.Track.Events.Any(e => e is MidiPitchBendEvent))
                 continue;
-            TrackSlot? slot = allocator.SlotFor(TrackKeyFor(note));
-            if (slot is null)
-                continue;
-            int required = RequiredBendRange(note);
-            ranges[slot.Domain] = ranges.TryGetValue(slot.Domain, out int current)
-                ? Math.Max(current, required) : required;
-        }
-        return ranges;
-    }
-
-    private void EmitDomainBendRanges(TrackAllocator allocator,
-        IReadOnlyDictionary<MidiChannelDomain, int> ranges)
-    {
-        foreach ((MidiChannelDomain domain, int range) in ranges
-                     .OrderBy(pair => pair.Key.Device.Type)
-                     .ThenBy(pair => pair.Key.Device.Instance)
-                     .ThenBy(pair => pair.Key.VoiceFamily)
-                     .ThenBy(pair => pair.Key.SourceChannel))
-        {
-            TrackSlot slot = allocator.Slots
-                .Where(pair => pair.Value.Domain == domain)
-                .OrderBy(pair => pair.Value.Index)
-                .Select(pair => pair.Value)
-                .First();
-            // RPN state is channel-global across tracks. Initialize it once at
-            // tick zero with the maximum range for the complete source domain.
             AddTrackEvent(slot.Track, new MidiBendRangeEvent(0, slot.Index, slot.Channel, range));
         }
     }
@@ -772,30 +826,6 @@ internal sealed class MusicalMidiExporter
         return new MidiTrackKey(device, voice, sourceChannel, instrument);
     }
 
-    /// <summary>Reads the source chip + channel from a VoiceId-style ChannelId
-    /// (e.g. "ym2608.0.fm.2" → Ym2608, channel 1). The numeric suffix is 1-based;
-    /// we fold it to zero-based SourceChannel so (Chip, SourceChannel) identifies a
-    /// source voice, and cross-Kind separation (FM vs SSG on the same numbered
-    /// channel) comes from InstrumentIdentity.Family in the key.</summary>
-    private static bool TryParseSourceChannel(string channelId, out ChipType chip, out int sourceChannel)
-    {
-        chip = ChipType.Unknown;
-        sourceChannel = 0;
-        if (string.IsNullOrWhiteSpace(channelId))
-            return false;
-        string[] parts = channelId.Split('.');
-        if (parts.Length < 4)
-            return false;
-        if (!DeviceId.TryParse(parts[0] + "." + parts[1], out DeviceId device))
-            return false;
-        string suffix = parts[^1];
-        if (!int.TryParse(suffix, out int n) || n < 1)
-            return false;
-        chip = device.Type;
-        sourceChannel = n - 1;
-        return true;
-    }
-
     private static bool TryParseSourceDomain(string channelId, out DeviceId device,
         out VoiceKind voice, out int sourceChannel)
     {
@@ -817,19 +847,37 @@ internal sealed class MusicalMidiExporter
                 return false;
         }
         string suffix = parts[^1];
-        if (!int.TryParse(suffix, out int n) || n < 1)
-            return false;
-        sourceChannel = n - 1;
-        return true;
+        if (int.TryParse(suffix, out int n) && n >= 1)
+        {
+            sourceChannel = n - 1;
+            return true;
+        }
+        // Patch E.2: a KNOWN voice family with a NON-NUMERIC (named) voice token
+        // (e.g. ym2608.0.rhythm.top) is real source-voice identity — never a
+        // placeholder. Derive a stable per-(device, kind, name) index from the token
+        // so distinct named voices stay distinct tracks while remaining valid.
+        if (voice is VoiceKind.Rhythm or VoiceKind.Pcm or VoiceKind.Adpcm or VoiceKind.Ssg
+            or VoiceKind.Psg or VoiceKind.MidiChannel)
+        {
+            sourceChannel = StableIndex(suffix);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>Collapses notes whose instrument identity could not be resolved to a
     /// single per-source-channel placeholder track (R11). The key is stable within a
     /// ChannelId and otherwise unique, so all placeholder notes on one channel share
-    /// exactly one track and never leak per-instrument tracks.</summary>
-    private static MidiTrackKey PlaceholderKey(string channelId) =>
-        new(new DeviceId(ChipType.Unknown, StableIndex(channelId)), VoiceKind.Pcm,
+    /// exactly one track and never leak per-instrument tracks. Records the fallback
+    /// in the exporter's placeholder diagnostics (Patch E.3).</summary>
+    private MidiTrackKey PlaceholderKey(string channelId)
+    {
+        _placeholderCount++;
+        if (Diagnostics is not null)
+            Diagnostics.Warnings.Add($"voice identity unresolved; collapsed to placeholder track: '{channelId}'");
+        return new(new DeviceId(ChipType.Unknown, StableIndex(channelId)), VoiceKind.Pcm,
             StableIndex(channelId), InstrumentIdentity.Empty);
+    }
 
     private static int StableIndex(string channelId)
     {
@@ -964,6 +1012,13 @@ internal sealed class MusicalMidiExporter
         VoiceKind VoiceFamily,
         int SourceChannel);
 
+    /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
+    private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note);
+
+    /// <summary>A planned pitch event at an absolute MIDI tick: the target pitch and its
+    /// encoded bend, resolved through tick-domain collapse and re-anchoring.</summary>
+    private readonly record struct PlannedPitchState(long Tick, double Target, int EncodedBend);
+
     private sealed class TrackSlot
     {
         private readonly TrackAllocator _owner;
@@ -983,7 +1038,7 @@ internal sealed class MusicalMidiExporter
         public int Index { get; }
         public int Channel { get; }
         public MidiChannelDomain Domain { get; }
-        private bool Percussive { get; }
+        public bool Percussive { get; }
 
         /// <summary>Per-voice override applied to this slot (default: include + program 0).</summary>
         public VoiceExportOverride Override { get; set; } = null!;

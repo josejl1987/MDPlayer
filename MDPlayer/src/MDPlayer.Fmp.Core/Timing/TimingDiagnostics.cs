@@ -96,6 +96,24 @@ internal sealed class TimingDiagnostics
     /// </summary>
     public bool TempoAmbiguous { get; set; }
 
+    /// <summary>Selected BPM from symbolic inference (Patch D diagnostics).</summary>
+    public double? SelectedBpm { get; set; }
+
+    /// <summary>Nearest half/double-tempo alternative BPM, when ambiguous (Patch D).</summary>
+    public double? AlternativeBpm { get; set; }
+
+    /// <summary>Normalized onset+subdivision score of the selected BPM (0..1, Patch D).</summary>
+    public double? SelectedScore { get; set; }
+
+    /// <summary>Normalized score of the alternative BPM (Patch D).</summary>
+    public double? AlternativeScore { get; set; }
+
+    /// <summary>Confidence derived from absolute normalized fit AND alias margin (Patch D).</summary>
+    public double? TempoConfidence { get; set; }
+
+    /// <summary>Sample where quarter 0 occurs (negative => pickup).</summary>
+    public long? PhaseSample { get; set; }
+
     /// <summary>True when tempo had to be estimated (not driver-validated and not user override).</summary>
     public bool TempoInferred => TempoSource is TimingSource.SymbolicInference or TimingSource.AudioInference;
 

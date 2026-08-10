@@ -134,7 +134,7 @@ public sealed class MusicalMidiExporterTests
         // note-on share the same MIDI tick. The writer must serialize the note-off
         // (0x80) before the note-on (0x90) so a same-pitch retrigger never glitches
         // into a running legato.
-        var track = new global::Fmp.Core.Midi.MidiTrack { Name = "retrig" };
+        var track = new global::Fmp.Core.Midi.MidiTrack { Name = "retrig", Endpoint = new global::Fmp.Core.Midi.MidiEndpoint(0, 0) };
         const int on = 960; // quarter 1
         const int tick = 2400 + 240; // off and next on both here
         track.Events.Add(new global::Fmp.Core.Midi.MidiNoteEvent(on, 1, 0, 64, 90, NoteOn: true));
@@ -345,8 +345,8 @@ public sealed class MusicalMidiExporterTests
         // A bend at (or before) the note-on corrects the rounded note to 60.3.
         ParsedBend? bend = parsed.Bends.OrderBy(b => b.Tick).FirstOrDefault();
         Assert.NotNull(bend);
-        // bend is in [-8192, 8191] for +-2 semitones range; 0.3 ST -> +1228.
-        Assert.InRange(bend!.Bend, 1100, 1350);
+        // Default fixed bend range is 24 semitones; 0.3 ST -> 0.3/24*8191 ≈ +102.
+        Assert.InRange(bend!.Bend, 90, 115);
         long noteOn = parsed.Notes[0].On;
         Assert.True(bend.Tick <= parsed.Notes[0].On, "cent correction bend must precede/coincide with note-on");
     }
@@ -545,9 +545,10 @@ public sealed class MusicalMidiExporterTests
 
         // The boundary bend maps to exactly quarter 16 => tick 16*PPQ (no offset).
         Assert.Contains(parsed.Bends, b => b.Tick == 16 * Ppq);
-        // Note-start bend sits exactly one quarter earlier (15*PPQ): no discontinuity.
-        long onBend = parsed.Bends.OrderBy(b => b.Tick).First().Tick;
-        Assert.Equal(15 * Ppq, onBend);
+        // The note starts exactly on its base note (bend 0) at quarter 15, so no
+        // note-start bend is emitted — only the boundary bend exists (no discontinuity).
+        Assert.Single(parsed.Bends);
+        Assert.Equal(16 * Ppq, parsed.Bends[0].Tick);
     }
 
     [Fact]
@@ -759,10 +760,10 @@ public sealed class MusicalMidiExporterTests
         // No pitch bend (or note) may clamp a negative delta.
         Assert.All(parsed.Notes, n => Assert.True(n.On >= 0 && n.Off >= 0, "note ticks must be nonnegative"));
         Assert.All(parsed.Bends, b => Assert.True(b.Tick >= 0, "bend ticks must be nonnegative"));
-        // The pitch change (quarter -0.25) is present as a bend before the note-on.
-        ParsedBend? preNote = parsed.Bends.OrderBy(b => b.Tick).FirstOrDefault();
-        Assert.NotNull(preNote);
-        Assert.True(preNote!.Tick >= 0);
+        // A pitch change BEFORE the note start is ignored (Patch B: fold only from
+        // the note's own start onward); the note itself is the event that must land
+        // on a nonnegative tick, keeping every family within the shifted origin.
+        Assert.True(parsed.Notes[0].On >= 0);
     }
 
     [Fact]
@@ -822,11 +823,15 @@ public sealed class MusicalMidiExporterTests
 
         Marker? downbeat = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "FIRST_DOWNBEAT");
         Assert.NotNull(downbeat);
-        Assert.Equal(0, downbeat!.Tick); // -4 + 4 → tick 0, never negative
-        // The conductor (incl. the first Set Tempo) is shifted by the downbeat's four
-        // quarters so no emitted event lands negative.
+        Assert.Equal(0, downbeat!.Tick); // -4 quarters → tick 0 via minimal integer shift, never negative
+        // The first Set Tempo is a setup event that stays at logical tick 0
+        // (Patch C.2), so there is no leading default-tempo span; the SOURCE_START
+        // marker carries the origin shift.
         Assert.NotEmpty(parsed.ConductorTempo);
-        Assert.Equal(4 * Ppq, parsed.ConductorTempo[0].Tick);
+        Assert.Equal(0, parsed.ConductorTempo[0].Tick);
+        Marker? sourceStart = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "SOURCE_START");
+        Assert.NotNull(sourceStart);
+        Assert.Equal(4 * Ppq, sourceStart!.Tick);
     }
 
     [Fact]
@@ -1021,10 +1026,11 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
-    public void Export_BendRangeRpn_EmittedOncePerChannel()
+    public void Export_BendRangeRpn_EmitsFixedRangeOnEachMelodicTrack()
     {
-        // RPN state is channel-global: two instrument tracks sharing one source
-        // domain/channel must use one fixed range, chosen from the whole domain.
+        // Fixed bounded bend range (Patch B): RPN setup is emitted once per melodic
+        // track that emits bends, at the CONFIGURED range — never auto-expanded to a
+        // per-domain maximum.
         double spq = Sr * 60.0 / 120.0;
         var notes = new[]
         {
@@ -1043,17 +1049,18 @@ public sealed class MusicalMidiExporterTests
             Beats = BuildBeats(120),
         };
         var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions { Meter = new Meter(4, 4), DetectTempoChanges = true });
-        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true, BendRangeSemitones = 2 })
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = true, BendRangeSemitones = 24 })
         {
             Diagnostics = build.Diagnostics,
         };
         MusicalMidiExportResult result = exporter.Export(timeline);
 
         var rangeEvents = result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().ToList();
-        // Both instrument tracks share one source domain/channel → one RPN setup,
-        // and it must be the 10-semitone domain maximum, not the first note's 2.
+        // Both notes share one placeholder track (same channel, non-canonical
+        // instrument tokens collapse to a single per-channel track), so exactly one
+        // RPN setup at the FIXED configured range (24) is emitted.
         Assert.Single(rangeEvents);
-        Assert.Equal(10, rangeEvents[0].Semitones);
+        Assert.Equal(24, rangeEvents[0].Semitones);
     }
 
     [Fact]

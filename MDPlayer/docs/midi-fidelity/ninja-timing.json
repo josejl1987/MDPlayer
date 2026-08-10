@@ -1,0 +1,49 @@
+{
+  "sampleRate": 44100,
+  "ppq": 960,
+  "source": "SymbolicInference",
+  "phaseAuthoritative": false,
+  "tempoAuthoritative": false,
+  "originTickOffset": 0,
+  "meter": null,
+  "downbeatKnown": false,
+  "tempoInference": {
+    "selectedBpm": 224,
+    "alternativeBpm": 112,
+    "selectedScore": 0.6262407455958258,
+    "alternativeScore": 0.7208914993996819,
+    "tempoConfidence": 0.8131203727979128,
+    "tempoAmbiguous": true,
+    "phaseSample": 6458
+  },
+  "pitch": {
+    "bendRange": 24,
+    "pitchEvents": 41001,
+    "reanchors": 6473,
+    "maxPitchErrorCents": 0.1465022585764864,
+    "sourceTimeMaxErrorMs": 0.27901770833333334,
+    "sourceTimeRmsErrorMs": 0.16099321770833333
+  },
+  "anchors": {
+    "input": 6502,
+    "accepted": 6502,
+    "rejected": 0,
+    "rmsResidualSamples": 0,
+    "maxResidualSamples": 0,
+    "rejectedDetails": []
+  },
+  "segments": [
+    {
+      "startSample": 0,
+      "endSample": 8152597,
+      "quarterAtStart": 0.5467089947089948,
+      "bpm": 224,
+      "source": "SymbolicInference",
+      "confidence": 0.8131203727979128
+    }
+  ],
+  "warnings": [
+    "symbolic inference: tempo 224 BPM, phase sample 6458 (score 0.626, confidence 0.813); sample-derived timing generally preferred if available",
+    "224/112 BPM ambiguity; treat phase/tempo as inferred"
+  ]
+}
