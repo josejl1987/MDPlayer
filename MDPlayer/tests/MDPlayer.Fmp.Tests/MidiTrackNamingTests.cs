@@ -118,6 +118,64 @@ public sealed class MidiTrackNamingTests
         Assert.Single(names);
     }
 
+    // ---- Patch 3: source-domain naming (FR-12, SC-10/SC-11) ---------------------
+
+    [Fact]
+    public void TrackNaming_KnownDomainWithoutInstrument_UsesSemanticName()
+    {
+        // SN76489 has no timbre identity (spec 30): the track is keyed by source
+        // channel and NAMED semantically — never a raw channelId, never a placeholder.
+        var result = Export(
+            Note("sn76489.0.psg.2", "sn76489:tone", 0, 1000),   // PSG channel 2 (0-based 1)
+            Note("sn76489.0.noise.1", "sn76489:noise", 2000, 3000));
+
+        string[] names = TrackNames(result).Where(n => n != "Conductor").OrderBy(n => n).ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Equal("SN76489 Noise", names[0]);
+        Assert.Equal("SN76489 PSG CH2", names[1]);
+    }
+
+    [Fact]
+    public void TrackNaming_KnownDomainWithInstrument_ComposesDomainAndInstrument()
+    {
+        // Locked hyphen convention ("<CHIP> CH<n> - <DisplayName>", D14): the
+        // domain and the normalized instrument compose — YM2151 identity fm:6
+        // propagates (Ym2151TimelineDecoder emits fm:N upstream; no exporter hack).
+        var result = Export(Note("ym2151.0.fm.4", "fm:6", 0, 1000));
+        string[] names = TrackNames(result).Where(n => n != "Conductor").ToArray();
+        Assert.Equal("YM2151 CH4 - FM 006", Assert.Single(names));
+    }
+
+    [Fact]
+    public void TrackNaming_SnesDspSampleIdentity_PropagatesAndSplitsBySample()
+    {
+        // spc:srcN parses (Patch 3 TryParse fix) so SNES DSP notes no longer
+        // collapse to a placeholder; the track key carries the Pcm/sample identity
+        // and splits when the voice changes samples (spec 29).
+        var result = Export(
+            Note("snesdsp.0.pcmvoice.1", "spc:src3", 0, 1000),
+            Note("snesdsp.0.pcmvoice.1", "spc:src12", 2000, 3000));
+
+        string[] names = TrackNames(result).Where(n => n != "Conductor").OrderBy(n => n).ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Equal("SNES DSP CH1 - Sample 03", names[0]);
+        Assert.Equal("SNES DSP CH1 - Sample 12", names[1]);
+    }
+
+    [Fact]
+    public void TrackNaming_GenuinePlaceholder_ReportsPlaceholderTrackCount()
+    {
+        var result = ExportWithDiagnostics(
+            Note("ym2612.0.fm.2", "unresolved-token", 0, 1000),
+            Note("ym2612.0.fm.3", "unresolved-token", 2000, 3000));
+
+        Assert.Contains(result.Diagnostics.Warnings,
+            w => w.Contains("placeholder-track-count=2", StringComparison.Ordinal));
+        // The per-placeholder warning still names the unresolved channelId (req 33).
+        Assert.Contains(result.Diagnostics.Warnings,
+            w => w.Contains("ym2612.0.fm.2", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void IndependentDomains_GetUniqueEndpoints_AcrossPorts()
     {
@@ -242,6 +300,22 @@ public sealed class MidiTrackNamingTests
         {
             StartSample = 0, EndSample = 5_000_000, SampleRate = 44100, Notes = notes,
         }, options);
+
+    private static MusicalMidiExportResult ExportWithDiagnostics(params VisualizationNoteEvent[] notes)
+    {
+        var map = new MusicalTimeMap(
+            44100, 0,
+            new[] { new TempoSegment(0, 5_000_000, 0, 22050, 120, TimingSource.UserOverride, 1.0) },
+            meter: null);
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = false })
+        {
+            Diagnostics = new TimingDiagnostics(),
+        };
+        return exporter.Export(new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 5_000_000, SampleRate = 44100, Notes = notes,
+        });
+    }
 
     private static MusicalMidiExportResult ExportTimeline(VisualizationTimeline timeline, MusicalMidiExportOptions options)
     {

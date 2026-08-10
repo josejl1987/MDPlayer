@@ -130,8 +130,11 @@ internal sealed class MusicalMidiExporter
 
     /// <summary>Number of source voices that fell back to a placeholder track (Patch
     /// E.3). Recorded so the timing report surfaces genuine unknowns rather than
-    /// silently collapsing them.</summary>
+    /// silently collapsing them. Counts DISTINCT unresolved channelIds (TrackKeyFor
+    /// runs in two passes, so per-call counting would over-report).</summary>
     private int _placeholderCount;
+
+    private readonly HashSet<string> _placeholderChannels = new();
 
     public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
     {
@@ -236,6 +239,12 @@ internal sealed class MusicalMidiExporter
                 throw new InvalidOperationException(
                     $"Duplicate MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) allocated to more than one track.");
         }
+
+        // Placeholder diagnostics (FR-12 / request 33): a single summary warning so
+        // the report surfaces genuinely unresolved identities — the per-placeholder
+        // warnings above already name the channelId.
+        if (_placeholderCount > 0 && Diagnostics is not null)
+            Diagnostics.Warnings.Add($"placeholder-track-count={_placeholderCount}");
 
         var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
 
@@ -1007,13 +1016,23 @@ internal sealed class MusicalMidiExporter
     /// change mid-note never retargets the note to another track.</summary>
     private MidiTrackKey TrackKeyFor(NoteEvent note)
     {
+        MidiTrackKey key;
         if (note.Domain is SourceDomainKey domain
             && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity typedInstrument))
-            return new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, typedInstrument);
-        if (!TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
-            || !InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
+            key = new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, typedInstrument);
+        else if (TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
+                 && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
+            key = new MidiTrackKey(device, voice, sourceChannel, instrument);
+        else
             return PlaceholderKey(note.ChannelId);
-        return new MidiTrackKey(device, voice, sourceChannel, instrument);
+        // SN76489 tone/noise is NOT an instrument (spec 30): PSG has no patch object
+        // comparable to FM, so the track is keyed by source channel only (channels
+        // are already split by VoiceKind.Psg index 0-2 / VoiceKind.Noise index 0).
+        // TryParse still accepts sn76489:* so it never placeholders; the semantic
+        // naming (SN76489 PSG CH1-3 / SN76489 Noise) carries the voice meaning.
+        if (key.Device.Type == ChipType.Sn76489)
+            key = key with { Instrument = InstrumentIdentity.Empty };
+        return key;
     }
 
     /// <summary>The MIDI track key owning a rhythm trigger, keyed by the rhythm
@@ -1085,9 +1104,12 @@ internal sealed class MusicalMidiExporter
     /// in the exporter's placeholder diagnostics (Patch E.3).</summary>
     private MidiTrackKey PlaceholderKey(string channelId)
     {
-        _placeholderCount++;
-        if (Diagnostics is not null)
-            Diagnostics.Warnings.Add($"voice identity unresolved; collapsed to placeholder track: '{channelId}'");
+        if (_placeholderChannels.Add(channelId))
+        {
+            _placeholderCount++;
+            if (Diagnostics is not null)
+                Diagnostics.Warnings.Add($"voice identity unresolved; collapsed to placeholder track: '{channelId}'");
+        }
         return new(new DeviceId(ChipType.Unknown, StableIndex(channelId)), VoiceKind.Pcm,
             StableIndex(channelId), InstrumentIdentity.Empty);
     }
@@ -1185,9 +1207,11 @@ internal sealed class MusicalMidiExporter
 
         private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId, int rhythmCountForChip)
         {
-            // Placeholder / unresolved instruments keep the per-channel name.
+            // Placeholder / unresolved instruments keep the per-channel name UNLESS
+            // the source domain is known — then the semantic source-domain name is
+            // used (FR-12: known domains never show a raw channelId unnecessarily).
             if (key.Instrument.IsEmpty)
-                return channelId;
+                return SourceDomainDisplayName(key) ?? channelId;
             if (percussive)
             {
                 // Semantic percussion name: "<CHIP> Rhythm" — the source "CH<n>"
@@ -1204,6 +1228,37 @@ internal sealed class MusicalMidiExporter
             // therefore always get distinct names.
             string chipName = key.Chip == ChipType.Unknown ? "CH" : $"{ChipPrefix(key.Chip)} CH";
             return $"{chipName}{key.SourceChannel + 1} - {instrument}";
+        }
+
+        /// <summary>
+        /// Semantic display name for a source domain WITHOUT an instrument identity
+        /// (FR-12 / request 31): "&lt;CHIP&gt; {word} CH{n}" or "&lt;CHIP&gt; Noise" —
+        /// e.g. "SN76489 PSG CH2", "SNES DSP Voice 1", "OKIM6295 Voice 1",
+        /// "YM2608 SSG CH1". Returns null for unknown/placeholder chips so the
+        /// caller falls back to the raw channelId. Used ONLY when the instrument is
+        /// Empty; with-instrument naming keeps the locked "&lt;CHIP&gt; CH&lt;n&gt; -
+        /// &lt;DisplayName&gt;" composition (test-locked hyphen convention, D14).
+        /// </summary>
+        private static string SourceDomainDisplayName(MidiTrackKey key)
+        {
+            if (key.Chip == ChipType.Unknown)
+                return null;
+            string chip = ChipPrefix(key.Chip);
+            if (key.VoiceFamily == VoiceKind.Noise)
+                return $"{chip} Noise";
+            string word = key.VoiceFamily switch
+            {
+                VoiceKind.Fm or VoiceKind.Fm3Operator => "FM",
+                VoiceKind.Ssg => "SSG",
+                VoiceKind.Psg => "PSG",
+                VoiceKind.PcmVoice => $"Voice {key.SourceChannel + 1}",
+                VoiceKind.Adpcm => $"Voice {key.SourceChannel + 1}",
+                VoiceKind.MidiChannel => "CH",
+                VoiceKind.Rhythm => "Rhythm",
+                VoiceKind.Pcm => "PCM",
+                _ => key.VoiceFamily.ToString(),
+            };
+            return $"{chip} {word} CH{key.SourceChannel + 1}";
         }
 
         /// <summary>Short voice name of a rhythm identity ("rhythm:top" → "top").</summary>
@@ -1229,6 +1284,8 @@ internal sealed class MusicalMidiExporter
             ChipType.Ymf262 => "YMF262",
             ChipType.Ymf278b => "YMF278B",
             ChipType.Ymz280b => "YMZ280B",
+            ChipType.Sn76489 => "SN76489",
+            ChipType.SnesDsp => "SNES DSP",
             _ => chip.ToString().ToUpperInvariant(),
         };
 
