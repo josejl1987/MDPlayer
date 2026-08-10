@@ -81,12 +81,35 @@ internal sealed class MusicalTimeMap
         return segment.QuarterPositionAt(sample);
     }
 
+    /// <summary>Converts a source sample position to source-wall-clock seconds.</summary>
+    public double SampleToSeconds(long sample) => (double)sample / SampleRate;
+
     /// <summary>
-    /// Converts an absolute sample to an absolute MIDI tick at the given PPQ,
-    /// computing from the absolute sample so no per-beat rounding accumulates.
+    /// Converts a source sample to a MIDI tick using the wall-clock tempo actually
+    /// emitted for each segment. Musical quarter positions remain available for grid
+    /// metadata, but inferred phase or BPM must never alter source playback timing.
     /// </summary>
-    public long SampleToTick(long sample, int ppq) =>
-        QuarterPositionToTick(SampleToQuarterPosition(sample), ppq);
+    public long SampleToTick(long sample, int ppq)
+    {
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+
+        double ticks = SampleToQuarterPosition(FirstSample) * ppq;
+        long clamped = Math.Clamp(sample, FirstSample, EndSample);
+        foreach (TempoSegment segment in _segments)
+        {
+            if (clamped <= segment.StartSample)
+                break;
+            long segmentEnd = Math.Min(clamped, segment.EndSample);
+            double seconds = segmentEnd > segment.StartSample
+                ? SampleToSeconds(segmentEnd) - SampleToSeconds(segment.StartSample)
+                : 0;
+            ticks += seconds * 1_000_000.0 / segment.MicrosecondsPerQuarter * ppq;
+            if (clamped <= segment.EndSample)
+                break;
+        }
+        return (long)Math.Round(ticks, MidpointRounding.AwayFromZero);
+    }
 
     /// <summary>
     /// Converts an absolute quarter-note position to an absolute MIDI tick.

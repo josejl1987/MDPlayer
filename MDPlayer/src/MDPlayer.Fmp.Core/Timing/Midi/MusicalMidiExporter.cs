@@ -81,6 +81,9 @@ internal sealed class VoiceExportOverride
     /// <summary>MIDI channel (0–15) forced on this voice's track; null = default allocation.</summary>
     public int? Channel { get; set; }
 
+    /// <summary>Optional bank-select MSB. No bank or program event is emitted by default.</summary>
+    public int? Bank { get; set; }
+
     /// <summary>Note velocity (1–127); null = use option default.</summary>
     public int? Velocity { get; set; }
 
@@ -131,6 +134,8 @@ internal sealed class MusicalMidiExporter
             throw new ArgumentOutOfRangeException(nameof(ppq));
         _ppq = ppq;
         _options = (options ?? MusicalMidiExportOptions.Default);
+        if (_options.BendRangeSemitones is < 1 or > 127)
+            throw new ArgumentOutOfRangeException(nameof(options), "Bend range must be in [1, 127].");
     }
 
     /// <summary>Optional diagnostics (from the map's builder) surfaced on the result.</summary>
@@ -145,19 +150,25 @@ internal sealed class MusicalMidiExporter
         BuildConductor(timeline, originOffsetQuarters, conductor);
 
         TrackAllocator allocator = BuildTracks(timeline);
-        // One RPN pitch-bend-range setup per (track, channel) the first time that
-        // channel emits a bend (§32): DAW playback must not depend on a coincidental
-        // bend range, but the setup is not re-sent for every note on an unchanged
-        // channel.
-        var bendRangeChannels = new HashSet<(int Track, int Channel)>();
-        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        Dictionary<MidiChannelDomain, int> domainBendRanges = BuildDomainBendRanges(timeline, allocator);
+        EmitDomainBendRanges(allocator, domainBendRanges);
+        var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>();
+        foreach (NoteEvent note in (timeline.Notes ?? Array.Empty<NoteEvent>())
+                     .Where(IsNoteEmitted)
+                     .OrderBy(n => TrackKeyFor(n), Comparer<MidiTrackKey>.Create(CompareTrackKeys))
+                     .ThenBy(n => n.StartSample)
+                     .ThenByDescending(n => n.EndSample)
+                     .ThenBy(n => n.InitialMidiNote))
         {
-            if (!IsNoteEmitted(note))
-                continue;
-            TrackSlot slot = allocator.SlotFor(TrackKeyFor(note));
+            MidiTrackKey key = TrackKeyFor(note);
+            TrackSlot slot = allocator.SlotFor(key);
             if (slot is null)
                 continue;
-            EmitNote(slot, note, originOffsetQuarters, bendRangeChannels);
+            // One source-time collision has one musical decision. The ordering above
+            // makes the winner independent of decoder encounter order.
+            if (!emittedNoteTicks.Add((key, MapTick(note.StartSample, originOffsetQuarters))))
+                continue;
+            EmitNote(slot, note, originOffsetQuarters, domainBendRanges);
         }
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
@@ -176,6 +187,9 @@ internal sealed class MusicalMidiExporter
             if (!drumNoteByIdentity.TryGetValue(rhythmKey, out int note))
             {
                 note = nextDrum++;
+                if (note is < 0 or > 127)
+                    throw new InvalidOperationException(
+                        $"Percussion note exhaustion: rhythm domain '{rhythmKey}' cannot be assigned a MIDI note.");
                 drumNoteByIdentity[rhythmKey] = note;
             }
             AddTrackEvent(slot.Track, new MidiNoteEvent(
@@ -213,7 +227,8 @@ internal sealed class MusicalMidiExporter
     };
 
     private long MapTick(long sample, double originOffsetQuarters) =>
-        _map.QuarterPositionToTick(_map.SampleToQuarterPosition(sample) + originOffsetQuarters, _ppq);
+        _map.SampleToTick(sample, _ppq)
+        + _map.QuarterPositionToTick(originOffsetQuarters, _ppq);
 
     private int ShortHitTicks => Math.Max(1, _ppq / 32);
 
@@ -252,33 +267,25 @@ internal sealed class MusicalMidiExporter
     }
 
     private void EmitNote(TrackSlot slot, NoteEvent note, double originOffsetQuarters,
-        HashSet<(int Track, int Channel)> bendRangeChannels)
+        IReadOnlyDictionary<MidiChannelDomain, int> domainBendRanges)
     {
         VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
         int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
         int transpose = voiceOverride.TransposeSemitones;
 
         bool needsBend = ShouldFoldPitch(note);
+        int bendRange = needsBend ? domainBendRanges[slot.Domain] : 0;
 
         // When no bend is needed, emit a single note at the rounded pitch with no
         // bend infrastructure at all (keeps constant-pitch output minimal and
         // byte-identical to the pre-bend exporter for the common case).
         IReadOnlyList<NotePlaybackSegment> segments = needsBend
-            ? BuildPlaybackSegments(note, _options.BendRangeSemitones)
+            ? new[] { new NotePlaybackSegment(note.StartSample, note.EndSample,
+                double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60,
+                note.Pitch.OrderBy(p => p.SamplePosition).ThenBy(p => p.MidiNote).ToArray()) }
             : new[] { new NotePlaybackSegment(
                 note.StartSample, note.EndSample,
                 note.InitialMidiNote, Array.Empty<PitchChange>()) };
-
-        if (needsBend && bendRangeChannels.Add((slot.Index, slot.Channel)))
-        {
-            // Emit the RPN pitch-bend-range setup once per (track, channel), at the
-            // first bend-needing note's start (§32): the DAW's range must come from
-            // an explicit RPN, not a coincidental default, but it is not re-sent for
-            // every note on an unchanged channel.
-            AddTrackEvent(slot.Track, new MidiBendRangeEvent(
-                MapTick(note.StartSample, originOffsetQuarters),
-                slot.Index, slot.Channel, _options.BendRangeSemitones));
-        }
 
         foreach (NotePlaybackSegment segment in segments)
         {
@@ -294,7 +301,8 @@ internal sealed class MusicalMidiExporter
                 continue;
             // Initial fractional correction so the note starts at its true pitch.
             double baseNote = segment.BaseMidiNote;
-            int initialBend = EncodeBend(baseNote - pitch, _options.BendRangeSemitones);
+            int initialBend = EncodeBend(baseNote + transpose - pitch, bendRange);
+            ValidateEffectivePitch(note, segment.StartSample, baseNote + transpose, pitch, initialBend, bendRange);
             AddTrackEvent(slot.Track, new MidiPitchBendEvent(segOn, slot.Index, slot.Channel, initialBend));
             // Each change, relative to the segment's base note.
             foreach (PitchChange change in segment.Changes)
@@ -304,7 +312,9 @@ internal sealed class MusicalMidiExporter
                 AddTrackEvent(slot.Track, new MidiPitchBendEvent(
                     MapTick(change.SamplePosition, originOffsetQuarters),
                     slot.Index, slot.Channel,
-                    EncodeBend(change.MidiNote - baseNote, _options.BendRangeSemitones)));
+                    EncodeBend(change.MidiNote + transpose - pitch, bendRange)));
+                ValidateEffectivePitch(note, change.SamplePosition, change.MidiNote + transpose,
+                    pitch, EncodeBend(change.MidiNote + transpose - pitch, bendRange), bendRange);
             }
         }
     }
@@ -333,11 +343,51 @@ internal sealed class MusicalMidiExporter
         return Math.Clamp((int)Math.Round(scaled), -8192, 8191);
     }
 
+    private int RequiredBendRange(NoteEvent note)
+    {
+        ValidateSourcePitch(note);
+        double basePitch = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
+        double max = note.Pitch.Where(p => double.IsFinite(p.MidiNote))
+            .Select(p => Math.Abs(p.MidiNote - Math.Round(basePitch)))
+            .Append(Math.Abs(basePitch - Math.Round(basePitch)))
+            .DefaultIfEmpty(0).Max();
+        int required = Math.Max(_options.BendRangeSemitones, (int)Math.Ceiling(max));
+        if (required > 127)
+            throw new InvalidOperationException(
+                $"Source note '{note.ChannelId}' requires a pitch-bend range of {required} semitones; MIDI supports at most 127.");
+        return Math.Max(1, required);
+    }
+
+    private static void ValidateSourcePitch(NoteEvent note)
+    {
+        if (!double.IsFinite(note.InitialMidiNote) || note.InitialMidiNote is < 0 or > 127)
+            throw new InvalidOperationException(
+                $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid initial MIDI pitch " +
+                $"'{note.InitialMidiNote}'. Expected a finite value in [0, 127].");
+        foreach (PitchChange change in note.Pitch)
+        {
+            if (!double.IsFinite(change.MidiNote) || change.MidiNote is < 0 or > 127)
+                throw new InvalidOperationException(
+                    $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid pitch " +
+                    $"'{change.MidiNote}' at sample {change.SamplePosition}. Expected a finite value in [0, 127].");
+        }
+    }
+
+    private static void ValidateEffectivePitch(NoteEvent note, long sample, double planned,
+        int midiNote, int bend, int range)
+    {
+        double reconstructed = midiNote + bend / 8191.0 * range;
+        double tolerance = Math.Max(0.01, range / 8191.0 * 1.5);
+        if (Math.Abs(reconstructed - planned) > tolerance)
+            throw new InvalidOperationException(
+                $"Pitch reconstruction failed for source note '{note.ChannelId}' at sample {sample}: " +
+                $"planned {planned:0.###}, MIDI note {midiNote}, bend {bend}, range {range}, " +
+                $"reconstructed {reconstructed:0.###}.");
+    }
+
     /// <summary>
-    /// Decomposes a possibly long-running pitch contour into a run of short notes.
-    /// One segment is emitted per pitch-change sample at which the contour leaves
-    /// the configured bend range; each segment keeps its pitch within ±range of its
-    /// own (rounded) base note, so no bend ever clips and the full contour is traced.
+    /// Legacy helper retained for callers compiled against the previous planner.
+    /// Semantic export now emits one note and selects a domain-wide bend range.
     /// </summary>
     private List<NotePlaybackSegment> BuildPlaybackSegments(NoteEvent note, int rangeSemitones)
     {
@@ -511,7 +561,7 @@ internal sealed class MusicalMidiExporter
         if (_map.Meter is Meter meter)
         {
             conductor.Add(WithSourceOrder(new MidiTimeSignatureEvent(
-                MapTick(_map.FirstSample, originOffsetQuarters),
+                0,
                 meter.Numerator, meter.Denominator)));
         }
 
@@ -596,6 +646,8 @@ internal sealed class MusicalMidiExporter
         }
         keyOrder.Sort(CompareTrackKeys);
 
+        ValidateChannelState(keyOrder, representativeByKey);
+
         foreach (MidiTrackKey key in keyOrder)
         {
             string channelId = representativeByKey[key];
@@ -607,11 +659,74 @@ internal sealed class MusicalMidiExporter
         return allocator;
     }
 
+    private Dictionary<MidiChannelDomain, int> BuildDomainBendRanges(
+        VisualizationTimeline timeline, TrackAllocator allocator)
+    {
+        var ranges = new Dictionary<MidiChannelDomain, int>();
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (!IsNoteEmitted(note))
+                continue;
+            ValidateSourcePitch(note);
+            if (!ShouldFoldPitch(note))
+                continue;
+            TrackSlot? slot = allocator.SlotFor(TrackKeyFor(note));
+            if (slot is null)
+                continue;
+            int required = RequiredBendRange(note);
+            ranges[slot.Domain] = ranges.TryGetValue(slot.Domain, out int current)
+                ? Math.Max(current, required) : required;
+        }
+        return ranges;
+    }
+
+    private void EmitDomainBendRanges(TrackAllocator allocator,
+        IReadOnlyDictionary<MidiChannelDomain, int> ranges)
+    {
+        foreach ((MidiChannelDomain domain, int range) in ranges
+                     .OrderBy(pair => pair.Key.Device.Type)
+                     .ThenBy(pair => pair.Key.Device.Instance)
+                     .ThenBy(pair => pair.Key.VoiceFamily)
+                     .ThenBy(pair => pair.Key.SourceChannel))
+        {
+            TrackSlot slot = allocator.Slots
+                .Where(pair => pair.Value.Domain == domain)
+                .OrderBy(pair => pair.Value.Index)
+                .Select(pair => pair.Value)
+                .First();
+            // RPN state is channel-global across tracks. Initialize it once at
+            // tick zero with the maximum range for the complete source domain.
+            AddTrackEvent(slot.Track, new MidiBendRangeEvent(0, slot.Index, slot.Channel, range));
+        }
+    }
+
+    private void ValidateChannelState(IReadOnlyList<MidiTrackKey> keys,
+        IReadOnlyDictionary<MidiTrackKey, string> representatives)
+    {
+        var owners = new Dictionary<int, (MidiTrackKey Key, int? Program, int? Bank)>();
+        foreach (MidiTrackKey key in keys)
+        {
+            VoiceExportOverride ov = _options.OverrideFor(representatives[key]);
+            if (ov.Channel is not int channel) continue;
+            if (owners.TryGetValue(channel, out var prior)
+                && (prior.Program != ov.Program || prior.Bank != ov.Bank))
+                throw new InvalidOperationException(
+                    $"MIDI channel {channel} has incompatible state: domain '{prior.Key}' " +
+                    $"requests program/bank {prior.Program?.ToString() ?? "none"}/{prior.Bank?.ToString() ?? "none"}, " +
+                    $"domain '{key}' requests {ov.Program?.ToString() ?? "none"}/{ov.Bank?.ToString() ?? "none"}.");
+            owners[channel] = (key, ov.Program, ov.Bank);
+        }
+    }
+
     /// <summary>Deterministic total order over keys (chip, then identity family,
     /// then canonical instrument string, then source channel).</summary>
     private static int CompareTrackKeys(MidiTrackKey a, MidiTrackKey b)
     {
-        int c = a.Chip.CompareTo(b.Chip);
+        int c = a.Device.Type.CompareTo(b.Device.Type);
+        if (c != 0) return c;
+        c = a.Device.Instance.CompareTo(b.Device.Instance);
+        if (c != 0) return c;
+        c = a.VoiceFamily.CompareTo(b.VoiceFamily);
         if (c != 0) return c;
         c = a.Instrument.Family.CompareTo(b.Instrument.Family);
         if (c != 0) return c;
@@ -625,10 +740,13 @@ internal sealed class MusicalMidiExporter
     /// change mid-note never retargets the note to another track.</summary>
     private MidiTrackKey TrackKeyFor(NoteEvent note)
     {
-        if (!TryParseSourceChannel(note.ChannelId, out ChipType chip, out int sourceChannel)
+        if (note.Domain is SourceDomainKey domain
+            && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity typedInstrument))
+            return new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, typedInstrument);
+        if (!TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
             || !InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
             return PlaceholderKey(note.ChannelId);
-        return new MidiTrackKey(chip, sourceChannel, instrument);
+        return new MidiTrackKey(device, voice, sourceChannel, instrument);
     }
 
     /// <summary>The MIDI track key owning a rhythm trigger, keyed by the rhythm
@@ -636,10 +754,22 @@ internal sealed class MusicalMidiExporter
     /// the raw voice-name string — so a future rename cannot change grouping.</summary>
     private MidiTrackKey RhythmKeyFor(RhythmEvent rhythm)
     {
-        if (!TryParseSourceChannel(rhythm.ChannelId, out ChipType chip, out int sourceChannel)
-            || !InstrumentIdentity.TryParse(rhythm.InstrumentId, out InstrumentIdentity instrument))
+        if (rhythm.Domain is SourceDomainKey domain)
+        {
+            string domainInstrument = string.IsNullOrWhiteSpace(rhythm.InstrumentId)
+                ? $"rhythm:{rhythm.Voice.ToLowerInvariant()}" : rhythm.InstrumentId;
+            if (!InstrumentIdentity.TryParse(domainInstrument, out InstrumentIdentity domainIdentity))
+                domainIdentity = new InstrumentIdentity(IdentityFamily.Rhythm, 0, $"rhythm:{domainInstrument}");
+            return new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, domainIdentity);
+        }
+        if (!TryParseSourceDomain(rhythm.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel))
             return PlaceholderKey(rhythm.ChannelId);
-        return new MidiTrackKey(chip, sourceChannel, instrument);
+        string normalized = string.IsNullOrWhiteSpace(rhythm.InstrumentId)
+            ? $"rhythm:{rhythm.Voice.ToLowerInvariant()}"
+            : rhythm.InstrumentId;
+        if (!InstrumentIdentity.TryParse(normalized, out InstrumentIdentity instrument))
+            instrument = new InstrumentIdentity(IdentityFamily.Rhythm, 0, $"rhythm:{normalized}");
+        return new MidiTrackKey(device, voice, sourceChannel, instrument);
     }
 
     /// <summary>Reads the source chip + channel from a VoiceId-style ChannelId
@@ -666,12 +796,40 @@ internal sealed class MusicalMidiExporter
         return true;
     }
 
+    private static bool TryParseSourceDomain(string channelId, out DeviceId device,
+        out VoiceKind voice, out int sourceChannel)
+    {
+        device = default;
+        voice = VoiceKind.Pcm;
+        sourceChannel = 0;
+        if (string.IsNullOrWhiteSpace(channelId)) return false;
+        string[] parts = channelId.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3 || !DeviceId.TryParse(parts[0] + "." + parts[1], out device)) return false;
+        string kind = parts[2];
+        if (kind == "fm3" && parts.Length > 3 && parts[3] == "op") kind = "fm3";
+        if (!Enum.TryParse(kind, true, out voice))
+        {
+            if (kind == "channel")
+                voice = VoiceKind.MidiChannel;
+            else if (kind == "adpcm-b")
+                voice = VoiceKind.Adpcm;
+            else
+                return false;
+        }
+        string suffix = parts[^1];
+        if (!int.TryParse(suffix, out int n) || n < 1)
+            return false;
+        sourceChannel = n - 1;
+        return true;
+    }
+
     /// <summary>Collapses notes whose instrument identity could not be resolved to a
     /// single per-source-channel placeholder track (R11). The key is stable within a
     /// ChannelId and otherwise unique, so all placeholder notes on one channel share
     /// exactly one track and never leak per-instrument tracks.</summary>
     private static MidiTrackKey PlaceholderKey(string channelId) =>
-        new(ChipType.Unknown, StableIndex(channelId), InstrumentIdentity.Empty);
+        new(new DeviceId(ChipType.Unknown, StableIndex(channelId)), VoiceKind.Pcm,
+            StableIndex(channelId), InstrumentIdentity.Empty);
 
     private static int StableIndex(string channelId)
     {
@@ -685,6 +843,8 @@ internal sealed class MusicalMidiExporter
     {
         public Dictionary<MidiTrackKey, TrackSlot> _slots = new();
         public Dictionary<int, MidiTrack> Tracks { get; } = new();
+        private readonly HashSet<MidiEndpoint> _usedEndpoints = new();
+        private readonly Dictionary<MidiChannelDomain, int> _requestedChannelsByDomain = new();
 
         public void Add(MidiTrackKey key, int index, string channelId, VoiceExportOverride voiceOverride,
             MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder)
@@ -694,10 +854,12 @@ internal sealed class MusicalMidiExporter
                 return; // key already allocated (defensive; BuildTracks dedupes).
             bool percussive = key.Instrument.Family == IdentityFamily.Rhythm;
             string name = IdentityNameFor(key, percussive, channelId);
-            var track = new MidiTrack { Name = name };
+            MidiEndpoint endpoint = ResolveEndpoint(key, percussive, options, voiceOverride);
+            var track = new MidiTrack { Name = name, Endpoint = endpoint };
             Tracks[index] = track;
-            int channel = ResolveChannel(key, index, percussive, options, voiceOverride);
-            _slots[key] = new TrackSlot(this, track, index, channel, percussive)
+            int channel = endpoint.Channel;
+            MidiChannelDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel);
+            _slots[key] = new TrackSlot(this, track, index, channel, percussive, domain)
             {
                 Override = voiceOverride,
             };
@@ -707,24 +869,56 @@ internal sealed class MusicalMidiExporter
                 // track creation and never changed mid-track (R7). This initial
                 // setup is also the captured "silent-period state" — no silence-only
                 // track is created (R6).
-                int program = voiceOverride.Program ?? 0;
-                track.Events.Add(withOrder(new MidiProgramEvent(0, index, channel, program)));
+                if (voiceOverride.Bank is int bank)
+                    track.Events.Add(withOrder(new MidiBankEvent(0, index, channel, bank)));
+                if (voiceOverride.Program is int program)
+                    track.Events.Add(withOrder(new MidiProgramEvent(0, index, channel, program)));
             }
         }
 
-        private static int ResolveChannel(MidiTrackKey key, int index, bool percussive,
+        private MidiEndpoint ResolveEndpoint(MidiTrackKey key, bool percussive,
             MusicalMidiExportOptions options, VoiceExportOverride voiceOverride)
         {
+            MidiChannelDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel);
             if (voiceOverride.Channel is int oc)
-                return oc;
+            {
+                if (oc is < 0 or > 15) throw new InvalidOperationException(
+                    $"Requested MIDI channel {oc} for source domain '{key}' is outside [0, 15].");
+                if (percussive && oc != 9)
+                    throw new InvalidOperationException(
+                        $"Percussion source domain '{key}' must use MIDI channel 9.");
+                if (!percussive && oc == 9)
+                    throw new InvalidOperationException(
+                        $"Melodic source domain '{key}' cannot use reserved MIDI channel 9.");
+                if (_requestedChannelsByDomain.TryGetValue(domain, out int existing) && existing != oc)
+                    throw new InvalidOperationException(
+                        $"Source domain '{domain}' requests incompatible MIDI channels {existing} and {oc}.");
+                _requestedChannelsByDomain[domain] = oc;
+                return AllocateEndpoint(oc, percussive, key);
+            }
             if (percussive)
-                return options.UsePercussionChannel ? 9 : (key.SourceChannel % 16);
-            // MIDI channel tracks the source channel (R3): all (CH2, instrument*)
-            // tracks share one MIDI channel. Unknown/placeholder keys preserve the
-            // historical index-based channel so per-channel behaviour is unchanged.
-            if (key.Chip == ChipType.Unknown)
-                return (index - 1) % 16;
-            return key.SourceChannel % 16;
+                return AllocateEndpoint(9, percussive, key);
+            return AllocateEndpoint(null, false, key);
+        }
+
+        private MidiEndpoint AllocateEndpoint(int? requestedChannel, bool percussive, MidiTrackKey key)
+        {
+            IEnumerable<int> channels = percussive
+                ? new[] { 9 }
+                : Enumerable.Range(0, 16).Where(channel => channel != 9);
+            if (requestedChannel is int requested)
+                channels = new[] { requested };
+            for (int port = 0; port <= byte.MaxValue; port++)
+            {
+                foreach (int channel in channels)
+                {
+                    var endpoint = new MidiEndpoint((byte)port, channel);
+                    if (_usedEndpoints.Add(endpoint))
+                        return endpoint;
+                }
+            }
+            throw new InvalidOperationException(
+                $"MIDI port exhaustion: source track '{key}' cannot be assigned a unique endpoint (maximum port is 255).");
         }
 
         private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId)
@@ -760,25 +954,35 @@ internal sealed class MusicalMidiExporter
         public TrackSlot? SlotFor(MidiTrackKey key) =>
             _slots.TryGetValue(key, out TrackSlot? slot) ? slot : null;
 
+        public IReadOnlyDictionary<MidiTrackKey, TrackSlot> Slots => _slots;
+
         public IEnumerable<MidiTrack> Values => Tracks.Values;
     }
+
+    private readonly record struct MidiChannelDomain(
+        DeviceId Device,
+        VoiceKind VoiceFamily,
+        int SourceChannel);
 
     private sealed class TrackSlot
     {
         private readonly TrackAllocator _owner;
 
-        public TrackSlot(TrackAllocator owner, MidiTrack track, int index, int channel, bool percussive)
+        public TrackSlot(TrackAllocator owner, MidiTrack track, int index, int channel, bool percussive,
+            MidiChannelDomain domain)
         {
             _owner = owner;
             Track = track;
             Index = index;
             Channel = channel;
             Percussive = percussive;
+            Domain = domain;
         }
 
         public MidiTrack Track { get; }
         public int Index { get; }
         public int Channel { get; }
+        public MidiChannelDomain Domain { get; }
         private bool Percussive { get; }
 
         /// <summary>Per-voice override applied to this slot (default: include + program 0).</summary>

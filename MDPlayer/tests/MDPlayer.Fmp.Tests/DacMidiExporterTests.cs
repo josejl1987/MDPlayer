@@ -1,6 +1,12 @@
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
+using DryMarkerEvent = Melanchall.DryWetMidi.Core.MarkerEvent;
+using DryMidiFile = Melanchall.DryWetMidi.Core.MidiFile;
+using DryMidiFileFormat = Melanchall.DryWetMidi.Core.MidiFileFormat;
+using DryNoteOnEvent = Melanchall.DryWetMidi.Core.NoteOnEvent;
+using DryPitchBendEvent = Melanchall.DryWetMidi.Core.PitchBendEvent;
+using DryWritingSettings = Melanchall.DryWetMidi.Core.WritingSettings;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -93,6 +99,40 @@ public sealed class DacMidiExporterTests
 
         // Reasonable length given a header, meta track, and a data track.
         Assert.True(midi.Length > 14 + 20);
+    }
+
+    [Fact]
+    public void DryWetMidi_IndependentSemanticRoundTrip_CoversMelodicRhythmMarkerPitchAndDac()
+    {
+        long sample = 1_000;
+        var melodic = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 5_000_000,
+            SampleRate = Sr,
+            Notes = new[]
+            {
+                new NoteEvent("melodic", sample, sample + 20_000, 440, 60, "inst",
+                    VisualizationNoteMode.Fm, false,
+                    new[] { new PitchChange(sample + 5_000, 466.16, 61.0) }),
+            },
+            Rhythm = new[] { new RhythmEvent("drums", "drums", sample, 1.0f, 0.5f) },
+            LoopMarkers = new[] { new LoopMarker(sample, LoopMarkerKind.Start, 0) },
+        };
+        byte[] melodicBytes = new MusicalMidiExporter(MakeMap(), Ppq,
+            new MusicalMidiExportOptions { EmitPitchBend = true }).Export(melodic).Bytes;
+        byte[] dacBytes = new DacMidiExporter(MakeMap(), Ppq).Write(
+            MakeReport(ops => Play(ops, sample, [0x10, 0x20])));
+
+        Assert.Contains(MidiRoundTrip.TrackChunks(melodicBytes).SelectMany(c => c.Events),
+            e => e is DryNoteOnEvent);
+        Assert.Contains(MidiRoundTrip.TrackChunks(melodicBytes).SelectMany(c => c.Events),
+            e => e is DryPitchBendEvent or DryMarkerEvent);
+        Assert.Contains(MidiRoundTrip.TrackChunks(dacBytes).SelectMany(c => c.Events),
+            e => e is DryNoteOnEvent);
+
+        Assert.Equal(SemanticEvents(melodicBytes), SemanticEvents(ReWrite(melodicBytes)));
+        Assert.Equal(SemanticEvents(dacBytes), SemanticEvents(ReWrite(dacBytes)));
     }
 
     [Fact]
@@ -259,6 +299,50 @@ public sealed class DacMidiExporterTests
         Assert.True(tempos[1].Tick > tempos[0].Tick, "the 2nd tempo must sit at the later boundary");
     }
 
+    [Fact]
+    public void Write_MultiSegmentTempoMap_PreservesSourceWallClockForSerializedDacNotes()
+    {
+        const double firstBpm = 123.45;
+        const double secondBpm = 87.5;
+        const long boundary = 200_000;
+        double firstSpq = Sr * 60.0 / firstBpm;
+        double secondSpq = Sr * 60.0 / secondBpm;
+        var map = new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, boundary, 0.0, firstSpq, firstBpm, TimingSource.UserOverride, 1.0),
+                new TempoSegment(boundary, 5_000_000, boundary / firstSpq, secondSpq, secondBpm,
+                    TimingSource.UserOverride, 1.0),
+            });
+        long before = boundary - 100;
+        long after = boundary + 100;
+        DacAnalysisReport report = MakeReport(ops =>
+        {
+            Play(ops, before, [0x10, 0x20], duration: 100);
+            Play(ops, after, [0xAA, 0xBB], duration: 100);
+        });
+
+        byte[] midi = new DacMidiExporter(map, Ppq).Write(report);
+        List<(long Tick, bool NoteOn)> notes = ParseDacNoteEvents(midi);
+        List<(long Tick, int Us)> tempos = ParseConductorTempos(midi);
+
+        Assert.Equal(new[]
+        {
+            (int)Math.Round(60_000_000.0 / firstBpm),
+            (int)Math.Round(60_000_000.0 / secondBpm),
+        }, tempos.Select(t => t.Us).ToArray());
+        Assert.Equal(4, notes.Count);
+        Assert.Equal(new[] { true, false, true, false }, notes.Select(n => n.NoteOn).ToArray());
+
+        double tickSeconds = tempos.Max(t => t.Us) / 1_000_000.0 / Ppq;
+        var expectedSamples = new[] { before, boundary, after, after + 100 };
+        foreach (var pair in expectedSamples.Zip(notes))
+            Assert.InRange(Math.Abs(TickToSeconds(pair.Second.Tick, tempos) - (double)pair.First / Sr),
+                0, tickSeconds);
+    }
+
     /// <summary>§67 + §19 — first-downbeat-before-map-start AND a multi-segment map:
     /// DAC, melodic and rhythm triggers at the same sample map to the SAME tick
     /// (shared non-negative origin incl. the downbeat) and the DAC conductor carries
@@ -385,6 +469,20 @@ public sealed class DacMidiExporterTests
     private static IReadOnlyList<DacMidiEvent> ExportEvents(DacAnalysisReport report) =>
         new DacMidiExporter(MakeMap(), Ppq).BuildEvents(report);
 
+    private static byte[] ReWrite(byte[] bytes)
+    {
+        DryMidiFile file = MidiRoundTrip.Read(bytes);
+        using var stream = new MemoryStream();
+        file.Write(stream, DryMidiFileFormat.MultiTrack, new DryWritingSettings());
+        return stream.ToArray();
+    }
+
+    private static IReadOnlyList<string> SemanticEvents(byte[] bytes) =>
+        MidiRoundTrip.TrackChunks(bytes)
+            .SelectMany((_, track) => MidiRoundTrip.TimedEvents(bytes, track)
+                .Select(item => $"{track}:{item.Tick}:{item.Event.GetType().Name}:{item.Event}"))
+            .ToArray();
+
     private static DacAnalysisReport MakeReport(Action<List<DacOperation>> build)
     {
         var ops = new List<DacOperation>();
@@ -396,12 +494,13 @@ public sealed class DacMidiExporterTests
         return DacAnalysisReport.From(tracker);
     }
 
-    private static void Play(List<DacOperation> ops, long start, byte[] payload, double? rate = null)
+    private static void Play(List<DacOperation> ops, long start, byte[] payload, double? rate = null,
+        long duration = 10)
     {
         ops.Add(new DacOperation.DacPlaybackStarted(start, Src, 0, null, rate));
         for (int i = 0; i < payload.Length; i++)
             ops.Add(new DacOperation.DacByteConsumed(start + i, Src, i, payload[i]));
-        ops.Add(new DacOperation.DacPlaybackStopped(start + 10, DacStopReason.ExplicitStop));
+        ops.Add(new DacOperation.DacPlaybackStopped(start + duration, DacStopReason.ExplicitStop));
     }
 
     /// <summary>120 BPM map from sample 0, quarter 0.</summary>
@@ -572,6 +671,63 @@ public sealed class DacMidiExporterTests
             }
         }
         return tempos;
+    }
+
+    private static List<(long Tick, bool NoteOn)> ParseDacNoteEvents(byte[] midi)
+    {
+        var notes = new List<(long, bool)>();
+        using var ms = new MemoryStream(midi);
+        using var br = new BinaryReader(ms);
+        br.ReadBytes(4); ReadInt32BE(br); br.ReadInt16();
+        int ntrks = ReadInt16BE(br); br.ReadInt16();
+        for (int track = 0; track < ntrks; track++)
+        {
+            br.ReadBytes(4);
+            int length = ReadInt32BE(br);
+            long end = ms.Position + length;
+            long tick = 0;
+            while (ms.Position < end)
+            {
+                tick += ReadVlv(br);
+                byte status = br.ReadByte();
+                if (status == 0xFF)
+                {
+                    br.ReadByte();
+                    long size = ReadVlv(br);
+                    br.ReadBytes((int)size);
+                    continue;
+                }
+                if ((status & 0xF0) == 0xF0)
+                {
+                    long size = ReadVlv(br);
+                    br.ReadBytes((int)size);
+                    continue;
+                }
+                br.ReadByte();
+                byte velocity = br.ReadByte();
+                if (track > 0 && (status & 0xF0) is 0x80 or 0x90)
+                    notes.Add((tick, (status & 0xF0) == 0x90 && velocity != 0));
+            }
+        }
+        return notes;
+    }
+
+    private static double TickToSeconds(long tick, IReadOnlyList<(long Tick, int Us)> tempos)
+    {
+        double seconds = 0;
+        long previousTick = tempos[0].Tick;
+        int us = tempos[0].Us;
+        foreach ((long tempoTick, int tempoUs) in tempos.Skip(1))
+        {
+            if (tick <= tempoTick)
+                break;
+            seconds += (tempoTick - previousTick) * us / 1_000_000.0 / Ppq;
+            previousTick = tempoTick;
+            us = tempoUs;
+        }
+        if (tick > previousTick)
+            seconds += (tick - previousTick) * us / 1_000_000.0 / Ppq;
+        return seconds;
     }
 
     /// <summary>Parses the absolute tick of every note-on (0x90 vel&gt;0) in a format-1 stream.</summary>

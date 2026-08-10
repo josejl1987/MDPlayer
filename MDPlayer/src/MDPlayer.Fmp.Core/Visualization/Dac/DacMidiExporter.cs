@@ -180,7 +180,8 @@ internal sealed class DacMidiExporter
     /// diverge from the musical grid.
     /// </summary>
     private long MapTick(long sample) =>
-        _map.QuarterPositionToTick(_map.SampleToQuarterPosition(sample) + _originOffsetQuarters, _ppqn);
+        _map.SampleToTick(sample, _ppqn)
+        + _map.QuarterPositionToTick(_originOffsetQuarters, _ppqn);
 
     /// <summary>
     /// Computes the single global non-negative tick origin (spec §21) using the

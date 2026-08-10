@@ -116,4 +116,98 @@ public sealed class MidiTrackNamingTests
         // Placeholder keeps the source channelId based name.
         Assert.Single(names);
     }
+
+    [Fact]
+    public void IndependentDomains_ExhaustChannelsWithoutWrappingOrReuse()
+    {
+        var notes = Enumerable.Range(0, 16)
+            .Select(instance => Note($"ym2608.{instance}.fm.1", "fm:1", 0, 1000)
+                with { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, instance), VoiceKind.Fm, 0) })
+            .ToArray();
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Export(notes));
+        Assert.Contains("channel exhaustion", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("without wrapping or merging", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ExplicitSharedChannel_ConflictingProgramAndBankFailsBeforeSmfCreation()
+    {
+        var options = new MusicalMidiExportOptions
+        {
+            EmitPitchBend = false,
+            VoiceOverrides = new[]
+            {
+                new VoiceExportOverride("ym2608.0.fm.1") { Channel = 3, Program = 10, Bank = 1 },
+                new VoiceExportOverride("ym2608.0.fm.1-b") { Channel = 3, Program = 11, Bank = 1 },
+            },
+        };
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Export(options,
+            Note("ym2608.0.fm.1", "fm:1", 0, 1000),
+            Note("ym2608.0.fm.1-b", "fm:2", 0, 1000)));
+        Assert.Contains("incompatible state", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("program/bank", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("10", error.Message);
+        Assert.Contains("11", error.Message);
+    }
+
+    [Fact]
+    public void SharedDomain_CompatibleTracksKeepOneChannelAndOneBendRangeAfterRoundTrip()
+    {
+        var result = Export(new MusicalMidiExportOptions { EmitPitchBend = true, BendRangeSemitones = 7 },
+            Note("ym2608.0.fm.1", "fm:1", 0, 1000) with
+            {
+                Pitch = new[] { new PitchChange(500, 440 * Math.Pow(2, 7.0 / 12), 67) },
+            },
+            Note("ym2608.0.fm.1", "fm:2", 1000, 2000));
+
+        var chunks = MidiRoundTrip.TrackChunks(result.Bytes).Skip(1).ToList();
+        Assert.Equal(2, chunks.Count);
+        Assert.Equal(1, chunks.Select(c => c.Events.OfType<DryNote>().Single().Channel).Distinct().Count());
+        Assert.Single(result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>());
+        Assert.Equal(7, result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().Single().Semitones);
+    }
+
+    [Fact]
+    public void MalformedLegacyVoiceIdsRemainSeparateByOwnershipAndValidRhythmIsNotPlaceholder()
+    {
+        var result = Export(
+            Note("ym2608.0.fm.unknown-a", "fm:1", 0, 1000),
+            Note("ym2608.0.fm.unknown-b", "fm:1", 1000, 2000));
+
+        string[] names = TrackNames(result).Where(n => n != "Conductor").ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Contains("ym2608.0.fm.unknown-a", names);
+        Assert.Contains("ym2608.0.fm.unknown-b", names);
+
+        var rhythm = new RhythmEvent("top", "ym2608.0.rhythm.top", 0, 1, 0, InstrumentId: "rhythm:top")
+        {
+            Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 2),
+        };
+        var rhythmResult = ExportTimeline(new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 5000, SampleRate = 44100,
+            Rhythm = new[] { rhythm },
+        }, new MusicalMidiExportOptions { EmitPitchBend = false });
+        string rhythmName = Assert.Single(TrackNames(rhythmResult).Where(n => n != "Conductor"));
+        Assert.Contains("rhythm:top", rhythmName);
+        var rhythmChunk = Assert.Single(MidiRoundTrip.TrackChunks(rhythmResult.Bytes).Skip(1));
+        Assert.Equal(9, rhythmChunk.Events.OfType<DryNote>().Single().Channel);
+    }
+
+    private static MusicalMidiExportResult Export(MusicalMidiExportOptions options, params VisualizationNoteEvent[] notes) =>
+        ExportTimeline(new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 5_000_000, SampleRate = 44100, Notes = notes,
+        }, options);
+
+    private static MusicalMidiExportResult ExportTimeline(VisualizationTimeline timeline, MusicalMidiExportOptions options)
+    {
+        var map = new MusicalTimeMap(
+            44100, 0,
+            new[] { new TempoSegment(0, 5_000_000, 0, 22050, 120, TimingSource.UserOverride, 1.0) },
+            meter: null);
+        return new MusicalMidiExporter(map, Ppq, options).Export(timeline);
+    }
 }

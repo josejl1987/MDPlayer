@@ -444,9 +444,11 @@ internal sealed class Ym2608TimelineDecoder
         };
     }
 
-    private MutableNote OpenFmNote(int channel, long samplePosition, bool retrigger, VisualizationNoteMode mode)
+    private MutableNote? OpenFmNote(int channel, long samplePosition, bool retrigger, VisualizationNoteMode mode)
     {
         var pitch = DecodeFmPitch(channel);
+        if (!IsValidInitialPitch(pitch))
+            return null;
         var instrument = GetOrAddFmInstrument(channel);
         var note = new MutableNote(
             $"ym2608.0.fm.{channel + 1}",
@@ -460,9 +462,11 @@ internal sealed class Ym2608TimelineDecoder
         return note;
     }
 
-    private MutableNote OpenFm3OperatorNote(int op, long samplePosition, bool retrigger)
+    private MutableNote? OpenFm3OperatorNote(int op, long samplePosition, bool retrigger)
     {
         var pitch = DecodeFm3OperatorPitch(op);
+        if (!IsValidInitialPitch(pitch))
+            return null;
         var instrument = GetOrAddFmInstrument(2);
         var note = new MutableNote(
             $"ym2608.0.fm3.op.{op + 1}",
@@ -475,6 +479,10 @@ internal sealed class Ym2608TimelineDecoder
         _notes.Add(note);
         return note;
     }
+
+    private static bool IsValidInitialPitch(Pitch pitch) =>
+        pitch.FrequencyHz > 0 && double.IsFinite(pitch.FrequencyHz)
+        && pitch.MidiNote >= 0 && double.IsFinite(pitch.MidiNote);
 
     private void AddFmPitchPoint(int channel, long samplePosition)
     {
@@ -667,7 +675,10 @@ internal sealed class Ym2608TimelineDecoder
                 Math.Clamp(totalGain * voiceGain, 0, 1),
                 pan,
                 "ym2608.0.rhythm",
-                $"rhythm:{name}"));
+                $"rhythm:{name}")
+            {
+                Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, voice),
+            });
         }
     }
 
