@@ -45,6 +45,30 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\smash-up.spc</Link>
     </Content>
+    <!-- Corpus regression fixtures (FR-14 / request 40-41): 02 Stranger, 05
+         Twilight, 18 U.S.A. (Ken) I, 20 Ninja Yashiki, 28 Smoking Head. 12 - Ken's
+         Theme.vgz is MISSING from the repo (documented exclusion, D18); 32 Arctic
+         Wind.vgz is outside the 9-file corpus. -->
+    <Content Include="..\..\..\02 Stranger ~ Wandering Swordsman.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\02-stranger.vgz</Link>
+    </Content>
+    <Content Include="..\..\..\05 - Twilight Express.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\05-twilight.vgz</Link>
+    </Content>
+    <Content Include="..\..\..\18 U.S.A. (Ken) I.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\18-usa-ken.vgz</Link>
+    </Content>
+    <Content Include="..\..\..\20 Ninja Yashiki ~ Their Secrets Die With Them.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\20-ninja-yashiki.vgz</Link>
+    </Content>
+    <Content Include="..\..\..\28 - Smoking Head.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\28-smoking-head.vgz</Link>
+    </Content>
     <!-- Real YM2612-DAC-heavy VGZ used by the DAC sample integration tests. -->
     <Content Include="..\..\..\26 - Robotnik.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

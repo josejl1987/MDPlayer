@@ -804,6 +804,10 @@ internal sealed class MusicalMidiExporter
             if (!string.IsNullOrWhiteSpace(timeline.Source?.SourceFormat))
                 conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"src-format {timeline.Source.SourceFormat}")));
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}")));
+            // Build provenance (FR-15): attributes uploaded MIDIs to the exact
+            // exporter binary. git-commit is omitted when the build had no
+            // resolvable SHA — never "git-commit=unknown".
+            AddBuildProvenance(conductor, WithSourceOrder, BuildMetadata.Version, BuildMetadata.GitCommit);
         }
 
         // First Set Tempo at tick 0 UNCONDITIONALLY (so no leading ticks run under an
@@ -893,6 +897,20 @@ internal sealed class MusicalMidiExporter
     /// <summary>Diagnostic doubles serialize as "0.###"; missing values as "none".</summary>
     private static string FormatDiagnosticDouble(double? value) =>
         value is double d ? d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "none";
+
+    /// <summary>
+    /// Build-provenance metadata events (FR-15): mdplayer-version is always
+    /// emitted; git-commit only when a short SHA is available (never
+    /// "git-commit=unknown"). Test-visible so the omission path is covered without
+    /// re-running a build.
+    /// </summary>
+    internal static void AddBuildProvenance(List<MidiEventBase> conductor,
+        Func<MidiEventBase, MidiEventBase> withOrder, string? version, string? gitCommit)
+    {
+        conductor.Add(withOrder(new MidiMetaTextEvent(0, 0x01, $"mdplayer-version {version}")));
+        if (!string.IsNullOrWhiteSpace(gitCommit))
+            conductor.Add(withOrder(new MidiMetaTextEvent(0, 0x01, $"git-commit {gitCommit}")));
+    }
 
     private TrackAllocator BuildTracks(VisualizationTimeline timeline)
     {

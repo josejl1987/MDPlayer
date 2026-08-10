@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Fmp.Cli;
+using Fmp.Core.Rendering;
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
@@ -343,6 +344,43 @@ public sealed class TempoDiagnosticsTests
             foreach (string p in new[] { timelinePath, outPath, reportPath })
                 if (File.Exists(p)) File.Delete(p);
         }
+    }
+
+    // ---- T-19: real-file integration acceptance (SC-14 real arm) ----------------
+
+    [Fact]
+    public void NinjaRealFile_SelectedBpm112_IntegrationAcceptance()
+    {
+        // Real-file acceptance ONLY (synthetic determinism lives in
+        // TempoDiagnostics_NinjaAlias_112Permanent): the actual corpus file must
+        // resolve to the canonical alias 112 BPM under the D.4 prior, not 56/224.
+        string input = Path.Combine(AppContext.BaseDirectory, "testfixtures", "corpus", "20-ninja-yashiki.vgz");
+        Assert.True(File.Exists(input), $"Ninja corpus fixture not provisioned: {input}");
+
+        string wav = Path.Combine(Path.GetTempPath(), $"mdplayer-ninja-{Guid.NewGuid():N}.wav");
+        var sink = new TimelineDecoderEventSink(Sr);
+        VisualizationTimeline timeline;
+        try
+        {
+            using IPlaybackCaptureSession session = new VgmPlaybackBackend().Open(
+                new FileInfo(input),
+                new PlaybackOptions(LoopCount: 1, FadeSeconds: 0, TailSeconds: 0, OutputAudioPath: wav, SampleRate: Sr),
+                sink);
+            session.Run();
+            timeline = sink.Complete(session.SamplePosition, "test");
+        }
+        finally
+        {
+            if (File.Exists(wav)) File.Delete(wav);
+        }
+
+        Assert.True(timeline.Notes.Count > 0, "Ninja capture produced no notes");
+        MusicalMidiExportResult result = Export(timeline);
+        TimingDiagnostics d = result.Diagnostics;
+        Assert.NotNull(d.SelectedBpm);
+        Assert.True(Math.Abs(d.SelectedBpm.Value - 112.0) < 0.5,
+            $"real Ninja file must resolve to 112 BPM, got {d.SelectedBpm.Value}");
+        Assert.Equal("112", Field(TimingMetaText(result.Bytes), "selected-bpm"));
     }
 
     private static string WriteTimeline(VisualizationTimeline timeline)

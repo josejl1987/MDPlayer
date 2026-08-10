@@ -6,9 +6,33 @@
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Fmp.Core</RootNamespace>
+    <Version>1.0.0</Version>
     <!-- Allow running on machines with only a newer .NET runtime (e.g. .NET 10). -->
     <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
+
+  <!--
+    Build provenance (FR-15 / request 43): generate BuildMetadata.g.cs into the
+    intermediate directory with mdplayer-version and, when the build runs inside a
+    git checkout with a resolvable HEAD, the short commit SHA. The commit line is
+    OMITTED when unavailable — never "git-commit=unknown". The generated file is a
+    build artifact (obj/), never committed.
+  -->
+  <Target Name="GenerateBuildMetadata" BeforeTargets="BeforeCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="BuildMetadataGitCommitShort" />
+      <Output TaskParameter="ExitCode" PropertyName="BuildMetadataGitExitCode" />
+    </Exec>
+    <PropertyGroup>
+      <BuildMetadataGitCommitLine Condition="'$(BuildMetadataGitExitCode)' == '0' And '$(BuildMetadataGitCommitShort)' != ''">    public static readonly string? GitCommit = "$(BuildMetadataGitCommitShort.Trim())"</BuildMetadataGitCommitLine>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildMetadata.g.cs" Overwrite="true" Lines="// &lt;auto-generated&gt;&#xA;namespace Fmp.Core%3B&#xA;internal static class BuildMetadata&#xA;{&#xA;    public const string Version = &quot;$(Version)&quot;%3B&#xA;$(BuildMetadataGitCommitLine)%3B&#xA;}&#xA;" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)BuildMetadata.g.cs" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <InternalsVisibleTo Include="MDPlayer.Fmp.Tests" />
     <InternalsVisibleTo Include="fmp-render" />
