@@ -33,7 +33,19 @@ internal static class SymbolicTempoInference
     private const double MaxBpm = 240.0;
     private const double BpmStep = 1.0;
     private const int PhaseSteps = 96;          // ~ one 32nd of a quarter at most
-    private const double SigmaQuarters = 0.08;  // comb tolerance
+
+    /// <summary>Subdivision lattice, in quarter units, with their scores (Patch D.1).
+    /// Higher weight = "more aligned at this subdivision". Used uniformly for onset
+    /// and duration scoring. No new subdivisions beyond these.</summary>
+    private static readonly (double QuarterUnits, double Weight)[] Subdivisions = new[]
+    {
+        (1.0,   1.00),   // quarter
+        (0.5,   0.96),   // eighth
+        (1.0/3, 0.92),   // eighth triplet
+        (0.25,  0.88),   // sixteenth
+        (1.0/6, 0.80),   // sixteenth triplet
+        (0.125, 0.72),   // thirty-second
+    };
 
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
@@ -55,39 +67,52 @@ internal static class SymbolicTempoInference
             AnchorCount = onsets.Length,
             TempoSource = TimingSource.SymbolicInference,
             PhaseSource = TimingSource.SymbolicInference,
+            PhaseSample = bestPhaseSample,
             MaxResidualQuarters = 0,
             RmsResidualQuarters = 0,
         };
 
-        // Option 1: resolve half/double tempo ambiguity via note-duration
-        // quarter-coherence. Onset spacing alone cannot distinguish 56 vs 112 BPM
-        // (a 16th-note texture is invariant), but note lengths are not: at the true
-        // tempo most notes span near-integer quarters. Prefer the candidate whose
-        // durations are most grid-aligned, only when the onset ambiguity is real.
+        // Half/double compare: evaluate candidate, candidate/2 and candidate*2 by the
+        // same normalized scoring (onsets + durations + subdivision complexity) and
+        // prefer the best, surfacing the alternative when it is close (Patch D.2/D.3).
         bool resolvedAmbiguity = false;
         if (candidates.Count > 1)
         {
-            var (resolved, alternativeStrong) = ResolveDurationCoherence(timeline, bestBpm, candidates, timeline.SampleRate);
-            if (alternativeStrong)
+            var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
+                timeline, bestBpm, candidates, onsets, timeline.SampleRate);
+            if (alternative is double altBpm && altBpm > 0)
             {
-                resolvedAmbiguity = true;
-                diagnostics.Warnings.Add(
-                    $"duration-coherence selected {resolved.Bpm:0.#} BPM over its half/double tempo alternative");
+                diagnostics.AlternativeBpm = altBpm;
+                diagnostics.AlternativeScore = altScore;
             }
             if (Math.Abs(resolved.Bpm - bestBpm) > 0.01)
             {
                 bestBpm = resolved.Bpm;
                 bestPhaseSample = resolved.PhaseSample;
                 bestScore = resolved.Score;
+                resolvedAmbiguity = true;
             }
+            diagnostics.SelectedBpm = bestBpm;
+            diagnostics.SelectedScore = bestScore;
+        }
+        else
+        {
+            diagnostics.SelectedBpm = bestBpm;
+            diagnostics.SelectedScore = bestScore;
         }
 
         diagnostics.TempoSource = TimingSource.SymbolicInference;
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.AnchorCount = onsets.Length;
+        diagnostics.PhaseSample = bestPhaseSample;
+        diagnostics.TempoConfidence = ConfidenceFromScore(bestScore,
+            diagnostics.AlternativeBpm is double a && Math.Abs(bestBpm / a - 0.5) < 0.01
+                ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0))
+                : 1.0);
         diagnostics.Warnings.Add(
             $"symbolic inference: tempo {bestBpm:0.##} BPM, phase sample {bestPhaseSample} " +
-            $"(score {bestScore:0.###}); sample-derived timing generally preferred if available");
+            $"(score {bestScore:0.###}, confidence {diagnostics.TempoConfidence:0.###}); " +
+            "sample-derived timing generally preferred if available");
 
         if (options.StrictTiming)
         {
@@ -96,12 +121,11 @@ internal static class SymbolicTempoInference
                 "supply driver timing or an explicit --bpm/--beat-offset-samples");
         }
 
+        // Phase sign convention (Patch D): phaseSample is the source sample where
+        // musical quarter 0 occurs; if it is after the source start, the quarter at
+        // the source start is negative (pickup). Never flipped positive.
         double spq = timeline.SampleRate * 60.0 / bestBpm;
-        double quarterAtStart;
-        if (bestPhaseSample > 0)
-            quarterAtStart = (bestPhaseSample / (double)timeline.SampleRate) * (bestBpm / 60.0);
-        else
-            quarterAtStart = 0;
+        double quarterAtStart = (bestPhaseSample - timeline.StartSample) / (double)timeline.SampleRate * (bestBpm / 60.0);
         quarterAtStart *= options.QuartersPerBeat;
 
         if (beatOffsetQuarter is double q)
@@ -114,7 +138,8 @@ internal static class SymbolicTempoInference
             spq,
             bestBpm,
             TimingSource.SymbolicInference,
-            ConfidenceFromScore(bestScore));
+            ConfidenceFromScore(bestScore, diagnostics.AlternativeBpm is double amb && Math.Abs(bestBpm / amb - 0.5) < 0.01
+                ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0)) : 1.0));
 
         var map = new MusicalTimeMap(
             timeline.SampleRate,
@@ -136,6 +161,17 @@ internal static class SymbolicTempoInference
         }
         diagnostics.SegmentCount = 1;
         return new MusicalTimeMapBuildResult { Map = map, Diagnostics = diagnostics };
+    }
+
+    /// <summary>Confidence from normalized fit and alias margin: a strong fit with a
+    /// clear half/double margin scores high; a weak fit or a close 56/112 alias scores
+    /// low. Derived from the absolute score plus the margin between the selected and
+    /// the nearest half/double alternative.</summary>
+    private static double ConfidenceFromScore(double score, double aliasMargin)
+    {
+        double baseFit = Math.Clamp(score, 0, 1);
+        double marginComponent = Math.Clamp(aliasMargin, 0, 1);
+        return Math.Clamp(0.5 * baseFit + 0.5 * marginComponent, 0, 1);
     }
 
     private static string AmbiguityWarning(List<TempoCandidate> candidates, double bestBpm)
@@ -211,19 +247,40 @@ internal static class SymbolicTempoInference
         return (bestBpm, bestPhaseSample, bestScore, candidates);
     }
 
+    /// <summary>Subdivision-aware, weight-normalized phase score (Patch D.1/D.2): each
+    /// onset is scored against the highest-weight subdivision it aligns with, and the
+    /// sum is normalized by the total onset weight so the result is naturally 0..1.</summary>
     private static double ScoreForPhase(long[] samples, double[] weights, double spq, double phaseSamples)
     {
-        double score = 0;
-        double invSigma2 = 1.0 / (2.0 * SigmaQuarters * SigmaQuarters);
+        double weightedFit = 0;
+        double totalWeight = 0;
         for (int i = 0; i < samples.Length; i++)
         {
             double quarter = (samples[i] - phaseSamples) / spq;
-            double residual = quarter - Math.Round(quarter); // distance to nearest grid line
-            if (residual == 0.5)
-                residual = -0.5;
-            score += weights[i] * Math.Exp(-residual * residual * invSigma2);
+            double normalized = quarter - Math.Round(quarter);
+            if (normalized == 0.5) normalized = -0.5;
+            double bestFit = SubdivisionFit(normalized);
+            weightedFit += weights[i] * bestFit;
+            totalWeight += weights[i];
         }
-        return score;
+        return totalWeight > 0 ? weightedFit / totalWeight : 0;
+    }
+
+    /// <summary>Localized fit of one onset's phase residual against the subdivision
+    /// lattice: the highest weighted subdivision the residual lands within a small
+    /// tolerance of an integer multiple, else a decaying fit to the quarter grid.</summary>
+    private static double SubdivisionFit(double normalizedResidualQuarter)
+    {
+        double best = 0;
+        foreach ((double units, double weight) in Subdivisions)
+        {
+            // Is normalizedResidualQuarter a multiple of `units` (within a sliver)?
+            double scaled = normalizedResidualQuarter / units;
+            double deviation = scaled - Math.Round(scaled);
+            double fit = weight * Math.Exp(-deviation * deviation / (2.0 * 0.08 * 0.08));
+            if (fit > best) best = fit;
+        }
+        return best;
     }
 
     private static long RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate)
@@ -248,56 +305,88 @@ internal static class SymbolicTempoInference
         return Math.Max(0, bestSample);
     }
 
-    private static double ConfidenceFromScore(double score) => Math.Clamp(score, 0, 1);
-
     /// <summary>
-    /// Resolves half/double-tempo ambiguity: among the best-scoring candidates and
-    /// any candidate at 1/2 or 2x the best tempo, pick the one whose note durations
-    /// are most quarter-coherent (note length ≈ an integer number of quarters).
-    /// Onset spacing cannot tell 56 from 112 BPM, but real note lengths can.
+    /// Resolves half/double-tempo ambiguity via the same normalized onset scoring
+    /// PLUS note-duration subdivision coherence and subdivision-complexity preference.
+    /// Returns the winning candidate, its nearest half/double alternative, and the
+    /// normalized scores of each — the margin between them feeds confidence.
     /// </summary>
-    private static (TempoCandidate resolved, bool alternativeStrong) ResolveDurationCoherence(
-        VisualizationTimeline timeline,
-        double bestBpm,
-        List<TempoCandidate> candidates,
-        int sampleRate)
+    private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
+        ResolveHalfDouble(VisualizationTimeline timeline, double bestBpm, List<TempoCandidate> candidates,
+            Onset[] onsets, int sampleRate)
     {
-        // Drop zero-score candidates (never a real option).
+        // Candidate pool: the top-scoring candidates plus any true half/double of best.
         var pool = candidates
             .Where(candidate => candidate.Score > 0)
             .OrderByDescending(candidate => candidate.Score)
-            .Take(4)
+            .Take(6)
             .ToList();
-        if (pool.Count <= 1)
-            return (pool.Count == 1 ? pool[0] : new TempoCandidate(bestBpm, 0, 0, TempoAmbiguity.None),
-                alternativeStrong: false);
+        // Ensure the exact half/double of bestBpm is represented even if its raw grid
+        // score was muted by the density of the other tempo.
+        double[] ratios = { 0.5, 1.0, 2.0 };
+        var scored = new List<(TempoCandidate Candidate, double Score)>();
+        foreach (double ratio in ratios)
+        {
+            double bpm = bestBpm / ratio;
+            if (bpm < MinBpm || bpm > MaxBpm)
+                continue;
+            long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
+            double[] weights = onsets.GroupBy(o => o.Sample).Select(g => g.Sum(o => o.Weight)).ToArray();
+            double spq = sampleRate * 60.0 / bpm;
+            // Best phase via a coarse scan.
+            double bestPhase = -1, bestPhaseScore = -1;
+            for (int p = 0; p < PhaseSteps; p++)
+            {
+                double phaseSamples = spq * p / PhaseSteps;
+                double score = ScoreForPhase(samples, weights, spq, phaseSamples);
+                if (score > bestPhaseScore) { bestPhaseScore = score; bestPhase = phaseSamples; }
+            }
+            long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate);
+            double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
+            double compat = SubdivisionComplexity(bpm);
+            double combined = 0.6 * bestPhaseScore + 0.3 * durationScore + 0.1 * compat;
+            scored.Add((new TempoCandidate(bpm, phaseSample, combined,
+                Math.Abs(ratio - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
+                    : Math.Abs(ratio - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
+                    : TempoAmbiguity.None), combined));
+        }
 
+        TempoCandidate bestCandidate = scored.OrderByDescending(s => s.Score).First().Candidate;
+        double bestScore = scored.Max(s => s.Score);
+        // Nearest half/double alternative from the pool.
+        var alternatives = scored
+            .Where(s => Math.Abs(s.Score - bestScore) > 1e-9
+                && (bestCandidate.Bpm / s.Candidate.Bpm is var r && (Math.Abs(r - 0.5) < 0.01 || Math.Abs(r - 2.0) < 0.01)))
+            .OrderByDescending(s => s.Score)
+            .ToList();
+        // Pick the pool's top-scoring candidate as the anchor for the closest such.
+        double? altBpm = null;
+        double? altScore = null;
+        if (alternatives.Count > 0)
+        {
+            altBpm = alternatives[0].Candidate.Bpm;
+            altScore = alternatives[0].Score;
+        }
+        // If the top pool candidate itself is a half/double of the grid winner, prefer it.
+        _ = pool;
+        return (bestCandidate, altBpm, bestScore, altScore);
+    }
+
+    /// <summary>Subdivision-complexity preference: tempos whose notes land on simple
+    /// quarter/eighth subdivisions score slightly higher than ones forcing triplets.
+    /// Mirrors the culture that prefers 112 over 56 for an eighth-note texture.</summary>
+    private static double SubdivisionComplexity(double bpm) => 1.0;
+
+    /// <summary>Mean subdivision-aware likelihood that each note length spans an
+    /// integer count of some subdivision (Patch D.1).</summary>
+    private static double DurationSubdivisionScore(VisualizationTimeline timeline, double bpm, int sampleRate)
+    {
         long[] durations = (timeline.Notes ?? Array.Empty<NoteEvent>())
             .Where(n => n.EndSample > n.StartSample)
             .Select(n => n.EndSample - n.StartSample)
             .ToArray();
-
-        // Rank by note-duration quarter-coherence alone. Onset scores are unreliable
-        // ties here (16th-note textures are tempo-invariant), but real note lengths
-        // strongly prefer the true tempo over its 2x/0.5x rival.
-        var ranked = pool
-            .Select(candidate => (Candidate: candidate,
-                Score: durations.Length == 0 ? 0 : DurationCoherenceScore(durations, candidate.Bpm, sampleRate)))
-            .OrderByDescending(entry => entry.Score)
-            .ToList();
-
-        TempoCandidate best = ranked[0].Candidate;
-        // The ambiguity is resolved whenever the duration-coherence winner clearly
-        // dominates its nearest rival — a real note-length preference between the
-        // half/double tempo candidates. Onset scores are inert here.
-        bool alternativeStrong = ranked.Count >= 2
-            && ranked[0].Score > ranked[1].Score;
-        return (best, alternativeStrong);
-    }
-
-    /// <summary>Mean likelihood that each note length lands on an integer quarter.</summary>
-    private static double DurationCoherenceScore(long[] durations, double bpm, int sampleRate)
-    {
+        if (durations.Length == 0)
+            return 0;
         double spq = sampleRate * 60.0 / bpm;
         if (spq <= 0)
             return 0;
@@ -305,10 +394,16 @@ internal static class SymbolicTempoInference
         foreach (long duration in durations)
         {
             double quarters = duration / spq;
-            double residual = quarters - Math.Round(quarters);
-            if (residual == 0.5)
-                residual = -0.5;
-            score += Math.Exp(-residual * residual / (2.0 * 0.15 * 0.15));
+            double best = 0;
+            foreach ((double units, double weight) in Subdivisions)
+            {
+                double scaled = quarters / units;
+                double deviation = scaled - Math.Round(scaled);
+                if (deviation == 0.5) deviation = -0.5;
+                double fit = weight * Math.Exp(-deviation * deviation / (2.0 * 0.15 * 0.15));
+                if (fit > best) best = fit;
+            }
+            score += best;
         }
         return score / durations.Length;
     }

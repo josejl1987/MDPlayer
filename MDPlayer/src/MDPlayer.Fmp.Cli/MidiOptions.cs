@@ -53,7 +53,7 @@ internal sealed class MidiOptions : BatchRenderSettings
     public string TimingReport { get; set; }
     public bool StrictTiming { get; set; }
     public bool EmitPitchBend { get; set; } = true;
-    public int BendRange { get; set; } = 2;
+    public int BendRange { get; set; } = 24;
     public bool UsePercussionChannel { get; set; } = true;
     public TextWriter OutputWriter { get; set; } = Console.Out;
 }

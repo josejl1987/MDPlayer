@@ -54,6 +54,22 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>fmp-native-audio-validation.json</Link>
     </Content>
+
+    <!-- SPC / OPNA native backends (libmdplayer_spc.so / libmdplayer_opna.so) for
+         the native-audio integration tests. These are built by the native CMake
+         builds into runtimes/<rid>/native/ (gitignored) and are only present when
+         the native build has run. Mirror the CLI packaging so SpcNativeSession /
+         OpnaNativeSession resolve them under AppContext.BaseDirectory. -->
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_spc.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_spc.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_spc.so</Link>
+    </None>
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_opna.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_opna.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_opna.so</Link>
+    </None>
   </ItemGroup>
 
 </Project>

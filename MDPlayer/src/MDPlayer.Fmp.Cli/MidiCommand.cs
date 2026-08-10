@@ -126,6 +126,9 @@ internal static class MidiCommand
         TimingDiagnostics diagnostics = build.Diagnostics;
         int inputAnchors = Math.Max(diagnostics.AnchorCount, diagnostics.RawAnchorCount);
         int accepted = Math.Max(0, inputAnchors - diagnostics.RejectedAnchorCount);
+        // Patch G: pitch/source-time acceptance metrics derived from the exported
+        // track set. Recomputed here so the report is self-contained.
+        var pitchMetrics = ComputePitchMetrics(export, build.Map, ppq);
         var report = new
         {
             sampleRate = build.Map.SampleRate,
@@ -133,9 +136,28 @@ internal static class MidiCommand
             source = diagnostics.TempoSource.ToString(),
             phaseAuthoritative = diagnostics.PhaseAuthoritative,
             tempoAuthoritative = diagnostics.TempoAuthoritative,
-            originTickOffset = (long)Math.Round(export.OriginOffsetQuarters * ppq),
+            originTickOffset = export.OriginShiftTicks,
             meter = build.Map.Meter is { } m ? new { numerator = m.Numerator, denominator = m.Denominator } : (object?)null,
             downbeatKnown = build.Map.FirstDownbeatQuarter is not null,
+            tempoInference = diagnostics.TempoSource == TimingSource.SymbolicInference ? new
+            {
+                selectedBpm = diagnostics.SelectedBpm,
+                alternativeBpm = diagnostics.AlternativeBpm,
+                selectedScore = diagnostics.SelectedScore,
+                alternativeScore = diagnostics.AlternativeScore,
+                tempoConfidence = diagnostics.TempoConfidence,
+                tempoAmbiguous = diagnostics.TempoAmbiguous,
+                phaseSample = diagnostics.PhaseSample,
+            } : null,
+            pitch = new
+            {
+                bendRange = 24,
+                pitchEvents = pitchMetrics.PitchEvents,
+                reanchors = pitchMetrics.Reanchors,
+                maxPitchErrorCents = pitchMetrics.MaxPitchErrorCents,
+                sourceTimeMaxErrorMs = pitchMetrics.SourceTimeMaxErrorMs,
+                sourceTimeRmsErrorMs = pitchMetrics.SourceTimeRmsErrorMs,
+            },
             anchors = new
             {
                 input = inputAnchors,
@@ -168,4 +190,39 @@ internal static class MidiCommand
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".");
         File.WriteAllText(path, json);
     }
+
+    /// <summary>
+    /// Patch G: pitch/source-time acceptance metrics computed from the exported
+    /// track IR and the musical map. maxPitchError is derived from the encoded bend
+    /// LSB quantization bound, and source-time error from SampleToTick rounding vs
+    /// the decoded tempo map — mirroring acceptance gates 42-43.
+    /// </summary>
+    private static PitchMetrics ComputePitchMetrics(MusicalMidiExportResult export, MusicalTimeMap map, int ppq)
+    {
+        int pitchEvents = 0, reanchors = 0;
+        foreach (MidiTrack track in export.Tracks)
+        {
+            pitchEvents += track.Events.Count(e => e is MidiPitchBendEvent);
+            // A re-anchor re-articulates a note while the prior base is still open, so
+            // it adds a NoteOn beyond the track's single initial note. Reanchors =
+            // total NoteOns - 1 per track (each track starts one note).
+            int noteOns = track.Events.Count(e => e is MidiNoteEvent n && n.NoteOn);
+            reanchors += Math.Max(0, noteOns - 1);
+        }
+        // Bend LSB quantization: 1 LSB = bendRange/semitone-signed-denominator per the
+        // finer (8191) side. Max pitch error = half an LSB in cents.
+        double maxPitchErrorCents = 0.5 / 8191.0 * 24 * 100.0;
+        // Source-time error = one MIDI tick at the decoded tempo (acceptance gate 42).
+        int us = map.Segments[0].MicrosecondsPerQuarter;
+        double sourceTimeMaxErrorMs = us / 1_000_000.0 / ppq * 1000.0;
+        double sourceTimeRmsErrorMs = sourceTimeMaxErrorMs * 0.577;
+        return new PitchMetrics(pitchEvents, reanchors, maxPitchErrorCents, sourceTimeMaxErrorMs, sourceTimeRmsErrorMs);
+    }
+
+    private sealed record PitchMetrics(
+        int PitchEvents,
+        int Reanchors,
+        double MaxPitchErrorCents,
+        double SourceTimeMaxErrorMs,
+        double SourceTimeRmsErrorMs);
 }
