@@ -237,8 +237,32 @@ internal sealed class MusicalMidiExporter
                     $"Duplicate MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) allocated to more than one track.");
         }
 
-        var writer = new MidiFileWriter(_ppq);
         var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
+
+        // Endpoint-level pitch-bend canonicalization (Patch 1): after ALL musical
+        // events are planned, collapse multiple bends on the same endpoint at the
+        // same absolute tick to the single final effective bend, and suppress
+        // consecutive identical bends with no bend-range change in between. This
+        // closes the note-boundary handoff bug where an outgoing note's final bend
+        // and the incoming note's initial bend both land on the boundary tick.
+        // Removal only — never changes tick assignment and never re-links tracks.
+        if (SkipEndpointCanonicalization)
+        {
+            // Test-only comparison path: emit the pre-canonicalization state so the
+            // Smash Up acceptance check can quantify what the pass removes. The hard
+            // invariant below intentionally does NOT run here (it would throw on
+            // exactly the duplicates this path is meant to observe).
+        }
+        else
+        {
+            CanonicalizeEndpointPitchState(tracks);
+
+            // Hard invariant: after canonicalization, per (endpoint, tick) there is
+            // at most one PitchBend. Throws before any MIDI is serialized (FR-5).
+            ValidateNoDuplicateEndpointTickBends(tracks);
+        }
+
+        var writer = new MidiFileWriter(_ppq);
         byte[] bytes = writer.Write(conductor, tracks);
         return new MusicalMidiExportResult
         {
@@ -255,6 +279,146 @@ internal sealed class MusicalMidiExporter
         TempoSource = TimingSource.DriverBeatAnchors,
         PhaseSource = TimingSource.DriverBeatAnchors,
     };
+
+    /// <summary>Test-only escape hatch used by the Smash Up acceptance check to
+    /// compare pre/post-canonicalization output. Default false — the canonicalization
+    /// pass always runs in production.</summary>
+    internal bool SkipEndpointCanonicalization { get; set; }
+
+    /// <summary>Test-observable counters for SC-19: the canonicalization pass must
+    /// perform exactly ONE sort and ONE grouped linear pass per track. Reset at the
+    /// start of <see cref="CanonicalizeEndpointPitchState"/>; instance-scoped so
+    /// parallel tests never share state.</summary>
+    internal int CanonicalizeSortCount;
+    internal int CanonicalizePassCount;
+
+    /// <summary>
+    /// Endpoint-level pitch-bend canonicalization (Patch 1, FR-1..FR-4). Runs once
+    /// after all musical events are planned and before validation/serialization.
+    /// Groups events semantically by <see cref="MidiEndpoint"/> (the endpoint
+    /// uniqueness invariant already guarantees one track per endpoint, so keying on
+    /// track.Endpoint is equivalent) and:
+    /// 1. Same-tick collapse (FR-2): per absolute tick, zero bends → nothing; one →
+    ///    retain; N → keep ONLY the bend with the greatest SourceOrder (later source
+    ///    state wins; on a tie the first in sorted order is kept — ties are
+    ///    impossible in practice because SourceOrder is globally monotonic).
+    /// 2. Consecutive-identical suppression (FR-4): a retained bend equal to the
+    ///    previous retained bend on the endpoint is dropped iff no MidiBendRangeEvent
+    ///    (RPN sensitivity change) occurred between them; the flag resets after each
+    ///    retained bend. NoteOff/NoteOn never touch the flag — NoteOff does not reset
+    ///    pitch bend.
+    /// Cross-tick bends are NEVER merged (FR-3). The pass only REMOVES events;
+    /// tick assignment is baked at event creation and unchanged (D4), and tracks
+    /// are never re-linked. Deterministic by SourceOrder, never collection iteration
+    /// order (FR-16). O(events log n): one sort + one grouped pass per track (FR-17).
+    /// </summary>
+    internal void CanonicalizeEndpointPitchState(IReadOnlyList<MidiTrack> tracks)
+    {
+        CanonicalizeSortCount = 0;
+        CanonicalizePassCount = 0;
+        foreach (MidiTrack track in tracks)
+        {
+            // ONE sort — the exact (Tick, Rank, SourceOrder) key AppendEvents uses,
+            // so the writer's later sort is a stable no-op and same-tick collapse is
+            // deterministic by SourceOrder, never insertion/iteration order.
+            List<MidiEventBase> sorted = track.Events
+                .OrderBy(e => e.Tick)
+                .ThenBy(MidiEventOrder.Rank)
+                .ThenBy(e => e.SourceOrder)
+                .ToList();
+            CanonicalizeSortCount++;
+
+            var rebuilt = new List<MidiEventBase>(sorted.Count);
+            int? lastEmittedBend = null;
+            bool sensitivityDirty = false;
+
+            // ONE grouped linear pass over consecutive same-tick runs.
+            int i = 0;
+            while (i < sorted.Count)
+            {
+                long tick = sorted[i].Tick;
+                int runEnd = i;
+                while (runEnd < sorted.Count && sorted[runEnd].Tick == tick)
+                    runEnd++;
+
+                // Same-tick run: bends are contiguous at Rank 3; keep the bend with
+                // the greatest SourceOrder (first in sorted order on a tie).
+                MidiPitchBendEvent? retained = null;
+                bool bendRangeInRun = false;
+                for (int j = i; j < runEnd; j++)
+                {
+                    switch (sorted[j])
+                    {
+                        case MidiBendRangeEvent:
+                            bendRangeInRun = true;
+                            break;
+                        case MidiPitchBendEvent bend when retained is null || bend.SourceOrder > retained.SourceOrder:
+                            retained = bend;
+                            break;
+                    }
+                }
+                // A bend-range event sorts before PitchBend within the tick, so one
+                // sharing this tick counts as "occurred between" the previous
+                // retained bend and this one — the sensitivity flag must be set
+                // before the suppression decision.
+                if (bendRangeInRun)
+                    sensitivityDirty = true;
+
+                if (retained is not null)
+                {
+                    if (!sensitivityDirty && lastEmittedBend is int last && retained.Bend == last)
+                    {
+                        // Consecutive-identical duplicate: dropped; the flag is NOT
+                        // reset (no retained bend was emitted).
+                        retained = null;
+                    }
+                    else
+                    {
+                        lastEmittedBend = retained.Bend;
+                        sensitivityDirty = false;
+                    }
+                }
+
+                for (int j = i; j < runEnd; j++)
+                {
+                    if (ReferenceEquals(sorted[j], retained) || sorted[j] is not MidiPitchBendEvent)
+                        rebuilt.Add(sorted[j]);
+                }
+                i = runEnd;
+            }
+            CanonicalizePassCount++;
+
+            // Rebuild the track's event list in place (never re-link the track).
+            track.Events.Clear();
+            track.Events.AddRange(rebuilt);
+        }
+    }
+
+    /// <summary>
+    /// Hard invariant (FR-5): after canonicalization, per (endpoint, tick) there is
+    /// at most one <see cref="MidiPitchBendEvent"/>. Any violation throws
+    /// <see cref="InvalidOperationException"/> naming the endpoint, tick, bend
+    /// values, track name and SourceOrder values — before any MIDI is serialized.
+    /// </summary>
+    internal static void ValidateNoDuplicateEndpointTickBends(IReadOnlyList<MidiTrack> tracks)
+    {
+        foreach (MidiTrack track in tracks)
+        {
+            foreach (IGrouping<long, MidiPitchBendEvent> group in track.Events
+                         .OfType<MidiPitchBendEvent>()
+                         .GroupBy(b => b.Tick))
+            {
+                MidiPitchBendEvent[] bends = group.ToArray();
+                if (bends.Length <= 1)
+                    continue;
+                throw new InvalidOperationException(
+                    $"Duplicate pitch-bend events on endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) " +
+                    $"at tick {group.Key}: bend values [{string.Join(", ", bends.Select(b => b.Bend))}], " +
+                    $"track '{track.Name}', " +
+                    $"SourceOrder values [{string.Join(", ", bends.Select(b => b.SourceOrder))}].");
+            }
+        }
+    }
 
     /// <summary>The unshifted absolute MIDI tick of a source sample (may be negative).</summary>
     private long TimeTick(long sample) => _map.SampleToTick(sample, _ppq);

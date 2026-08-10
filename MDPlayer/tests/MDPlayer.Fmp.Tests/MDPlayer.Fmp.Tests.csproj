@@ -39,6 +39,12 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\master-ninja.vgz</Link>
     </Content>
+    <!-- Real SNES SPC used by the endpoint-canonicalization Smash Up acceptance
+         (FR-8): adversarial note-boundary handoff corpus member. -->
+    <Content Include="..\..\..\120 Smash Up.spc">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\smash-up.spc</Link>
+    </Content>
     <!-- Real YM2612-DAC-heavy VGZ used by the DAC sample integration tests. -->
     <Content Include="..\..\..\26 - Robotnik.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
