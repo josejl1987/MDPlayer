@@ -76,6 +76,23 @@ public sealed class Ym2608TimelineDecoderTests
     }
 
     [Fact]
+    public void FmPitchCommitWithinTwoSamplesOfKeyOn_UpdatesInitialPitch()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        WriteFmPitch(decoder, 2, 100, 0x135, 4);
+        decoder.ApplyYm2608(0, 0, 0x28, 0xF2, 200);
+        decoder.ApplyYm2608(0, 0, 0xA6, 0x23, 201);
+        decoder.ApplyYm2608(0, 0, 0xA2, 0x9E, 201);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x02, 900);
+
+        var note = Assert.Single(decoder.Complete(1000, 44_100, "test").Notes);
+
+        double expectedFrequency = 0x39E * 7_987_200d * 16 / ((1 << 20) * 24d * 6);
+        Assert.Equal(expectedFrequency, note.InitialFrequencyHz, 9);
+        Assert.Empty(note.Pitch);
+    }
+
+    [Fact]
     public void FmRetrigger_ClosesPreviousBeforeOpeningNext()
     {
         var decoder = new Ym2608TimelineDecoder();

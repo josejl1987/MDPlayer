@@ -72,14 +72,18 @@ internal static class SymbolicTempoInference
             RmsResidualQuarters = 0,
         };
 
-        // Half/double compare: evaluate candidate, candidate/2 and candidate*2 by the
-        // same normalized scoring (onsets + durations + subdivision complexity) and
-        // prefer the best, surfacing the alternative when it is close (Patch D.2/D.3).
-        bool resolvedAmbiguity = false;
+        // Half/double compare: evaluate the full power-of-two metrical family by the
+        // combined octave-fair scoring (onsets + durations + accents + tempo prior)
+        // and prefer the best, surfacing the alternative when it is close
+        // (Patch D.2/D.3/D.4).
         if (candidates.Count > 1)
         {
             var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
                 timeline, bestBpm, candidates, onsets, timeline.SampleRate);
+            // The ResolveHalfDouble combined score is the decision metric, so it is
+            // the SelectedScore reported for BOTH the selected and (below) the
+            // alternative — the two are directly comparable.
+            bestScore = resolvedByScore;
             if (alternative is double altBpm && altBpm > 0)
             {
                 diagnostics.AlternativeBpm = altBpm;
@@ -89,8 +93,6 @@ internal static class SymbolicTempoInference
             {
                 bestBpm = resolved.Bpm;
                 bestPhaseSample = resolved.PhaseSample;
-                bestScore = resolved.Score;
-                resolvedAmbiguity = true;
             }
             diagnostics.SelectedBpm = bestBpm;
             diagnostics.SelectedScore = bestScore;
@@ -106,7 +108,7 @@ internal static class SymbolicTempoInference
         diagnostics.AnchorCount = onsets.Length;
         diagnostics.PhaseSample = bestPhaseSample;
         diagnostics.TempoConfidence = ConfidenceFromScore(bestScore,
-            diagnostics.AlternativeBpm is double a && Math.Abs(bestBpm / a - 0.5) < 0.01
+            diagnostics.AlternativeBpm is double a && IsMetricalFamilyRatio(bestBpm / a)
                 ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0))
                 : 1.0);
         diagnostics.Warnings.Add(
@@ -125,7 +127,7 @@ internal static class SymbolicTempoInference
         // musical quarter 0 occurs; if it is after the source start, the quarter at
         // the source start is negative (pickup). Never flipped positive.
         double spq = timeline.SampleRate * 60.0 / bestBpm;
-        double quarterAtStart = (bestPhaseSample - timeline.StartSample) / (double)timeline.SampleRate * (bestBpm / 60.0);
+        double quarterAtStart = (timeline.StartSample - bestPhaseSample) / (double)timeline.SampleRate * (bestBpm / 60.0);
         quarterAtStart *= options.QuartersPerBeat;
 
         if (beatOffsetQuarter is double q)
@@ -138,7 +140,7 @@ internal static class SymbolicTempoInference
             spq,
             bestBpm,
             TimingSource.SymbolicInference,
-            ConfidenceFromScore(bestScore, diagnostics.AlternativeBpm is double amb && Math.Abs(bestBpm / amb - 0.5) < 0.01
+            ConfidenceFromScore(bestScore, diagnostics.AlternativeBpm is double amb && IsMetricalFamilyRatio(bestBpm / amb)
                 ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0)) : 1.0));
 
         var map = new MusicalTimeMap(
@@ -149,15 +151,15 @@ internal static class SymbolicTempoInference
             null);
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.SampleZeroQuarter = quarterAtStart;
-        string ambiguity = AmbiguityWarning(candidates, bestBpm);
-        if (!resolvedAmbiguity && ambiguity != "tempo appears unambiguous")
+        // Metrical-family ambiguity is surfaced whenever ResolveHalfDouble found a
+        // musically equivalent alternative, whether or not the octave was changed:
+        // resolving the octave does not make the alternative disappear (D.4).
+        diagnostics.TempoAmbiguous = diagnostics.AlternativeBpm is double;
+        if (diagnostics.TempoAmbiguous)
         {
-            diagnostics.TempoAmbiguous = true;
-            diagnostics.Warnings.Add(ambiguity);
-        }
-        else if (!resolvedAmbiguity && ambiguity == "tempo appears unambiguous")
-        {
-            diagnostics.TempoAmbiguous = false;
+            diagnostics.Warnings.Add(
+                $"{bestBpm:0.#}/{diagnostics.AlternativeBpm!.Value:0.#} BPM ambiguity; " +
+                "treat phase/tempo as inferred");
         }
         diagnostics.SegmentCount = 1;
         return new MusicalTimeMapBuildResult { Map = map, Diagnostics = diagnostics };
@@ -172,23 +174,6 @@ internal static class SymbolicTempoInference
         double baseFit = Math.Clamp(score, 0, 1);
         double marginComponent = Math.Clamp(aliasMargin, 0, 1);
         return Math.Clamp(0.5 * baseFit + 0.5 * marginComponent, 0, 1);
-    }
-
-    private static string AmbiguityWarning(List<TempoCandidate> candidates, double bestBpm)
-    {
-        var ambiguous = candidates
-            .Where(candidate => Math.Abs(candidate.Bpm - bestBpm) > 0.01)
-            .Where(candidate =>
-            {
-                double ratio = bestBpm / candidate.Bpm;
-                return Math.Abs(ratio - 0.5) < 0.01 || Math.Abs(ratio - 2.0) < 0.01;
-            })
-            .OrderByDescending(candidate => candidate.Score)
-            .ToList();
-        if (ambiguous.Count == 0)
-            return "tempo appears unambiguous";
-        double nearest = ambiguous[0].Bpm;
-        return $"{bestBpm:0.#}/{nearest:0.#} BPM ambiguity; treat phase/tempo as inferred";
     }
 
     private static (double bpm, long phaseSample, double score, List<TempoCandidate>) Search(
@@ -235,8 +220,8 @@ internal static class SymbolicTempoInference
                 }
             }
             candidates.Add(new TempoCandidate(bpm, (long)localBestPhase, localBestScore,
-                localBestScore > 0 && Math.Abs(bestBpm / bpm - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
-                    : localBestScore > 0 && Math.Abs(bestBpm / bpm - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
+                localBestScore > 0 && IsMetricalFamilyRatio(bestBpm / bpm) && Math.Abs(bestBpm / bpm - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
+                    : localBestScore > 0 && IsMetricalFamilyRatio(bestBpm / bpm) && Math.Abs(bestBpm / bpm - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
                     : TempoAmbiguity.None));
         }
 
@@ -306,24 +291,26 @@ internal static class SymbolicTempoInference
     }
 
     /// <summary>
-    /// Resolves half/double-tempo ambiguity via the same normalized onset scoring
-    /// PLUS note-duration subdivision coherence and subdivision-complexity preference.
-    /// Returns the winning candidate, its nearest half/double alternative, and the
-    /// normalized scores of each — the margin between them feeds confidence.
+    /// Resolves power-of-two tempo ambiguity within the metrical family of the
+    /// winning tempo. Phase alignment alone cannot pick the octave — the same
+    /// onset lattice is a valid subdivision at every family tempo — so the octave
+    /// is chosen by evidence that is deliberately scale-fair:
+    ///   - durations and accents are scored by the octave-invariant DYADIC lattice
+    ///     fit (<see cref="DyadicFit"/>), so an octave can never win by turning
+    ///     the pulse into a coarser or finer subdivision;
+    ///   - a broad musical tempo prior breaks the remaining tie toward the common
+    ///     beat band instead of the extremes of the search range.
+    /// Returns the winning candidate, its nearest family alternative, and the
+    /// combined scores of each — the margin between them feeds confidence.
     /// </summary>
     private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
         ResolveHalfDouble(VisualizationTimeline timeline, double bestBpm, List<TempoCandidate> candidates,
             Onset[] onsets, int sampleRate)
     {
-        // Candidate pool: the top-scoring candidates plus any true half/double of best.
-        var pool = candidates
-            .Where(candidate => candidate.Score > 0)
-            .OrderByDescending(candidate => candidate.Score)
-            .Take(6)
-            .ToList();
-        // Ensure the exact half/double of bestBpm is represented even if its raw grid
-        // score was muted by the density of the other tempo.
-        double[] ratios = { 0.5, 1.0, 2.0 };
+        // The full power-of-two metrical family around the winning tempo, so the
+        // exact half/double is always represented even if its raw grid score was
+        // muted by the density of the other tempo.
+        double[] ratios = { 0.25, 0.5, 1.0, 2.0, 4.0 };
         var scored = new List<(TempoCandidate Candidate, double Score)>();
         foreach (double ratio in ratios)
         {
@@ -343,11 +330,12 @@ internal static class SymbolicTempoInference
             }
             long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate);
             double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
-            double compat = SubdivisionComplexity(bpm);
-            double combined = 0.6 * bestPhaseScore + 0.3 * durationScore + 0.1 * compat;
+            double accentScore = AccentFitScore(timeline, bpm, sampleRate);
+            double prior = TempoPrior(bpm);
+            double combined = 0.55 * bestPhaseScore + 0.20 * durationScore + 0.10 * accentScore + 0.15 * prior;
             scored.Add((new TempoCandidate(bpm, phaseSample, combined,
-                Math.Abs(ratio - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
-                    : Math.Abs(ratio - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
+                IsMetricalFamilyRatio(ratio) && Math.Abs(ratio - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
+                    : IsMetricalFamilyRatio(ratio) && Math.Abs(ratio - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
                     : TempoAmbiguity.None), combined));
         }
 
@@ -356,7 +344,7 @@ internal static class SymbolicTempoInference
         // Nearest half/double alternative from the pool.
         var alternatives = scored
             .Where(s => Math.Abs(s.Score - bestScore) > 1e-9
-                && (bestCandidate.Bpm / s.Candidate.Bpm is var r && (Math.Abs(r - 0.5) < 0.01 || Math.Abs(r - 2.0) < 0.01)))
+                && IsMetricalFamilyRatio(bestCandidate.Bpm / s.Candidate.Bpm))
             .OrderByDescending(s => s.Score)
             .ToList();
         // Pick the pool's top-scoring candidate as the anchor for the closest such.
@@ -367,18 +355,26 @@ internal static class SymbolicTempoInference
             altBpm = alternatives[0].Candidate.Bpm;
             altScore = alternatives[0].Score;
         }
-        // If the top pool candidate itself is a half/double of the grid winner, prefer it.
-        _ = pool;
         return (bestCandidate, altBpm, bestScore, altScore);
     }
 
-    /// <summary>Subdivision-complexity preference: tempos whose notes land on simple
-    /// quarter/eighth subdivisions score slightly higher than ones forcing triplets.
-    /// Mirrors the culture that prefers 112 over 56 for an eighth-note texture.</summary>
-    private static double SubdivisionComplexity(double bpm) => 1.0;
+    private static bool IsMetricalFamilyRatio(double ratio)
+    {
+        if (!double.IsFinite(ratio) || ratio <= 0)
+            return false;
+        double nearestPowerOfTwo = Math.Pow(2, Math.Round(Math.Log2(ratio)));
+        return Math.Abs(ratio - nearestPowerOfTwo) < 0.01;
+    }
 
-    /// <summary>Mean subdivision-aware likelihood that each note length spans an
-    /// integer count of some subdivision (Patch D.1).</summary>
+    /// <summary>
+    /// Mean subdivision-aware likelihood that each note length spans an integer
+    /// count of some subdivision (Patch D.1), scored by a DYADIC lattice fit
+    /// (<see cref="DyadicFit"/>). Doubling the tempo halves <c>quarters</c> and the
+    /// <c>k+1</c> grid compensates exactly, so the score is octave-invariant BY
+    /// CONSTRUCTION — a tempo can never win here by turning the pulse into a
+    /// coarser or finer subdivision. Octave choice is delegated to
+    /// <see cref="TempoPrior"/>.
+    /// </summary>
     private static double DurationSubdivisionScore(VisualizationTimeline timeline, double bpm, int sampleRate)
     {
         long[] durations = (timeline.Notes ?? Array.Empty<NoteEvent>())
@@ -392,20 +388,94 @@ internal static class SymbolicTempoInference
             return 0;
         double score = 0;
         foreach (long duration in durations)
-        {
-            double quarters = duration / spq;
-            double best = 0;
-            foreach ((double units, double weight) in Subdivisions)
-            {
-                double scaled = quarters / units;
-                double deviation = scaled - Math.Round(scaled);
-                if (deviation == 0.5) deviation = -0.5;
-                double fit = weight * Math.Exp(-deviation * deviation / (2.0 * 0.15 * 0.15));
-                if (fit > best) best = fit;
-            }
-            score += best;
-        }
+            score += DyadicFit(duration / spq, sigma: 0.15);
         return score / durations.Length;
+    }
+
+    /// <summary>
+    /// Octave-invariant dyadic lattice fit (Patch D.4): how close <c>quarters</c>
+    /// is to an integer multiple of a power-of-two subdivision (…, 1/16, 1/8,
+    /// 1/4, 1/2, 1, 2, … quarters). Measured as <c>quarters · 2^k</c> against the
+    /// nearest integer for every <c>k</c>, so doubling the tempo halves
+    /// <c>quarters</c> and the <c>k+1</c> grid returns the identical deviation —
+    /// the fit is exactly the same at 56, 112 and 224 BPM for the same physical
+    /// durations. No finite subdivision set can achieve this (unit 1 doubles to 2,
+    /// which is outside every finite set); this formulation has no boundary.
+    /// </summary>
+    private static double DyadicFit(double quarters, double sigma)
+    {
+        double best = 0;
+        for (int k = 2; k <= 14; k++)
+        {
+            double scaled = quarters * Math.Pow(2, k);
+            double deviation = scaled - Math.Round(scaled);
+            if (deviation == 0.5) deviation = -0.5;
+            double fit = Math.Exp(-deviation * deviation / (2.0 * sigma * sigma));
+            if (fit > best) best = fit;
+        }
+        return best;
+    }
+
+    // ---- Octave disambiguation (Patch D.4) -----------------------------------
+
+    /// <summary>Center and width of the broad tempo prior, in BPM. Intentionally
+    /// wide: it only breaks near-ties inside a metrical family, never overrides
+    /// strong onset evidence on its own.</summary>
+    private const double PriorCenterBpm = 115.0;
+    private const double PriorSigmaBpm = 70.0;
+
+    /// <summary>
+    /// Broad musical tempo prior (Patch D.4): gently prefers the common beat band
+    /// and penalizes the extremes of the [MinBpm, MaxBpm] search range. This is the
+    /// final disambiguator among octave-equivalent subdivisions — e.g. the same
+    /// ~134 ms unit can be a 32nd at 56 BPM, a 16th at 112 BPM, or an 8th at
+    /// 224 BPM, and none of the lattice fits can tell them apart. The prior breaks
+    /// that tie toward the central octave without assuming any particular meter.
+    /// </summary>
+    private static double TempoPrior(double bpm)
+    {
+        double deviation = (bpm - PriorCenterBpm) / PriorSigmaBpm;
+        return Math.Exp(-0.5 * deviation * deviation);
+    }
+
+    /// <summary>
+    /// Beat-level accent evidence (Patch D.4): rhythm and aggregate hits (the
+    /// accented onsets) are scored against the metrical subdivision lattice with
+    /// the same octave-invariant <see cref="DyadicFit"/> used for durations, so the
+    /// term can never hand the win to a coarser or finer octave. It still
+    /// contributes real evidence: a drum pattern that sits off the lattice at one
+    /// family tempo but cleanly on it at another shifts the family comparison.
+    /// Returns a neutral 0.5 when no accent onsets exist, so a song without
+    /// percussion is neither favored nor penalized.
+    /// </summary>
+    private static double AccentFitScore(VisualizationTimeline timeline, double bpm, int sampleRate)
+    {
+        var accented = new List<Onset>();
+        var seen = new HashSet<long>();
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null || !seen.Add(rhythm.SamplePosition))
+                continue;
+            accented.Add(new Onset(rhythm.SamplePosition, WeightFor(rhythm.Strength, high: true)));
+        }
+        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
+        {
+            if (hit is null || !seen.Add(hit.SamplePosition))
+                continue;
+            accented.Add(new Onset(hit.SamplePosition, 1.0));
+        }
+        if (accented.Count == 0)
+            return 0.5;
+
+        double spq = sampleRate * 60.0 / bpm;
+        double weightedFit = 0;
+        double totalWeight = 0;
+        foreach (Onset onset in accented)
+        {
+            weightedFit += onset.Weight * DyadicFit(onset.Sample / spq, sigma: 0.08);
+            totalWeight += onset.Weight;
+        }
+        return totalWeight > 0 ? weightedFit / totalWeight : 0.5;
     }
 
     private static Onset[] CollectOnsets(VisualizationTimeline timeline)

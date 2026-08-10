@@ -178,12 +178,14 @@ internal sealed class MidiFileWriter
     {
         int value = range.Semitones & 0x7F;
         // RPN pitch-bend range (semitones): select RPN 0, data entry MSB, then the
-        // null RPN to unselect. Only the first generated CC carries the source delta.
+        // null RPN (CC101/CC100 = 127) to unselect. A Data Entry (CC6) write after
+        // the null RPN is redundant — no RPN is selected, so it is omitted.
+        // Only the first generated CC carries the source delta.
         var channel = Channel(range.Channel);
         (int Control, int Value)[] writes =
         {
             (101, 0), (100, 0), (6, value),     // select RPN 0 + data entry msb
-            (101, 127), (100, 127), (6, 0),     // null RPN (unselect)
+            (101, 127), (100, 127),             // null RPN (unselect)
         };
         return writes.Select(w => new ControlChangeEvent(
                 new SevenBitNumber((byte)w.Control), new SevenBitNumber((byte)w.Value))

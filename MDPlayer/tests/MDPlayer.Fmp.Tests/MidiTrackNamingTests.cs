@@ -207,9 +207,34 @@ public sealed class MidiTrackNamingTests
             Rhythm = new[] { rhythm },
         }, new MusicalMidiExportOptions { EmitPitchBend = false });
         string rhythmName = Assert.Single(TrackNames(rhythmResult).Where(n => n != "Conductor"));
-        Assert.Contains("rhythm:top", rhythmName);
+        // A single rhythm identity on the chip gets the clean semantic name, not the
+        // raw source-voice "rhythm:top" canonical.
+        Assert.Equal("YM2608 Rhythm", rhythmName);
         var rhythmChunk = Assert.Single(MidiRoundTrip.TrackChunks(rhythmResult.Bytes).Skip(1));
         Assert.Equal(9, rhythmChunk.Events.OfType<DryNote>().Single().Channel);
+    }
+
+    [Fact]
+    public void MultipleRhythmVoices_SameChip_DisambiguatedByVoiceName()
+    {
+        // Two distinct rhythm identities on one YM2608 get the semantic chip name
+        // disambiguated by their short voice name (never duplicate "YM2608 Rhythm").
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 5000, SampleRate = 44100,
+            Rhythm = new[]
+            {
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", 0, 1, 0, InstrumentId: "rhythm:bd")
+                { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 0) },
+                new RhythmEvent("top", "ym2608.0.rhythm.top", 0, 1, 0, InstrumentId: "rhythm:top")
+                { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 2) },
+            },
+        };
+        var result = ExportTimeline(timeline, new MusicalMidiExportOptions { EmitPitchBend = false });
+        string[] names = TrackNames(result).Where(n => n != "Conductor").OrderBy(n => n).ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Equal("YM2608 Rhythm - bd", names[0]);
+        Assert.Equal("YM2608 Rhythm - top", names[1]);
     }
 
     private static MusicalMidiExportResult Export(MusicalMidiExportOptions options, params VisualizationNoteEvent[] notes) =>

@@ -157,6 +157,14 @@ internal sealed class MusicalMidiExporter
 
         TrackAllocator allocator = BuildTracks(timeline);
 
+        // Unpitched noise is excluded from the melodic export (no pitch exists);
+        // surface it as a diagnostic so the exclusion is never silent.
+        int unpitchedNoise = (timeline.Notes ?? Array.Empty<NoteEvent>()).Count(IsUnpitchedNoise);
+        if (unpitchedNoise > 0 && Diagnostics is not null)
+            Diagnostics.Warnings.Add(
+                $"{unpitchedNoise} unpitched noise note(s) excluded from the melodic MIDI export " +
+                "(SSG noise has no pitch to serialize)");
+
         var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>();
         var plannable = new List<PlannableNote>();
         foreach (NoteEvent note in (timeline.Notes ?? Array.Empty<NoteEvent>())
@@ -253,9 +261,22 @@ internal sealed class MusicalMidiExporter
 
     private int ShortHitTicks => Math.Max(1, _ppq / 32);
 
-    /// <summary>Single source of truth for whether a note is actually emitted (§21).</summary>
+    /// <summary>Single source of truth for whether a note is actually emitted (§21).
+    /// Unpitched noise (SSG noise-only, the intentional -1 sentinel) is excluded:
+    /// it has no pitch to serialize as a melodic MIDI note, and fabricating one
+    /// would corrupt fidelity. Such notes are counted and surfaced as a diagnostic.
+    /// </summary>
     private bool IsNoteEmitted(NoteEvent note) =>
-        note is not null && note.EndSample > note.StartSample && _options.OverrideFor(note.ChannelId).Include;
+        note is not null && note.EndSample > note.StartSample
+        && !IsUnpitchedNoise(note)
+        && _options.OverrideFor(note.ChannelId).Include;
+
+    /// <summary>True for the decoder's intentional unpitched-noise notes (SSG
+    /// noise-only modes). These carry the <c>-1</c> "Unpitched" sentinel and are
+    /// rendered as fixed noise rows by the visualization; MIDI has no pitch to
+    /// express them, so they are excluded from the melodic export.</summary>
+    private static bool IsUnpitchedNoise(NoteEvent note) =>
+        note.Mode is VisualizationNoteMode.SsgNoise or VisualizationNoteMode.SsgEnvelopeNoise;
 
     /// <summary>Single source of truth for whether a rhythm trigger is emitted (§21).</summary>
     private bool IsRhythmEmitted(RhythmEvent rhythm) =>
@@ -720,13 +741,22 @@ internal sealed class MusicalMidiExporter
 
         ValidateChannelState(keyOrder, representativeByKey);
 
+        // Percussion naming needs the set of distinct rhythm identities per chip:
+        // a chip with exactly one rhythm voice gets the clean "<CHIP> Rhythm" name,
+        // and multiple voices are disambiguated by their short voice name.
+        var rhythmCountByChip = keyOrder
+            .Where(key => key.Instrument.Family == IdentityFamily.Rhythm)
+            .GroupBy(key => key.Chip)
+            .ToDictionary(group => group.Key, group => group.Count());
+
         foreach (MidiTrackKey key in keyOrder)
         {
             string channelId = representativeByKey[key];
             VoiceExportOverride voiceOverride = _options.OverrideFor(channelId);
             if (!voiceOverride.Include)
                 continue; // excluded voice: no track, no notes.
-            allocator.Add(key, index++, channelId, voiceOverride, _options, WithSourceOrder);
+            allocator.Add(key, index++, channelId, voiceOverride, _options, WithSourceOrder,
+                rhythmCountByChip.GetValueOrDefault(key.Chip));
         }
         return allocator;
     }
@@ -895,13 +925,14 @@ internal sealed class MusicalMidiExporter
         private readonly Dictionary<MidiChannelDomain, int> _requestedChannelsByDomain = new();
 
         public void Add(MidiTrackKey key, int index, string channelId, VoiceExportOverride voiceOverride,
-            MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder)
+            MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder,
+            int rhythmCountForChip = 0)
         {
             TrackSlot? existing = SlotFor(key);
             if (existing is not null)
                 return; // key already allocated (defensive; BuildTracks dedupes).
             bool percussive = key.Instrument.Family == IdentityFamily.Rhythm;
-            string name = IdentityNameFor(key, percussive, channelId);
+            string name = IdentityNameFor(key, percussive, channelId, rhythmCountForChip);
             MidiEndpoint endpoint = ResolveEndpoint(key, percussive, options, voiceOverride);
             var track = new MidiTrack { Name = name, Endpoint = endpoint };
             Tracks[index] = track;
@@ -969,17 +1000,36 @@ internal sealed class MusicalMidiExporter
                 $"MIDI port exhaustion: source track '{key}' cannot be assigned a unique endpoint (maximum port is 255).");
         }
 
-        private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId)
+        private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId, int rhythmCountForChip)
         {
             // Placeholder / unresolved instruments keep the per-channel name.
             if (key.Instrument.IsEmpty)
                 return channelId;
-            string instrument = percussive ? key.Instrument.Canonical : key.Instrument.DisplayName;
+            if (percussive)
+            {
+                // Semantic percussion name: "<CHIP> Rhythm" — the source "CH<n>"
+                // prefix is meaningless for a rhythm voice, and the raw rhythm:xxx
+                // canonical is noise. A chip carrying several distinct rhythm
+                // identities is disambiguated by the short voice name (e.g. top).
+                string chip = key.Chip == ChipType.Unknown ? "CH" : ChipPrefix(key.Chip);
+                string baseName = $"{chip} Rhythm";
+                return rhythmCountForChip > 1 ? $"{baseName} - {ShortRhythmName(key.Instrument)}" : baseName;
+            }
+            string instrument = key.Instrument.DisplayName;
             // Deterministic, source-channel-aware prefix: "<CHIP> CH<n>" where n is
             // the 1-based source channel. Distinct (chip, channel, instrument) keys
             // therefore always get distinct names.
-            string chip = key.Chip == ChipType.Unknown ? "CH" : $"{ChipPrefix(key.Chip)} CH";
-            return $"{chip}{key.SourceChannel + 1} - {instrument}";
+            string chipName = key.Chip == ChipType.Unknown ? "CH" : $"{ChipPrefix(key.Chip)} CH";
+            return $"{chipName}{key.SourceChannel + 1} - {instrument}";
+        }
+
+        /// <summary>Short voice name of a rhythm identity ("rhythm:top" → "top").</summary>
+        private static string ShortRhythmName(InstrumentIdentity instrument)
+        {
+            string canonical = instrument.Canonical ?? string.Empty;
+            return canonical.StartsWith("rhythm:", StringComparison.Ordinal)
+                ? canonical["rhythm:".Length..]
+                : canonical;
         }
 
         private static string ChipPrefix(ChipType chip) => chip switch

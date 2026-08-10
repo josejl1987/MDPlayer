@@ -63,6 +63,31 @@ public sealed class InstrumentIdentityTests
         Assert.False(InstrumentIdentity.TryParse("", out _));
     }
 
+    [Theory]
+    [InlineData("fm:007", "Fm")]
+    [InlineData("ssg:envelope:4", "Ssg")]
+    [InlineData("rhythm:bd", "Rhythm")]
+    [InlineData("dac:005", "Pcm")]
+    [InlineData("pcm:005", "Pcm")]
+    public void Identity_TypedCanonicalForms_RoundTrip(string canonical, string familyName)
+    {
+        Assert.True(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
+        Assert.Equal(familyName, identity.Family.ToString());
+        Assert.True(InstrumentIdentity.TryParse(identity.Canonical, out InstrumentIdentity roundTrip));
+        Assert.Equal(identity, roundTrip);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("unknown:voice")]
+    [InlineData("fm:not-a-number")]
+    public void Identity_UnknownOrMalformedForms_UseExplicitUnresolvedResult(string canonical)
+    {
+        Assert.False(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
+        Assert.True(identity.IsEmpty);
+    }
+
     [Fact]
     public void MidiTrackKey_ComposesChipChannelInstrument()
     {
