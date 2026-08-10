@@ -21,7 +21,7 @@ public sealed class MidiFileWriterTests
     public void Write_Header_IsFormat1WithConfiguredPpq()
     {
         var writer = new MidiFileWriter(Ppq);
-        byte[] bytes = writer.Write(EmptyConductor(), new[] { new MidiTrack { Name = "t" } });
+        byte[] bytes = writer.Write(EmptyConductor(), new[] { new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) } });
 
         var file = MidiRoundTrip.Read(bytes);
         Assert.Equal(MidiFileFormat.MultiTrack, file.OriginalFormat);
@@ -55,9 +55,9 @@ public sealed class MidiFileWriterTests
             new MidiTempoEvent(0, 500_000),
             new MidiTimeSignatureEvent(0, 4, 4),
         };
-        var t1 = new MidiTrack { Name = "t1" };
+        var t1 = new MidiTrack { Name = "t1", Endpoint = new MidiEndpoint(0, 0) };
         t1.Events.Add(new MidiNoteEvent(10, 0, 0, 60, 90, NoteOn: true));
-        var t2 = new MidiTrack { Name = "t2" };
+        var t2 = new MidiTrack { Name = "t2", Endpoint = new MidiEndpoint(0, 1) };
         t2.Events.Add(new MidiNoteEvent(5, 0, 1, 70, 90, NoteOn: true));
         var writer = new MidiFileWriter(Ppq);
         byte[] bytes = writer.Write(c, new[] { t1, t2 });
@@ -76,11 +76,25 @@ public sealed class MidiFileWriterTests
     }
 
     [Fact]
+    public void Write_RejectsDuplicateEndpoints()
+    {
+        var tracks = new[]
+        {
+            new MidiTrack { Name = "a", Endpoint = new MidiEndpoint(2, 4) },
+            new MidiTrack { Name = "b", Endpoint = new MidiEndpoint(2, 4) },
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new MidiFileWriter(Ppq).Write(EmptyConductor(), tracks));
+        Assert.Contains("endpoint", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Write_TempoPrecedesNoteOn_AtSameTick()
     {
         // A tempo at tick T and a note-on at T: the tempo must serialize first.
         var c = new List<MidiEventBase> { new MidiTempoEvent(100, 500_000) };
-        var track = new MidiTrack { Name = "t" };
+        var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         track.Events.Add(new MidiNoteEvent(100, 0, 0, 60, 90, NoteOn: true));
         var writer = new MidiFileWriter(Ppq);
         byte[] bytes = writer.Write(c, new[] { track });
@@ -103,7 +117,7 @@ public sealed class MidiFileWriterTests
     [Fact]
     public void Write_Twice_IsByteIdentical()
     {
-        var track = new MidiTrack { Name = "t" };
+        var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         track.Events.Add(new MidiNoteEvent(10, 0, 0, 60, 90, NoteOn: true));
         track.Events.Add(new MidiNoteEvent(20, 0, 0, 60, 0, NoteOn: false));
         var writer = new MidiFileWriter(Ppq);
@@ -118,14 +132,14 @@ public sealed class MidiFileWriterTests
         // Three notes sharing the same tick AND the same rank (all note-on). The
         // only distinguishing key is SourceOrder, so the serialized byte order
         // must follow SourceOrder regardless of the list's insertion order.
-        var tNormal = new MidiTrack { Name = "t" };
+        var tNormal = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         tNormal.Events.Add(NoteAt(100, 0, 60, sourceOrder: 0));
         tNormal.Events.Add(NoteAt(100, 0, 62, sourceOrder: 1));
         tNormal.Events.Add(NoteAt(100, 0, 64, sourceOrder: 2));
         var writer = new MidiFileWriter(Ppq);
         byte[] normal = writer.Write(EmptyConductor(), new[] { tNormal });
 
-        var tShuffled = new MidiTrack { Name = "t" };
+        var tShuffled = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         tShuffled.Events.Add(NoteAt(100, 0, 64, sourceOrder: 2));
         tShuffled.Events.Add(NoteAt(100, 0, 60, sourceOrder: 0));
         tShuffled.Events.Add(NoteAt(100, 0, 62, sourceOrder: 1));
@@ -137,7 +151,7 @@ public sealed class MidiFileWriterTests
     [Fact]
     public void Write_SameTickRetrigger_NoteOffBeforeNoteOn()
     {
-        var track = new MidiTrack { Name = "retrig" };
+        var track = new MidiTrack { Name = "retrig", Endpoint = new MidiEndpoint(0, 0) };
         track.Events.Add(new MidiNoteEvent(960, 1, 0, 64, 90, NoteOn: false));
         track.Events.Add(new MidiNoteEvent(960, 1, 0, 64, 90, NoteOn: true));
         var writer = new MidiFileWriter(Ppq);
@@ -156,7 +170,7 @@ public sealed class MidiFileWriterTests
     [Fact]
     public void Write_RejectsNegativeTick()
     {
-        var track = new MidiTrack { Name = "t" };
+        var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         track.Events.Add(new MidiNoteEvent(-1, 0, 0, 60, 90, NoteOn: true));
         var writer = new MidiFileWriter(Ppq);
         Assert.Throws<InvalidOperationException>(() => writer.Write(EmptyConductor(), new[] { track }));

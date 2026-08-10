@@ -112,7 +112,10 @@ internal sealed class TimelineBuilder
             instrumentId ?? "",
             mode,
             isRetrigger,
-            pitch ?? Array.Empty<PitchChange>()));
+            pitch ?? Array.Empty<PitchChange>())
+        {
+            Domain = new SourceDomainKey(voice.Device, voice.Kind, voice.Index),
+        });
         AddGenericPcmPlayback(
             voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger, sampleId);
     }
@@ -149,6 +152,13 @@ internal sealed class TimelineBuilder
     public void AddRhythm(RhythmEvent rhythm)
     {
         ArgumentNullException.ThrowIfNull(rhythm);
+        if (rhythm.Domain is null)
+        {
+            VoiceDescriptor voiceDescriptor = _voices.Values.FirstOrDefault(value =>
+                string.Equals(value.Id.ToString(), rhythm.ChannelId, StringComparison.Ordinal));
+            if (voiceDescriptor is not null)
+                rhythm = rhythm with { Domain = new SourceDomainKey(voiceDescriptor.Id.Device, voiceDescriptor.Id.Kind, voiceDescriptor.Id.Index) };
+        }
         _rhythm.Add(rhythm);
         VoiceDescriptor voice = _voices.Values.FirstOrDefault(value =>
             string.Equals(value.Id.ToString(), rhythm.ChannelId, StringComparison.Ordinal));

@@ -33,6 +33,38 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
+    public void Export_SourceSamplesKeepWallClockTimeAcrossMusicalBpms()
+    {
+        long start = Sr / 2;
+        long end = start + Sr / 2;
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = Sr * 2,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("v", start, end, 60) },
+        };
+
+        var exports = new[] { 56.0, 112.0, 173.0 }
+            .Select(bpm => Parser.Parse(Export(new TimelineState
+            {
+                Timeline = timeline,
+                FixedBpm = bpm,
+            })))
+            .ToArray();
+
+        Assert.Equal(3, exports.Select(parsed => parsed.Notes[0].On).Distinct().Count());
+        foreach (ParsedMidi parsed in exports)
+        {
+            TempoAtTick tempo = Assert.Single(parsed.ConductorTempo);
+            double onSeconds = parsed.Notes[0].On * tempo.MicrosecondsPerQuarter / (Ppq * 1_000_000.0);
+            double offSeconds = parsed.Notes[0].Off * tempo.MicrosecondsPerQuarter / (Ppq * 1_000_000.0);
+            Assert.Equal((double)start / Sr, onSeconds, 5);
+            Assert.Equal((double)end / Sr, offSeconds, 5);
+        }
+    }
+
+    [Fact]
     public void Export_BeatPhase_PreservedNotQuantized()
     {
         // Sample zero is one quarter before the first downbeat.
@@ -238,6 +270,51 @@ public sealed class MusicalMidiExporterTests
         Assert.True(parsed.PitchBendCount > 0, "a pitching note should emit pitch bends");
     }
 
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(128.0)]
+    public void Export_OutOfRangeInitialPitch_RejectsWithDiagnosticAndNoArtifact(double pitch)
+    {
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 100_000,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("invalid", 1_000, 10_000, 60) with { InitialMidiNote = pitch } },
+        };
+
+        byte[]? artifact = null;
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            artifact = Export(new TimelineState { Timeline = timeline }));
+
+        Assert.Contains("invalid initial MIDI pitch", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(artifact);
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(128.0)]
+    public void Export_OutOfRangeSourcePitchChange_RejectsWithoutWrapping(double pitch)
+    {
+        var note = NewNote("invalid", 1_000, 10_000, 60) with
+        {
+            Pitch = new[] { new PitchChange(5_000, 440, pitch) },
+        };
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 100_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+        };
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Export(
+            new TimelineState { Timeline = timeline }));
+
+        Assert.Contains("invalid pitch", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("wrapped", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Export_FractionalInitialNote_BendsToTruePitchAtNoteOn()
     {
@@ -275,7 +352,7 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
-    public void Export_LongPitchContour_SplitsIntoMultipleNotesRatherThanClipping()
+    public void Export_LongPitchContour_UsesOneNoteWithWideBendRange()
     {
         double spq = Sr * 60.0 / 120.0;
         long start = (long)Math.Round(spq);
@@ -308,15 +385,13 @@ public sealed class MusicalMidiExporterTests
         var state = new TimelineState { Timeline = timeline, FixedBpm = 120 };
         ParsedMidi parsed = Parser.Parse(Export(state));
 
-        // The long contour must be re-articulated into several short notes (one
-        // per segment fold) instead of a single clipped note.
-        Assert.True(parsed.Notes.Count >= 3,
-            $"expected the glissando to split into >=3 notes, got {parsed.Notes.Count}");
-        // Every emitted bend stays within the configured range.
+        // One source key-on is one MIDI note; the contour is represented by bends
+        // and a domain-wide range rather than local note splitting.
+        Assert.Single(parsed.Notes);
+        Assert.True(parsed.Notes[0].Off > parsed.Notes[0].On);
+        Assert.NotEmpty(parsed.Bends);
+        // Every emitted bend stays within the selected representable range.
         Assert.All(parsed.Bends, bend => Assert.InRange(bend.Bend, -8192, 8191));
-        // The final note of the run lands near the endpoint pitch (C# ~44).
-        long lastOn = parsed.Notes.Max(n => n.On);
-        Assert.True(lastOn > parsed.Notes[0].On, "later split notes start after the first");
     }
 
     [Fact]
@@ -948,15 +1023,16 @@ public sealed class MusicalMidiExporterTests
     [Fact]
     public void Export_BendRangeRpn_EmittedOncePerChannel()
     {
-        // §32: the RPN pitch-bend-range setup is emitted once per (track, channel),
-        // NOT before every note. Two bend-needing notes on one channel => a single RPN.
+        // RPN state is channel-global: two instrument tracks sharing one source
+        // domain/channel must use one fixed range, chosen from the whole domain.
         double spq = Sr * 60.0 / 120.0;
         var notes = new[]
         {
             new NoteEvent("v", (long)Math.Round(spq), (long)Math.Round(spq) + 20_000, 440, 60.3,
                 "inst", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
             new NoteEvent("v", (long)Math.Round(2 * spq), (long)Math.Round(2 * spq) + 20_000, 440, 60.3,
-                "inst", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>()),
+                "inst2", VisualizationNoteMode.Fm, false,
+                new[] { new PitchChange((long)Math.Round(2 * spq) + 5_000, 440 * Math.Pow(2, 10.0 / 12), 70.0) }),
         };
         var timeline = new VisualizationTimeline
         {
@@ -974,16 +1050,18 @@ public sealed class MusicalMidiExporterTests
         MusicalMidiExportResult result = exporter.Export(timeline);
 
         var rangeEvents = result.Tracks.SelectMany(t => t.Events).OfType<MidiBendRangeEvent>().ToList();
-        // Both notes share one channel → one RPN setup (§32, not re-sent per note).
+        // Both instrument tracks share one source domain/channel → one RPN setup,
+        // and it must be the 10-semitone domain maximum, not the first note's 2.
         Assert.Single(rangeEvents);
+        Assert.Equal(10, rangeEvents[0].Semitones);
     }
 
     [Fact]
-    public void Export_BendOffset_OutOfRange_ClampsNotWraps()
+    public void Export_BendOffset_UsesDomainRangeWithoutWrapping()
     {
-        // §33: a 20-semitone jump while the range is ±2 semitones is re-articulated to
-        // the nearest representable base note and every bend stays in [-8192, 8191] —
-        // never wrapped/overflowed.
+        // A 20-semitone jump selects a domain-wide range rather than re-articulating
+        // the source note. Every bend remains representable and the one MIDI note
+        // preserves the source key-on/key-off boundary.
         double spq = Sr * 60.0 / 120.0;
         long start = (long)Math.Round(spq);
         var changes = new[] { new PitchChange(start + 5000, 440 * Math.Pow(2, 20.0 / 12), 80.0) };
@@ -1000,8 +1078,8 @@ public sealed class MusicalMidiExporterTests
         ParsedMidi parsed = Parser.Parse(Export(state));
 
         Assert.All(parsed.Bends, b => Assert.InRange(b.Bend, -8192, 8191));
-        // Nearest representable base note re-centred near the target pitch.
-        Assert.Contains(parsed.NoteOns, n => n.Note >= 76);
+        Assert.Single(parsed.Notes);
+        Assert.Equal(60, parsed.NoteOns.Single().Note);
     }
 
     /* ---------- helpers ---------- */
@@ -1473,4 +1551,3 @@ internal sealed class ParsedPitchNote : IMidiPitchNote
     int IMidiPitchNote.Note => Note;
     int IMidiPitchNote.Channel => Channel;
 }
-

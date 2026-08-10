@@ -6,9 +6,13 @@ using Melanchall.DryWetMidi.Core;
 namespace Fmp.Core.Midi;
 
 /// <summary>The content of one MIDI track: its name and ordered musical events.</summary>
+internal readonly record struct MidiEndpoint(byte Port, int Channel);
+
 internal sealed class MidiTrack
 {
     public required string Name { get; init; }
+
+    public required MidiEndpoint Endpoint { get; init; }
 
     public List<MidiEventBase> Events { get; } = new();
 }
@@ -52,10 +56,18 @@ internal sealed class MidiFileWriter
         AppendEvents(conductorChunk, conductor);
         file.Chunks.Add(conductorChunk);
 
+        var endpoints = new HashSet<MidiEndpoint>();
         foreach (MidiTrack track in tracks)
         {
+            if (!endpoints.Add(track.Endpoint))
+                throw new InvalidOperationException(
+                    $"MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) is assigned to more than one track.");
+            if (track.Endpoint.Channel is < 0 or > 15)
+                throw new InvalidOperationException(
+                    $"MIDI channel {track.Endpoint.Channel} is outside [0, 15].");
             var chunk = new TrackChunk();
             chunk.Events.Add(new SequenceTrackNameEvent(track.Name));
+            chunk.Events.Add(new PortPrefixEvent(track.Endpoint.Port));
             AppendEvents(chunk, track.Events);
             file.Chunks.Add(chunk);
         }

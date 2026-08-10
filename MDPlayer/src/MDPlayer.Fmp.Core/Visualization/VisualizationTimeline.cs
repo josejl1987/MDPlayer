@@ -21,6 +21,12 @@ internal sealed record PitchChange(
     double FrequencyHz,
     double MidiNote);
 
+/// <summary>Authoritative source ownership. It is never inferred from display names.</summary>
+internal readonly record struct SourceDomainKey(DeviceId Device, VoiceKind VoiceFamily, int Index)
+{
+    public override string ToString() => $"{Device}.{VoiceFamily}:{Index}";
+}
+
 internal sealed record NoteEvent(
     [property: JsonPropertyName("voiceId")] string ChannelId,
     long StartSample,
@@ -30,7 +36,10 @@ internal sealed record NoteEvent(
     string InstrumentId,
     VisualizationNoteMode Mode,
     bool IsRetrigger,
-    IReadOnlyList<PitchChange> Pitch);
+    IReadOnlyList<PitchChange> Pitch)
+{
+    public SourceDomainKey? Domain { get; init; }
+}
 
 internal sealed record RhythmEvent(
     string Voice,
@@ -39,7 +48,10 @@ internal sealed record RhythmEvent(
     float Strength,
     float Pan,
     [property: JsonPropertyName("parentVoiceId")] string ParentVoiceId = null,
-    string InstrumentId = "");
+    string InstrumentId = "")
+{
+    public SourceDomainKey? Domain { get; init; }
+}
 
 internal sealed record Ppz8Event(
     int Channel,

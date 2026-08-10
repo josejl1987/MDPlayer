@@ -84,6 +84,15 @@ internal readonly record struct InstrumentIdentity(
 /// tuple differs; all <c>(Chip, SourceChannel, *)</c> tracks share one MIDI channel.
 /// </summary>
 internal readonly record struct MidiTrackKey(
-    ChipType Chip,
+    DeviceId Device,
+    VoiceKind VoiceFamily,
     int SourceChannel,
-    InstrumentIdentity Instrument);
+    InstrumentIdentity Instrument)
+{
+    // Compatibility constructor for existing plan/unit fixtures. New exporters
+    // must use the full device + voice-family identity above.
+    public MidiTrackKey(ChipType chip, int sourceChannel, InstrumentIdentity instrument)
+        : this(new DeviceId(chip, 0), VoiceKind.Pcm, sourceChannel, instrument) { }
+
+    public ChipType Chip => Device.Type;
+}

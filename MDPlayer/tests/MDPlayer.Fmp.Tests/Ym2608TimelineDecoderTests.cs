@@ -37,6 +37,28 @@ public sealed class Ym2608TimelineDecoderTests
     }
 
     [Fact]
+    public void FmKeyOnWithoutPitch_DoesNotCreateInvalidNote_AndLaterValidKeyOnExports()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        decoder.ApplyYm2608(0, 0, 0x28, 0xF0, 100);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x00, 200);
+
+        WriteFmPitch(decoder, 0, 300, 0x135, 4);
+        decoder.ApplyYm2608(0, 0, 0x28, 0xF0, 400);
+        decoder.ApplyYm2608(0, 0, 0x28, 0x00, 600);
+
+        var notes = decoder.Complete(800, 44_100, "test").Notes
+            .Where(note => note.ChannelId == "ym2608.0.fm.1")
+            .ToArray();
+
+        var note = Assert.Single(notes);
+        Assert.Equal(400, note.StartSample);
+        Assert.Equal(600, note.EndSample);
+        Assert.True(double.IsFinite(note.InitialMidiNote));
+        Assert.InRange(note.InitialMidiNote, 59.9, 60.1);
+    }
+
+    [Fact]
     public void FmPitchWrite_AddsPitchPointWithoutSplittingNote()
     {
         var decoder = new Ym2608TimelineDecoder();
@@ -182,6 +204,10 @@ public sealed class Ym2608TimelineDecoderTests
         Assert.Equal(2, events.Count);
         Assert.Contains(events, evt => evt.Voice == "bd");
         Assert.Contains(events, evt => evt.Voice == "sd");
+        RhythmEvent bd = Assert.Single(events.Where(evt => evt.Voice == "bd"));
+        Assert.Equal("ym2608.0.rhythm.bd", bd.ChannelId);
+        Assert.Equal("rhythm:bd", bd.InstrumentId);
+        Assert.Equal(new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 0), bd.Domain);
     }
 
     [Fact]
@@ -236,7 +262,7 @@ public sealed class Ym2608TimelineDecoderTests
     public void Fm3SpecialMode_UsesOperatorChannelsNotMainFm3()
     {
         var decoder = new Ym2608TimelineDecoder();
-        WriteFmPitch(decoder, 2, 0, 0x135, 4);
+        WriteFm3OperatorPitch(decoder, 2, 0, 0x135, 4);
         decoder.ApplyYm2608(0, 0, 0x27, 0x40, 50);
         decoder.ApplyYm2608(0, 0, 0x28, 0x42, 100);
         decoder.ApplyYm2608(0, 0, 0x28, 0x02, 300);
@@ -263,7 +289,7 @@ public sealed class Ym2608TimelineDecoderTests
     public void CombinedCsmAndThreeSlotBits_EnableThreeSlotMode()
     {
         var decoder = new Ym2608TimelineDecoder();
-        WriteFmPitch(decoder, 2, 0, 0x135, 4);
+        WriteFm3OperatorPitch(decoder, 2, 0, 0x135, 4);
         decoder.ApplyYm2608(0, 0, 0x27, 0xC0, 50);
         decoder.ApplyYm2608(0, 0, 0x28, 0x42, 100);
         decoder.ApplyYm2608(0, 0, 0x28, 0x02, 300);
@@ -303,6 +329,32 @@ public sealed class Ym2608TimelineDecoderTests
         int localChannel = channel % 3;
         decoder.ApplyYm2608(0, port, 0xA0 + localChannel, fNumber & 0xFF, sample);
         decoder.ApplyYm2608(0, port, 0xA4 + localChannel,
+            ((block & 0x07) << 3) | ((fNumber >> 8) & 0x07), sample);
+    }
+
+    private static void WriteFm3OperatorPitch(
+        Ym2608TimelineDecoder decoder,
+        int op,
+        long sample,
+        int fNumber,
+        int block)
+    {
+        int lowAddress = op switch
+        {
+            0 => 0xA2,
+            1 => 0xA8,
+            2 => 0xA9,
+            _ => 0xAA,
+        };
+        int highAddress = op switch
+        {
+            0 => 0xA6,
+            1 => 0xAC,
+            2 => 0xAD,
+            _ => 0xAE,
+        };
+        decoder.ApplyYm2608(0, 0, lowAddress, fNumber & 0xFF, sample);
+        decoder.ApplyYm2608(0, 0, highAddress,
             ((block & 0x07) << 3) | ((fNumber >> 8) & 0x07), sample);
     }
 }
