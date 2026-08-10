@@ -849,11 +849,11 @@ internal sealed class MusicalMidiExporter
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
                 TimeTick(_map.FirstSample) + originShift,
                 0x01,
-                TimingConfidenceText())));
+                TimingConfidenceText(Diagnostics))));
         }
     }
 
-    private string TimingConfidenceText()
+    private string TimingConfidenceText(TimingDiagnostics? diagnostics)
     {
         var parts = new List<string>
         {
@@ -863,8 +863,27 @@ internal sealed class MusicalMidiExporter
             _map.FirstDownbeatQuarter is not null ? "downbeat=known" : "downbeat=unknown",
             $"sample0-quarter={_map.SampleToQuarterPosition(_map.StartSample):0.###}",
         };
+        // FR-9: expose the alias/confidence diagnostics when symbolic inference was
+        // actually used. Source of truth is TimingDiagnostics — no recompute here
+        // (DRY). NullDiagnostics / driver path keeps only the structural fields.
+        // Missing values serialize as "none"; no fabricated 1.0 (request 21).
+        if (diagnostics is not null && diagnostics.TempoInferred)
+        {
+            parts.Add($"selected-bpm={FormatDiagnosticDouble(diagnostics.SelectedBpm)}");
+            parts.Add($"selected-score={FormatDiagnosticDouble(diagnostics.SelectedScore)}");
+            parts.Add($"alternative-bpm={FormatDiagnosticDouble(diagnostics.AlternativeBpm)}");
+            parts.Add($"alternative-score={FormatDiagnosticDouble(diagnostics.AlternativeScore)}");
+            parts.Add($"alias-margin={FormatDiagnosticDouble(diagnostics.AliasMargin)}");
+            parts.Add($"tempo-confidence={FormatDiagnosticDouble(diagnostics.TempoConfidence)}");
+            parts.Add($"tempo-ambiguous={diagnostics.TempoAmbiguous.ToString().ToLowerInvariant()}");
+            parts.Add($"phase-sample={diagnostics.PhaseSample?.ToString() ?? "none"}");
+        }
         return "timing " + string.Join(";", parts);
     }
+
+    /// <summary>Diagnostic doubles serialize as "0.###"; missing values as "none".</summary>
+    private static string FormatDiagnosticDouble(double? value) =>
+        value is double d ? d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "none";
 
     private TrackAllocator BuildTracks(VisualizationTimeline timeline)
     {

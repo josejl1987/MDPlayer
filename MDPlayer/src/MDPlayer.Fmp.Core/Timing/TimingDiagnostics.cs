@@ -126,6 +126,17 @@ internal sealed class TimingDiagnostics
     /// <summary>Absolute quarter position of sample zero as fitted.</summary>
     public double? SampleZeroQuarter { get; set; }
 
+    /// <summary>
+    /// Score margin between the selected tempo and its nearest half/double
+    /// alternative: SelectedScore - AlternativeScore when both exist, else null.
+    /// Pure derivation from existing fields (FR-9 / request 21: never fabricate a
+    /// margin — no invented 1.0).
+    /// </summary>
+    public double? AliasMargin =>
+        SelectedScore is double selected && AlternativeScore is double alternative
+            ? selected - alternative
+            : null;
+
     public List<string> Warnings { get; }
 
     /// <summary>

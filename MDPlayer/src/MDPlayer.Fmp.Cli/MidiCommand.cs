@@ -145,9 +145,11 @@ internal static class MidiCommand
                 alternativeBpm = diagnostics.AlternativeBpm,
                 selectedScore = diagnostics.SelectedScore,
                 alternativeScore = diagnostics.AlternativeScore,
+                aliasMargin = diagnostics.AliasMargin,
                 tempoConfidence = diagnostics.TempoConfidence,
                 tempoAmbiguous = diagnostics.TempoAmbiguous,
                 phaseSample = diagnostics.PhaseSample,
+                sample0Quarter = diagnostics.SampleZeroQuarter,
             } : null,
             pitch = new
             {
