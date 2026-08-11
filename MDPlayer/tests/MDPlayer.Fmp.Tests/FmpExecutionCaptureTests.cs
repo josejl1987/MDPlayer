@@ -116,9 +116,9 @@ public class FmpExecutionCaptureTests
             Assert.True(capture.Events[i].Sequence > capture.Events[i - 1].Sequence);
         // Equal-clock equal-call order preserved: the 3 events at clock 100
         // keep emit order (opna, ppz8, opna).
-        Assert.IsType<CapturedOpnaWrite>(capture.Events[0]);
-        Assert.IsType<CapturedPpz8Command>(capture.Events[1]);
-        Assert.IsType<CapturedOpnaWrite>(capture.Events[2]);
+        Assert.Equal(CapturedEventKind.OpnaWrite, capture.Events[0].Kind);
+        Assert.Equal(CapturedEventKind.Ppz8Command, capture.Events[1].Kind);
+        Assert.Equal(CapturedEventKind.OpnaWrite, capture.Events[2].Kind);
     }
 
     [Fact]
@@ -182,18 +182,19 @@ public class FmpExecutionCaptureTests
         // ~500ms startup wait, which must be represented on the absolute
         // master-clock timeline (~7,987,200 * 0.5 = 3,993,600).
         var firstActive = capture.Events
-            .OfType<CapturedOpnaWrite>()
-            .FirstOrDefault(w => w.OpnaMasterClock > 0);
-        if (firstActive == null)
+            .Where(e => e.Kind == CapturedEventKind.OpnaWrite && e.OpnaMasterClock > 0)
+            .Select(e => e.OpnaMasterClock)
+            .FirstOrDefault();
+        if (firstActive == 0)
             return; // degenerate fixture produced no post-boot OPNA writes
 
         Assert.True(
-            firstActive.OpnaMasterClock >= 3_000_000,
-            $"first active event clock {firstActive.OpnaMasterClock} is far below the ~500ms startup delay (~3,993,600); "
+            firstActive >= 3_000_000,
+            $"first active event clock {firstActive} is far below the ~500ms startup delay (~3,993,600); "
             + "the capture is collapsing musical time (old CPU-cycle timeline)");
         Assert.True(
-            firstActive.OpnaMasterClock <= 7_000_000,
-            $"first active event clock {firstActive.OpnaMasterClock} is implausibly high for a ~500ms startup delay");
+            firstActive <= 7_000_000,
+            $"first active event clock {firstActive} is implausibly high for a ~500ms startup delay");
     }
 
     [Fact]

@@ -15,18 +15,18 @@ public class NativeOpnaTraceRendererTests
     private const ulong MasterHz = 7_987_200;
     private const int SampleRate = 44100;
 
-    private static IReadOnlyList<FmpCapturedEvent> Capture(params FmpCapturedEvent[] events)
+    private static IReadOnlyList<CapturedEvent> Capture(params CapturedEvent[] events)
     {
         var builder = new FmpExecutionCaptureBuilder(SampleRate);
         foreach (var e in events)
         {
-            switch (e)
+            switch (e.Kind)
             {
-                case CapturedOpnaWrite w:
-                    builder.CaptureOpnaWrite(w.OpnaMasterClock, w.Port, w.Address, w.Data);
+                case CapturedEventKind.OpnaWrite:
+                    builder.CaptureOpnaWrite(e.OpnaMasterClock, e.Payload.Opna.Port, e.Payload.Opna.Address, e.Payload.Opna.Data);
                     break;
-                case CapturedPpz8Command c:
-                    builder.CapturePpz8Command(c.OpnaMasterClock, new Ppz8Command(c.Port, c.Address, c.Data, c.BankId));
+                case CapturedEventKind.Ppz8Command:
+                    builder.CapturePpz8Command(e.OpnaMasterClock, new Ppz8Command(e.Payload.Ppz8.Port, e.Payload.Ppz8.Address, e.Payload.Ppz8.Data, e.Payload.Ppz8.BankId));
                     break;
             }
         }
@@ -38,10 +38,10 @@ public class NativeOpnaTraceRendererTests
     public void Replay_WritesEveryEventAtItsClock_InOrder_ZeroStatusReads()
     {
         var events = Capture(
-            new CapturedOpnaWrite(100UL, 1, 0, 0x28, 0x01),
-            new CapturedOpnaWrite(100UL, 2, 1, 0x28, 0x02),
-            new CapturedOpnaWrite(101UL, 3, 0, 0x28, 0x03),
-            new CapturedOpnaWrite(MasterHz / 2, 4, 0, 0xB4, 0xC0));
+            CapturedEvent.OpnaWrite(100UL, 1, 0, 0x28, 0x01),
+            CapturedEvent.OpnaWrite(100UL, 2, 1, 0x28, 0x02),
+            CapturedEvent.OpnaWrite(101UL, 3, 0, 0x28, 0x03),
+            CapturedEvent.OpnaWrite(MasterHz / 2, 4, 0, 0xB4, 0xC0));
 
         using var device = new RecordingOpnaDevice();
         device.OutputLatencyFrames = 0;
@@ -68,9 +68,9 @@ public class NativeOpnaTraceRendererTests
     public void Replay_IgnoresPpz8Events_InSequence()
     {
         var events = Capture(
-            new CapturedOpnaWrite(50UL, 1, 0, 0x28, 0x01),
-            new CapturedPpz8Command(60UL, 2, 0, 0x08, 0x10),
-            new CapturedOpnaWrite(70UL, 3, 0, 0x28, 0x02));
+            CapturedEvent.OpnaWrite(50UL, 1, 0, 0x28, 0x01),
+            CapturedEvent.Ppz8Command(60UL, 2, 0, 0x08, 0x10),
+            CapturedEvent.OpnaWrite(70UL, 3, 0, 0x28, 0x02));
 
         using var device = new RecordingOpnaDevice();
         device.OutputLatencyFrames = 0;
@@ -85,10 +85,10 @@ public class NativeOpnaTraceRendererTests
     [Fact]
     public void Replay_RegressedMasterClock_Throws()
     {
-        var events = new List<FmpCapturedEvent>
+        var events = new List<CapturedEvent>
         {
-            new CapturedOpnaWrite(500UL, 1, 0, 0x28, 0x01),
-            new CapturedOpnaWrite(100UL, 2, 0, 0x28, 0x02), // regressed
+            CapturedEvent.OpnaWrite(500UL, 1, 0, 0x28, 0x01),
+            CapturedEvent.OpnaWrite(100UL, 2, 0, 0x28, 0x02), // regressed
         };
         using var device = new RecordingOpnaDevice();
         device.OutputLatencyFrames = 0;

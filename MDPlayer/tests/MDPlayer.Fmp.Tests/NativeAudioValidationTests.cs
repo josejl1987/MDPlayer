@@ -41,10 +41,10 @@ public class NativeAudioValidationTests
         var canon = new List<(ulong, ulong, byte, byte, byte, byte, int)>();
         foreach (var e in capture.Events)
         {
-            if (e is CapturedOpnaWrite w)
-                canon.Add((w.OpnaMasterClock, w.Sequence, 0, w.Port, w.Address, w.Data, -1));
-            else if (e is CapturedPpz8Command p)
-                canon.Add((p.OpnaMasterClock, p.Sequence, 1, (byte)p.Port, (byte)p.Address, (byte)p.Data, p.BankId));
+            if (e.Kind == CapturedEventKind.OpnaWrite)
+                canon.Add((e.OpnaMasterClock, e.Sequence, 0, e.Payload.Opna.Port, e.Payload.Opna.Address, e.Payload.Opna.Data, -1));
+            else if (e.Kind == CapturedEventKind.Ppz8Command)
+                canon.Add((e.OpnaMasterClock, e.Sequence, 1, (byte)e.Payload.Ppz8.Port, (byte)e.Payload.Ppz8.Address, (byte)e.Payload.Ppz8.Data, e.Payload.Ppz8.BankId));
         }
         return (hash, canon);
     }

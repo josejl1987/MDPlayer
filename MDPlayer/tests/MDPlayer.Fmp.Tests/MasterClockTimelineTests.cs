@@ -101,15 +101,15 @@ public class MasterClockTimelineTests
         foreach (var e in c.Events)
         {
             sb.Append(e.OpnaMasterClock).Append(':').Append(e.Sequence).Append(':');
-            switch (e)
+            switch (e.Kind)
             {
-                case CapturedOpnaWrite w:
-                    sb.Append('O').Append(w.Port).Append('/').Append(w.Address)
-                      .Append('/').Append(w.Data);
+                case CapturedEventKind.OpnaWrite:
+                    sb.Append('O').Append(e.Payload.Opna.Port).Append('/').Append(e.Payload.Opna.Address)
+                      .Append('/').Append(e.Payload.Opna.Data);
                     break;
-                case CapturedPpz8Command p:
-                    sb.Append("P").Append(p.Port).Append('/').Append(p.Address)
-                      .Append('/').Append(p.Data).Append('/').Append(p.BankId);
+                case CapturedEventKind.Ppz8Command:
+                    sb.Append("P").Append(e.Payload.Ppz8.Port).Append('/').Append(e.Payload.Ppz8.Address)
+                      .Append('/').Append(e.Payload.Ppz8.Data).Append('/').Append(e.Payload.Ppz8.BankId);
                     break;
             }
             sb.Append(';');
@@ -206,7 +206,7 @@ public class MasterClockTimelineTests
         {
             Assert.True(e.OpnaMasterClock >= prev,
                 $"event at sequence {e.Sequence} regressed: {e.OpnaMasterClock} < {prev}");
-            if (e is CapturedOpnaWrite) writers++;
+            if (e.Kind == CapturedEventKind.OpnaWrite) writers++;
             prev = e.OpnaMasterClock;
         }
         Assert.True(writers > 0, "no OPNA writes captured across driver invocations");
@@ -247,7 +247,7 @@ public class MasterClockTimelineTests
         const int sr = 44100;
         // A realistic multi-second capture: clusters of writes at 0.5s, 1s,
         // 5s, 10s and the final frame (60s), each a key write + a note write.
-        var events = new List<FmpCapturedEvent>();
+        var events = new List<CapturedEvent>();
         ulong seq = 0;
         foreach ((double seconds, byte data) in new[]
                  {
@@ -259,8 +259,8 @@ public class MasterClockTimelineTests
                  })
         {
             ulong clock = (ulong)((decimal)seconds * MasterHz);
-            events.Add(new CapturedOpnaWrite(clock, ++seq, 0, 0x28, (byte)(0x01)));
-            events.Add(new CapturedOpnaWrite(clock + 1, ++seq, 0, 0xA4, data));
+            events.Add(CapturedEvent.OpnaWrite(clock, ++seq, 0, 0x28, (byte)(0x01)));
+            events.Add(CapturedEvent.OpnaWrite(clock + 1, ++seq, 0, 0xA4, data));
         }
 
         using var device = new RecordingOpnaDevice();
@@ -300,11 +300,11 @@ public class MasterClockTimelineTests
         ulong keyOn = (ulong)(1.5 * MasterHz);          // 1.5s
         ulong keyOff = keyOn + (ulong)(0.7 * MasterHz); // +0.7s later
 
-        var events = new List<FmpCapturedEvent>
+        var events = new List<CapturedEvent>
         {
-            new CapturedOpnaWrite(keyOn, 1, 0, 0x28, 0x10),   // key-on channel 0
-            new CapturedOpnaWrite(keyOn + 1, 2, 1, 0x28, 0x12),
-            new CapturedOpnaWrite(keyOff, 3, 0, 0x28, 0x00),  // key-off
+            CapturedEvent.OpnaWrite(keyOn, 1, 0, 0x28, 0x10),   // key-on channel 0
+            CapturedEvent.OpnaWrite(keyOn + 1, 2, 1, 0x28, 0x12),
+            CapturedEvent.OpnaWrite(keyOff, 3, 0, 0x28, 0x00),  // key-off
         };
 
         using var device = new RecordingOpnaDevice();

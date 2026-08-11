@@ -41,7 +41,7 @@ public class FmpExecutionCaptureCacheTests
         => new FmpExecutionCapture
         {
             OutputSampleRate = sampleRate,
-            Events = System.Array.Empty<FmpCapturedEvent>(),
+            Events = System.Array.Empty<CapturedEvent>(),
             FinalOpnaMasterClock = 0,
             FinalOutputFrame = 1000 * sampleRate / 1000,
             FadeStartOutputFrame = 0,

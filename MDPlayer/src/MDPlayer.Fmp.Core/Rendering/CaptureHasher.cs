@@ -85,27 +85,27 @@ internal static class CaptureHasher
         // Fully ordered event stream: type (0=OPNA, 1=PPZ8), master clock, seq, payload.
         foreach (var e in capture.Events)
         {
-            switch (e)
+            switch (e.Kind)
             {
-                case CapturedOpnaWrite opna:
+                case CapturedEventKind.OpnaWrite:
                     WriteU8(buffer, ref off, 0);
-                    WriteU64(buffer, ref off, opna.OpnaMasterClock);
-                    WriteU64(buffer, ref off, opna.Sequence);
-                    WriteU8(buffer, ref off, opna.Port);
-                    WriteU8(buffer, ref off, opna.Address);
-                    WriteU8(buffer, ref off, opna.Data);
+                    WriteU64(buffer, ref off, e.OpnaMasterClock);
+                    WriteU64(buffer, ref off, e.Sequence);
+                    WriteU8(buffer, ref off, e.Payload.Opna.Port);
+                    WriteU8(buffer, ref off, e.Payload.Opna.Address);
+                    WriteU8(buffer, ref off, e.Payload.Opna.Data);
                     break;
-                case CapturedPpz8Command ppz8:
+                case CapturedEventKind.Ppz8Command:
                     WriteU8(buffer, ref off, 1);
-                    WriteU64(buffer, ref off, ppz8.OpnaMasterClock);
-                    WriteU64(buffer, ref off, ppz8.Sequence);
-                    WriteU32(buffer, ref off, (uint)ppz8.Port);
-                    WriteU32(buffer, ref off, (uint)ppz8.Address);
-                    WriteU32(buffer, ref off, (uint)ppz8.Data);
-                    WriteU32(buffer, ref off, (uint)ppz8.BankId);
+                    WriteU64(buffer, ref off, e.OpnaMasterClock);
+                    WriteU64(buffer, ref off, e.Sequence);
+                    WriteU32(buffer, ref off, (uint)e.Payload.Ppz8.Port);
+                    WriteU32(buffer, ref off, (uint)e.Payload.Ppz8.Address);
+                    WriteU32(buffer, ref off, (uint)e.Payload.Ppz8.Data);
+                    WriteU32(buffer, ref off, (uint)e.Payload.Ppz8.BankId);
                     break;
                 default:
-                    throw new InvalidOperationException($"unsupported captured event type: {e.GetType().Name}");
+                    throw new InvalidOperationException($"unsupported captured event kind: {e.Kind}");
             }
         }
 

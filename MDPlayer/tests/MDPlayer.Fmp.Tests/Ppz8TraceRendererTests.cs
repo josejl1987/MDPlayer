@@ -20,12 +20,12 @@ public class Ppz8TraceRendererTests
         foreach (var sr in new[] { 44100, 48000, 96000 })
         {
             var banks = new List<Ppz8BankSnapshot>();
-            var events = new List<FmpCapturedEvent>
+            var events = new List<CapturedEvent>
             {
-                new CapturedPpz8Command(100UL, 1, 0, 0x08, 0x01),
-                new CapturedPpz8Command(100UL, 2, 0, 0x08, 0x02), // same clock
-                new CapturedPpz8Command(14_000UL, 3, 0, 0x09, 0x40), // volume
-                new CapturedPpz8Command(18_000UL, 4, 0, 0x08, 0x00), // stop
+                CapturedEvent.Ppz8Command(100UL, 1, 0, 0x08, 0x01),
+                CapturedEvent.Ppz8Command(100UL, 2, 0, 0x08, 0x02), // same clock
+                CapturedEvent.Ppz8Command(14_000UL, 3, 0, 0x09, 0x40), // volume
+                CapturedEvent.Ppz8Command(18_000UL, 4, 0, 0x08, 0x00), // stop
             };
 
             using var a = new Ppz8TraceRenderer(events, banks, sr, latencyFrames: 0);
@@ -44,12 +44,12 @@ public class Ppz8TraceRendererTests
             var banks = new List<Ppz8BankSnapshot>();
             // Absolute master clocks that map to the same output frame and to
             // adjacent frames just after each frame clock boundary.
-            var events = new List<FmpCapturedEvent>
+            var events = new List<CapturedEvent>
             {
-                new CapturedPpz8Command(0UL, 1, 0, 0x08, 0x00),
-                new CapturedPpz8Command(1UL, 2, 0, 0x08, 0x01),
-                new CapturedPpz8Command(MasterHz / (ulong)sr - 1, 3, 0, 0x08, 0x02),
-                new CapturedPpz8Command(MasterHz / (ulong)sr, 4, 0, 0x08, 0x03),
+                CapturedEvent.Ppz8Command(0UL, 1, 0, 0x08, 0x00),
+                CapturedEvent.Ppz8Command(1UL, 2, 0, 0x08, 0x01),
+                CapturedEvent.Ppz8Command(MasterHz / (ulong)sr - 1, 3, 0, 0x08, 0x02),
+                CapturedEvent.Ppz8Command(MasterHz / (ulong)sr, 4, 0, 0x08, 0x03),
             };
             using var ppz8 = new Ppz8TraceRenderer(events, banks, sr, 0);
             var buf = new short[16 * 2];
@@ -64,9 +64,9 @@ public class Ppz8TraceRendererTests
         // no file-system path, so replay can only use the captured bytes.
         var bank = new Ppz8BankSnapshot(0, "bank.bin", new byte[] { 0x77, 0x88, 0x99 },
             new[] { 3 }, "FIXED-SHA");
-        var captured = new List<FmpCapturedEvent>
+        var captured = new List<CapturedEvent>
         {
-            new CapturedPpz8Command(100UL, 1, 0, 0, 0, BankId: 0), // load
+            CapturedEvent.Ppz8Command(100UL, 1, 0, 0, 0, BankId: 0), // load
         };
         using var ppz8 = new Ppz8TraceRenderer(captured, new List<Ppz8BankSnapshot> { bank }, 48000, 0);
         // Frame 0 is the load frame (floor(100*48000/7987200)=0); producing
@@ -85,9 +85,9 @@ public class Ppz8TraceRendererTests
         // seam this test exercises.)
         var bank = new Ppz8BankSnapshot(0, "bank.bin", new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 },
             new[] { 9 }, "SHA-9");
-        var captured = new List<FmpCapturedEvent>
+        var captured = new List<CapturedEvent>
         {
-            new CapturedPpz8Command(100UL, 1, 0, 0, 0, BankId: 0), // load
+            CapturedEvent.Ppz8Command(100UL, 1, 0, 0, 0, BankId: 0), // load
         };
         foreach (var sr in new[] { 44100, 48000, 96000 })
         {

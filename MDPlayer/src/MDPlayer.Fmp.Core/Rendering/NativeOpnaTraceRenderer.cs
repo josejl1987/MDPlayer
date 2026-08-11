@@ -17,14 +17,14 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
 
     private readonly IClockedOpnaDevice _device;
     private readonly OpnaMasterClockFrameMapper _frameMapper;
-    private readonly IReadOnlyList<FmpCapturedEvent> _events;
+    private readonly IReadOnlyList<CapturedEvent> _events;
 
     private int _cursor;
     private ulong _lastClock;
 
     public NativeOpnaTraceRenderer(
         IClockedOpnaDevice device,
-        IReadOnlyList<FmpCapturedEvent> events,
+        IReadOnlyList<CapturedEvent> events,
         int sampleRate)
     {
         _device = device ?? throw new ArgumentNullException(nameof(device));
@@ -60,15 +60,15 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
         for (; _cursor < _events.Count; _cursor++)
         {
             var e = _events[_cursor];
-            if (e is not CapturedOpnaWrite write)
+            if (e.Kind != CapturedEventKind.OpnaWrite)
                 continue; // PPZ8 events are not consumed by the OPNA cursor
-            if (write.OpnaMasterClock > ceiling)
+            if (e.OpnaMasterClock > ceiling)
                 break;
-            if (write.OpnaMasterClock < _lastClock)
-                throw new InvalidOperationException($"OPNA capture regressed at sequence {write.Sequence}");
-            EnsureCadenceSupported(write, write.OpnaMasterClock);
-            _device.WriteRegister(write.OpnaMasterClock, write.Port, write.Address, write.Data);
-            _lastClock = write.OpnaMasterClock;
+            if (e.OpnaMasterClock < _lastClock)
+                throw new InvalidOperationException($"OPNA capture regressed at sequence {e.Sequence}");
+            EnsureCadenceSupported(e, e.OpnaMasterClock);
+            _device.WriteRegister(e.OpnaMasterClock, e.Payload.Opna.Port, e.Payload.Opna.Address, e.Payload.Opna.Data);
+            _lastClock = e.OpnaMasterClock;
         }
         _device.AdvanceTo(ceiling);
     }
@@ -79,17 +79,17 @@ internal sealed class NativeOpnaTraceRenderer : IDisposable
     /// and 0x2F request other cadences and must fail — never fall back, never
     /// continue with incorrect audio.
     /// </summary>
-    private void EnsureCadenceSupported(CapturedOpnaWrite write, ulong clock)
+    private void EnsureCadenceSupported(CapturedEvent e, ulong clock)
     {
-        if ((write.Port == 0 && write.Address == 0x2E)
-            || (write.Port == 0 && write.Address == 0x2F)
-            || (write.Port == 1 && write.Address == 0x2E)
-            || (write.Port == 1 && write.Address == 0x2F))
+        if ((e.Payload.Opna.Port == 0 && e.Payload.Opna.Address == 0x2E)
+            || (e.Payload.Opna.Port == 0 && e.Payload.Opna.Address == 0x2F)
+            || (e.Payload.Opna.Port == 1 && e.Payload.Opna.Address == 0x2E)
+            || (e.Payload.Opna.Port == 1 && e.Payload.Opna.Address == 0x2F))
         {
             throw new NotSupportedException(
                 $"Captured YM2608 write requests an unsupported cadence: " +
-                $"opnaClock={clock} port={write.Port} " +
-                $"address=0x{write.Address:X2} data=0x{write.Data:X2}. " +
+                $"opnaClock={clock} port={e.Payload.Opna.Port} " +
+                $"address=0x{e.Payload.Opna.Address:X2} data=0x{e.Payload.Opna.Data:X2}. " +
                 $"Only the fixed 144-master-clock cadence (register 0x2D) is supported.");
         }
     }

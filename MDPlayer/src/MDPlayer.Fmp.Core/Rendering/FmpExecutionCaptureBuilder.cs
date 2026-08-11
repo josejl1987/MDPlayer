@@ -10,15 +10,16 @@ namespace Fmp.Core.Rendering;
 /// never touches the mutable source file.
 ///
 /// The implementation is deterministic: the same FMP execution yields the
-/// same event stream. It uses <see cref="List{T}"/> and record structs;
-/// per-event class allocations are avoided. The time coordinate is the absolute
-/// YM2608 master clock supplied by the capture tap — it is never derived here.
+/// same event stream. It uses <see cref="List{T}"/> of the unboxed
+/// <see cref="CapturedEvent"/> value type; per-event class allocations and
+/// boxing are avoided. The time coordinate is the absolute YM2608 master clock
+/// supplied by the capture tap — it is never derived here.
 /// </summary>
 internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDisposable
 {
     private readonly int _outputSampleRate;
 
-    private readonly List<FmpCapturedEvent> _events = new();
+    private readonly List<CapturedEvent> _events = new();
     private readonly List<Ppz8BankSnapshot> _banks = new();
     private readonly Dictionary<string, Ppz8BankSnapshot> _bankBySha = new();
 
@@ -37,13 +38,13 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
     public void CaptureOpnaWrite(ulong opnaMasterClock, byte port, byte address, byte data)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _events.Add(new CapturedOpnaWrite(opnaMasterClock, NextSequence(), port, address, data));
+        _events.Add(CapturedEvent.OpnaWrite(opnaMasterClock, NextSequence(), port, address, data));
     }
 
     public void CapturePpz8Command(ulong opnaMasterClock, in Ppz8Command command)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _events.Add(new CapturedPpz8Command(
+        _events.Add(CapturedEvent.Ppz8Command(
             opnaMasterClock, NextSequence(), command.Port, command.Address, command.Data, command.BankId));
     }
 

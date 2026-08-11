@@ -118,8 +118,8 @@ internal static class NativeAudioValidationRunner
         int opna = 0, ppz8 = 0;
         foreach (var e in capture.Events)
         {
-            if (e is CapturedOpnaWrite) opna++;
-            else if (e is CapturedPpz8Command) ppz8++;
+            if (e.Kind == CapturedEventKind.OpnaWrite) opna++;
+            else if (e.Kind == CapturedEventKind.Ppz8Command) ppz8++;
         }
         return (capture, CaptureHasher.Sha256(capture), opna, ppz8);
     }

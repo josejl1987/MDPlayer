@@ -15,7 +15,7 @@ internal sealed class Ppz8TraceRenderer : IDisposable
 {
     private readonly PPZ8 _ppz8;
     private readonly IReadOnlyDictionary<int, Ppz8BankSnapshot> _banksById;
-    private readonly IReadOnlyList<FmpCapturedEvent> _events;
+    private readonly IReadOnlyList<CapturedEvent> _events;
     private readonly OpnaMasterClockFrameMapper _frameMapper;
     private readonly Ppz8OutputDelayBuffer _delay;
     private readonly int _latencyFrames;
@@ -25,7 +25,7 @@ internal sealed class Ppz8TraceRenderer : IDisposable
     private readonly int[][] _ppz8Out;
 
     public Ppz8TraceRenderer(
-        IReadOnlyList<FmpCapturedEvent> events,
+        IReadOnlyList<CapturedEvent> events,
         IReadOnlyList<Ppz8BankSnapshot> banks,
         int sampleRate,
         int latencyFrames)
@@ -86,20 +86,21 @@ internal sealed class Ppz8TraceRenderer : IDisposable
         for (; _cursor < _events.Count; _cursor++)
         {
             var e = _events[_cursor];
-            if (e is not CapturedPpz8Command cmd)
+            if (e.Kind != CapturedEventKind.Ppz8Command)
                 continue; // OPNA events are not consumed by the PPZ8 cursor
-            long frame = _frameMapper.MapOutputFrame(cmd.OpnaMasterClock);
+            long frame = _frameMapper.MapOutputFrame(e.OpnaMasterClock);
             if (frame > generatedFrame)
                 break;
             if (frame < generatedFrame)
                 continue; // mapped earlier; already handled by a prior pass
-            ApplyCommand(cmd);
+            ApplyCommand(e);
             applied++;
         }
     }
 
-    private void ApplyCommand(CapturedPpz8Command cmd)
+    private void ApplyCommand(CapturedEvent e)
     {
+        var cmd = e.Payload.Ppz8;
         if (cmd.BankId >= 0)
         {
             if (!_banksById.TryGetValue(cmd.BankId, out var bank))
