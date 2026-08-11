@@ -46,6 +46,17 @@ internal static class SymbolicTempoInference
     private const double BpmStep = 1.0;
     private const int PhaseSteps = 96;          // ~ one 32nd of a quarter at most
 
+    /// <summary>Relative tie epsilon for phase-selection comparisons (TI-HOIST).
+    /// The hoisted factoring (<c>normalized[i] - phaseQuarters</c> vs the original
+    /// <c>(samples[i] - phaseSamples) / spq</c>) moves last-ulp rounding, and the
+    /// 96-step phase grid produces exact-arithmetic plateaus (e.g. phases a half
+    /// quarter apart can score identically); which plateau member wins must not
+    /// depend on float rounding. Treating scores within this relative band as a
+    /// tie keeps the FIRST-encountered phase — the pre-hoist behavior — instead of
+    /// letting rounding flip the decision. 1e-12 is ~1000x above accumulation
+    /// noise (~1e-15) and ~8 orders below any musically meaningful gap (~1e-4).</summary>
+    private const double ScoreTieEpsilon = 1e-12;
+
     /// <summary>Subdivision lattice, in quarter units, with their scores (Patch D.1).
     /// Higher weight = "more aligned at this subdivision". Used uniformly for onset
     /// and duration scoring. No new subdivisions beyond these.</summary>
@@ -236,20 +247,38 @@ internal static class SymbolicTempoInference
         var candidates = new List<TempoCandidate>();
 
         int steps = (int)Math.Ceiling((MaxBpm - MinBpm) / BpmStep);
+        // TI-HOIST: suffix sums over onset weights (weightSuffix[i] = sum of
+        // weights[j] for j >= i) are tempo- and phase-independent, so they are
+        // built once here. Consumed by the next optimization task (TI-PRUNE);
+        // built now even if unused.
+        double[] weightSuffix = new double[weights.Length];
+        double suffixAccum = 0;
+        for (int i = weights.Length - 1; i >= 0; i--)
+        {
+            suffixAccum += weights[i];
+            weightSuffix[i] = suffixAccum;
+        }
+
         for (int b = 0; b <= steps; b++)
         {
             double bpm = MinBpm + b * BpmStep;
             double spq = sampleRate * 60.0 / bpm;
             if (spq <= 0)
                 continue;
+            // TI-HOIST: onset samples normalized to quarter units once per tempo;
+            // the phase loop then only subtracts (phaseSamples / spq).
+            double[] normalized = new double[samples.Length];
+            for (int i = 0; i < samples.Length; i++)
+                normalized[i] = samples[i] / spq;
             // Sample-weighted phase search over one quarter period.
             double localBestScore = -1;
             double localBestPhase = 0;
             for (int p = 0; p < PhaseSteps; p++)
             {
                 double phaseSamples = spq * p / PhaseSteps; // phase as sample offset in [0,spq)
-                double score = ScoreForPhase(samples, weights, spq, phaseSamples, acc);
-                if (score > localBestScore)
+                double phaseQuarters = phaseSamples / spq;
+                double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+                if (score > localBestScore * (1 + ScoreTieEpsilon))
                 {
                     localBestScore = score;
                     localBestPhase = phaseSamples;
@@ -276,21 +305,25 @@ internal static class SymbolicTempoInference
 
     /// <summary>Subdivision-aware, weight-normalized phase score (Patch D.1/D.2): each
     /// onset is scored against the highest-weight subdivision it aligns with, and the
-    /// sum is normalized by the total onset weight so the result is naturally 0..1.</summary>
-    private static double ScoreForPhase(long[] samples, double[] weights, double spq, double phaseSamples)
-    => ScoreForPhase(samples, weights, spq, phaseSamples, acc: null);
-
-    private static double ScoreForPhase(long[] samples, double[] weights, double spq, double phaseSamples, CounterAccumulator? acc)
+    /// sum is normalized by the total onset weight so the result is naturally 0..1.
+    /// TI-HOIST: the tempo-dependent onset normalization is hoisted out of the phase
+    /// loop — callers precompute <paramref name="normalized"/> (onset sample over the
+    /// fixed samples-per-quarter) once per tempo and pass the phase as
+    /// <paramref name="phaseQuarters"/> (phase sample over the same spq), so the
+    /// per-onset division becomes a subtraction. Winner-identity factoring:
+    /// low-bit differences vs. the original <c>(sample - phaseSamples) / spq</c> are
+    /// expected and accepted.</summary>
+    private static double ScoreForPhase(double[] normalized, double[] weights, double phaseQuarters, CounterAccumulator? acc)
     {
         if (acc is not null) acc.ScoreForPhaseCalls++;
         double weightedFit = 0;
         double totalWeight = 0;
-        for (int i = 0; i < samples.Length; i++)
+        for (int i = 0; i < normalized.Length; i++)
         {
-            double quarter = (samples[i] - phaseSamples) / spq;
-            double normalized = quarter - Math.Round(quarter);
-            if (normalized == 0.5) normalized = -0.5;
-            double bestFit = SubdivisionFit(normalized, acc);
+            double quarter = normalized[i] - phaseQuarters;
+            double residual = quarter - Math.Round(quarter);
+            if (residual == 0.5) residual = -0.5;
+            double bestFit = SubdivisionFit(residual, acc);
             weightedFit += weights[i] * bestFit;
             totalWeight += weights[i];
         }
@@ -325,6 +358,10 @@ internal static class SymbolicTempoInference
     {
         double bestScore = -1;
         long bestSample = (long)bestPhase;
+        // TI-HOIST: per-tempo onset normalization, as in Search.
+        double[] normalized = new double[samples.Length];
+        for (int i = 0; i < samples.Length; i++)
+            normalized[i] = samples[i] / spq;
         // Fine phase scan around the coarse winner.
         int fine = 200;
         for (int i = 0; i <= fine; i++)
@@ -332,8 +369,9 @@ internal static class SymbolicTempoInference
             double candidate = bestPhase - spq / 2 + spq * i / (double)fine;
             if (candidate < 0)
                 candidate = 0;
-            double score = ScoreForPhase(samples, weights, spq, candidate, acc);
-            if (score > bestScore)
+            double phaseQuarters = candidate / spq;
+            double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+            if (score > bestScore * (1 + ScoreTieEpsilon))
             {
                 bestScore = score;
                 bestSample = (long)Math.Round(candidate);
@@ -373,13 +411,18 @@ internal static class SymbolicTempoInference
             long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
             double[] weights = onsets.GroupBy(o => o.Sample).Select(g => g.Sum(o => o.Weight)).ToArray();
             double spq = sampleRate * 60.0 / bpm;
+            // TI-HOIST: per-tempo onset normalization for the coarse phase scan.
+            double[] normalized = new double[samples.Length];
+            for (int i = 0; i < samples.Length; i++)
+                normalized[i] = samples[i] / spq;
             // Best phase via a coarse scan.
             double bestPhase = -1, bestPhaseScore = -1;
             for (int p = 0; p < PhaseSteps; p++)
             {
                 double phaseSamples = spq * p / PhaseSteps;
-                double score = ScoreForPhase(samples, weights, spq, phaseSamples, acc);
-                if (score > bestPhaseScore) { bestPhaseScore = score; bestPhase = phaseSamples; }
+                double phaseQuarters = phaseSamples / spq;
+                double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+                if (score > bestPhaseScore * (1 + ScoreTieEpsilon)) { bestPhaseScore = score; bestPhase = phaseSamples; }
             }
             long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
             double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
