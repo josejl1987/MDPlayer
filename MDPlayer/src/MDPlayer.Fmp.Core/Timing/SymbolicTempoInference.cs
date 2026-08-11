@@ -4,6 +4,18 @@ using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Timing;
 
+/// <summary>
+/// Optional counters describing the work a tempo-inference run performed.
+/// Instrumented via the <see cref="SymbolicTempoInference.Build"/> overload that
+/// reports them; the default <see cref="SymbolicTempoInference.Build"/> path does
+/// not allocate or count. Counters are additive across the whole search
+/// (coarse phases, fine refinement, and the half/double metrical-family probes).
+/// </summary>
+internal readonly record struct TempoInferenceCounters(
+    int OnsetCount,
+    long ScoreForPhaseCalls,
+    long SubdivisionFitEvals);
+
 /// <summary>The ambiguity of a symbolic tempo inference result.</summary>
 internal enum TempoAmbiguity
 {
@@ -47,12 +59,41 @@ internal static class SymbolicTempoInference
         (0.125, 0.72),   // thirty-second
     };
 
+    /// <summary>Default build: no instrumentation, no counter allocation.</summary>
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
         MusicalTimeMapOptions options,
-        double? beatOffsetQuarter)
+        double? beatOffsetQuarter) =>
+        Build(timeline, options, beatOffsetQuarter, out _);
+
+    /// <summary>
+    /// Build overload with opt-in counters (TI-INSTRUMENT). The default path
+    /// (<see cref="Build(VisualizationTimeline,MusicalTimeMapOptions,double?)"/>)
+    /// routes here with <c>out _</c>, so instrumentation adds no allocation and
+    /// no observable change to inference output. Only callers that opt in (the
+    /// benchmark harness / tests via InternalsVisibleTo) pay for the counter.
+    /// </summary>
+    internal static MusicalTimeMapBuildResult Build(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        double? beatOffsetQuarter,
+        out TempoInferenceCounters counters)
     {
+        var acc = new CounterAccumulator();
         Onset[] onsets = CollectOnsets(timeline);
+        acc.OnsetCount = onsets.Length;
+        MusicalTimeMapBuildResult result = BuildCore(timeline, options, beatOffsetQuarter, onsets, acc);
+        counters = new TempoInferenceCounters(acc.OnsetCount, acc.ScoreForPhaseCalls, acc.SubdivisionFitEvals);
+        return result;
+    }
+
+    private static MusicalTimeMapBuildResult BuildCore(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        double? beatOffsetQuarter,
+        Onset[] onsets,
+        CounterAccumulator? acc)
+    {
         if (onsets.Length == 0)
         {
             throw new MusicalTimingException(
@@ -60,7 +101,7 @@ internal static class SymbolicTempoInference
         }
 
         (double bestBpm, long bestPhaseSample, double bestScore, List<TempoCandidate> candidates) =
-            Search(onsets, timeline.SampleRate);
+            Search(onsets, timeline.SampleRate, acc);
 
         var diagnostics = new TimingDiagnostics
         {
@@ -79,7 +120,7 @@ internal static class SymbolicTempoInference
         if (candidates.Count > 1)
         {
             var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
-                timeline, bestBpm, candidates, onsets, timeline.SampleRate);
+                timeline, bestBpm, candidates, onsets, timeline.SampleRate, acc);
             // The ResolveHalfDouble combined score is the decision metric, so it is
             // the SelectedScore reported for BOTH the selected and (below) the
             // alternative — the two are directly comparable.
@@ -178,7 +219,8 @@ internal static class SymbolicTempoInference
 
     private static (double bpm, long phaseSample, double score, List<TempoCandidate>) Search(
         Onset[] onsets,
-        int sampleRate)
+        int sampleRate,
+        CounterAccumulator? acc)
     {
         // Order onsets; we only need their sample positions and weights.
         long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
@@ -206,7 +248,7 @@ internal static class SymbolicTempoInference
             for (int p = 0; p < PhaseSteps; p++)
             {
                 double phaseSamples = spq * p / PhaseSteps; // phase as sample offset in [0,spq)
-                double score = ScoreForPhase(samples, weights, spq, phaseSamples);
+                double score = ScoreForPhase(samples, weights, spq, phaseSamples, acc);
                 if (score > localBestScore)
                 {
                     localBestScore = score;
@@ -227,7 +269,7 @@ internal static class SymbolicTempoInference
 
         // Improve the phase resolution within the winning tempo directly via onsets.
         double winSpq = sampleRate * 60.0 / bestBpm;
-        long bestPhaseSample = RefinePhase(samples, weights, winSpq, bestPhase, sampleRate);
+        long bestPhaseSample = RefinePhase(samples, weights, winSpq, bestPhase, sampleRate, acc);
 
         return (bestBpm, bestPhaseSample, bestScore, candidates);
     }
@@ -236,7 +278,11 @@ internal static class SymbolicTempoInference
     /// onset is scored against the highest-weight subdivision it aligns with, and the
     /// sum is normalized by the total onset weight so the result is naturally 0..1.</summary>
     private static double ScoreForPhase(long[] samples, double[] weights, double spq, double phaseSamples)
+    => ScoreForPhase(samples, weights, spq, phaseSamples, acc: null);
+
+    private static double ScoreForPhase(long[] samples, double[] weights, double spq, double phaseSamples, CounterAccumulator? acc)
     {
+        if (acc is not null) acc.ScoreForPhaseCalls++;
         double weightedFit = 0;
         double totalWeight = 0;
         for (int i = 0; i < samples.Length; i++)
@@ -244,7 +290,7 @@ internal static class SymbolicTempoInference
             double quarter = (samples[i] - phaseSamples) / spq;
             double normalized = quarter - Math.Round(quarter);
             if (normalized == 0.5) normalized = -0.5;
-            double bestFit = SubdivisionFit(normalized);
+            double bestFit = SubdivisionFit(normalized, acc);
             weightedFit += weights[i] * bestFit;
             totalWeight += weights[i];
         }
@@ -255,10 +301,14 @@ internal static class SymbolicTempoInference
     /// lattice: the highest weighted subdivision the residual lands within a small
     /// tolerance of an integer multiple, else a decaying fit to the quarter grid.</summary>
     private static double SubdivisionFit(double normalizedResidualQuarter)
+        => SubdivisionFit(normalizedResidualQuarter, acc: null);
+
+    private static double SubdivisionFit(double normalizedResidualQuarter, CounterAccumulator? acc)
     {
         double best = 0;
         foreach ((double units, double weight) in Subdivisions)
         {
+            if (acc is not null) acc.SubdivisionFitEvals++;
             // Is normalizedResidualQuarter a multiple of `units` (within a sliver)?
             double scaled = normalizedResidualQuarter / units;
             double deviation = scaled - Math.Round(scaled);
@@ -269,6 +319,9 @@ internal static class SymbolicTempoInference
     }
 
     private static long RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate)
+        => RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc: null);
+
+    private static long RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate, CounterAccumulator? acc)
     {
         double bestScore = -1;
         long bestSample = (long)bestPhase;
@@ -279,7 +332,7 @@ internal static class SymbolicTempoInference
             double candidate = bestPhase - spq / 2 + spq * i / (double)fine;
             if (candidate < 0)
                 candidate = 0;
-            double score = ScoreForPhase(samples, weights, spq, candidate);
+            double score = ScoreForPhase(samples, weights, spq, candidate, acc);
             if (score > bestScore)
             {
                 bestScore = score;
@@ -305,7 +358,7 @@ internal static class SymbolicTempoInference
     /// </summary>
     private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
         ResolveHalfDouble(VisualizationTimeline timeline, double bestBpm, List<TempoCandidate> candidates,
-            Onset[] onsets, int sampleRate)
+            Onset[] onsets, int sampleRate, CounterAccumulator? acc)
     {
         // The full power-of-two metrical family around the winning tempo, so the
         // exact half/double is always represented even if its raw grid score was
@@ -325,10 +378,10 @@ internal static class SymbolicTempoInference
             for (int p = 0; p < PhaseSteps; p++)
             {
                 double phaseSamples = spq * p / PhaseSteps;
-                double score = ScoreForPhase(samples, weights, spq, phaseSamples);
+                double score = ScoreForPhase(samples, weights, spq, phaseSamples, acc);
                 if (score > bestPhaseScore) { bestPhaseScore = score; bestPhase = phaseSamples; }
             }
-            long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate);
+            long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
             double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
             double accentScore = AccentFitScore(timeline, bpm, sampleRate);
             double prior = TempoPrior(bpm);
@@ -510,4 +563,14 @@ internal static class SymbolicTempoInference
         high ? Math.Clamp(0.7 + strength * 0.6, 0.1, 1.3) : 0.6;
 
     private readonly record struct Onset(long Sample, double Weight);
+
+    /// <summary>Mutable accumulator for the opt-in instrumentation counters. Only
+    /// touched (and therefore only allocates) on the instrumented
+    /// <see cref="SymbolicTempoInference.Build"/> overload.</summary>
+    private sealed class CounterAccumulator
+    {
+        public int OnsetCount;
+        public long ScoreForPhaseCalls;
+        public long SubdivisionFitEvals;
+    }
 }
