@@ -624,7 +624,7 @@ internal static class SymbolicTempoInference
         return totalWeight > 0 ? weightedFit / totalWeight : 0.5;
     }
 
-    private static Onset[] CollectOnsets(VisualizationTimeline timeline)
+    internal static Onset[] CollectOnsets(VisualizationTimeline timeline)
     {
         var seen = new HashSet<long>();
         var list = new List<Onset>();
@@ -655,7 +655,7 @@ internal static class SymbolicTempoInference
     private static double WeightFor(float strength, bool high) =>
         high ? Math.Clamp(0.7 + strength * 0.6, 0.1, 1.3) : 0.6;
 
-    private readonly record struct Onset(long Sample, double Weight);
+    internal readonly record struct Onset(long Sample, double Weight);
 
     /// <summary>Mutable accumulator for the opt-in instrumentation counters. Only
     /// touched (and therefore only allocates) on the instrumented
