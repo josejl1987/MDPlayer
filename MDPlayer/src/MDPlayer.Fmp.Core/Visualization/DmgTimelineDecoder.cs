@@ -55,7 +55,12 @@ internal sealed class DmgTimelineDecoder : IChipTimelineDecoder
 
             bool retrigger = _notes[channel] != null;
             Close(ref _notes[channel], write.SamplePosition);
-            string instrument = $"dmg:{channel + 1}";
+            // Family-disambiguated instrument ID so the identity pipeline can tell
+            // the two pulse channels from the single wave channel ("dmg:pulse:<n>"
+            // vs "dmg:wave:3"); the bare legacy "dmg:<n>" form is unresolvable.
+            string instrument = channel == 2
+                ? "dmg:wave:3"
+                : $"dmg:pulse:{channel + 1}";
             _timeline.AddInstrument(new InstrumentDefinition(
                 instrument, "psg", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
             _notes[channel] = new MutableNote(

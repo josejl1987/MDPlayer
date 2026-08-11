@@ -315,6 +315,28 @@ public sealed class MidiFidelityIntegrationTests
         Assert.Contains(d.State.Keys, k => k.Item2 == 9);
     }
 
+    [Fact]
+    public void UnpitchedSsgNoise_ExcludedFromExport_NotAnError()
+    {
+        // SSG noise-only notes carry the intentional -1 "Unpitched" sentinel (the
+        // decoder's tested representation: no pitch exists). The melodic MIDI export
+        // must exclude them with a diagnostic, never fabricate a pitch and never
+        // crash the whole export.
+        var noise = new NoteEvent("ym2608.0.ssg.1", 0, 1000, 0, -1.0, "ssg:noise",
+            VisualizationNoteMode.SsgNoise, false, Array.Empty<PitchChange>())
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Ssg, 0) };
+        var tone = Note("ym2608.0.fm.1", 0, 1000, 62);
+        MusicalMidiExportResult result = ExportResult(Timeline(noise, tone), 120);
+        // No throw; the melodic content is intact.
+        Assert.True(result.Bytes.Length > 0);
+        // Only the pitched FM note survives: exactly one melodic endpoint.
+        MidiSemanticDecoder.Result d = MidiSemanticDecoder.Decode(result.Bytes);
+        Assert.Equal(1, d.State.Count);
+        // The exclusion is surfaced as a diagnostic warning.
+        Assert.Contains(result.Diagnostics.Warnings,
+            w => w.Contains("unpitched noise", StringComparison.OrdinalIgnoreCase));
+    }
+
     // ---- Patch F: endpoint uniqueness / program / determinism ------------------
 
     [Fact]
@@ -444,8 +466,9 @@ public sealed class MidiFidelityIntegrationTests
     {
         // A 32nd-note texture at 56 BPM is temporally identical to a 16th-note
         // texture at 112 BPM (and its octave equivalents). Onset spacing alone cannot
-        // pick the octave, so the inference must surface the half/double alternative
-        // with both scores and BPMs populated — never silently commit to one octave.
+        // pick the octave, so the inference must (a) resolve to the musically central
+        // octave — 112 here, never the extreme 56/224 — and (b) still surface the
+        // half/double alternative with both scores and BPMs populated.
         var step = (long)Math.Round(Sr * 60.0 / 112.0 / 4.0); // 16th at 112 == 32nd at 56
         var notes = Enumerable.Range(0, 32)
             .Select(i => Note("v", i * step, i * step + 800, 64))
@@ -456,18 +479,48 @@ public sealed class MidiFidelityIntegrationTests
         }, new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
         var d = build.Diagnostics;
         Assert.NotNull(d.SelectedBpm);
-        // The selected BPM is a valid octave-equivalent resolution of the grid
-        // interval (the true pulse is 112 → allowed 56/112/224, scaled by the search).
-        double selected = d.SelectedBpm.Value;
-        Assert.True(Math.Abs(selected / 56.0 - Math.Pow(2, Math.Round(Math.Log2(selected / 56.0)))) < 1.5,
-            $"selected {selected} must be an octave of 56");
+        // The true pulse is 112; the octave resolution must pick the central member
+        // of the 56/112/224 family, not the coarse-duration-favoring extreme.
+        Assert.True(Math.Abs(d.SelectedBpm.Value - 112.0) < 0.5,
+            $"selected {d.SelectedBpm.Value} must be the central octave 112");
         // Half/double ambiguity must be surfaced with the alternative BPM + scores.
         Assert.True(d.TempoAmbiguous, "a pure dense grid must be flagged prominent half/double ambiguity");
-        Assert.True(d.AlternativeBpm is double a && (Math.Abs(selected / a - 0.5) < 0.02 || Math.Abs(selected / a - 2) < 0.02),
+        Assert.True(d.AlternativeBpm is double a && (Math.Abs(112.0 / a - 0.5) < 0.02 || Math.Abs(112.0 / a - 2) < 0.02),
             "alternative must be the half/double of the selected");
         Assert.NotNull(d.SelectedScore);
         Assert.NotNull(d.AlternativeScore);
         Assert.NotNull(d.TempoConfidence);
+    }
+
+    [Fact]
+    public void Symbolic_BeatLockedRhythm_SurfacesAccentEvidence_ResolvesCentralOctave()
+    {
+        // A dense melodic stream plus a rhythm/accent layer locked to the quarter
+        // beat at 112 BPM. The accent layer is genuine beat-level evidence: it must
+        // never push the family toward the coarse 224 extreme, and the resolution
+        // still lands on the central octave while flagging the family ambiguity.
+        long step = (long)Math.Round(Sr * 60.0 / 112.0 / 4.0);       // 16th at 112
+        long beat = (long)Math.Round(Sr * 60.0 / 112.0);             // quarter at 112
+        var notes = Enumerable.Range(0, 24)
+            .Select(i => Note("v", i * step, i * step + 800, 64))
+            .ToArray();
+        var rhythm = Enumerable.Range(0, 8)
+            .Select(i => new RhythmEvent("top", "rhythm.top", i * beat, 1.0f, 0f)
+            {
+                Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 2),
+            })
+            .ToArray();
+        var build = MusicalTimeMapBuilder.Build(new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 24 * step + 10_000, SampleRate = Sr, Notes = notes, Rhythm = rhythm,
+        }, new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+        var d = build.Diagnostics;
+        Assert.NotNull(d.SelectedBpm);
+        Assert.True(Math.Abs(d.SelectedBpm.Value - 112.0) < 0.5,
+            $"selected {d.SelectedBpm.Value} must be the central octave 112");
+        Assert.True(d.TempoAmbiguous, "a pure metrical grid must still surface family ambiguity");
+        Assert.NotNull(d.SelectedScore);
+        Assert.NotNull(d.AlternativeScore);
     }
 
     [Fact]
@@ -515,5 +568,26 @@ public sealed class MidiFidelityIntegrationTests
         // A non-grid sample maps to a fractional, non-integer quarter — never snapped.
         double q = map.SampleToQuarterPosition((long)Math.Round(0.37 * step) + 3 * step);
         Assert.True(Math.Abs(q - Math.Round(q)) > 0.01, $"quarter {q} must be continuous, not snapped");
+    }
+
+    [Fact]
+    public void Symbolic_PhaseAfterSourceStart_MapsSourceStartToNegativeQuarter()
+    {
+        double spq = Sr * 60.0 / 120.0;
+        long phaseSample = 1_000;
+        var notes = Enumerable.Range(0, 16)
+            .Select(i => Note("v", phaseSample + (long)Math.Round(i * spq), phaseSample + (long)Math.Round(i * spq) + 600, 64))
+            .ToArray();
+
+        var build = MusicalTimeMapBuilder.Build(new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = phaseSample + 16 * (long)spq + 10_000,
+            SampleRate = Sr,
+            Notes = notes,
+        }, new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+
+        Assert.True(build.Diagnostics.SampleZeroQuarter < 0);
+        Assert.True(build.Map.SampleToQuarterPosition(0) < 0);
     }
 }

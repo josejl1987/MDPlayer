@@ -38,6 +38,7 @@ public sealed class InstrumentIdentityTests
         Assert.Equal("FM 042", new InstrumentIdentity(IdentityFamily.Fm, 42, "fm:042").DisplayName);
         Assert.Equal("ssg:tone", new InstrumentIdentity(IdentityFamily.Ssg, 0, "ssg:tone").DisplayName);
         Assert.Equal("rhythm:003", new InstrumentIdentity(IdentityFamily.Rhythm, 3, "rhythm:003").DisplayName);
+        Assert.Equal("WAVE 3", new InstrumentIdentity(IdentityFamily.Wavetable, 0, "huc6280:wave:3").DisplayName);
     }
 
     [Fact]
@@ -57,10 +58,84 @@ public sealed class InstrumentIdentityTests
         Assert.True(InstrumentIdentity.TryParse("dac:005", out var dac));
         Assert.Equal(IdentityFamily.Pcm, dac.Family);
 
+        Assert.True(InstrumentIdentity.TryParse("huc6280:wave:1", out var hucWave));
+        Assert.Equal(IdentityFamily.Wavetable, hucWave.Family);
+        Assert.Equal("WAVE 1", hucWave.DisplayName);
+
+        Assert.True(InstrumentIdentity.TryParse("k051649:wave:3", out var sccWave));
+        Assert.Equal(IdentityFamily.Wavetable, sccWave.Family);
+
+        // Chip-prefixed decoder forms resolve by their family token.
+        Assert.True(InstrumentIdentity.TryParse("ym2203:0:fm:1", out var yamahaFm));
+        Assert.Equal(IdentityFamily.Fm, yamahaFm.Family);
+        Assert.Equal("FM", yamahaFm.DisplayName);
+
+        Assert.True(InstrumentIdentity.TryParse("ymz280b:pcm:1", out var pcm));
+        Assert.Equal(IdentityFamily.Pcm, pcm.Family);
+
+        Assert.True(InstrumentIdentity.TryParse("ay8910:0:tone:1", out var ayTone));
+        Assert.Equal(IdentityFamily.Ssg, ayTone.Family);
+
+        Assert.True(InstrumentIdentity.TryParse("dmg:pulse:1", out var dmgPulse));
+        Assert.Equal(IdentityFamily.Ssg, dmgPulse.Family);
+        Assert.Equal("PULSE", dmgPulse.DisplayName);
+
+        Assert.True(InstrumentIdentity.TryParse("midi:channel-1:program-5", out var midi));
+        Assert.Equal(IdentityFamily.Midi, midi.Family);
+
+        // Legacy Game Boy form disambiguates by channel (3 = wave, 1-2 = pulse).
+        Assert.True(InstrumentIdentity.TryParse("dmg:1", out var legacyPulse));
+        Assert.Equal(IdentityFamily.Ssg, legacyPulse.Family);
+        Assert.Equal("PULSE", legacyPulse.DisplayName);
+
+        Assert.True(InstrumentIdentity.TryParse("dmg:3", out var legacyWave));
+        Assert.Equal(IdentityFamily.Wavetable, legacyWave.Family);
+
+        // SPC (SNES DSP) sample voices.
+        Assert.True(InstrumentIdentity.TryParse("spc:src3", out var spc));
+        Assert.Equal(IdentityFamily.Pcm, spc.Family);
+
         // Placeholder / unresolved tokens are not canonical identities.
         Assert.False(InstrumentIdentity.TryParse("ym2608:deadbeef", out _));
-        Assert.False(InstrumentIdentity.TryParse("ym2612:fm:1", out _));
+        Assert.False(InstrumentIdentity.TryParse("dmg:4", out _));
         Assert.False(InstrumentIdentity.TryParse("", out _));
+    }
+
+    [Theory]
+    [InlineData("fm:007", "Fm")]
+    [InlineData("ssg:envelope:4", "Ssg")]
+    [InlineData("rhythm:bd", "Rhythm")]
+    [InlineData("dac:005", "Pcm")]
+    [InlineData("pcm:005", "Pcm")]
+    [InlineData("huc6280:wave:1", "Wavetable")]
+    [InlineData("k051649:wave:3", "Wavetable")]
+    [InlineData("ym2203:0:fm:1", "Fm")]
+    [InlineData("ymz280b:pcm:1", "Pcm")]
+    [InlineData("ay8910:0:tone:1", "Ssg")]
+    [InlineData("dmg:pulse:1", "Ssg")]
+    [InlineData("dmg:1", "Ssg")]
+    [InlineData("dmg:3", "Wavetable")]
+    [InlineData("spc:src3", "Pcm")]
+    [InlineData("midi:channel-1:program-5", "Midi")]
+    public void Identity_TypedCanonicalForms_RoundTrip(string canonical, string familyName)
+    {
+        Assert.True(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
+        Assert.Equal(familyName, identity.Family.ToString());
+        Assert.True(InstrumentIdentity.TryParse(identity.Canonical, out InstrumentIdentity roundTrip));
+        Assert.Equal(identity, roundTrip);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("unknown:voice")]
+    [InlineData("fm:not-a-number")]
+    [InlineData("dmg:4")]
+    [InlineData("ym2612:unknown:1")]
+    public void Identity_UnknownOrMalformedForms_UseExplicitUnresolvedResult(string canonical)
+    {
+        Assert.False(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
+        Assert.True(identity.IsEmpty);
     }
 
     [Fact]

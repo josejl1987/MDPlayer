@@ -207,9 +207,77 @@ public sealed class MidiTrackNamingTests
             Rhythm = new[] { rhythm },
         }, new MusicalMidiExportOptions { EmitPitchBend = false });
         string rhythmName = Assert.Single(TrackNames(rhythmResult).Where(n => n != "Conductor"));
-        Assert.Contains("rhythm:top", rhythmName);
+        // A single rhythm identity on the chip gets the clean semantic name, not the
+        // raw source-voice "rhythm:top" canonical.
+        Assert.Equal("YM2608 Rhythm", rhythmName);
         var rhythmChunk = Assert.Single(MidiRoundTrip.TrackChunks(rhythmResult.Bytes).Skip(1));
         Assert.Equal(9, rhythmChunk.Events.OfType<DryNote>().Single().Channel);
+    }
+
+    [Fact]
+    public void MultipleRhythmVoices_SameChip_DisambiguatedByVoiceName()
+    {
+        // Two distinct rhythm identities on one YM2608 get the semantic chip name
+        // disambiguated by their short voice name (never duplicate "YM2608 Rhythm").
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0, EndSample = 5000, SampleRate = 44100,
+            Rhythm = new[]
+            {
+                new RhythmEvent("bd", "ym2608.0.rhythm.bd", 0, 1, 0, InstrumentId: "rhythm:bd")
+                { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 0) },
+                new RhythmEvent("top", "ym2608.0.rhythm.top", 0, 1, 0, InstrumentId: "rhythm:top")
+                { Domain = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, 2) },
+            },
+        };
+        var result = ExportTimeline(timeline, new MusicalMidiExportOptions { EmitPitchBend = false });
+        string[] names = TrackNames(result).Where(n => n != "Conductor").OrderBy(n => n).ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Equal("YM2608 Rhythm - bd", names[0]);
+        Assert.Equal("YM2608 Rhythm - top", names[1]);
+    }
+
+    [Fact]
+    public void WavetableTrack_Huc6280_GetsSemanticChipName_NotPlaceholder()
+    {
+        // A HuC6280 wavetable note must resolve to a proper instrument track named
+        // from the chip + display name ("HUC6280 CH1 - WAVE 1"), never collapse to
+        // the raw channelId placeholder.
+        var note = Note("huc6280.0.wavetable.1", "huc6280:wave:1", 0, 1000) with
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.Huc6280, 0), VoiceKind.Wavetable, 0) };
+        var result = Export(note);
+        string[] names = TrackNames(result).Where(n => n != "Conductor").ToArray();
+        Assert.Single(names);
+        Assert.Equal("HUC6280 CH1 - WAVE 1", names[0]);
+    }
+
+    [Fact]
+    public void DmgPulseAndWaveChannels_GetDistinctFamilyNames()
+    {
+        // The DMG decoder now disambiguates pulse vs wave instrument IDs, so the
+        // two pulse channels and the wave channel resolve to distinct family names.
+        var pulse = Note("dmg.0.pulse.1", "dmg:pulse:1", 0, 1000) with
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.Dmg, 0), VoiceKind.Pulse, 0) };
+        var wave = Note("dmg.0.wavetable.1", "dmg:wave:3", 0, 1000) with
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.Dmg, 0), VoiceKind.Wavetable, 2) };
+        var result = Export(pulse, wave);
+        string[] names = TrackNames(result).Where(n => n != "Conductor").OrderBy(n => n).ToArray();
+        Assert.Equal(2, names.Length);
+        Assert.Equal("DMG CH1 - PULSE", names[0]);
+        Assert.Equal("DMG CH3 - WAVE 3", names[1]);
+    }
+
+    [Fact]
+    public void SpcSampleVoice_GetsPcmTrackName_NotPlaceholder()
+    {
+        // An SPC sample voice ("spc:src3") resolves to a PCM-family track named
+        // from the chip + channel, never a raw channelId placeholder.
+        var note = Note("snesdsp.0.pcmvoice.1", "spc:src3", 0, 1000) with
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.SnesDsp, 0), VoiceKind.PcmVoice, 0) };
+        var result = Export(note);
+        string[] names = TrackNames(result).Where(n => n != "Conductor").ToArray();
+        Assert.Single(names);
+        Assert.Equal("SNESDSP CH1 - PCM", names[0]);
     }
 
     private static MusicalMidiExportResult Export(MusicalMidiExportOptions options, params VisualizationNoteEvent[] notes) =>

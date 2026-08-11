@@ -907,7 +907,12 @@ internal sealed class Ym2608TimelineDecoder
             // start, it means the period register was written multiple times in
             // the same batch. Correct the initial pitch instead of recording a
             // divergent pitch-bend from the note's own start position.
-            if (_pitch.Count == 0 && samplePosition == StartSample)
+            // A YM2608 key-on can be followed by the two F-number writes on the
+            // next output sample. Fold that immediate commit into the initial
+            // pitch as well; later changes remain pitch points.
+            if (_pitch.Count == 0
+                && samplePosition >= StartSample
+                && samplePosition <= StartSample + 2)
             {
                 if (Math.Abs(InitialMidiNote - midiNote) < 0.0001)
                     return;

@@ -8,6 +8,7 @@ internal enum IdentityFamily
     Midi,
     Rhythm,
     Pcm,
+    Wavetable,
 }
 
 /// <summary>
@@ -24,9 +25,64 @@ internal readonly record struct InstrumentIdentity(
 {
     public static readonly InstrumentIdentity Empty = new(IdentityFamily.Pcm, 0, "");
 
-    /// <summary>Human display name: "FM 007" for FM; the canonical string otherwise.</summary>
-    public string DisplayName =>
-        Family == IdentityFamily.Fm ? $"FM {DedupNumber:000}" : Canonical;
+    /// <summary>
+    /// Human display name. The normalized FM form renders as "FM 007"; wavetable
+    /// as "WAVE 3"; chip-positional FM/MIDI/PCM labels collapse to their family
+    /// ("FM", "MIDI", "PCM") since the track name already carries the chip and
+    /// channel. Everything else keeps the canonical string.
+    /// </summary>
+    public string DisplayName => Family switch
+    {
+        IdentityFamily.Fm => FmDisplayName,
+        IdentityFamily.Wavetable => WavetableDisplayName,
+        IdentityFamily.Pcm => "PCM",
+        IdentityFamily.Midi => "MIDI",
+        IdentityFamily.Ssg => SsgDisplayName,
+        _ => Canonical,
+    };
+
+    /// <summary>Human name for an SSG/PSG identity. The normalized <c>ssg:…</c> forms
+    /// keep the canonical string; Game Boy pulse channels render as "PULSE" (the
+    /// track name already carries the channel number).</summary>
+    private string SsgDisplayName
+    {
+        get
+        {
+            if (Canonical is null)
+                return "";
+            if (Canonical.StartsWith("dmg:pulse:", StringComparison.Ordinal)
+                || Canonical.StartsWith("dmg:", StringComparison.Ordinal))
+                return "PULSE";
+            return Canonical;
+        }
+    }
+
+    /// <summary>Human name for an FM identity: "FM 007" for the normalized
+    /// <c>fm:&lt;n&gt;</c> patch form; "FM" for chip-positional forms such as
+    /// <c>ym2203:0:fm:1</c> (whose canonical has no global patch number).</summary>
+    private string FmDisplayName
+    {
+        get
+        {
+            if (Canonical is not null
+                && Canonical.StartsWith("fm:", StringComparison.Ordinal)
+                && int.TryParse(Canonical.AsSpan(3), out _))
+                return $"FM {DedupNumber:000}";
+            return "FM";
+        }
+    }
+
+    /// <summary>Human name for a wavetable identity: "WAVE 3" from "huc6280:wave:3".</summary>
+    private string WavetableDisplayName
+    {
+        get
+        {
+            int separator = Canonical is null ? -1 : Canonical.LastIndexOf(':');
+            return separator >= 0 && separator < Canonical.Length - 1
+                ? "WAVE " + Canonical[(separator + 1)..]
+                : "WAVE";
+        }
+    }
 
     public bool IsEmpty => string.IsNullOrEmpty(Canonical);
 
@@ -48,6 +104,7 @@ internal readonly record struct InstrumentIdentity(
         if (string.IsNullOrWhiteSpace(canonical))
             return false;
 
+        // Normalized identity forms: family-prefixed canonicals.
         if (canonical.StartsWith("fm:", StringComparison.Ordinal)
             && int.TryParse(canonical.AsSpan(3), out int fmNumber))
         {
@@ -70,6 +127,67 @@ internal readonly record struct InstrumentIdentity(
             return true;
         }
         if (canonical.StartsWith("pcm:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Pcm, 0, canonical);
+            return true;
+        }
+
+        // Chip-prefixed decoder forms: "<chip>[:<instance>]:<family-token>:<suffix>"
+        // (e.g. ym2203:0:fm:1, ymz280b:pcm:1, huc6280:wave:1, ay8910:0:tone:1). The
+        // family token carries the semantic family; the positional canonical keeps
+        // distinct channels distinct tracks while giving them a real identity.
+        if (canonical.Contains(":fm:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Fm, 0, canonical);
+            return true;
+        }
+        if (canonical.Contains(":pcm:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Pcm, 0, canonical);
+            return true;
+        }
+        if (canonical.Contains(":wave:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Wavetable, 0, canonical);
+            return true;
+        }
+        if (canonical.Contains(":tone:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Ssg, 0, canonical);
+            return true;
+        }
+
+        // Special decoder forms without a family token.
+        // YM2151 is a pure FM chip: "ym2151:<instance>:<channel>".
+        if (canonical.StartsWith("ym2151:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Fm, 0, canonical);
+            return true;
+        }
+        // Game Boy: "dmg:pulse:<channel>" / "dmg:wave:<channel>" (the DMG decoder
+        // must disambiguate pulse vs wave channels), plus the legacy bare
+        // "dmg:<n>" form where channel 3 is the wave channel and 1-2 are pulse.
+        if (canonical.StartsWith("dmg:pulse:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Ssg, 0, canonical);
+            return true;
+        }
+        if (canonical.StartsWith("dmg:", StringComparison.Ordinal)
+            && int.TryParse(canonical.AsSpan(4), out int dmgChannel)
+            && dmgChannel is >= 1 and <= 3)
+        {
+            identity = new InstrumentIdentity(
+                dmgChannel == 3 ? IdentityFamily.Wavetable : IdentityFamily.Ssg, 0, canonical);
+            return true;
+        }
+        // MIDI passthrough: "midi:channel-<n>:program-<p>".
+        if (canonical.StartsWith("midi:channel-", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Midi, 0, canonical);
+            return true;
+        }
+        // SPC (SNES DSP) sample voices: "spc:src<n>".
+        if (canonical.StartsWith("spc:src", StringComparison.Ordinal))
         {
             identity = new InstrumentIdentity(IdentityFamily.Pcm, 0, canonical);
             return true;

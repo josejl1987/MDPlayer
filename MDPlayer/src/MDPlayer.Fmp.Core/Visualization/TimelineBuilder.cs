@@ -800,10 +800,14 @@ internal sealed class TimelineBuilder
         return hash.ToString("X8", System.Globalization.CultureInfo.InvariantCulture).ToLowerInvariant();
     }
 
+    /// <summary>Content identity of a waveform: family, length and preview data.
+    /// <see cref="WaveformDefinition.DisplayName"/> is deliberately excluded — the
+    /// <c>wave:&lt;content-hash&gt;</c> ID is the identity, and display names are
+    /// positional labels ("WAVE 1"/"WAVE 3") that legitimately differ when two
+    /// wavetable channels share identical data (e.g. HuC6280/K051649).</summary>
     private static bool WaveformEquals(WaveformDefinition left, WaveformDefinition right) =>
         left.Family == right.Family
         && left.SourceLength == right.SourceLength
-        && left.DisplayName == right.DisplayName
         && left.Preview.AsSpan().SequenceEqual(right.Preview);
 
     private static bool SampleEquals(SampleDefinition left, SampleDefinition right) =>
@@ -813,7 +817,6 @@ internal sealed class TimelineBuilder
         && left.LoopStart == right.LoopStart
         && left.LoopEnd == right.LoopEnd
         && left.LoopMode == right.LoopMode
-        && left.DisplayName == right.DisplayName
         && left.IdentityKind == right.IdentityKind
         && left.Preview.Length == right.Preview.Length
         && left.Preview.Zip(right.Preview).All(pair =>
