@@ -72,19 +72,23 @@ internal static class SymbolicTempoInference
         (0.125, 0.72),   // thirty-second
     };
 
-    /// <summary>Default build: no instrumentation, no counter allocation.</summary>
+    /// <summary>Default build: no instrumentation, no counter allocation, no
+    /// counter increments on the hot path (acc is null throughout).</summary>
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
         MusicalTimeMapOptions options,
-        double? beatOffsetQuarter) =>
-        Build(timeline, options, beatOffsetQuarter, out _);
+        double? beatOffsetQuarter)
+    {
+        Onset[] onsets = CollectOnsets(timeline);
+        return BuildCore(timeline, options, beatOffsetQuarter, onsets, acc: null);
+    }
 
     /// <summary>
-    /// Build overload with opt-in counters (TI-INSTRUMENT). The default path
-    /// (<see cref="Build(VisualizationTimeline,MusicalTimeMapOptions,double?)"/>)
-    /// routes here with <c>out _</c>, so instrumentation adds no allocation and
-    /// no observable change to inference output. Only callers that opt in (the
-    /// benchmark harness / tests via InternalsVisibleTo) pay for the counter.
+    /// Build overload with opt-in counters (TI-INSTRUMENT). Only callers that opt
+    /// in (the benchmark harness / tests via InternalsVisibleTo) allocate a
+    /// CounterAccumulator and pay the per-call counter increments; the default
+    /// <see cref="Build(VisualizationTimeline,MusicalTimeMapOptions,double?)"/>
+    /// path runs with acc = null and performs NO counter work.
     /// </summary>
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
@@ -133,7 +137,7 @@ internal static class SymbolicTempoInference
         if (candidates.Count > 1)
         {
             var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
-                timeline, bestBpm, candidates, onsets, timeline.SampleRate, acc);
+                timeline, bestBpm, candidates, onsets, timeline.SampleRate, bestPhaseSample, bestScore, acc);
             // The ResolveHalfDouble combined score is the decision metric, so it is
             // the SelectedScore reported for BOTH the selected and (below) the
             // alternative — the two are directly comparable.
@@ -308,9 +312,11 @@ internal static class SymbolicTempoInference
 
         // Improve the phase resolution within the winning tempo directly via onsets.
         double winSpq = sampleRate * 60.0 / bestBpm;
-        long bestPhaseSample = RefinePhase(samples, weights, winSpq, bestPhase, sampleRate, acc);
+        (long bestPhaseSample, double refinedScore) = RefinePhase(samples, weights, winSpq, bestPhase, sampleRate, acc);
 
-        return (bestBpm, bestPhaseSample, bestScore, candidates);
+        // Report the REFINED phase's score as the winner's score (previously the
+        // coarse-grid score was reported alongside the refined phase — incoherent).
+        return (bestBpm, bestPhaseSample, refinedScore, candidates);
     }
 
     /// <summary>Subdivision-aware, weight-normalized phase score (Patch D.1/D.2): each
@@ -398,10 +404,10 @@ internal static class SymbolicTempoInference
         return best;
     }
 
-    private static long RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate)
+    private static (long PhaseSample, double Score) RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate)
         => RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc: null);
 
-    private static long RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate, CounterAccumulator? acc)
+    private static (long PhaseSample, double Score) RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate, CounterAccumulator? acc)
     {
         double bestScore = -1;
         long bestSample = (long)bestPhase;
@@ -431,7 +437,7 @@ internal static class SymbolicTempoInference
             }
         }
         _ = sampleRate;
-        return Math.Max(0, bestSample);
+        return (Math.Max(0, bestSample), bestScore);
     }
 
     /// <summary>
@@ -449,7 +455,7 @@ internal static class SymbolicTempoInference
     /// </summary>
     private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
         ResolveHalfDouble(VisualizationTimeline timeline, double bestBpm, List<TempoCandidate> candidates,
-            Onset[] onsets, int sampleRate, CounterAccumulator? acc)
+            Onset[] onsets, int sampleRate, long searchPhaseSample, double searchRefinedScore, CounterAccumulator? acc)
     {
         // The full power-of-two metrical family around the winning tempo, so the
         // exact half/double is always represented even if its raw grid score was
@@ -461,6 +467,19 @@ internal static class SymbolicTempoInference
             double bpm = bestBpm / ratio;
             if (bpm < MinBpm || bpm > MaxBpm)
                 continue;
+            // The 1.0 family member IS the tempo Search() just scored; reusing its
+            // refined phase/score avoids re-running the full coarse+refine scan for
+            // the identical BPM. The refined score is the coherent companion of the
+            // refined phase (Search now reports it), so the combined score uses it.
+            if (Math.Abs(ratio - 1.0) < 1e-12)
+            {
+                double reuseDurationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
+                double reuseAccentScore = AccentFitScore(timeline, bpm, sampleRate);
+                double reusePrior = TempoPrior(bpm);
+                double reuseCombined = 0.55 * searchRefinedScore + 0.20 * reuseDurationScore + 0.10 * reuseAccentScore + 0.15 * reusePrior;
+                scored.Add((new TempoCandidate(bpm, searchPhaseSample, reuseCombined, TempoAmbiguity.None), reuseCombined));
+                continue;
+            }
             long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
             double[] weights = onsets.GroupBy(o => o.Sample).Select(g => g.Sum(o => o.Weight)).ToArray();
             double spq = sampleRate * 60.0 / bpm;
@@ -481,7 +500,7 @@ internal static class SymbolicTempoInference
                 double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
                 if (score > bestPhaseScore * (1 + ScoreTieEpsilon)) { bestPhaseScore = score; bestPhase = phaseSamples; }
             }
-            long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
+            (long phaseSample, _) = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
             double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
             double accentScore = AccentFitScore(timeline, bpm, sampleRate);
             double prior = TempoPrior(bpm);
