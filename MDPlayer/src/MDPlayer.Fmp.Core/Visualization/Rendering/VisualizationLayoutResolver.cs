@@ -157,7 +157,7 @@ internal static class VisualizationLayoutResolver
         // Minimal: no scope region. A roll is kept only when it can retain a
         // readable content height; otherwise the panel degrades to aggregate
         // activity.
-        bool roll = rollPossible && (panelHeight - scopeHeight) >= MinimumRollContentHeight;
+        bool roll = rollPossible && panelHeight >= MinimumRollContentHeight;
         return (VisualizationLayoutDensity.Minimal, new VisualizationLayoutCapabilities(
             ShowScopes: false,
             ShowRoll: roll,

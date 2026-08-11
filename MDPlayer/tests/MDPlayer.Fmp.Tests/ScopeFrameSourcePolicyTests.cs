@@ -83,6 +83,51 @@ public sealed class ScopeFrameSourcePolicyTests
         }
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void Create_InteractivePolicy_DoesNotRouteOverviewThroughChannelSource(
+        int overviewKind)
+    {
+        VisualizationLayoutVariant overviewVariant = overviewKind == 0
+            ? VisualizationLayoutVariant.DiagnosticOverview
+            : VisualizationLayoutVariant.DeviceOverview;
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        VisualizationRequest request = FixtureRequest();
+        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationChannelFilter.All, VisualizationGroupBy.None);
+        int height = overviewVariant == VisualizationLayoutVariant.DiagnosticOverview ? 300 : 120;
+        ResolvedVisualizationLayout layout = VisualizationLayoutResolver.Resolve(
+            request.Output.Width, height, request.View.PastSeconds, request.View.FutureSeconds,
+            VisualizationLayoutMode.Diagnostic, topology, topology.Panels.Count,
+            VisualizationScopePosition.Top);
+        Assert.Equal(overviewVariant, layout.Variant);
+
+        string masterWav = Path.Combine(Path.GetTempPath(), $"overview-policy-{Guid.NewGuid():N}.wav");
+        WriteSineWav(masterWav);
+        try
+        {
+            var channels = Enumerable.Range(0, layout.Topology.Panels.Count)
+                .Select(p => new ProjectedScopeChannel(
+                    PanelIndex: p, Name: "master", Label: "Master", WavPath: masterWav,
+                    SemanticClass: ScopeSemanticClass.Mixed, WindowWidth: 1,
+                    DefaultAmplification: 1.0, DefaultColor: "#7AA4FF"))
+                .ToArray();
+            var prepared = MakePrepared(timeline, request, layout, masterWav, channels);
+
+            using VisualizationFrameRenderer renderer = VisualizationFrameRendererFactory.Create(
+                prepared, VisualizationWorkspace.Create(request), new RenderRuntimeOptions(),
+                introOutro: false, ScopeFrameSourcePolicy.Interactive);
+
+            Assert.False(renderer.HasScopeSource);
+            Assert.False(renderer.UsesApproximatedScopeSource);
+        }
+        finally
+        {
+            File.Delete(masterWav);
+        }
+    }
+
     private static VisualizationRequest FixtureRequest()
         => new()
         {

@@ -4,6 +4,7 @@ namespace Fmp.Core.Visualization.Rendering;
 // mechanical extraction; no alternate note renderer is introduced.
 internal sealed partial class PanelOverlayRenderer
 {
+    private const double NormalRibbonOpacity = 0.72;
     private static bool IsSsgMode(VisualizationNoteMode mode)
         => mode is VisualizationNoteMode.SsgTone
             or VisualizationNoteMode.SsgToneNoise
@@ -698,7 +699,7 @@ internal sealed partial class PanelOverlayRenderer
                 double ageSeconds = Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate);
                 temporalOpacity = 0.70 - 0.35 * Math.Clamp(ageSeconds / 0.25, 0, 1);
             }
-            alphaFactor *= opacityFactor * temporalOpacity;
+            alphaFactor *= NormalRibbonOpacity * opacityFactor * temporalOpacity;
             if (alphaFactor <= 0)
                 continue;
 
@@ -803,7 +804,7 @@ internal sealed partial class PanelOverlayRenderer
                     temporalOpacity = 0.70 - 0.35 * Math.Clamp(ageSeconds / 0.25, 0, 1);
                 }
 
-                alphaFactor = temporalOpacity;
+                alphaFactor = NormalRibbonOpacity * temporalOpacity;
                 if (taper)
                     alphaFactor *= Math.Clamp(
                         (note.EndSample - sample) / (double)_taperSamples,
@@ -879,7 +880,7 @@ internal sealed partial class PanelOverlayRenderer
         int bottom,
         double coverage)
     {
-        byte alpha = (byte)Math.Clamp(Math.Round(fill.A * coverage), 0, 255);
+        byte alpha = (byte)Math.Clamp(Math.Round(fill.A * NormalRibbonOpacity * coverage), 0, 255);
         for (int y = top; y < bottom; y++)
             BlendFlatPixel(frame, x, y, fill, alpha);
     }

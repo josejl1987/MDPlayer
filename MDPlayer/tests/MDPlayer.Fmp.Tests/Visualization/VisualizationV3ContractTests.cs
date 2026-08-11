@@ -273,6 +273,9 @@ public sealed class VisualizationV3ContractTests
     [Fact]
     public void ScopeRatioIsAppliedToAvailableContent()
     {
+        // The scope-height ratio applies to the stacked layout with a roll.
+        // DiagnosticGrid ignores it: the integrated scope always mirrors the full
+        // roll body height, and no-roll layouts hand the whole body to the scope.
         var layout = new OverlayLayout(
             960,
             720,
@@ -280,7 +283,9 @@ public sealed class VisualizationV3ContractTests
             2.25,
             1,
             VisualizationLayoutMode.Diagnostic,
-            scopeRatioOverride: 0.32);
+            variant: VisualizationLayoutVariant.DiagnosticOverview,
+            scopeRatioOverride: 0.32,
+            showRoll: true);
 
         Assert.Equal(
             (int)Math.Round((layout.PanelHeight - layout.PanelHeaderHeight) * 0.32),

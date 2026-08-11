@@ -45,10 +45,10 @@ public sealed class PanelOverlayRendererSplitTests
         int scopeOffset = scopeY * renderer.Width * 4 + 100 * 4 + 3;
         Assert.Equal(0, staticFrame[scopeOffset]);
 
-        // A pixel in a panel timeline region is opaque chrome.
-        int timelineY = layout.GetTimelineRect(0).Y + 4;
-        int timelineOffset = timelineY * renderer.Width * 4 + 100 * 4 + 3;
-        Assert.Equal(255, staticFrame[timelineOffset]);
+        // The pitch gutter (left of the scope) is opaque chrome inside the panel.
+        OverlayRect timeline = layout.GetTimelineRect(0);
+        int gutterOffset = (timeline.Y + 4) * renderer.Width * 4 + (timeline.X + 5) * 4 + 3;
+        Assert.Equal(255, staticFrame[gutterOffset]);
     }
 
     [Fact]
@@ -58,11 +58,22 @@ public sealed class PanelOverlayRendererSplitTests
         var frame = new byte[renderer.FrameByteCount];
         renderer.RenderDynamicFrame(0, frame);
 
-        // The scope regions must stay transparent in the dynamic frame — the
-        // scope rows come from the separate scope layer.
-        int scopeY = renderer.Layout.GetScopeRowDestinationY(1) + renderer.Layout.ScopeHeight / 2;
-        int scopeOffset = scopeY * renderer.Width * 4 + 100 * 4 + 3;
-        Assert.Equal(0, frame[scopeOffset]);
+        // The scope region is a transparent hole in the dynamic frame — the
+        // scope rows come from the separate scope layer. Reference chrome (the
+        // pitch grid, time lines, playhead) draws over the integrated body, so
+        // assert the hole exists rather than a single reference-free pixel.
+        bool transparentScopePixel = false;
+        for (int panel = 0; panel < renderer.Layout.PanelCount && !transparentScopePixel; panel++)
+        {
+            OverlayRect scope = renderer.Layout.GetScopeRect(panel);
+            for (int y = scope.Y; y < scope.Bottom && !transparentScopePixel; y++)
+            for (int x = scope.X + 4; x < scope.Right - 4 && !transparentScopePixel; x++)
+            {
+                int offset = (y * renderer.Width + x) * 4 + 3;
+                transparentScopePixel = frame[offset] == 0;
+            }
+        }
+        Assert.True(transparentScopePixel, "the scope hole must contain transparent pixels");
 
         // The clock is drawn in the top bar, so some pixel in that row is opaque.
         bool clockPixels = false;

@@ -90,8 +90,13 @@ public sealed class PanelOverlayGeometryTests
         {
             OverlayRect scope = layout.GetScopeRect(i);
             OverlayRect timeline = layout.GetTimelineRect(i);
-            Assert.Equal(scope.X, timeline.X);
-            Assert.Equal(scope.Width, timeline.Width);
+            // DiagnosticGrid integrates the scope into the roll body: the scope is
+            // the signal portion right of the pitch gutter, sharing the body's
+            // vertical span and horizontal bounds minus the gutter.
+            Assert.Equal(timeline.X + layout.PitchLabelWidth, scope.X);
+            Assert.Equal(timeline.Width - layout.PitchLabelWidth, scope.Width);
+            Assert.Equal(timeline.Y, scope.Y);
+            Assert.Equal(timeline.Height, scope.Height);
         }
     }
 

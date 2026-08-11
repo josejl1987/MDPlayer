@@ -20,7 +20,7 @@ namespace Fmp.Core.Visualization.Rendering;
 internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 {
     // Same color the branch used for the FFmpeg master-waveform fallback.
-    private static readonly byte[] Color = { 0x7A, 0xA4, 0xFF };
+    private static readonly byte[] Color = { 0x7A, 0xA4, 0xFF, 0x70 };
 
     private readonly PanelOverlayRenderer _overlay;
     private readonly int _sampleRate;
@@ -32,9 +32,9 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
     private readonly int _gridWidth;
     private readonly int _gridHeight;
     private readonly FileStream _stream;
-    private short[] _window = System.Array.Empty<short>();
-    private byte[] _raw = System.Array.Empty<byte>();
-    private int _windowCount;
+    private readonly int _bucketSize;
+    private readonly int[] _minimums;
+    private readonly int[] _maximums;
 
     private MasterWaveformFrameSource(
         PanelOverlayRenderer overlay,
@@ -58,6 +58,14 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         _gridWidth = gridWidth;
         _gridHeight = gridHeight;
         _stream = stream;
+        long visibleSamples = Math.Max(1, (long)Math.Round(overlay.Layout.WindowSeconds * sampleRate));
+        long targetBuckets = Math.Max(1, (long)gridWidth * 2);
+        _bucketSize = (int)Math.Clamp(
+            (visibleSamples + targetBuckets - 1) / targetBuckets, 1, int.MaxValue);
+        int bucketCount = checked((int)((totalSamples + _bucketSize - 1) / _bucketSize));
+        _minimums = new int[bucketCount];
+        _maximums = new int[bucketCount];
+        BuildPeakEnvelope();
     }
 
     /// <summary>
@@ -206,14 +214,11 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 
         destination.Clear();
 
-        long startSample = OverlayLayout.FrameToSample(
+        long currentSample = OverlayLayout.FrameToSample(
             frameIndex, _sampleRate, _fpsNumerator, _fpsDenominator);
-        long endSample = OverlayLayout.FrameToSample(
-            (long)frameIndex + 1, _sampleRate, _fpsNumerator, _fpsDenominator);
+        long startSample = _overlay.Layout.WindowStartSample(currentSample, _sampleRate);
+        long endSample = _overlay.Layout.WindowEndSample(currentSample, _sampleRate);
         long windowSamples = Math.Max(0, endSample - startSample);
-
-        // Read the frame's audio window once; every grid cell samples it.
-        ReadWindow(startSample, windowSamples);
 
         int panelCount = _overlay.Layout.PanelCount;
         int columnCount = _overlay.Layout.ColumnCount;
@@ -222,17 +227,17 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         for (int panelIndex = 0; panelIndex < panelCount; panelIndex++)
         {
             int row = panelIndex / columnCount;
-            int column = panelIndex % columnCount;
             OverlayRect scope = _overlay.Layout.GetScopeRect(panelIndex);
-            int cellWidth = Math.Min(_gridWidth / columnCount, scope.Width);
+            int cellWidth = Math.Min(_gridWidth - scope.X, scope.Width);
             if (cellWidth <= 0 || scopeHeight <= 0)
                 continue;
             DrawCell(
                 destination,
-                column * cellWidth,
+                scope.X,
                 row * scopeHeight,
                 cellWidth,
                 scopeHeight,
+                startSample,
                 windowSamples);
         }
     }
@@ -242,64 +247,42 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         _stream.Dispose();
     }
 
-    private void ReadWindow(long startSample, long windowSamples)
+    private void BuildPeakEnvelope()
     {
-        int needed = checked((int)Math.Min(windowSamples, _totalSamples) * _channels);
-        if (_window.Length < needed)
-            _window = new short[needed];
-        if (_window.Length > 0)
-            Array.Clear(_window, 0, _window.Length);
-
-        if (windowSamples <= 0 || _totalSamples <= 0)
+        _stream.Seek(_dataStart, SeekOrigin.Begin);
+        const int ChunkSamples = 64 * 1024;
+        byte[] raw = new byte[ChunkSamples * _channels * 2];
+        for (long offset = 0; offset < _totalSamples; offset += ChunkSamples)
         {
-            _windowCount = 0;
-            return;
-        }
-
-        long first = Math.Clamp(startSample, 0, _totalSamples);
-        long last = Math.Min(_totalSamples, startSample + windowSamples);
-        int count = checked((int)(last - first));
-        if (count <= 0)
-        {
-            _windowCount = 0;
-            return;
-        }
-
-        int bytes = count * _channels * 2;
-        if (_raw.Length < bytes)
-            _raw = new byte[bytes];
-
-        _stream.Seek(_dataStart + first * _channels * 2L, SeekOrigin.Begin);
-        int total = 0;
-        while (total < bytes)
-        {
-            int read = _stream.Read(_raw, total, bytes - total);
-            if (read <= 0)
-                break;
-            total += read;
-        }
-        if (total < bytes)
-        {
-            // Truncated (or lying) WAV: the unread tail would otherwise retain
-            // the previous frame's samples and be drawn as garbage. Silence it.
-            Array.Clear(_raw, total, bytes - total);
-        }
-
-        int perChannel = count;
-        for (int i = 0; i < perChannel; i++)
-        {
-            // _raw is interleaved: sample pair i occupies bytes [4i, 4i+4)
-            // for stereo (left at 4i, right at 4i+2), or [2i, 2i+2) for mono.
-            int interleaved = i * _channels;
-            _window[i] =
-                BinaryPrimitives.ReadInt16LittleEndian(_raw.AsSpan(interleaved * 2, 2));
-            if (_channels == 2)
+            int count = (int)Math.Min(ChunkSamples, _totalSamples - offset);
+            int bytes = count * _channels * 2;
+            int total = 0;
+            while (total < bytes)
             {
-                _window[perChannel + i] =
-                    BinaryPrimitives.ReadInt16LittleEndian(_raw.AsSpan((interleaved + 1) * 2, 2));
+                int read = _stream.Read(raw, total, bytes - total);
+                if (read <= 0) break;
+                total += read;
             }
+            int available = total / (_channels * 2);
+            for (int i = 0; i < available; i++)
+            {
+                int offsetBytes = i * _channels * 2;
+                int min = _channels == 2
+                    ? Math.Min(BinaryPrimitives.ReadInt16LittleEndian(raw.AsSpan(offsetBytes, 2)),
+                        BinaryPrimitives.ReadInt16LittleEndian(raw.AsSpan(offsetBytes + 2, 2)))
+                    : BinaryPrimitives.ReadInt16LittleEndian(raw.AsSpan(offsetBytes, 2));
+                int max = min;
+                if (_channels == 2)
+                {
+                    int right = BinaryPrimitives.ReadInt16LittleEndian(raw.AsSpan(offsetBytes + 2, 2));
+                    max = Math.Max(max, right);
+                }
+                int bucket = (int)((offset + i) / _bucketSize);
+                _minimums[bucket] = Math.Min(_minimums[bucket], min);
+                _maximums[bucket] = Math.Max(_maximums[bucket], max);
+            }
+            if (available < count) break;
         }
-        _windowCount = perChannel;
     }
 
     private void DrawCell(
@@ -308,6 +291,7 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         int cellY,
         int width,
         int height,
+        long startSample,
         long windowSamples)
     {
         int yCenter = cellY + height / 2;
@@ -315,25 +299,21 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 
         for (int x = 0; x < width; x++)
         {
-            long s0 = x * windowSamples / width;
-            long s1 = (x + 1L) * windowSamples / width;
-            if (s1 <= s0)
-                s1 = s0 + 1;
-
             int min = 0;
             int max = 0;
-            for (long s = s0; s < s1; s++)
+            long sampleStart = startSample + x * windowSamples / width;
+            long sampleEnd = startSample + (x + 1L) * windowSamples / width;
+            if (sampleEnd <= sampleStart) sampleEnd = sampleStart + 1;
+            if (sampleEnd > 0 && sampleStart < _totalSamples)
             {
-                if (s >= _windowCount)
-                    break;
-                int left = _window[(int)s];
-                if (left < min) min = left;
-                if (left > max) max = left;
-                if (_channels == 2)
+                sampleStart = Math.Max(0, sampleStart);
+                sampleEnd = Math.Min(_totalSamples, sampleEnd);
+                int firstBucket = (int)Math.Clamp(sampleStart / _bucketSize, 0, _minimums.Length - 1);
+                int lastBucket = (int)Math.Clamp((sampleEnd - 1) / _bucketSize, 0, _minimums.Length - 1);
+                for (int bucket = firstBucket; bucket <= lastBucket; bucket++)
                 {
-                    int right = _window[(int)s + _windowCount];
-                    if (right < min) min = right;
-                    if (right > max) max = right;
+                    min = Math.Min(min, _minimums[bucket]);
+                    max = Math.Max(max, _maximums[bucket]);
                 }
             }
 
@@ -353,7 +333,7 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
                 destination[offset] = Color[0];
                 destination[offset + 1] = Color[1];
                 destination[offset + 2] = Color[2];
-                destination[offset + 3] = 255;
+                destination[offset + 3] = Color[3];
             }
         }
     }

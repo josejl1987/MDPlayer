@@ -119,7 +119,8 @@ internal static class VisualizationFrameRendererFactory
         PanelOverlayRenderer overlay)
     {
         if (!prepared.Scope.Enabled
-            || !prepared.Layout.Geometry.HasScopes)
+            || !prepared.Layout.Geometry.HasScopes
+            || prepared.Layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
         {
             return null;
         }

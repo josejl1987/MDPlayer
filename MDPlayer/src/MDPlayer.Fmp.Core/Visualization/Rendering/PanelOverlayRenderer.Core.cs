@@ -87,7 +87,10 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private OverlayColor CanvasBackground => Palette.CanvasBackground;
     private OverlayColor HeaderBackground => Palette.HeaderBackground;
     private OverlayColor TimelineBackground => Palette.TimelineBackground;
-    private OverlayColor BlackKeyBand => Palette.BlackKeyBand;
+    // Keep the pitch guide subordinate to the time-aligned waveform. Custom
+    // palettes may request less opacity, but never make this semantic band
+    // opaque over DiagnosticGrid's waveform layer.
+    private OverlayColor BlackKeyBand => Palette.BlackKeyBand.WithAlpha(Math.Min(Palette.BlackKeyBand.A, (byte)90));
     private OverlayColor GridLine => Palette.GridLine;
     private OverlayColor Border => Palette.Border;
     private OverlayColor MutedText => Palette.MutedText;
@@ -405,9 +408,21 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         }
 
         _staticFrame.AsSpan().CopyTo(destination);
+        // The playhead is a background time reference: draw it before the scope
+        // rows so the (opaque) waveform can cover it, keeping the current-sample
+        // signal visible exactly at the playhead column.
+        DrawPlayheads(destination);
         if (!scopeGrid.IsEmpty)
             PlaceScopeRows(scopeGrid, destination);
         DrawDynamicCore(frameIndex, destination);
+    }
+
+    /// <summary>Draws the per-panel playhead cursor (playhead position is a fixed
+    /// window fraction, independent of the current sample).</summary>
+    private void DrawPlayheads(Span<byte> destination)
+    {
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+            DrawPlayhead(destination, panelIndex);
     }
 
     private void RenderMotionBlurFrame(
@@ -594,7 +609,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 // Per-channel dynamic state in the panel header is retained
                 // for the diagnostic grid.
                 DrawDynamicPanelHeader(destination, panel, currentSample);
-                DrawPlayhead(destination, panel.Index);
             }
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
@@ -1082,12 +1096,15 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     }
 
     /// <summary>
-    /// Copies each scope cell from the Corrscope grid strip into the
-    /// transparent scope hole of its panel. The grid is raw RGB0 (alpha bytes
-    /// are 0), so the alpha of every placed pixel is forced to 255 to make the
-    /// scopes opaque over the canvas. Each grid row holds one cell per column;
-    /// the cell for panel <c>row*ColumnCount + column</c> starts at
-    /// <c>column * PanelWidth</c> within row <c>row</c>.
+    /// Copies each scope cell from the Corrscope grid strip into its panel.
+    /// Every placed waveform pixel is opaque (alpha forced 255): the scope
+    /// region is a transparent hole in the overlay frame, and the composite is
+    /// what paints the waveform into it — semi-transparent placement would leave
+    /// the scope see-through. DiagnosticGrid reads each panel cell offset by its
+    /// pitch gutter so the waveform's playhead aligns with the shared body;
+    /// overview RGB0 frames use the plain per-column cell. Each grid row holds
+    /// one cell per column; the cell for panel <c>row*ColumnCount + column</c>
+    /// starts at <c>column * PanelWidth</c> within row <c>row</c>.
     /// </summary>
     private void PlaceScopeRows(ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
     {
@@ -1102,7 +1119,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             OverlayRect scope = _layout.GetScopeRect(panelIndex);
             int copyWidth = Math.Min(sourceWidth / _layout.ColumnCount, scope.Width);
             int srcY = row * scopeHeight;
-            int srcX = column * copyWidth;
+            int srcX = _layout.Variant == VisualizationLayoutVariant.DiagnosticGrid
+                ? scope.X
+                : column * copyWidth;
             for (int y = 0; y < scopeHeight; y++)
             {
                 int src = (srcY + y) * sourceStride + srcX * 4;
@@ -1259,10 +1278,13 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             }
 
             FillRect(frame, panel, HeaderBackground);
-            ClearRect(frame, scope);
             FillRect(frame, timeline, TimelineBackground);
+            // The scope region stays a transparent hole for the Corrscope
+            // waveform, including DiagnosticGrid's integrated body where the
+            // scope is the signal portion of the roll. Notes and lane chrome
+            // drawn afterward remain visible over the hole.
+            ClearRect(frame, scope);
             StrokeRect(frame, panel, Border, 1);
-            StrokeRect(frame, scope, Border.WithAlpha(180), 1);
 
             OverlayColor accent = _panelAccents[index];
             FillRect(frame, new OverlayRect(header.X, header.Y, 4, header.Height), accent);

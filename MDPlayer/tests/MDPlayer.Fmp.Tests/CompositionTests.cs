@@ -79,10 +79,16 @@ public sealed class CompositionTests
         byte[] frame = renderer.RenderFrame(40); // 2 s in
         Assert.Equal(renderer.FrameByteCount, frame.Length);
 
-        // The roll lanes contain drawn note content (alpha 255), and the
-        // scope cells stay transparent for Corrscope.
+        // The roll lane contains drawn note content (alpha 255), and the scope
+        // cells stay transparent for Corrscope.
         OverlayRect roll = renderer.Layout.GetTimelineRect(0);
-        Assert.Equal(255, AlphaAt(frame, renderer.Width, roll.X + 100, roll.Y + roll.Height / 2));
+        bool rollHasOpaqueNote = false;
+        for (int y = roll.Y; y < roll.Bottom && !rollHasOpaqueNote; y++)
+        {
+            for (int x = roll.X + 30; x < roll.Right - 10 && !rollHasOpaqueNote; x++)
+                rollHasOpaqueNote = AlphaAt(frame, renderer.Width, x, y) == 255;
+        }
+        Assert.True(rollHasOpaqueNote, "the roll lane must contain opaque note content");
         OverlayRect scope = renderer.Layout.GetScopeRect(0);
         Assert.Equal(0, AlphaAt(frame, renderer.Width, scope.X + scope.Width / 2, scope.Y + scope.Height / 2));
     }
@@ -125,9 +131,124 @@ public sealed class CompositionTests
         }
     }
 
+    [Fact]
+    public void Diagnostic_WaveformColumnAndPlayheadShareLayoutX()
+    {
+        PanelOverlayRenderer renderer = CreateRenderer(VisualizationLayoutMode.Diagnostic);
+        byte[] scopeGrid = new byte[renderer.ScopeFrameByteCount];
+        int frameIndex = 40;
+        int panelIndex = 0;
+        OverlayRect scope = renderer.Layout.GetScopeRect(panelIndex);
+        int expectedX = renderer.Layout.GetPlayheadX(panelIndex);
+        int localX = expectedX - scope.X;
+        Assert.InRange(localX, 0, scope.Width - 1);
+
+        for (int y = 0; y < scope.Height; y++)
+        {
+            int offset = (y * renderer.Layout.CorrscopeGridWidth + localX) * 4;
+            scopeGrid[offset] = 255;
+            scopeGrid[offset + 3] = 255;
+        }
+
+        byte[] frame = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(frameIndex, scopeGrid, frame);
+
+        Assert.Equal(255, frame[((scope.Y + scope.Height / 2) * renderer.Width + expectedX) * 4 + 3]);
+        OverlayRect timeline = renderer.Layout.GetTimelineRect(panelIndex);
+        Assert.True(AlphaAt(frame, renderer.Width, expectedX, timeline.Y + timeline.Height / 2) > 0);
+    }
+
+    [Fact]
+    public void Diagnostic_WaveformLayerPreservesAlphaBoundsAndFm3RhythmSemanticVariants()
+    {
+        PanelOverlayRenderer renderer = CreateRenderer(VisualizationLayoutMode.Diagnostic);
+        byte[] baseline = renderer.RenderFrame(40);
+        byte[] scopeGrid = new byte[renderer.ScopeFrameByteCount];
+        Array.Fill(scopeGrid, (byte)90);
+        byte[] composed = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(40, scopeGrid, composed);
+
+        for (int panel = 0; panel < renderer.Layout.PanelCount; panel++)
+        {
+            OverlayRect scope = renderer.Layout.GetScopeRect(panel);
+            for (int y = scope.Y; y < scope.Bottom; y++)
+            for (int x = scope.X; x < scope.Right; x++)
+                Assert.Equal(255, AlphaAt(composed, renderer.Width, x, y));
+        }
+
+        // FM3 (panel 2) and rhythm (panel 9) retain their semantic lanes when
+        // a waveform layer is present; scope compositing must not overwrite them.
+        foreach (int panelIndex in new[] { 2, 9 })
+        {
+            OverlayRect timeline = renderer.Layout.GetTimelineRect(panelIndex);
+            int coloredBaseline = CountColored(baseline, renderer.Width, timeline);
+            int coloredComposed = CountColored(composed, renderer.Width, timeline);
+            Assert.True(coloredBaseline > 0, $"panel {panelIndex} baseline should contain semantic content");
+            // The composite may add the opaque waveform, but it must never remove
+            // the FM3/rhythm semantic pixels that were already there.
+            Assert.True(coloredComposed >= coloredBaseline,
+                $"panel {panelIndex} composite must not overwrite semantic lanes");
+        }
+    }
+
+    [Theory]
+    [InlineData(960, 300, false)]
+    [InlineData(320, 120, true)]
+    public void OverviewVariants_DoNotReceiveDiagnosticWaveformCells(
+        int width, int height, bool deviceOverview)
+    {
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+            timeline, VisualizationChannelFilter.All, VisualizationGroupBy.None);
+        ResolvedVisualizationLayout resolved = VisualizationLayoutResolver.Resolve(
+            width, height, 0.75, 2.25, VisualizationLayoutMode.Diagnostic, topology,
+            topology.Panels.Count, VisualizationScopePosition.Top);
+        Assert.Equal(
+            deviceOverview ? VisualizationLayoutVariant.DeviceOverview : VisualizationLayoutVariant.DiagnosticOverview,
+            resolved.Variant);
+
+        using var renderer = new PanelOverlayRenderer(timeline, resolved);
+        byte[] baseline = renderer.RenderFrame(0);
+        byte[] scopeGrid = new byte[renderer.ScopeFrameByteCount];
+        Array.Fill(scopeGrid, (byte)200);
+        byte[] composed = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(0, scopeGrid, composed);
+
+        for (int offset = 0; offset < composed.Length; offset += 4)
+        {
+            if (composed[offset] == baseline[offset]
+                && composed[offset + 1] == baseline[offset + 1]
+                && composed[offset + 2] == baseline[offset + 2]
+                && composed[offset + 3] == baseline[offset + 3])
+                continue;
+
+            int pixel = offset / 4;
+            int x = pixel % renderer.Width;
+            int y = pixel / renderer.Width;
+            Assert.Contains(Enumerable.Range(0, renderer.Layout.PanelCount), panel =>
+            {
+                OverlayRect scope = renderer.Layout.GetScopeRect(panel);
+                return x >= scope.X && x < scope.Right && y >= scope.Y && y < scope.Bottom;
+            });
+        }
+    }
+
     private static byte AlphaAt(byte[] frame, int width, int x, int y)
     {
         int offset = (y * width + x) * 4;
         return frame[offset + 3];
+    }
+
+    private static int CountColored(byte[] frame, int width, OverlayRect rect)
+    {
+        int count = 0;
+        for (int y = rect.Y; y < rect.Bottom; y++)
+        for (int x = rect.X; x < rect.Right; x++)
+        {
+            int offset = (y * width + x) * 4;
+            if ((frame[offset] | frame[offset + 1] | frame[offset + 2]) != 0)
+                count++;
+        }
+        return count;
     }
 }

@@ -45,8 +45,15 @@ public sealed class OverlayLayoutInvariantTests
             OverlayRect roll = g.GetTimelineRect(i);
 
             Assert.True(header.Width > 0 && header.Height > 0, "header positive");
-            // Scope and roll are separated by the divider, but never overlap.
-            Assert.True(scope.Bottom <= roll.Y, "scope does not overlap roll");
+            // DiagnosticGrid integrates the scope INTO the shared roll body: the
+            // scope is the signal portion right of the pitch gutter, never a
+            // separate stacked region. It must be a strict sub-rectangle of the
+            // roll with the same vertical span.
+            Assert.True(scope.X >= roll.X && scope.Right <= roll.Right, "scope inside roll horizontally");
+            Assert.Equal(roll.Y, scope.Y);
+            Assert.Equal(roll.Bottom, scope.Bottom);
+            Assert.True(scope.Width < roll.Width, "pitch gutter keeps scope narrower than the roll");
+            Assert.True(header.Bottom <= roll.Y, "header above the shared body");
             Assert.True(header.Y >= panel.Y && roll.Bottom <= panel.Bottom, "inside panel");
         }
     }
@@ -61,10 +68,9 @@ public sealed class OverlayLayoutInvariantTests
         Assert.True(withoutScopes.HasRoll);
         Assert.Equal(0, withoutScopes.ScopeHeight);
         Assert.Equal(0, withoutScopes.DividerHeight);
-        // Roll grows to consume the freed scope + divider height.
-        Assert.Equal(
-            withScopes.TimelineHeight + withScopes.ScopeHeight + withScopes.DividerHeight,
-            withoutScopes.TimelineHeight);
+        // The roll already owns the whole body in the integrated design; disabling
+        // scopes removes the scope reservation but cannot grow the body further.
+        Assert.Equal(withScopes.TimelineHeight, withoutScopes.TimelineHeight);
 
         // No invisible gap: header is immediately followed by roll.
         var header = withoutScopes.GetHeaderRect(0);
@@ -81,8 +87,10 @@ public sealed class OverlayLayoutInvariantTests
         Assert.False(withoutRoll.HasRoll);
         Assert.True(withoutRoll.HasScopes);
         Assert.Equal(0, withoutRoll.TimelineHeight);
-        Assert.True(withoutRoll.ScopeHeight > withRoll.ScopeHeight,
-            "scope grows when the roll is disabled");
+        // With the roll gone the scope owns the entire content body (it already
+        // filled it in the integrated layout, so it never shrinks).
+        Assert.True(withoutRoll.ScopeHeight >= withRoll.ScopeHeight,
+            "scope takes the full body when the roll is disabled");
     }
 
     [Fact]

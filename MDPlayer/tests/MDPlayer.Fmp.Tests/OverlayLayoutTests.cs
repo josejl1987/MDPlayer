@@ -135,14 +135,17 @@ public sealed class OverlayLayoutTests
     }
 
     [Fact]
-    public void Geometry_1080p_PanelSubRegionsMatchReference()
+    public void Geometry_1080p_DiagnosticGridUsesAlignedTimelineBody()
     {
         var layout = CreateLayout(1920, 1080);
         Assert.Equal(244, layout.PanelHeight);
         Assert.Equal(28, layout.PanelHeaderHeight);
-        Assert.Equal(84, layout.ScopeHeight);
-        Assert.Equal(2, layout.DividerHeight);
-        Assert.Equal(130, layout.TimelineHeight);
+        Assert.Equal(216, layout.ScopeHeight);
+        Assert.Equal(0, layout.DividerHeight);
+        Assert.Equal(216, layout.TimelineHeight);
+        Assert.Equal(layout.PanelHeight - layout.PanelHeaderHeight, layout.GetTimelineRect(0).Height);
+        Assert.Equal(layout.GetTimelineRect(0).X + layout.PitchLabelWidth, layout.GetScopeRect(0).X);
+        Assert.Equal(layout.GetTimelineRect(0).Y, layout.GetScopeRect(0).Y);
     }
 
     [Fact]
@@ -170,10 +173,12 @@ public sealed class OverlayLayoutTests
     }
 
     [Fact]
-    public void Geometry_1080p_CorrscopeCompactHeightIs336()
+    public void Geometry_1080p_CorrscopeGridSpansFullBody()
     {
         var layout = CreateLayout(1920, 1080);
-        Assert.Equal(336, layout.CorrscopeGridHeight);
+        // The integrated DiagnosticGrid scope is the full body height, so the
+        // Corrscope grid spans ScopeHeight * RowCount = 216 * 4.
+        Assert.Equal(864, layout.CorrscopeGridHeight);
     }
 
     [Fact]

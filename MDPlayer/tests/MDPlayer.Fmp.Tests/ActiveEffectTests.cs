@@ -115,40 +115,42 @@ public sealed class ActiveEffectTests
     [Fact]
     public void OnsetRipple_RendersRingAtPlayheadWithin220Ms()
     {
-        // Note starts at sample 1500 (frame 30). Frame 31 = sample 1550 →
-        // age 50 ms (within ripple). Frame 37 = sample 1850 → age 350 ms
-        // (past ripple). Ripple pixels should exist at 50 ms but not 350 ms.
-        var renderer = Renderer(Timeline(Note(1500, 4500, 60)));
-        byte[] frameRipple = renderer.RenderFrame(31); // age 50 ms
-        byte[] frameNoRipple = renderer.RenderFrame(37); // age 350 ms
-        OverlayRect lane = Lane(renderer);
+        // Note starts at sample 1500 (frame 30). Frame 31 = sample 1550 → age
+        // 50 ms (within ripple). Enabling effects adds the onset ripple ring at
+        // the playhead, so the effect delta at a fresh onset is positive.
+        // Minimal (not None) is the baseline so the ribbon-height energy
+        // adjustment is held constant and only the flash/ripple differ.
+        var rendererWith = Renderer(Timeline(Note(1500, 4500, 60)), EffectsMode.All);
+        var rendererWithout = Renderer(Timeline(Note(1500, 4500, 60)), EffectsMode.Minimal);
+        OverlayRect lane = Lane(rendererWith);
 
-        int ripplePixels = CountAccentPixelsNearPlayhead(frameRipple, renderer, lane);
-        int noRipplePixels = CountAccentPixelsNearPlayhead(frameNoRipple, renderer, lane);
+        int withRipple = CountAccentPixelsNearPlayhead(rendererWith.RenderFrame(31), rendererWith, lane);
+        int withoutRipple = CountAccentPixelsNearPlayhead(rendererWithout.RenderFrame(31), rendererWithout, lane);
 
-        Assert.True(ripplePixels > noRipplePixels,
-            $"Ripple should produce accent pixels at 50 ms but not at 350 ms: ripple={ripplePixels}, none={noRipplePixels}.");
+        Assert.True(withRipple > withoutRipple,
+            $"Ripple should add accent pixels at a fresh onset: with={withRipple}, without={withoutRipple}.");
     }
 
     [Fact]
     public void OnsetRipple_DoesNotFireForOffScreenOnset()
     {
-        // Note starts at 100; frame 30 = sample 1500 → onset is 1400 ms in the
-        // past (off-screen, since past window is 750 ms). No ripple should fire.
-        // Compare accent pixel count against a frame with a fresh visible onset.
-        var renderer = Renderer(Timeline(Note(100, 4500, 60)));
-        byte[] frameOffScreen = renderer.RenderFrame(30); // onset at 100, off-screen
-        OverlayRect lane = Lane(renderer);
+        // Onset at sample 100 is 1400 ms in the past at frame 30 (off-screen,
+        // past window is 750 ms), so no flash or ripple fires: enabling effects
+        // adds nothing near the playhead. A fresh visible onset does fire them.
+        var offWith = Renderer(Timeline(Note(100, 4500, 60)), EffectsMode.All);
+        var offWithout = Renderer(Timeline(Note(100, 4500, 60)), EffectsMode.Minimal);
+        OverlayRect offLane = Lane(offWith);
+        int offAll = CountAccentPixelsNearPlayhead(offWith.RenderFrame(30), offWith, offLane);
+        int offNone = CountAccentPixelsNearPlayhead(offWithout.RenderFrame(30), offWithout, offLane);
 
-        var rendererOnScreen = Renderer(Timeline(Note(1500, 4500, 60)));
-        byte[] frameOnScreen = rendererOnScreen.RenderFrame(31); // onset at 1500, age 50 ms
-        OverlayRect laneOnScreen = Lane(rendererOnScreen);
+        var onWith = Renderer(Timeline(Note(1500, 4500, 60)), EffectsMode.All);
+        var onWithout = Renderer(Timeline(Note(1500, 4500, 60)), EffectsMode.Minimal);
+        OverlayRect onLane = Lane(onWith);
+        int onAll = CountAccentPixelsNearPlayhead(onWith.RenderFrame(31), onWith, onLane);
+        int onNone = CountAccentPixelsNearPlayhead(onWithout.RenderFrame(31), onWithout, onLane);
 
-        int offScreenPixels = CountAccentPixelsNearPlayhead(frameOffScreen, renderer, lane);
-        int onScreenPixels = CountAccentPixelsNearPlayhead(frameOnScreen, rendererOnScreen, laneOnScreen);
-
-        Assert.True(offScreenPixels < onScreenPixels,
-            $"Off-screen onset should produce fewer accent pixels than on-screen: off={offScreenPixels}, on={onScreenPixels}.");
+        Assert.True(offAll - offNone < onAll - onNone,
+            $"Off-screen onset should add fewer accent pixels than on-screen: off={offAll - offNone}, on={onAll - onNone}.");
     }
 
     [Fact]
@@ -316,7 +318,6 @@ public sealed class ActiveEffectTests
     private static int CountAccentPixelsNearPlayhead(byte[] frame, PanelOverlayRenderer renderer, OverlayRect lane)
     {
         int playheadX = PlayheadX(renderer);
-        var accent = InstrumentColorResolver.ResolveChannelAccent(Fm1, 0).Lighten(0.5);
         int count = 0;
         // Scan a 20px-wide, full-lane-height window centered on the playhead.
         for (int x = Math.Max(lane.X, playheadX - 10); x < Math.Min(lane.Right, playheadX + 10); x++)
@@ -326,11 +327,15 @@ public sealed class ActiveEffectTests
                 int offset = (y * renderer.Width + x) * 4;
                 if (frame[offset + 3] == 0)
                     continue;
-                // Check if the pixel is "accent-bright" (high brightness, not
-                // the dark background). Ripples produce semi-transparent accent
-                // pixels that brighten the area.
-                int brightness = frame[offset] + frame[offset + 1] + frame[offset + 2];
-                if (brightness > accent.R + accent.G + accent.B - 60 && brightness > 300)
+                // The ripple ring is drawn in the FM1 accent hue (blue-dominant),
+                // while note ribbons use their own instrument fill (green here).
+                // Require the accent hue in addition to brightness so the bright
+                // ribbon over the integrated transparent scope hole is not
+                // mistaken for a ripple.
+                int r = frame[offset], g = frame[offset + 1], b = frame[offset + 2];
+                int brightness = r + g + b;
+                if (brightness > 300
+                    && b >= g && g >= r)
                     count++;
             }
         }

@@ -167,9 +167,8 @@ internal sealed class OverlayLayout
         SafeHorizontalMargin = Math.Clamp((int)Math.Round(width * (32.0 / 1920.0)), 16, 32);
         SafeVerticalMargin = Math.Clamp((int)Math.Round(height * (24.0 / 1080.0)), 12, 24);
 
-        // Panel sub-regions scale with the panel height, anchored to the
-        // reference 1080p proportions (header 28, scope 84, divider 2,
-        // timeline 130 out of 244).
+        // DiagnosticGrid uses one aligned body: the waveform is the signal
+        // portion of the roll rather than a stacked standalone scope.
         // The 28px reference lands exactly on the default 1080p panel. On tight
         // high-channel-count grids the header yields down to a 12px floor so the
         // scope keeps its validator minimum (56@>=720, scaled below).
@@ -187,14 +186,32 @@ internal sealed class OverlayLayout
         if (scopeHeightOverride is null && scopeRatioOverride is not null)
             defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * scopeRatioOverride.Value));
 
-        if (HasScopes)
+        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
         {
-            ScopeHeight = scopeHeightOverride
-                ?? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2));
+            // DiagnosticGrid has one shared body below the header. Any legacy
+            // timeline override describes the old stacked geometry and would
+            // be double-counted when ScopeHeight mirrors the body height. The
+            // scope reservation disappears entirely when scopes are disabled so
+            // no invisible gap remains in the roll.
+            TimelineHeight = availableContentHeight;
+            ScopeHeight = HasScopes ? TimelineHeight : 0;
+            DividerHeight = 0;
+        }
+        else if (HasScopes)
+        {
             DividerHeight = Math.Max(1,
                 (int)Math.Round(PanelHeight * (DefaultDividerHeight / (double)DefaultPanelHeight)));
-            int derivedTimeline = availableContentHeight - ScopeHeight - DividerHeight;
-            TimelineHeight = timelineHeightOverride ?? derivedTimeline;
+            int maxScopeHeight = Math.Max(0, availableContentHeight - DividerHeight);
+            ScopeHeight = Math.Clamp(
+                scopeHeightOverride
+                    ?? Math.Clamp(defaultScopeHeight, 16, Math.Max(16, availableContentHeight / 2)),
+                0,
+                maxScopeHeight);
+            int derivedTimeline = Math.Max(0, availableContentHeight - ScopeHeight - DividerHeight);
+            TimelineHeight = Math.Clamp(
+                timelineHeightOverride ?? derivedTimeline,
+                0,
+                derivedTimeline);
         }
         else
         {
@@ -212,14 +229,18 @@ internal sealed class OverlayLayout
             TimelineHeight = 0;
             if (HasScopes)
             {
-                ScopeHeight = scopeHeightOverride
-                    ?? Math.Max(16, availableContentHeight);
+                ScopeHeight = Math.Clamp(
+                    scopeHeightOverride ?? Math.Max(16, availableContentHeight),
+                    0,
+                    Math.Max(0, availableContentHeight));
                 DividerHeight = 0;
             }
         }
 
-        if (ScopeHeight < 0 || TimelineHeight < 0
-            || PanelHeaderHeight + ScopeHeight + DividerHeight + TimelineHeight > PanelHeight)
+        bool integratedScope = Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll;
+        int occupiedPanelHeight = PanelHeaderHeight
+            + (integratedScope ? TimelineHeight : ScopeHeight + DividerHeight + TimelineHeight);
+        if (ScopeHeight < 0 || TimelineHeight < 0 || occupiedPanelHeight > PanelHeight)
             throw new ArgumentOutOfRangeException(nameof(height), "Panel regions exceed the available panel height.");
         if (HasRoll && TimelineHeight < 16)
             // The resolver must avoid selecting a configuration whose roll cannot
@@ -336,6 +357,12 @@ internal sealed class OverlayLayout
     public OverlayRect GetScopeRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
+        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
+        {
+            OverlayRect body = GetTimelineRect(panelIndex);
+            int gutter = Math.Min(PitchLabelWidth, body.Width);
+            return new OverlayRect(body.X + gutter, body.Y, body.Width - gutter, body.Height);
+        }
         int y = ScopePosition == VisualizationScopePosition.Bottom
             ? panel.Bottom - ScopeHeight
             : panel.Y + PanelHeaderHeight;
@@ -377,6 +404,8 @@ internal sealed class OverlayLayout
     public OverlayRect GetTimelineRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
+        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
+            return new OverlayRect(panel.X, panel.Y + PanelHeaderHeight, panel.Width, TimelineHeight);
         int y = ScopePosition == VisualizationScopePosition.Bottom
             ? panel.Y + PanelHeaderHeight + DividerHeight
             : panel.Y + PanelHeaderHeight + ScopeHeight + DividerHeight;

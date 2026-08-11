@@ -11,9 +11,8 @@ namespace Fmp.Core.Visualization.Rendering;
 /// explicit <see cref="ProjectedScopeChannel.PanelIndex"/>; panels with no
 /// usable stem stay transparent and later channels are never shifted forward.
 ///
-/// Scope triggering is deliberately approximated (fixed 16 ms window, local
-/// normalization) rather than reproducing Corrscope's stateful correlation
-/// trigger; exact output remains available through the production renderer.
+/// The visible OverlayLayout timeline window is sampled directly with stable
+/// per-channel amplification; no frame-rate-dependent or local auto-gain state is used.
 /// Frame rendering is order-independent and deterministic — seeking backward
 /// yields the same frame as seeking directly to that position.
 /// </summary>
@@ -22,8 +21,6 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
     // Fixed temporal window (not one output video frame) so the waveform's
     // scale does not change when the user selects 30/60/120 FPS. Matches the
     // FMP Corrscope render-window default.
-    private const double BaseWindowMilliseconds = 16.0;
-
     private const byte FallbackColorR = 0x7A;
     private const byte FallbackColorG = 0xA4;
     private const byte FallbackColorB = 0xFF;
@@ -85,14 +82,16 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
                 continue;
             }
 
-            states.Add(new ChannelState
+            var state = new ChannelState
             {
                 PanelIndex = channel.PanelIndex,
                 Wave = wave,
                 WindowWidth = channel.WindowWidth,
                 DefaultAmplification = channel.DefaultAmplification,
                 Color = ParseColor(channel.DefaultColor),
-            });
+            };
+            BuildPeakEnvelope(state, overlay.Layout.WindowSeconds, overlay.Layout.CorrscopeGridWidth);
+            states.Add(state);
         }
 
         if (states.Count == 0)
@@ -112,7 +111,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
 
     private static byte[] ParseColor(string? color)
     {
-        byte[] fallback = { FallbackColorR, FallbackColorG, FallbackColorB, 0xFF };
+        byte[] fallback = { FallbackColorR, FallbackColorG, FallbackColorB, 0x70 };
         if (string.IsNullOrWhiteSpace(color))
             return fallback;
 
@@ -131,7 +130,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
             return fallback;
         }
 
-        byte a = 0xFF;
+        byte a = 0x70;
         if (hex.Length == 8
             && byte.TryParse(hex.AsSpan(6, 2), System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out byte parsedA))
@@ -144,6 +143,11 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
 
     public void ReadFrame(int frameIndex, Span<byte> destination)
     {
+        int byteCount = checked(_gridWidth * _overlay.Layout.CorrscopeGridHeight * 4);
+        if (destination.Length < byteCount)
+            throw new ArgumentException(
+                "scope frame destination is too small", nameof(destination));
+
         // Start fully transparent; the overlay's static scope background (and
         // any other panel's waveform) remains visible beneath each channel.
         destination.Clear();
@@ -154,16 +158,21 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
         foreach (ChannelState channel in _channels)
         {
             int row = channel.PanelIndex / columnCount;
-            int column = channel.PanelIndex % columnCount;
+
+            if (channel.PanelIndex < 0
+                || channel.PanelIndex >= _overlay.Layout.PanelCount)
+            {
+                continue;
+            }
 
             OverlayRect scope = _overlay.Layout.GetScopeRect(channel.PanelIndex);
-            int width = Math.Min(_gridWidth / Math.Max(1, columnCount), scope.Width);
+            int width = Math.Min(_gridWidth - scope.X, scope.Width);
             if (width <= 0 || scopeHeight <= 0)
                 continue;
 
             DrawCell(
                 destination,
-                column * width,
+                scope.X,
                 row * scopeHeight,
                 width,
                 scopeHeight,
@@ -185,42 +194,41 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
         long currentSample = OverlayLayout.FrameToSample(
             frameIndex, sampleRate, _fpsNumerator, _fpsDenominator);
 
-        int samples = (int)Math.Ceiling(
-            sampleRate * BaseWindowMilliseconds / 1000.0 * Math.Max(1, channel.WindowWidth));
-        if (samples <= 0)
+        long startSample = _overlay.Layout.WindowStartSample(currentSample, sampleRate);
+        long endSample = _overlay.Layout.WindowEndSample(currentSample, sampleRate);
+        long windowSamples = Math.Max(0, endSample - startSample);
+        if (windowSamples <= 0)
             return;
 
-        long startSample = currentSample - samples / 2;
-        if (channel.Samples.Length < samples)
-            channel.Samples = new short[samples];
-        Span<short> window = channel.Samples.AsSpan(0, samples);
-        channel.Wave.ReadWindow(startSample, window);
-
-        // Window-local normalization: keeps quiet channels visible without a
-        // full-file peak scan, and keeps rendering order-independent.
-        int peak = MaxAbsolute(window);
-        double autoGain = peak <= 0
-            ? 1.0
-            : Math.Clamp(0.82 * short.MaxValue / peak, 0.5, 8.0);
-        double gain = Math.Clamp(autoGain * channel.DefaultAmplification, 0.25, 12.0);
+        double requestedGain = double.IsFinite(channel.DefaultAmplification)
+            ? channel.DefaultAmplification
+            : 1.0;
+        double gain = Math.Clamp(requestedGain, 0.25, 12.0);
 
         int yCenter = cellY + height / 2;
         int scale = Math.Max(1, height / 2 - 1);
 
         for (int x = 0; x < width; x++)
         {
-            long s0 = (long)x * samples / width;
-            long s1 = (long)(x + 1) * samples / width;
-            if (s1 <= s0)
-                s1 = s0 + 1;
-
+            long sampleStart = startSample + x * windowSamples / width;
+            long sampleEnd = startSample + (x + 1L) * windowSamples / width;
+            if (sampleEnd <= sampleStart)
+                sampleEnd = sampleStart + 1;
+            if (sampleEnd <= 0 || sampleStart >= channel.Wave.TotalSamples)
+            {
+                DrawColumn(destination, cellX, cellY, height, x, 0, 0, gain, channel.Color);
+                continue;
+            }
+            sampleStart = Math.Max(0, sampleStart);
+            sampleEnd = Math.Min(channel.Wave.TotalSamples, sampleEnd);
+            int firstBucket = (int)Math.Clamp(sampleStart / channel.BucketSize, 0, channel.Minimums.Length - 1);
+            int lastBucket = (int)Math.Clamp((sampleEnd - 1) / channel.BucketSize, 0, channel.Minimums.Length - 1);
             int min = 0;
             int max = 0;
-            for (long s = s0; s < s1 && s < samples; s++)
+            for (int bucket = firstBucket; bucket <= lastBucket; bucket++)
             {
-                short v = window[(int)s];
-                if (v < min) min = v;
-                if (v > max) max = v;
+                min = Math.Min(min, channel.Minimums[bucket]);
+                max = Math.Max(max, channel.Maximums[bucket]);
             }
 
             int yTop = yCenter - (int)Math.Round(max * gain * scale / short.MaxValue);
@@ -238,15 +246,52 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
         }
     }
 
-    private static int MaxAbsolute(ReadOnlySpan<short> samples)
+    private void DrawColumn(
+        Span<byte> destination, int cellX, int cellY, int height, int x,
+        int min, int max, double gain, byte[] color)
     {
-        int peak = 0;
-        foreach (short s in samples)
+        int yCenter = cellY + height / 2;
+        int scale = Math.Max(1, height / 2 - 1);
+        int yTop = Math.Max(cellY, yCenter - (int)Math.Round(max * gain * scale / short.MaxValue));
+        int yBottom = Math.Min(cellY + height - 1, yCenter - (int)Math.Round(min * gain * scale / short.MaxValue));
+        for (int y = yTop; y <= yBottom; y++)
         {
-            int abs = s < 0 ? -s : s;
-            if (abs > peak) peak = abs;
+            int offset = (y * _gridWidth + cellX + x) * 4;
+            destination[offset] = color[0];
+            destination[offset + 1] = color[1];
+            destination[offset + 2] = color[2];
+            destination[offset + 3] = color[3];
         }
-        return peak;
+    }
+
+    private static void BuildPeakEnvelope(
+        ChannelState channel, double visibleSeconds, int pixelWidth)
+    {
+        long visibleSamples = Math.Max(1, (long)Math.Round(visibleSeconds * channel.Wave.SampleRate));
+        long targetBuckets = Math.Max(1, (long)Math.Max(1, pixelWidth) * 2);
+        channel.BucketSize = (int)Math.Clamp((visibleSamples + targetBuckets - 1) / targetBuckets, 1, int.MaxValue);
+        int bucketCount = checked((int)((channel.Wave.TotalSamples + channel.BucketSize - 1) / channel.BucketSize));
+        channel.Minimums = new int[bucketCount];
+        channel.Maximums = new int[bucketCount];
+
+        const int ChunkSamples = 64 * 1024;
+        var samples = new short[ChunkSamples];
+        for (long offset = 0; offset < channel.Wave.TotalSamples; offset += ChunkSamples)
+        {
+            int count = (int)Math.Min(ChunkSamples, channel.Wave.TotalSamples - offset);
+            channel.Wave.ReadWindow(offset, samples.AsSpan(0, count));
+            for (int i = 0; i < count; i++)
+            {
+                short value = samples[i];
+                int bucket = (int)((offset + i) / channel.BucketSize);
+                int min = channel.Minimums[bucket];
+                int max = channel.Maximums[bucket];
+                if (value < min) min = value;
+                if (value > max) max = value;
+                channel.Minimums[bucket] = min;
+                channel.Maximums[bucket] = max;
+            }
+        }
     }
 
     public void Dispose()
@@ -262,7 +307,9 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
         public required int WindowWidth { get; init; }
         public required double DefaultAmplification { get; init; }
         public required byte[] Color { get; init; }
-        public short[] Samples = Array.Empty<short>();
+        public int BucketSize;
+        public int[] Minimums = Array.Empty<int>();
+        public int[] Maximums = Array.Empty<int>();
 
         public void Dispose()
         {

@@ -91,6 +91,12 @@ public sealed class MasterWaveformFrameSourceTests
         // Silence still draws the center baseline in every cell column.
         Assert.True(silencePixels > 0,
             "silence should still render a visible center line");
+        Assert.All(Enumerable.Range(0, sineFrame.Length / 4), pixel =>
+        {
+            int offset = pixel * 4;
+            if (sineFrame[offset] != 0 || sineFrame[offset + 1] != 0 || sineFrame[offset + 2] != 0)
+                Assert.Equal(0x70, sineFrame[offset + 3]);
+        });
     }
 
     [Fact]

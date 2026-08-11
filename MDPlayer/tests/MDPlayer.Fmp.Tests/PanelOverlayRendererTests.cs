@@ -54,12 +54,18 @@ public sealed class PanelOverlayRendererTests
         var renderer = CreateRenderer();
         byte[] frame = renderer.RenderFrame(40); // 2 seconds
 
+        // Every scope viewport keeps a transparent hole for the Corrscope
+        // waveform. Reference chrome (pitch grid, time lines, playhead, notes)
+        // draws over the integrated body, so assert the hole exists in each
+        // panel rather than requiring a specific center pixel to stay empty.
         for (int panel = 0; panel < 12; panel++)
         {
             OverlayRect scope = renderer.Layout.GetScopeRect(panel);
-            int x = scope.X + scope.Width / 2;
-            int y = scope.Y + scope.Height / 2;
-            Assert.Equal(0, AlphaAt(frame, renderer.Width, x, y));
+            bool transparent = false;
+            for (int y = scope.Y; y < scope.Bottom && !transparent; y++)
+            for (int x = scope.X + 4; x < scope.Right - 4 && !transparent; x++)
+                transparent = AlphaAt(frame, renderer.Width, x, y) == 0;
+            Assert.True(transparent, $"scope viewport of panel {panel} must stay transparent");
         }
     }
 
@@ -73,6 +79,62 @@ public sealed class PanelOverlayRendererTests
 
         Assert.Equal(255, AlphaAt(frame, renderer.Width, header.X + header.Width / 2, header.Y + header.Height / 2));
         Assert.Equal(255, AlphaAt(frame, renderer.Width, timeline.X + 2, timeline.Y + timeline.Height / 2));
+    }
+
+    [Fact]
+    public void DiagnosticGrid_NoteBodyPreservesWaveformAndSemanticContrast()
+    {
+        using var renderer = CreateRenderer();
+        byte[] waveform = SolidScopeGrid(renderer, 18, 42, 220);
+        byte[] withoutWaveform = renderer.RenderFrame(40);
+        byte[] withWaveform = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(40, waveform, withWaveform);
+        OverlayRect scope = renderer.Layout.GetScopeRect(0);
+
+        bool found = false;
+        for (int y = scope.Y; y < scope.Bottom && !found; y++)
+        {
+            for (int x = scope.X; x < scope.Right; x++)
+            {
+                ReadPixel(withoutWaveform, renderer.Width, x, y, out byte baseR, out byte baseG, out byte baseB, out _);
+                ReadPixel(withWaveform, renderer.Width, x, y, out byte mixedR, out byte mixedG, out byte mixedB, out _);
+                if (baseR + baseG + baseB > 150 && mixedB > baseB && mixedR != 18)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        Assert.True(found, "a visible note body should blend with, rather than hide, the waveform beneath it");
+    }
+
+    [Fact]
+    public void DiagnosticGrid_BlackKeyBandPreservesWaveformColor()
+    {
+        using var renderer = CreateRenderer();
+        byte[] waveform = SolidScopeGrid(renderer, 18, 42, 220);
+        byte[] withoutWaveform = renderer.RenderFrame(40);
+        byte[] withWaveform = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(40, waveform, withWaveform);
+        OverlayRect scope = renderer.Layout.GetScopeRect(0);
+
+        bool found = false;
+        for (int y = scope.Y; y < scope.Bottom && !found; y++)
+        {
+            for (int x = scope.X; x < scope.Right; x++)
+            {
+                ReadPixel(withoutWaveform, renderer.Width, x, y, out byte baseR, out byte baseG, out byte baseB, out _);
+                ReadPixel(withWaveform, renderer.Width, x, y, out byte mixedR, out byte mixedG, out byte mixedB, out _);
+                if (baseR + baseG + baseB < 100 && mixedB > baseB + 20 && mixedG > baseG + 10)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        Assert.True(found, "a pitch-band pixel should retain detectable waveform color");
     }
 
     [Fact]
@@ -172,9 +234,14 @@ public sealed class PanelOverlayRendererTests
         var renderer = CreateRenderer();
         byte[] frame = renderer.RenderFrame(40);
         OverlayRect lane = renderer.Layout.GetPitchedLaneRect(7, false);
-        int highestMatchingY = int.MaxValue;
-        int lowestMatchingY = int.MinValue;
         int playheadX = renderer.Layout.GetPlayheadX(7);
+
+        // The integrated roll draws thin vertical reference lines (pitch/time
+        // grid, playhead) across the transparent scope hole, so a single bright
+        // pixel is not proof of a misplaced ribbon. The noise strip is a WIDE
+        // horizontal band: count bright pixels per row and require the band
+        // (rows with a wide bright run) to sit in the bottom 12px of the lane.
+        var brightPerRow = new int[lane.Height];
         for (int y = lane.Y; y < lane.Bottom; y++)
         {
             for (int x = lane.X; x < lane.Right; x++)
@@ -183,15 +250,25 @@ public sealed class PanelOverlayRendererTests
                     continue;
                 if (!IsBrightRibbonPixel(frame, renderer.Width, x, y))
                     continue;
-                highestMatchingY = Math.Min(highestMatchingY, y);
-                lowestMatchingY = Math.Max(lowestMatchingY, y);
+                brightPerRow[y - lane.Y]++;
             }
         }
 
-        Assert.NotEqual(int.MaxValue, highestMatchingY);
-        Assert.True(highestMatchingY >= lane.Bottom - 12,
-            $"Noise strip unexpectedly entered pitched area at y={highestMatchingY}, bottom={lane.Bottom}.");
-        Assert.True(lowestMatchingY < lane.Bottom);
+        int wideRunThreshold = Math.Max(8, lane.Width / 4);
+        int highestBandY = int.MaxValue;
+        int lowestBandY = int.MinValue;
+        for (int row = 0; row < brightPerRow.Length; row++)
+        {
+            if (brightPerRow[row] < wideRunThreshold)
+                continue;
+            highestBandY = Math.Min(highestBandY, lane.Y + row);
+            lowestBandY = Math.Max(lowestBandY, lane.Y + row);
+        }
+
+        Assert.NotEqual(int.MaxValue, highestBandY);
+        Assert.True(highestBandY >= lane.Bottom - 12,
+            $"Noise strip unexpectedly entered pitched area at y={highestBandY}, bottom={lane.Bottom}.");
+        Assert.True(lowestBandY < lane.Bottom);
     }
 
     [Fact]
@@ -1040,6 +1117,19 @@ public sealed class PanelOverlayRendererTests
     {
         ReadPixel(frame, width, x, y, out byte r, out byte g, out byte b, out byte a);
         return r == color.R && g == color.G && b == color.B && a == color.A;
+    }
+
+    private static byte[] SolidScopeGrid(PanelOverlayRenderer renderer, byte r, byte g, byte b)
+    {
+        var grid = new byte[renderer.ScopeFrameByteCount];
+        for (int offset = 0; offset < grid.Length; offset += 4)
+        {
+            grid[offset] = r;
+            grid[offset + 1] = g;
+            grid[offset + 2] = b;
+            grid[offset + 3] = 255;
+        }
+        return grid;
     }
 
     private static byte AlphaAt(byte[] frame, int width, int x, int y)

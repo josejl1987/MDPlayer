@@ -159,6 +159,35 @@ public sealed class InteractiveWaveformScopeTests
     }
 
     [Fact]
+    public void ExplicitColorAlpha_IsPreserved()
+    {
+        (PanelOverlayRenderer renderer, _) = CreateRenderer();
+        string wav = WriteWav(SineWave(SampleRate * 2, SampleRate, 220));
+        try
+        {
+            using var source = MakeSource(renderer,
+                new[] { MakeChannel(0, "explicit", wav, "#11223344") });
+            Assert.NotNull(source);
+
+            var frame = new byte[renderer.ScopeFrameByteCount];
+            source!.ReadFrame(0, frame);
+
+            Assert.Contains(Enumerable.Range(0, frame.Length / 4), pixel =>
+            {
+                int offset = pixel * 4;
+                return frame[offset] == 0x11
+                    && frame[offset + 1] == 0x22
+                    && frame[offset + 2] == 0x33
+                    && frame[offset + 3] == 0x44;
+            });
+        }
+        finally
+        {
+            File.Delete(wav);
+        }
+    }
+
+    [Fact]
     public void Source_ReportsUnavailableChannelCount()
     {
         (PanelOverlayRenderer renderer, _) = CreateRenderer();
@@ -178,6 +207,84 @@ public sealed class InteractiveWaveformScopeTests
         finally
         {
             File.Delete(master);
+        }
+    }
+
+    [Fact]
+    public void ReadFrame_RejectsShortDestination()
+    {
+        (PanelOverlayRenderer renderer, _) = CreateRenderer();
+        string wav = WriteWav(SineWave(SampleRate * 2, SampleRate, 220));
+        try
+        {
+            using var source = MakeSource(renderer, new[] { MakeChannel(0, "ok", wav, null) });
+            Assert.NotNull(source);
+            Assert.Throws<ArgumentException>(() => source!.ReadFrame(0, new byte[8]));
+        }
+        finally
+        {
+            File.Delete(wav);
+        }
+    }
+
+    [Fact]
+    public void NonFiniteAmplification_RemainsRenderableAndBounded()
+    {
+        (PanelOverlayRenderer renderer, _) = CreateRenderer();
+        string wav = WriteWav(SineWave(SampleRate * 2, SampleRate, 220));
+        try
+        {
+            var channel = MakeChannel(0, "gain", wav, null) with
+            {
+                DefaultAmplification = double.NaN,
+            };
+            using var source = MakeSource(renderer, new[] { channel });
+            Assert.NotNull(source);
+            var frame = new byte[renderer.ScopeFrameByteCount];
+            source!.ReadFrame(0, frame);
+            Assert.Contains(frame, value => value != 0);
+        }
+        finally
+        {
+            File.Delete(wav);
+        }
+    }
+
+    [Fact]
+    public void ReadFrame_UsesCurrentSampleAtThePlayheadX()
+    {
+        // Equal past/future windows put the shared current sample at the same
+        // midpoint used by the fixed waveform envelope. This exercises the
+        // source, frame-to-sample conversion, scope placement, and playhead
+        // geometry together instead of asserting each seam independently.
+        VisualizationTimeline timeline = VisualizationTimelineFixture.Create();
+        var renderer = new PanelOverlayRenderer(
+            timeline,
+            RendererTestLayout.Build(timeline, 960, 540, pastSeconds: 1, futureSeconds: 1),
+            new PanelOverlayRenderer.Options { FpsNumerator = 60, FpsDenominator = 1 });
+        int frameIndex = 40;
+        long currentSample = OverlayLayout.FrameToSample(frameIndex, SampleRate, 60, 1);
+        string wav = WriteWav(ImpulseWave(SampleRate * 4, (int)currentSample));
+        try
+        {
+            using var source = MakeSource(renderer, new[] { MakeChannel(0, "impulse", wav, "#FF0000") });
+            Assert.NotNull(source);
+            var scopeGrid = new byte[renderer.ScopeFrameByteCount];
+            source!.ReadFrame(frameIndex, scopeGrid);
+            var frame = new byte[renderer.FrameByteCount];
+            renderer.RenderCompositeFrame(frameIndex, scopeGrid, frame);
+
+            OverlayRect scope = renderer.Layout.GetScopeRect(0);
+            int playheadX = renderer.Layout.GetPlayheadX(0);
+            int midpointY = scope.Y + scope.Height / 2;
+            int offset = (midpointY * renderer.Width + playheadX) * 4;
+            Assert.Equal(255, frame[offset + 3]);
+            Assert.Equal(255, frame[offset]);
+        }
+        finally
+        {
+            File.Delete(wav);
+            renderer.Dispose();
         }
     }
 
@@ -245,6 +352,14 @@ public sealed class InteractiveWaveformScopeTests
             double t = i / (double)sampleRate;
             samples[i] = (short)(Math.Sin(2 * Math.PI * frequency * t) * short.MaxValue * 0.8);
         }
+        return samples;
+    }
+
+    private static short[] ImpulseWave(int sampleCount, int sampleIndex)
+    {
+        var samples = new short[sampleCount];
+        if ((uint)sampleIndex < (uint)samples.Length)
+            samples[sampleIndex] = short.MaxValue;
         return samples;
     }
 
