@@ -260,6 +260,11 @@ internal static class SymbolicTempoInference
             suffixAccum += weights[i];
             weightSuffix[i] = suffixAccum;
         }
+        // TI-PRUNE fix: total weight is tempo- and phase-independent; compute it
+        // ONCE here and pass it down so ScoreForPhase never re-sums per phase.
+        double totalWeight = 0;
+        for (int i = 0; i < weights.Length; i++)
+            totalWeight += weights[i];
 
         for (int b = 0; b <= steps; b++)
         {
@@ -282,7 +287,7 @@ internal static class SymbolicTempoInference
                 // TI-PRUNE: incumbent = the per-BPM best achieved so far
                 // (localBestScore is always <= the global bestScore, so skipping
                 // phases that cannot beat it cannot affect the global winner).
-                double score = ScoreForPhase(normalized, weights, weightSuffix, phaseQuarters, localBestScore, acc);
+                double score = ScoreForPhase(normalized, weights, weightSuffix, phaseQuarters, localBestScore, totalWeight, acc);
                 if (score > localBestScore * (1 + ScoreTieEpsilon))
                 {
                     localBestScore = score;
@@ -325,21 +330,17 @@ internal static class SymbolicTempoInference
     /// pruned phase can never have beaten <paramref name="incumbentScore"/> (see the
     /// in-loop comment for the proof).</summary>
     internal static double ScoreForPhase(double[] normalized, double[] weights, double[]? weightSuffix,
-        double phaseQuarters, double incumbentScore, CounterAccumulator? acc)
+        double phaseQuarters, double incumbentScore, double totalWeight, CounterAccumulator? acc)
     {
         if (acc is not null) acc.ScoreForPhaseCalls++;
-        // Precompute the total weight ONCE in forward order (the same order the
-        // original incremental accumulation used, so the final division is
-        // bit-identical); the prune bound needs it before the loop ends.
-        double totalWeight = 0;
-        for (int i = 0; i < weights.Length; i++)
-            totalWeight += weights[i];
-        // TI-PRUNE: relative safety margin for the prune bound (see below).
-        // u = double.Epsilon = 2^-52; 8·n·u generously covers the worst-case
-        // floating-point discrepancy between the forward contribution sum and
-        // the reverse-built suffix sum (~(2n+6)·u per Higham's summation bound,
-        // n = onset count).
+        // TI-PRUNE fix: totalWeight is precomputed by the caller (once per Search /
+        // refine scan), never re-summed per phase. The prune bound becomes a single
+        // threshold computed once per phase: threshold = incumbentScore * totalWeight
+        // / (1 + boundMargin). The per-onset check is then a pure add + compare —
+        // NO division inside the hot loop (the original per-onset division that the
+        // hoist removed is NOT reintroduced here).
         double boundMargin = 8.0 * normalized.Length * double.Epsilon;
+        double threshold = incumbentScore * totalWeight / (1 + boundMargin);
         double weightedFit = 0;
         for (int i = 0; i < normalized.Length; i++)
         {
@@ -363,7 +364,7 @@ internal static class SymbolicTempoInference
             // evaluating it is what the unpruned run does, so this maximizes
             // fidelity while remaining provably argmax-exact.
             if (weightSuffix is not null && totalWeight > 0
-                && (weightedFit + weightSuffix[i]) / totalWeight * (1 + boundMargin) <= incumbentScore)
+                && weightedFit + weightSuffix[i] <= threshold)
             {
                 return 0; // pruned: cannot beat incumbent; 0 never triggers the strict-'>' updates
             }
@@ -410,6 +411,9 @@ internal static class SymbolicTempoInference
             normalized[i] = samples[i] / spq;
         // Fine phase scan around the coarse winner.
         int fine = 200;
+        double totalWeight = 0;
+        for (int j = 0; j < weights.Length; j++)
+            totalWeight += weights[j];
         for (int i = 0; i <= fine; i++)
         {
             double candidate = bestPhase - spq / 2 + spq * i / (double)fine;
@@ -419,7 +423,7 @@ internal static class SymbolicTempoInference
             // TI-PRUNE: refinement intentionally unpruned (null suffix) — TI-PRUNE
             // scope is the Search phase grid; keeping RefinePhase/ResolveHalfDouble
             // bit-identical guarantees the fixture output is byte-identical.
-            double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, acc);
+            double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
             if (score > bestScore * (1 + ScoreTieEpsilon))
             {
                 bestScore = score;
@@ -464,6 +468,9 @@ internal static class SymbolicTempoInference
             double[] normalized = new double[samples.Length];
             for (int i = 0; i < samples.Length; i++)
                 normalized[i] = samples[i] / spq;
+            double totalWeight = 0;
+            for (int i = 0; i < weights.Length; i++)
+                totalWeight += weights[i];
             // Best phase via a coarse scan.
             double bestPhase = -1, bestPhaseScore = -1;
             for (int p = 0; p < PhaseSteps; p++)
@@ -471,7 +478,7 @@ internal static class SymbolicTempoInference
                 double phaseSamples = spq * p / PhaseSteps;
                 double phaseQuarters = phaseSamples / spq;
                 // TI-PRUNE: unpruned (null suffix), see RefinePhase comment.
-                double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, acc);
+                double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
                 if (score > bestPhaseScore * (1 + ScoreTieEpsilon)) { bestPhaseScore = score; bestPhase = phaseSamples; }
             }
             long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);

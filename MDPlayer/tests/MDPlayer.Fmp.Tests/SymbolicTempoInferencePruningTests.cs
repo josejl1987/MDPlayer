@@ -46,6 +46,9 @@ public sealed class SymbolicTempoInferencePruningTests
                 double[] normalized = set.Samples.Select(s => s / spq).ToArray();
                 double[] weights = set.Weights;
                 double[] suffix = SuffixSums(weights);
+                double totalWeight = 0;
+                for (int w = 0; w < weights.Length; w++)
+                    totalWeight += weights[w];
 
                 // Unpruned reference run: replicate Search's phase loop exactly
                 // (local: strict '>' with the tie-epsilon band; global: strict '>').
@@ -54,7 +57,7 @@ public sealed class SymbolicTempoInferencePruningTests
                 {
                     double phaseQuarters = p / (double)PhaseSteps;
                     double score = SymbolicTempoInference.ScoreForPhase(
-                        normalized, weights, null, phaseQuarters, incumbentScore: 0, acc: null);
+                        normalized, weights, null, phaseQuarters, incumbentScore: 0, totalWeight, acc: null);
                     if (score > localBestU * (1 + SymbolicTempoInference.ScoreTieEpsilon))
                     {
                         localBestU = score;
@@ -75,13 +78,13 @@ public sealed class SymbolicTempoInferencePruningTests
                 {
                     double phaseQuarters = p / (double)PhaseSteps;
                     double score = SymbolicTempoInference.ScoreForPhase(
-                        normalized, weights, suffix, phaseQuarters, incumbentScore: localBestP, acc: null);
+                        normalized, weights, suffix, phaseQuarters, incumbentScore: localBestP, totalWeight, acc: null);
                     if (score == 0)
                     {
                         // Pruned: never evaluated. Its true score must not be able
                         // to beat the incumbent it was pruned against.
                         double reference = SymbolicTempoInference.ScoreForPhase(
-                            normalized, weights, null, phaseQuarters, incumbentScore: 0, acc: null);
+                            normalized, weights, null, phaseQuarters, incumbentScore: 0, totalWeight, acc: null);
                         Assert.True(reference > 0, "fully evaluated scores are strictly positive");
                         Assert.True(reference <= localBestP,
                             $"pruned phase {p} at {bpm} BPM could still beat incumbent ({reference} > {localBestP})");
@@ -93,7 +96,7 @@ public sealed class SymbolicTempoInferencePruningTests
                     // xUnit's 2-arg double overload compares exact equality.
                     evaluatedPhases++;
                     double unpruned = SymbolicTempoInference.ScoreForPhase(
-                        normalized, weights, null, phaseQuarters, incumbentScore: 0, acc: null);
+                        normalized, weights, null, phaseQuarters, incumbentScore: 0, totalWeight, acc: null);
                     Assert.Equal(unpruned, score);
                     if (score > localBestP * (1 + SymbolicTempoInference.ScoreTieEpsilon))
                     {
