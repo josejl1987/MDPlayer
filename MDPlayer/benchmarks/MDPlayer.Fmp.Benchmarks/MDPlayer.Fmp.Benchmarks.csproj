@@ -8,6 +8,9 @@
     <RootNamespace>Fmp.Benchmarks</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="MDPlayer.Fmp.Tests" />
     <ProjectReference Include="..\..\src\MDPlayer.Fmp.Core\MDPlayer.Fmp.Core.csproj" />
+    <ProjectReference Include="..\..\src\MDPlayer.Fmp.Cli\MDPlayer.Fmp.Cli.csproj" />
+    <ProjectReference Include="..\..\src\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
   </ItemGroup>
 </Project>

@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="MDPlayer.Fmp.Tests" />
+    <InternalsVisibleTo Include="MDPlayer.Fmp.Benchmarks" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
   </ItemGroup>
 

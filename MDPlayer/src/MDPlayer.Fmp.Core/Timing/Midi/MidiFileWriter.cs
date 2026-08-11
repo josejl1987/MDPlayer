@@ -15,6 +15,9 @@ internal sealed class MidiTrack
     public required MidiEndpoint Endpoint { get; init; }
 
     public List<MidiEventBase> Events { get; } = new();
+
+    /// <summary>Set only after the planner has applied canonical ordering.</summary>
+    internal bool HasCanonicalEventOrder { get; set; }
 }
 
 /// <summary>
@@ -68,7 +71,7 @@ internal sealed class MidiFileWriter
             var chunk = new TrackChunk();
             chunk.Events.Add(new SequenceTrackNameEvent(track.Name));
             chunk.Events.Add(new PortPrefixEvent(track.Endpoint.Port));
-            AppendEvents(chunk, track.Events);
+            AppendEvents(chunk, track.Events, track.HasCanonicalEventOrder);
             file.Chunks.Add(chunk);
         }
 
@@ -84,13 +87,12 @@ internal sealed class MidiFileWriter
     /// and the equal-tick ordering (NoteOff before NoteOn for a retrigger) are fully
     /// controlled.
     /// </summary>
-    private void AppendEvents(TrackChunk chunk, IReadOnlyList<MidiEventBase> events)
+    private void AppendEvents(TrackChunk chunk, IReadOnlyList<MidiEventBase> events,
+        bool canonical = false)
     {
-        var ordered = events
-            .OrderBy(e => e.Tick)
-            .ThenBy(MidiEventOrder.Rank)
-            .ThenBy(e => e.SourceOrder)
-            .ToList();
+        IEnumerable<MidiEventBase> ordered = events;
+        if (!canonical)
+            ordered = events.OrderBy(e => e.Tick).ThenBy(MidiEventOrder.Rank).ThenBy(e => e.SourceOrder);
 
         long previousTick = 0;
         foreach (MidiEventBase evt in ordered)
@@ -110,6 +112,19 @@ internal sealed class MidiFileWriter
             }
             previousTick = evt.Tick;
         }
+    }
+
+    private static bool IsCanonical(IReadOnlyList<MidiEventBase> events)
+    {
+        for (int i = 1; i < events.Count; i++)
+        {
+            MidiEventBase a = events[i - 1], b = events[i];
+            if (a.Tick > b.Tick || a.Tick == b.Tick &&
+                (MidiEventOrder.Rank(a) > MidiEventOrder.Rank(b) ||
+                 MidiEventOrder.Rank(a) == MidiEventOrder.Rank(b) && a.SourceOrder > b.SourceOrder))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>

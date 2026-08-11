@@ -150,6 +150,13 @@ internal sealed class MusicalMidiExporter
     public MusicalMidiExportResult Export(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
+        return Export(SourceTimeline.Create(timeline));
+    }
+
+    internal MusicalMidiExportResult Export(SourceTimeline sourceTimeline)
+    {
+        ArgumentNullException.ThrowIfNull(sourceTimeline);
+        VisualizationTimeline timeline = sourceTimeline.Timeline;
         long originShiftTicks = ComputeOriginShiftTicks(timeline);
 
         var conductor = new List<MidiEventBase>();
@@ -239,6 +246,19 @@ internal sealed class MusicalMidiExporter
 
         var writer = new MidiFileWriter(_ppq);
         var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
+        foreach (MidiTrack track in tracks)
+        {
+            // Canonicalize once here; MidiFileWriter can stream planner-owned
+            // tracks without materializing a second sorted copy.
+            track.Events.Sort((a, b) =>
+            {
+                int c = a.Tick.CompareTo(b.Tick);
+                if (c != 0) return c;
+                c = MidiEventOrder.Rank(a).CompareTo(MidiEventOrder.Rank(b));
+                return c != 0 ? c : a.SourceOrder.CompareTo(b.SourceOrder);
+            });
+            track.HasCanonicalEventOrder = true;
+        }
         byte[] bytes = writer.Write(conductor, tracks);
         return new MusicalMidiExportResult
         {
@@ -921,8 +941,9 @@ internal sealed class MusicalMidiExporter
     {
         public Dictionary<MidiTrackKey, TrackSlot> _slots = new();
         public Dictionary<int, MidiTrack> Tracks { get; } = new();
+        private readonly Dictionary<SourceDomainKey, MidiVoiceDomain> _domainsBySource = new();
         private readonly HashSet<MidiEndpoint> _usedEndpoints = new();
-        private readonly Dictionary<MidiChannelDomain, int> _requestedChannelsByDomain = new();
+        private readonly Dictionary<SourceDomainKey, int> _requestedChannelsByDomain = new();
 
         public void Add(MidiTrackKey key, int index, string channelId, VoiceExportOverride voiceOverride,
             MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder,
@@ -937,7 +958,12 @@ internal sealed class MusicalMidiExporter
             var track = new MidiTrack { Name = name, Endpoint = endpoint };
             Tracks[index] = track;
             int channel = endpoint.Channel;
-            MidiChannelDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel);
+            MidiVoiceDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel,
+                endpoint.Channel, voiceOverride.Program, voiceOverride.Bank,
+                options.BendRangeSemitones, endpoint.Port);
+            if (_domainsBySource.TryGetValue(domain.Source, out MidiVoiceDomain existingDomain))
+                existingDomain.EnsureCompatible(domain);
+            _domainsBySource[domain.Source] = domain;
             _slots[key] = new TrackSlot(this, track, index, channel, percussive, domain)
             {
                 Override = voiceOverride,
@@ -958,7 +984,7 @@ internal sealed class MusicalMidiExporter
         private MidiEndpoint ResolveEndpoint(MidiTrackKey key, bool percussive,
             MusicalMidiExportOptions options, VoiceExportOverride voiceOverride)
         {
-            MidiChannelDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel);
+            SourceDomainKey domain = new(key.Device, key.VoiceFamily, key.SourceChannel);
             if (voiceOverride.Channel is int oc)
             {
                 if (oc is < 0 or > 15) throw new InvalidOperationException(
@@ -1057,11 +1083,6 @@ internal sealed class MusicalMidiExporter
         public IEnumerable<MidiTrack> Values => Tracks.Values;
     }
 
-    private readonly record struct MidiChannelDomain(
-        DeviceId Device,
-        VoiceKind VoiceFamily,
-        int SourceChannel);
-
     /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
     private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note);
 
@@ -1074,7 +1095,7 @@ internal sealed class MusicalMidiExporter
         private readonly TrackAllocator _owner;
 
         public TrackSlot(TrackAllocator owner, MidiTrack track, int index, int channel, bool percussive,
-            MidiChannelDomain domain)
+            MidiVoiceDomain domain)
         {
             _owner = owner;
             Track = track;
@@ -1087,7 +1108,7 @@ internal sealed class MusicalMidiExporter
         public MidiTrack Track { get; }
         public int Index { get; }
         public int Channel { get; }
-        public MidiChannelDomain Domain { get; }
+        public MidiVoiceDomain Domain { get; }
         public bool Percussive { get; }
 
         /// <summary>Per-voice override applied to this slot (default: include + program 0).</summary>

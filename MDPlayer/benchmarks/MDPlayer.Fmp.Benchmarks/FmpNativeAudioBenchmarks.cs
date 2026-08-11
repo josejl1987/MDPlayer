@@ -134,7 +134,7 @@ internal static class FmpNativeAudioBenchmarks
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         long before = GC.GetAllocatedBytesForCurrentThread();
         var ctx = Context(fmpCom, ovi, rate, maxS);
-        var builder = new FmpExecutionCaptureBuilder(rate, CpuHz);
+        var builder = new FmpExecutionCaptureBuilder(rate);
         using (var legacy = new LegacyMdsoundFmpPcmSession(ctx, builder))
         {
             legacy.CpuClockFrequencyHz = CpuHz;
@@ -151,7 +151,7 @@ internal static class FmpNativeAudioBenchmarks
             long fadeLen = checked((long)Math.Ceiling(ctx.FadeSeconds * rate));
             var term = legacy.TerminationState;
             bool fadeActive = term != null && term.FadeActive;
-            builder.SetFinalCpuCycle(legacy.FinalCpuCycle);
+            builder.SetFinalOpnaMasterClock(legacy.FinalOpnaMasterClock);
             builder.Finish(legacy.TotalSamples,
                 fadeActive ? term.FadeStartSample : 0,
                 fadeActive ? checked(term.FadeStartSample + fadeLen) : 0,

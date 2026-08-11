@@ -1,3 +1,5 @@
+using Fmp.Core.Midi;
+
 namespace Fmp.Application.Export;
 
 /// <summary>Who supplies the tempo used by a GUI MIDI export. Mirrors the CLI.</summary>
@@ -72,6 +74,13 @@ public sealed class MidiExportRequest
 
     /// <summary>Per-voice transforms. A missing/no-entry voice keeps default export behavior.</summary>
     public IReadOnlyList<MidiVoiceOption> VoiceOptions { get; init; } = Array.Empty<MidiVoiceOption>();
+
+    /// <summary>Enables reproducible phase receipts; disabled by default so the
+    /// shipping path performs no measurement work.</summary>
+    public bool EnablePerformanceReceipts { get; init; }
+
+    /// <summary>Stable fixture/input label written to machine-readable receipts.</summary>
+    public string PerformanceFixture { get; init; } = "application-midi-export";
 }
 
 /// <summary>Per-voice MIDI export transform (mirrors the Core exporter override).</summary>
@@ -139,6 +148,11 @@ public sealed class MidiExportResult
     public string? TempoSource { get; init; }
     public string? PhaseSource { get; init; }
     public bool PhaseUnknown { get; init; }
+
+    public ExportPerformanceSummary? Performance { get; init; }
+
+    /// <summary>Planner-owned tracks retained for benchmark semantic counters.</summary>
+    internal IReadOnlyList<MidiTrack>? Tracks { get; init; }
 
     /// <summary>True when the beat grid (phase) could not be established.</summary>
     public bool Trustworthy => !PhaseUnknown && SegmentCount > 0;

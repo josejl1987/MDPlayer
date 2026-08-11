@@ -1,5 +1,6 @@
 using Fmp.Application.Export;
 using Fmp.Core.Visualization;
+using System.Text.Json;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -39,6 +40,40 @@ public sealed class MidiExportServiceTests
         Assert.Equal(1, result.Bytes[9]);
         Assert.Equal(1, result.SegmentCount);
         Assert.Contains(result.Report, line => line.Contains("tempo-source"));
+    }
+
+    [Fact]
+    public void PerformanceReceipts_EnabledEmitCompleteJsonAndHumanSummary()
+    {
+        string path = WriteTimeline(BuildTimeline(withBeats: true));
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(path,
+            new MidiExportRequest { EnablePerformanceReceipts = true, PerformanceFixture = "pinned-midi-fixture" });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.NotNull(result.Performance);
+        using JsonDocument json = JsonDocument.Parse(result.Performance!.ToJson());
+        Assert.Equal("pinned-midi-fixture", json.RootElement.GetProperty("Fixture").GetString());
+        Assert.True(json.RootElement.TryGetProperty("Input", out _));
+        Assert.True(json.RootElement.TryGetProperty("Configuration", out _));
+        Assert.True(json.RootElement.TryGetProperty("Environment", out _));
+        Assert.Equal("not-run", json.RootElement.GetProperty("Comparison").GetProperty("Status").GetString());
+        Assert.Contains(result.Report, line => line.Contains("comparison-status=not-run"));
+        Assert.Contains(result.Performance.ToHumanReadable(), line => line.Contains("midi-planning-and-serialization"));
+    }
+
+    [Fact]
+    public void PerformanceReceipts_DisabledPreserveOutputEquivalence()
+    {
+        string path = WriteTimeline(BuildTimeline(withBeats: true));
+        var service = new MidiExportService();
+        MidiExportResult disabled = service.ExportFromTimelinePath(path, new MidiExportRequest());
+        MidiExportResult enabled = service.ExportFromTimelinePath(path,
+            new MidiExportRequest { EnablePerformanceReceipts = true });
+
+        Assert.True(disabled.Succeeded, disabled.Error);
+        Assert.True(enabled.Succeeded, enabled.Error);
+        Assert.Equal(disabled.Bytes, enabled.Bytes);
+        Assert.Null(disabled.Performance);
     }
 
     [Fact]

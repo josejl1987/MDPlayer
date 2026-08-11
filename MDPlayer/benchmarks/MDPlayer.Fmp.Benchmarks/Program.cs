@@ -1,5 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Security.Cryptography;
+using Fmp.Application.Export;
+using Fmp.Cli;
+using Fmp.Core.Midi;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 
@@ -33,6 +38,15 @@ internal static class Program
             return FmpNativeAudioBenchmarks.Run(args[1], rate, maxS);
         }
 
+        if (args.Length >= 2 && args[0] == "--midi-scale")
+        {
+            int n = int.TryParse(args[1], out int parsed) ? parsed : 1_000;
+            return RunMidiScale(n);
+        }
+
+        if (args.Length >= 1 && args[0] == "--midi-fixture")
+            return RunMidiFixture(args);
+
         RunPhase1();
 
         if (args.Length > 0 && File.Exists(args[0]))
@@ -41,6 +55,158 @@ internal static class Program
             Console.WriteLine("Phase 2 skipped: no input file (pass an OVI path for full-pipeline metrics).");
         return 0;
     }
+
+    /// <summary>
+    /// Runs a tracked VGZ/OVI through capture, SourceTimeline, the application
+    /// MIDI service, and the canonical writer. This is intentionally an evidence
+    /// mode: it never substitutes a synthetic or approximate path.
+    /// </summary>
+    private static int RunMidiFixture(string[] args)
+    {
+        string? requested = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)
+            ? args[1] : null;
+        string? fixture = MidiFixtureResolver.Resolve(requested);
+        if (fixture is null)
+        {
+            Console.Error.WriteLine(requested is null
+                ? "error: no tracked VGZ/OVI fixture found"
+                : $"error: fixture not found or unsupported: {requested}");
+            return 2;
+        }
+
+        int ppq = ReadIntOption(args, "--ppq", 960);
+        double? bpm = ReadDoubleOption(args, "--bpm");
+        string root = MidiFixtureResolver.FindRepositoryRoot(fixture);
+        var settings = new BatchRenderSettings
+        {
+            AssetsDir = root,
+            Loops = 1,
+            MaxDuration = 300,
+            Timeout = 120,
+            SampleRate = 44_100,
+        };
+        settings.ValidateCommon();
+        var inputInfo = new FileInfo(fixture);
+        long captureAllocated = GC.GetAllocatedBytesForCurrentThread();
+        Stopwatch captureWatch = Stopwatch.StartNew();
+        VisualizationTimeline timeline = TimelineCaptureService.Capture(fixture, null, settings);
+        captureWatch.Stop();
+        long captureBytes = GC.GetAllocatedBytesForCurrentThread() - captureAllocated;
+
+        var request = new MidiExportRequest
+        {
+            Ppq = ppq,
+            Bpm = bpm,
+            TempoSource = bpm is null ? Fmp.Application.Export.MidiTempoSource.Auto : Fmp.Application.Export.MidiTempoSource.Fixed,
+            EnablePerformanceReceipts = true,
+            PerformanceFixture = Path.GetFileName(fixture),
+        };
+        MidiExportResult export = new MidiExportService().Export(timeline, request);
+        if (!export.Succeeded || export.Bytes is null)
+        {
+            Console.Error.WriteLine($"error: MIDI export failed: {export.Error}");
+            return 4;
+        }
+        string outputHash = Convert.ToHexString(SHA256.HashData(export.Bytes)).ToLowerInvariant();
+        var events = export.Performance?.Phases ?? Array.Empty<ExportPhaseReceipt>();
+        var tracks = export.Tracks ?? Array.Empty<MidiTrack>();
+        var allEvents = tracks.SelectMany(t => t.Events).ToArray();
+        var receipt = new
+        {
+            schema = "mdplayer.midi-fixture-receipt/v1",
+            harness = "TimelineCaptureService -> SourceTimeline -> MusicalMidiExporter -> MidiFileWriter",
+            input = new { path = Path.GetRelativePath(root, fixture), sha256 = FileHash(fixture), sizeBytes = inputInfo.Length },
+            duration = new { seconds = (timeline.EndSample - timeline.StartSample) / (double)timeline.SampleRate, startSample = timeline.StartSample, endSample = timeline.EndSample, sampleRate = timeline.SampleRate },
+            sourceEvents = CountSourceEvents(timeline),
+            emittedMidiEvents = allEvents.Length,
+            phases = new object[] { new { phase = "capture", wallMilliseconds = captureWatch.ElapsedMilliseconds, cpuMilliseconds = 0L, allocatedBytes = captureBytes, eventCount = CountSourceEvents(timeline) } }.Concat(events.Cast<object>()),
+            semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = 0, tracks = tracks.Count },
+            output = new { sha256 = outputHash, sizeBytes = export.Bytes.Length },
+            configuration = new { request.Ppq, request.Bpm, request.Quantize, request.EmitPitchBend, request.BendRangeSemitones, request.UsePercussionChannel, request.Velocity },
+            environment = new { runtime = Environment.Version.ToString(), os = Environment.OSVersion.ToString(), processorCount = Environment.ProcessorCount },
+            comparison = new { status = "baseline-unavailable", baseline = (object?)null, candidate = (object?)null, targetSpeedupClaim = (double?)null },
+        };
+        string json = JsonSerializer.Serialize(receipt, new JsonSerializerOptions { WriteIndented = true });
+        Console.WriteLine(json);
+        Console.WriteLine($"real fixture: {Path.GetRelativePath(root, fixture)}; output sha256={outputHash}; bytes={export.Bytes.Length}");
+        return 0;
+    }
+
+    private static int CountSourceEvents(VisualizationTimeline timeline) =>
+        (timeline.Notes?.Count() ?? 0) + (timeline.Rhythm?.Count() ?? 0) +
+        (timeline.Beats?.Count() ?? 0) + (timeline.Timing?.Count() ?? 0);
+
+    private static string FileHash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+    private static int ReadIntOption(string[] args, string name, int fallback)
+    {
+        int i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], out int value) ? value : fallback;
+    }
+    private static double? ReadDoubleOption(string[] args, string name)
+    {
+        int i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length && double.TryParse(args[i + 1], out double value) ? value : null;
+    }
+
+    private static int RunMidiScale(int n)
+    {
+        if (n < 1) return 2;
+        Console.WriteLine("MDPlayer MIDI-2 scaling benchmark (real exporter/writer harness)");
+        MidiScaleMeasurement first = MeasureMidi(n);
+        MidiScaleMeasurement doubleSize = MeasureMidi(checked(n * 2));
+        var report = new
+        {
+            harness = "MusicalMidiExporter -> MidiFileWriter",
+            input = "deterministic generated MIDI timeline; fixed 44.1kHz/120BPM/960PPQ",
+            baseline = (object?)null,
+            candidate = new { n = first, twoN = doubleSize },
+            comparison = new { status = "baseline-unavailable", targetSpeedupClaim = (double?)null },
+        };
+        Console.WriteLine(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    private static MidiScaleMeasurement MeasureMidi(int sourceEvents)
+    {
+        VisualizationTimeline timeline = BuildMidiTimeline(sourceEvents);
+        var map = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions { FixedBpm = 120 }).Map;
+        var exporter = new MusicalMidiExporter(map, 960);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        int gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        Stopwatch watch = Stopwatch.StartNew();
+        MusicalMidiExportResult result = exporter.Export(timeline);
+        watch.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        int emitted = result.Tracks.Sum(t => t.Events.Count);
+        int noteOns = result.Tracks.Sum(t => t.Events.OfType<MidiNoteEvent>().Count(e => e.NoteOn));
+        int noteOffs = result.Tracks.Sum(t => t.Events.OfType<MidiNoteEvent>().Count(e => !e.NoteOn));
+        return new(sourceEvents, emitted, result.Bytes.Length, watch.Elapsed.TotalMilliseconds,
+            allocated, GC.CollectionCount(0) - gen0, GC.CollectionCount(1) - gen1,
+            GC.CollectionCount(2) - gen2, noteOns, noteOffs);
+    }
+
+    private static VisualizationTimeline BuildMidiTimeline(int count)
+    {
+        const int sampleRate = 44_100;
+        long spacing = sampleRate / 8;
+        return new VisualizationTimeline
+        {
+            SampleRate = sampleRate,
+            StartSample = 0,
+            EndSample = Math.Max(spacing, count * spacing + spacing),
+            Notes = Enumerable.Range(0, count).Select(i => new NoteEvent(
+                "midi-bench", i * spacing, i * spacing + spacing / 2, 440, 60 + i % 24,
+                "bench", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>())).ToArray(),
+        };
+    }
+
+    private sealed record MidiScaleMeasurement(int SourceEvents, int EmittedMidiEvents,
+        int OutputBytes, double WallMilliseconds, long ManagedAllocatedBytes,
+        int Gen0Collections, int Gen1Collections, int Gen2Collections,
+        int SemanticNoteOns, int SemanticNoteOffs);
 
     /// <summary>
     /// Phase 1: CPU-only frame timing using a synthetic timeline with 12 active
