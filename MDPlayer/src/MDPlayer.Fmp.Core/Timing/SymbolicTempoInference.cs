@@ -54,8 +54,10 @@ internal static class SymbolicTempoInference
     /// depend on float rounding. Treating scores within this relative band as a
     /// tie keeps the FIRST-encountered phase — the pre-hoist behavior — instead of
     /// letting rounding flip the decision. 1e-12 is ~1000x above accumulation
-    /// noise (~1e-15) and ~8 orders below any musically meaningful gap (~1e-4).</summary>
-    private const double ScoreTieEpsilon = 1e-12;
+    /// noise (~1e-15) and ~8 orders below any musically meaningful gap (~1e-4).
+    /// Internal so the pruning equivalence test can replicate the update rules
+    /// exactly (TI-PRUNE).</summary>
+    internal const double ScoreTieEpsilon = 1e-12;
 
     /// <summary>Subdivision lattice, in quarter units, with their scores (Patch D.1).
     /// Higher weight = "more aligned at this subdivision". Used uniformly for onset
@@ -277,7 +279,10 @@ internal static class SymbolicTempoInference
             {
                 double phaseSamples = spq * p / PhaseSteps; // phase as sample offset in [0,spq)
                 double phaseQuarters = phaseSamples / spq;
-                double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+                // TI-PRUNE: incumbent = the per-BPM best achieved so far
+                // (localBestScore is always <= the global bestScore, so skipping
+                // phases that cannot beat it cannot affect the global winner).
+                double score = ScoreForPhase(normalized, weights, weightSuffix, phaseQuarters, localBestScore, acc);
                 if (score > localBestScore * (1 + ScoreTieEpsilon))
                 {
                     localBestScore = score;
@@ -312,20 +317,61 @@ internal static class SymbolicTempoInference
     /// <paramref name="phaseQuarters"/> (phase sample over the same spq), so the
     /// per-onset division becomes a subtraction. Winner-identity factoring:
     /// low-bit differences vs. the original <c>(sample - phaseSamples) / spq</c> are
-    /// expected and accepted.</summary>
-    private static double ScoreForPhase(double[] normalized, double[] weights, double phaseQuarters, CounterAccumulator? acc)
+    /// expected and accepted.
+    /// TI-PRUNE: <paramref name="weightSuffix"/> (built once per Search) enables an
+    /// exact suffix-sum prune — the only behavioral difference from the unpruned
+    /// reference is that some phases return early with score 0 instead of their true
+    /// score. Every phase that is NOT pruned returns a bit-identical score, and a
+    /// pruned phase can never have beaten <paramref name="incumbentScore"/> (see the
+    /// in-loop comment for the proof).</summary>
+    internal static double ScoreForPhase(double[] normalized, double[] weights, double[]? weightSuffix,
+        double phaseQuarters, double incumbentScore, CounterAccumulator? acc)
     {
         if (acc is not null) acc.ScoreForPhaseCalls++;
-        double weightedFit = 0;
+        // Precompute the total weight ONCE in forward order (the same order the
+        // original incremental accumulation used, so the final division is
+        // bit-identical); the prune bound needs it before the loop ends.
         double totalWeight = 0;
+        for (int i = 0; i < weights.Length; i++)
+            totalWeight += weights[i];
+        // TI-PRUNE: relative safety margin for the prune bound (see below).
+        // u = double.Epsilon = 2^-52; 8·n·u generously covers the worst-case
+        // floating-point discrepancy between the forward contribution sum and
+        // the reverse-built suffix sum (~(2n+6)·u per Higham's summation bound,
+        // n = onset count).
+        double boundMargin = 8.0 * normalized.Length * double.Epsilon;
+        double weightedFit = 0;
         for (int i = 0; i < normalized.Length; i++)
         {
+            // TI-PRUNE: before onset i, onsets 0..i-1 are already accumulated, so
+            // weightSuffix[i] is the total weight of the onsets still to come.
+            // Each remaining onset contributes at most weights[j] * 1.0 (the max
+            // SubdivisionFit is exactly the quarter's 1.00 weight, achieved at zero
+            // deviation), so (weightedFit + weightSuffix[i]) / totalWeight is the
+            // tightest attainable bound on the final normalized score. If even that
+            // bound cannot exceed the incumbent (Search passes the running per-BPM
+            // localBestScore — always &lt;= the global bestScore), the phase can at
+            // best TIE it, and the search's update rules are strict '&gt;' with a
+            // relative ScoreTieEpsilon margin, so a tying phase NEVER changes any
+            // search state (the first-encountered winner is kept). The margin also
+            // makes the prune exact in floating point: the true final score is at
+            // most boundMargin above this bound, so clearing the incumbent by the
+            // margin guarantees the true score cannot trigger ANY update — local or
+            // global. An exact tie (bound == incumbent) is therefore NOT pruned and
+            // is evaluated like the unpruned reference. '&lt;=' with the margin is
+            // the correct choice: pruning on the equality would be harmless, but
+            // evaluating it is what the unpruned run does, so this maximizes
+            // fidelity while remaining provably argmax-exact.
+            if (weightSuffix is not null && totalWeight > 0
+                && (weightedFit + weightSuffix[i]) / totalWeight * (1 + boundMargin) <= incumbentScore)
+            {
+                return 0; // pruned: cannot beat incumbent; 0 never triggers the strict-'>' updates
+            }
             double quarter = normalized[i] - phaseQuarters;
             double residual = quarter - Math.Round(quarter);
             if (residual == 0.5) residual = -0.5;
             double bestFit = SubdivisionFit(residual, acc);
             weightedFit += weights[i] * bestFit;
-            totalWeight += weights[i];
         }
         return totalWeight > 0 ? weightedFit / totalWeight : 0;
     }
@@ -370,7 +416,10 @@ internal static class SymbolicTempoInference
             if (candidate < 0)
                 candidate = 0;
             double phaseQuarters = candidate / spq;
-            double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+            // TI-PRUNE: refinement intentionally unpruned (null suffix) — TI-PRUNE
+            // scope is the Search phase grid; keeping RefinePhase/ResolveHalfDouble
+            // bit-identical guarantees the fixture output is byte-identical.
+            double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, acc);
             if (score > bestScore * (1 + ScoreTieEpsilon))
             {
                 bestScore = score;
@@ -421,7 +470,8 @@ internal static class SymbolicTempoInference
             {
                 double phaseSamples = spq * p / PhaseSteps;
                 double phaseQuarters = phaseSamples / spq;
-                double score = ScoreForPhase(normalized, weights, phaseQuarters, acc);
+                // TI-PRUNE: unpruned (null suffix), see RefinePhase comment.
+                double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, acc);
                 if (score > bestPhaseScore * (1 + ScoreTieEpsilon)) { bestPhaseScore = score; bestPhase = phaseSamples; }
             }
             long phaseSample = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
@@ -609,8 +659,9 @@ internal static class SymbolicTempoInference
 
     /// <summary>Mutable accumulator for the opt-in instrumentation counters. Only
     /// touched (and therefore only allocates) on the instrumented
-    /// <see cref="SymbolicTempoInference.Build"/> overload.</summary>
-    private sealed class CounterAccumulator
+    /// <see cref="SymbolicTempoInference.Build"/> overload. Internal because the
+    /// TI-PRUNE test harness calls the instrumented <see cref="ScoreForPhase"/>.</summary>
+    internal sealed class CounterAccumulator
     {
         public int OnsetCount;
         public long ScoreForPhaseCalls;
