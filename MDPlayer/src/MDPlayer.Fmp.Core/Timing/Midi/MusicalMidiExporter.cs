@@ -153,7 +153,13 @@ internal sealed class MusicalMidiExporter
     public MusicalMidiExportResult Export(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
-        long originShiftTicks = ComputeOriginShiftTicks(timeline);
+
+        // Pitch-normalization stage (FR-1): runs BEFORE the origin shift so the
+        // shift covers the NORMALIZED event set (the set the exporter actually
+        // serializes). Every pitch consumer reads the normalized model.
+        PitchNormalizationModel pitchModel = PitchNormalizationStage.Normalize(
+            timeline, PitchNormalizationThresholds.Default);
+        long originShiftTicks = ComputeOriginShiftTicks(timeline, pitchModel);
 
         var conductor = new List<MidiEventBase>();
         BuildConductor(timeline, originShiftTicks, conductor);
@@ -194,7 +200,7 @@ internal sealed class MusicalMidiExporter
         Dictionary<MidiEndpoint, int> lastBendByEndpoint = new();
         foreach (PlannableNote pn in plannable.OrderBy(p => p.Slot.Index).ThenBy(p => p.Note.StartSample))
         {
-            EmitNote(pn.Slot, pn.Note, originShiftTicks, lastBendByEndpoint);
+            EmitNote(pn.Slot, pn.Note, pitchModel, originShiftTicks, lastBendByEndpoint);
         }
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
@@ -461,24 +467,27 @@ internal sealed class MusicalMidiExporter
     /// contribute to the origin), so the two can never diverge. A note emits bends
     /// only when EmitPitchBend is set AND it has pitch changes OR a fractional /
     /// non-finite initial note; any other note produces a single round-pitch note
-    /// with no bend infrastructure.</summary>
-    private bool ShouldFoldPitch(NoteEvent note)
+    /// with no bend infrastructure. Operates on the NORMALIZED view (FR-1) — a note
+    /// whose normalized pitch is exactly integer and whose changes were compressed
+    /// away needs no bend infrastructure.</summary>
+    private bool ShouldFoldPitch(NormalizedNoteView view)
     {
         if (!_options.EmitPitchBend)
             return false;
-        if (note.Pitch is { Count: > 0 })
+        if (view.Changes is { Count: > 0 })
             return true;
-        return !double.IsFinite(note.InitialMidiNote)
-            || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6;
+        return !double.IsFinite(view.InitialMidiNote)
+            || Math.Abs(view.InitialMidiNote - Math.Round(view.InitialMidiNote)) > 1e-6;
     }
 
-    private void EmitNote(TrackSlot slot, NoteEvent note, long originShift,
+    private void EmitNote(TrackSlot slot, NoteEvent note, PitchNormalizationModel model, long originShift,
         Dictionary<MidiEndpoint, int> lastBendByEndpoint)
     {
         VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
         int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
         int transpose = voiceOverride.TransposeSemitones;
-        bool needsBend = ShouldFoldPitch(note);
+        NormalizedNoteView view = model.Views[note];
+        bool needsBend = ShouldFoldPitch(view);
         int bendRange = _options.BendRangeSemitones;
         // Validate the source pitch domain regardless of bend emission (§ B.3 /
         // cross-cutting fail-loudly): a note whose true pitch is outside MIDI 0..127
@@ -495,7 +504,7 @@ internal sealed class MusicalMidiExporter
             long off = TimeTick(note.EndSample) + originShift;
             if (off <= on)
                 off = on + 1;
-            int pitch = Math.Clamp((int)Math.Round(note.InitialMidiNote) + transpose, 0, 127);
+            int pitch = Math.Clamp((int)Math.Round(view.InitialMidiNote) + transpose, 0, 127);
             ValidateNotePitch(note, pitch);
             var noBendEndpoint = slot.Track.Endpoint;
             if (lastBendByEndpoint.TryGetValue(noBendEndpoint, out int lastBend) && lastBend != 0)
@@ -510,8 +519,8 @@ internal sealed class MusicalMidiExporter
 
         // Build the pitch anchor list: folded-initial + causal changes, "final wins"
         // at the same sample, transposed exactly once, collapsed to same-tick.
-        double initialSource = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
-        var anchors = BuildPitchAnchors(note, initialSource, transpose);
+        double initialSource = double.IsFinite(view.InitialMidiNote) ? view.InitialMidiNote : 60;
+        var anchors = BuildPitchAnchors(view, initialSource, transpose);
 
         long startTick = TimeTick(note.StartSample);
         long endTick = TimeTick(note.EndSample);
@@ -599,16 +608,18 @@ internal sealed class MusicalMidiExporter
     }
 
     private List<(long Tick, double Target, int Order)> BuildPitchAnchors(
-        NoteEvent note, double initialSource, int transpose)
+        NormalizedNoteView view, double initialSource, int transpose)
     {
+        NoteEvent note = view.Source;
         ValidateSourcePitch(note);
         // Initial pitch first, then each causal finite change that occurs strictly
         // after the note start (at/after StartSample fold into the initial pitch)
-        // and before/at the note end. Transpose applied exactly once.
+        // and before/at the note end. Transpose applied exactly once. Changes come
+        // from the NORMALIZED view (FR-1) — the same set the origin shift covered.
         var pts = new List<(long Sample, double Target, int Order)>();
         pts.Add((note.StartSample, initialSource + transpose, -1));
         int seq = 0;
-        foreach (PitchChange c in note.Pitch)
+        foreach (NormalizedPitchChange c in view.Changes ?? Array.Empty<NormalizedPitchChange>())
         {
             if (!double.IsFinite(c.MidiNote))
                 continue;
@@ -750,7 +761,7 @@ internal sealed class MusicalMidiExporter
     /// their logical tick 0 and are not shifted. The shift is the smallest whole tick
     /// that makes every time-domain tick nonnegative — NOT aligned to quarter/bar.
     /// </summary>
-    private long ComputeOriginShiftTicks(VisualizationTimeline timeline)
+    private long ComputeOriginShiftTicks(VisualizationTimeline timeline, PitchNormalizationModel model)
     {
         long minTick = TimeTick(_map.FirstSample);
         void Consider(long tick) { if (tick < minTick) minTick = tick; }
@@ -760,9 +771,9 @@ internal sealed class MusicalMidiExporter
             if (!IsNoteEmitted(note))
                 continue;
             Consider(TimeTick(note.StartSample));
-            if (!ShouldFoldPitch(note))
+            if (!model.Views.TryGetValue(note, out NormalizedNoteView? view) || !ShouldFoldPitch(view))
                 continue;
-            foreach (PitchChange change in note.Pitch)
+            foreach (NormalizedPitchChange change in view.Changes ?? Array.Empty<NormalizedPitchChange>())
             {
                 if (change is null || !double.IsFinite(change.MidiNote)) continue;
                 Consider(TimeTick(change.SamplePosition));
