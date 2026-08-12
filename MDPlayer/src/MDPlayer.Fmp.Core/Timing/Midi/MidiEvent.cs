@@ -59,6 +59,20 @@ internal sealed record MidiPitchBendEvent(long TickIn, int Track, int Channel, i
 /// <summary>RPN-based pitch-bend range (controller 101/100 + value) — Batch 4.</summary>
 internal sealed record MidiBendRangeEvent(long TickIn, int Track, int Channel, int Semitones) : MidiEventBase(TickIn);
 
+/// <summary>
+/// RPN-based channel tuning (controller 101/100 + CC6/CC38 data entry): fine
+/// tuning in cents (RPN 0x0002) plus optional coarse semitones (RPN 0x0001) for
+/// biases beyond ±100c. Emitted at tick 0, null-RPN terminated, at most one per
+/// endpoint (D10/D11). Fidelity mode restores the accepted domain bias through
+/// this event; DAW-friendly mode emits none.
+/// </summary>
+internal sealed record MidiTuningEvent(
+    long TickIn,
+    int Track,
+    int Channel,
+    int CoarseSemitones,
+    int FineCents) : MidiEventBase(TickIn);
+
 /// <summary>End of Track is appended automatically.</summary>
 internal static class MidiEventOrder
 {
@@ -76,6 +90,7 @@ internal static class MidiEventOrder
             MidiBankEvent => 2,
             MidiProgramEvent => 2,
             MidiBendRangeEvent => 2,
+            MidiTuningEvent => 2,
             MidiPitchBendEvent => 3,
             MidiNoteEvent => 4,
             _ => 5,

@@ -124,6 +124,7 @@ internal sealed class MidiFileWriter
         MidiBankEvent bank => BuildBank(bank),
         MidiPitchBendEvent bend => BuildPitchBend(bend),
         MidiBendRangeEvent range => BuildBendRange(range),
+        MidiTuningEvent tuning => BuildTuning(tuning),
         MidiTempoEvent tempo => BuildTempo(tempo),
         MidiTimeSignatureEvent timeSignature => BuildTimeSignature(timeSignature),
         MidiMetaTextEvent text => BuildMetaText(text),
@@ -190,6 +191,51 @@ internal sealed class MidiFileWriter
         return writes.Select(w => new ControlChangeEvent(
                 new SevenBitNumber((byte)w.Control), new SevenBitNumber((byte)w.Value))
             { Channel = channel }).ToArray();
+    }
+
+    /// <summary>
+    /// RPN channel tuning: fine = RPN 0x0002 with a 14-bit data entry centered at
+    /// 0x2000 (±100c → [0x0000, 0x3FFF]); coarse = RPN 0x0001 with the semitone
+    /// count as the same 14-bit center when |bias| exceeds ±100c. Both paths end
+    /// with the null RPN unselect so the tuning setup is self-contained and
+    /// conflict-free with the bend-range RPN (D10). Only the first generated CC
+    /// carries the source delta.
+    /// </summary>
+    private static IEnumerable<MidiEvent> BuildTuning(MidiTuningEvent tuning)
+    {
+        if (tuning.FineCents is < -100 or > 100)
+            throw new InvalidOperationException(
+                $"Fine tuning {tuning.FineCents}c is outside the valid [-100, 100] range.");
+        if (tuning.CoarseSemitones is < -12 or > 12)
+            throw new InvalidOperationException(
+                $"Coarse tuning {tuning.CoarseSemitones} st is outside the valid [-12, 12] range.");
+        if (tuning.CoarseSemitones == 0 && tuning.FineCents == 0)
+            throw new InvalidOperationException("A tuning event must change something.");
+
+        var channel = Channel(tuning.Channel);
+        if (tuning.CoarseSemitones != 0)
+        {
+            int coarse = 0x2000 + tuning.CoarseSemitones;
+            (int Control, int Value)[] writes =
+            {
+                (101, 0), (100, 1), (6, coarse >> 7), (38, coarse & 0x7F), // RPN 0x0001 + data entry
+                (101, 127), (100, 127),                                    // null RPN (unselect)
+            };
+            return writes.Select(w => new ControlChangeEvent(
+                new SevenBitNumber((byte)w.Control), new SevenBitNumber((byte)w.Value))
+            { Channel = channel }).ToArray();
+        }
+
+        int fine = 0x2000 + (int)Math.Round(tuning.FineCents * 8192.0 / 100.0);
+        fine = Math.Clamp(fine, 0, 0x3FFF);
+        (int Control, int Value)[] fineWrites =
+        {
+            (101, 0), (100, 2), (6, fine >> 7), (38, fine & 0x7F), // RPN 0x0002 + 14-bit data entry
+            (101, 127), (100, 127),                                // null RPN (unselect)
+        };
+        return fineWrites.Select(w => new ControlChangeEvent(
+            new SevenBitNumber((byte)w.Control), new SevenBitNumber((byte)w.Value))
+        { Channel = channel }).ToArray();
     }
 
     private static IEnumerable<MidiEvent> BuildTempo(MidiTempoEvent tempo)

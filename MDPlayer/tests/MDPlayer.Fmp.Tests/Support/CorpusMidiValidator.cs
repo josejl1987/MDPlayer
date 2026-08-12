@@ -25,7 +25,8 @@ internal static class CorpusMidiValidator
         int OneTickNotes,
         int LoopMarkerCount,
         string Meter,
-        long? SourceStartTick);
+        long? SourceStartTick,
+        int TuningEventCount);
 
     public static CorpusReport Analyze(string file, byte[] midiBytes)
     {
@@ -65,6 +66,11 @@ internal static class CorpusMidiValidator
 
         int programCount = decoded.Events.Values
             .SelectMany(e => e).Count(e => e.Event is ProgramChangeEvent);
+
+        // Tuning events (fidelity mode): endpoints carrying an active RPN 0x0002
+        // fine and/or 0x0001 coarse tuning state after the full byte stream.
+        int tuningEventCount = decoded.Events.Count(ep =>
+            decoded.State[ep.Key].HasTuning);
 
         // Zero/one-tick notes via note-on/note-off pairing per endpoint.
         int zeroTickNotes = 0, oneTickNotes = 0;
@@ -132,7 +138,8 @@ internal static class CorpusMidiValidator
             OneTickNotes: oneTickNotes,
             LoopMarkerCount: loopMarkerCount,
             Meter: meter,
-            SourceStartTick: sourceStartTick);
+            SourceStartTick: sourceStartTick,
+            TuningEventCount: tuningEventCount);
     }
 
     /// <summary>Prints the 14-field report for one file (FR-13).</summary>
@@ -153,6 +160,7 @@ internal static class CorpusMidiValidator
             $"one-tick={r.OneTickNotes}",
             $"loops={r.LoopMarkerCount}",
             $"meter={r.Meter}",
-            $"source-start={r.SourceStartTick?.ToString() ?? "none"}"));
+            $"source-start={r.SourceStartTick?.ToString() ?? "none"}",
+            $"tuning={r.TuningEventCount}"));
     }
 }

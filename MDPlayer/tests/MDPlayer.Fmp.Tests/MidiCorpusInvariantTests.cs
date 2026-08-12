@@ -62,6 +62,11 @@ public sealed class MidiCorpusInvariantTests
         MusicalMidiExportResult result = exporter.Export(timeline);
         MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
 
+        // FR-16/#4088 determinism extended to the normalization stage (FR-8): the
+        // same input + options must produce byte-identical MIDI on every run.
+        MusicalMidiExportResult second = exporter.Export(timeline);
+        Assert.Equal(result.Bytes, second.Bytes);
+
         // FR-13: print the 14-field report per file (visible with a detailed logger).
         CorpusMidiValidator.Print(songName, result.Bytes);
 

@@ -28,6 +28,18 @@ internal sealed class MusicalMidiExportOptions
     /// re-anchor, and an offset that cannot be represented fails loudly.</summary>
     public int BendRangeSemitones { get; init; } = 24;
 
+    /// <summary>Pitch-normalization mode (D11): Fidelity (default) subtracts the
+    /// accepted per-domain tuning bias and restores it via RPN channel tuning at
+    /// tick 0 — bends carry only expressive deviation; DawFriendly snaps small
+    /// biases to equal temperament and emits no tuning; Off reproduces the legacy
+    /// byte stream exactly.</summary>
+    public PitchNormalizationMode PitchNormalizationMode { get; init; } = PitchNormalizationMode.Fidelity;
+
+    /// <summary>Configurable pitch-normalization thresholds (FR-6, instrumentation
+    /// first): the conservative defaults are calibration placeholders meant to be
+    /// replaced from the first --pitch-report corpus runs. Null = defaults.</summary>
+    public PitchNormalizationThresholds? PitchNormalizationThresholds { get; init; }
+
     public bool EmitInstrumentMetadata { get; init; } = true;
 
     /// <summary>Emit loop/section markers on the conductor track.</summary>
@@ -103,6 +115,13 @@ internal sealed class MusicalMidiExportResult
     public required TimingDiagnostics Diagnostics { get; init; }
 
     /// <summary>
+    /// Per-domain pitch-normalization statistics (FR-6 / D12): attacks, raw pitch
+    /// samples, residual mode, stable-residual MAD, baseline confidence, pipeline
+    /// transition counts, accepted tuning and warnings. Surfaced by --pitch-report.
+    /// </summary>
+    public required PitchNormalizationDiagnostics PitchDiagnostics { get; init; }
+
+    /// <summary>
     /// The global minimal integer origin shift applied to every time-domain event
     /// (notes, bends, rhythm, markers, later tempo events) so no exported tick is
     /// negative (Patch C §21). Setup events — the first Set Tempo, Time Signature,
@@ -160,7 +179,11 @@ internal sealed class MusicalMidiExporter
         // rejections surface as Diagnostics warnings (low-confidence domains).
         var pitchWarnings = new List<string>();
         PitchNormalizationModel pitchModel = PitchNormalizationStage.Normalize(
-            timeline, PitchNormalizationThresholds.Default, TrackKeyFor, pitchWarnings);
+            timeline,
+            _options.PitchNormalizationMode,
+            _options.PitchNormalizationThresholds ?? PitchNormalizationThresholds.Default,
+            TrackKeyFor,
+            pitchWarnings);
         if (pitchWarnings.Count > 0 && Diagnostics is not null)
             Diagnostics.Warnings.AddRange(pitchWarnings);
         long originShiftTicks = ComputeOriginShiftTicks(timeline, pitchModel);
@@ -235,8 +258,9 @@ internal sealed class MusicalMidiExporter
 
         // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
         // that actually serialized a bend (Patch B): none on percussion or on tracks
-        // whose notes required no bend infrastructure.
-        EmitBendRangeSetup(allocator);
+        // whose notes required no bend infrastructure. Fidelity mode additionally
+        // emits the per-domain tuning RPN (FR-5).
+        EmitBendRangeSetup(allocator, pitchModel);
 
         ApplyQuantizationToGrid(allocator);
 
@@ -279,17 +303,50 @@ internal sealed class MusicalMidiExporter
             // Hard invariant: after canonicalization, per (endpoint, tick) there is
             // at most one PitchBend. Throws before any MIDI is serialized (FR-5).
             ValidateNoDuplicateEndpointTickBends(tracks);
+
+            // Tuning/RPN invariants (D13b): per endpoint at most one MidiTuningEvent
+            // AND at most one MidiBendRangeEvent — ONE domain → ONE active tuning
+            // state is structural, never duplicated.
+            ValidateTuningSetupCounts(tracks);
         }
 
         var writer = new MidiFileWriter(_ppq);
         byte[] bytes = writer.Write(conductor, tracks);
+
+        var pitchDiagnostics = new PitchNormalizationDiagnostics();
+        pitchDiagnostics.Domains.AddRange(pitchModel.Domains.Values
+            .OrderBy(d => d.Key.ToString(), StringComparer.Ordinal));
+        pitchDiagnostics.Warnings.AddRange(pitchWarnings);
         return new MusicalMidiExportResult
         {
             Bytes = bytes,
             Tracks = tracks,
             Diagnostics = Diagnostics ?? NullDiagnostics,
+            PitchDiagnostics = pitchDiagnostics,
             OriginShiftTicks = originShiftTicks,
         };
+    }
+
+    /// <summary>Hard invariant (D13b): an endpoint carries at most one tuning event
+    /// and at most one bend-range event, so the tuning state on a channel is never
+    /// ambiguous. Throws before any MIDI is serialized.</summary>
+    private static void ValidateTuningSetupCounts(IReadOnlyList<MidiTrack> tracks)
+    {
+        var counts = new Dictionary<MidiEndpoint, (int Tuning, int Range)>();
+        foreach (MidiTrack track in tracks)
+        {
+            (int Tuning, int Range) c = counts.GetValueOrDefault(track.Endpoint);
+            c.Tuning += track.Events.Count(e => e is MidiTuningEvent);
+            c.Range += track.Events.Count(e => e is MidiBendRangeEvent);
+            counts[track.Endpoint] = c;
+        }
+        foreach ((MidiEndpoint endpoint, (int Tuning, int Range) c) in counts)
+        {
+            if (c.Tuning > 1 || c.Range > 1)
+                throw new InvalidOperationException(
+                    $"MIDI endpoint ({endpoint.Port}, {endpoint.Channel}) carries {c.Tuning} tuning and " +
+                    $"{c.Range} bend-range RPN setups — at most one of each is allowed (D13b).");
+        }
     }
 
     private readonly TimingDiagnostics NullDiagnostics = new()
@@ -990,9 +1047,15 @@ internal sealed class MusicalMidiExporter
     /// Emits the fixed pitch-bend-range RPN setup (Patch B) once per melodic track
     /// that actually emits bends, at logical tick 0. A track that emits no bends
     /// gets no RPN setup. The range is the configured fixed value (default 24) —
-    /// never auto-expanded.
+    /// never auto-expanded. Fidelity mode (FR-5) additionally emits one channel
+    /// tuning RPN per TUNED melodic domain (accepted bias), before the bend-range
+    /// setup (smaller SourceOrder; both setups are null-RPN-terminated so their
+    /// order is semantics-independent). Tuning is emitted even when the domain's
+    /// normalized notes are all integer (no bends): without it those notes would
+    /// play at equal temperament instead of source pitch, violating FR-5's
+    /// played-pitch = source-pitch contract (D9).
     /// </summary>
-    private void EmitBendRangeSetup(TrackAllocator allocator)
+    private void EmitBendRangeSetup(TrackAllocator allocator, PitchNormalizationModel model)
     {
         int range = _options.BendRangeSemitones;
         if (range is < 1 or > 127)
@@ -1006,6 +1069,22 @@ internal sealed class MusicalMidiExporter
             if (!slot.Track.Events.Any(e => e is MidiPitchBendEvent))
                 continue;
             AddTrackEvent(slot.Track, new MidiBendRangeEvent(0, slot.Index, slot.Channel, range));
+        }
+
+        if (_options.PitchNormalizationMode != PitchNormalizationMode.Fidelity)
+            return; // DAW-friendly snaps (no tuning events); Off emits legacy bytes.
+        foreach ((MidiTrackKey key, TrackSlot slot) in allocator.Slots.OrderBy(pair => pair.Value.Index))
+        {
+            if (slot.Percussive)
+                continue;
+            if (!model.Domains.TryGetValue(key, out DomainPitchStats? stats) || !stats.Accepted)
+                continue;
+            double bias = stats.TuningCents!.Value;
+            int coarse = (int)Math.Truncate(bias / 100.0);
+            int fine = (int)Math.Round(bias - coarse * 100.0);
+            if (coarse == 0 && fine == 0)
+                continue; // in-tune domain: bias is exactly 0, nothing to restore
+            AddTrackEvent(slot.Track, new MidiTuningEvent(0, slot.Index, slot.Channel, coarse, fine));
         }
     }
 

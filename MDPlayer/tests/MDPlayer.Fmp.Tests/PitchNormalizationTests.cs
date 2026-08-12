@@ -1,7 +1,9 @@
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
+using Melanchall.DryWetMidi.Core;
 using Xunit;
+using NoteEvent = Fmp.Core.Visualization.NoteEvent;
 
 namespace MDPlayer.Fmp.Tests;
 
@@ -35,8 +37,8 @@ public sealed class PitchNormalizationTests
     /// sink. A fixed key means ALL notes share one domain — fine for single-domain
     /// fixtures; multi-domain tests pass their own keyFor.</summary>
     private static PitchNormalizationModel Normalize(VisualizationTimeline timeline) =>
-        PitchNormalizationStage.Normalize(timeline, PitchNormalizationThresholds.Default,
-            _ => DefaultKey, null);
+        PitchNormalizationStage.Normalize(timeline, PitchNormalizationMode.Fidelity,
+            PitchNormalizationThresholds.Default, _ => DefaultKey, null);
 
     // ---- Pass 1: exact-event dedup on a pitch grid (FR-2 / SC-2) ----------------
 
@@ -277,7 +279,7 @@ public sealed class PitchNormalizationTests
                 new PitchChange(i * 100_000L + 10_000, 0, 60.5));
         var warnings = new List<string>();
         var model = PitchNormalizationStage.Normalize(Timeline(notes),
-            PitchNormalizationThresholds.Default, _ => DefaultKey, warnings);
+            PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => DefaultKey, warnings);
 
         DomainPitchStats stats = model.Domains[DefaultKey];
         Assert.False(stats.Accepted);
@@ -339,12 +341,12 @@ public sealed class PitchNormalizationTests
         for (int i = 0; i < notes.Length; i++)
             notes[i] = Note(i * 100_000L, i * 100_000L + 50_000, bases[i] + (i < 4 ? 0.18 : 0.22));
         var tight = new PitchNormalizationThresholds { MadMaxCents = 1.0 };
-        var model = PitchNormalizationStage.Normalize(Timeline(notes), tight, _ => DefaultKey, null);
+        var model = PitchNormalizationStage.Normalize(Timeline(notes), PitchNormalizationMode.Fidelity, tight, _ => DefaultKey, null);
 
         Assert.False(model.Domains[DefaultKey].Accepted);
 
         var loose = PitchNormalizationStage.Normalize(Timeline(notes),
-            PitchNormalizationThresholds.Default, _ => DefaultKey, null);
+            PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => DefaultKey, null);
         Assert.True(loose.Domains[DefaultKey].Accepted);
     }
 
@@ -353,13 +355,31 @@ public sealed class PitchNormalizationTests
     {
         var snesKey = new MidiTrackKey(new DeviceId(ChipType.SnesDsp, 0), VoiceKind.Pcm, 0, InstrumentIdentity.Empty);
         var large = PitchNormalizationStage.Normalize(Timeline(StableTunedNotes(30.0)),
-            PitchNormalizationThresholds.Default, _ => snesKey, null);
+            PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => snesKey, null);
         Assert.False(large.Domains[snesKey].Accepted);
 
         var small = PitchNormalizationStage.Normalize(Timeline(StableTunedNotes(10.0)),
-            PitchNormalizationThresholds.Default, _ => snesKey, null);
+            PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => snesKey, null);
         Assert.True(small.Domains[snesKey].Accepted);
         Assert.Equal(10.0, small.Domains[snesKey].TuningCents!.Value, 6);
+    }
+
+    [Fact]
+    public void Detector_NoiseFloorBias_NotActedOn_Silently()
+    {
+        // First-run calibration (FR-6): a sub-deadband tuning center (here +0.1c) is
+        // "in tune" — no bias applied, NO warning (high confidence, not low), and the
+        // measured mode still reaches the report.
+        var warnings = new List<string>();
+        var model = PitchNormalizationStage.Normalize(Timeline(StableTunedNotes(0.1)),
+            PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => DefaultKey, warnings);
+
+        DomainPitchStats stats = model.Domains[DefaultKey];
+        Assert.False(stats.Accepted);
+        Assert.Null(stats.TuningCents);
+        Assert.Equal(0.1, stats.ResidualModeCents!.Value, 6); // measured, reported
+        Assert.Empty(warnings);
+        Assert.Equal(60.001, model.Views.Values.First().InitialMidiNote, 9); // raw — no subtraction
     }
 
     [Fact]
@@ -460,4 +480,155 @@ public sealed class PitchNormalizationTests
     }
 
     private static ParsedMidi Parse(byte[] bytes) => Parser.Parse(bytes);
+
+    // ---- Modes + IR (FR-5 / SC-6/SC-7/SC-8) -------------------------------------
+
+    private static MusicalMidiExportResult ExportResult(VisualizationTimeline timeline,
+        MusicalMidiExportOptions? options = null)
+    {
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = 120,
+            Meter = new Meter(4, 4),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq,
+            options ?? new MusicalMidiExportOptions { EmitPitchBend = true })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        return exporter.Export(timeline);
+    }
+
+    [Fact]
+    public void Fidelity_AcceptedBias_RpnTuningRoundTrip()
+    {
+        // SC-6: a tuned domain exports RPN 0x0002 + CC38 at tick 0 with a null-RPN
+        // unselect; bends carry only expressive deviation; played pitch = source.
+        var result = ExportResult(Timeline(StableTunedNotes(21.0)));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        Assert.Equal(0x26B8, decoded.State[tuned.Key].FineTuningValue); // +21c → 0x2000 + 1720
+        Assert.Equal(21.0, decoded.State[tuned.Key].FineTuningCents, 1);
+
+        // Null-RPN unselect after the data entry (CC101/CC100 = 127).
+        var ccs = decoded.Events[tuned.Key].Where(e => e.Event is ControlChangeEvent).ToList();
+        Assert.Contains(ccs, e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 100
+            && ((ControlChangeEvent)e.Event).ControlValue == 2); // RPN 0x0002 select
+        Assert.Contains(ccs, e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 100
+            && ((ControlChangeEvent)e.Event).ControlValue == 127); // null RPN unselect
+        Assert.Single(ccs.Where(e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 101
+            && ((ControlChangeEvent)e.Event).ControlValue == 0)); // exactly ONE tuning RPN select
+
+        // Notes play at equal-temperament 60 + fine tuning = source pitch 60.21.
+        var on = decoded.Events[tuned.Key].Select(e => e.Event).OfType<NoteOnEvent>().First();
+        Assert.Equal(60, on.NoteNumber);
+        Assert.Equal(60.21, MidiSemanticDecoder.EffectivePitch(on.NoteNumber, 0,
+            decoded.State[tuned.Key].BendRange, (int)Math.Round(decoded.State[tuned.Key].FineTuningCents)), 6);
+    }
+
+    [Fact]
+    public void Fidelity_NoBendTrack_StillEmitsTuning()
+    {
+        // A tuned domain whose normalized notes are all integer emits NO bends — but
+        // fidelity must still restore the bias via tuning or the notes would play at
+        // equal temperament instead of source pitch (FR-5 played pitch = source).
+        var result = ExportResult(Timeline(StableTunedNotes(21.0)));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        Assert.Equal(1, decoded.State.Values.Count(s => s.HasTuning));
+        Assert.Empty(decoded.Events.Values.SelectMany(e => e).Where(e => e.Event is PitchBendEvent));
+    }
+
+    [Fact]
+    public void DawFriendly_SnapToEt_NoTuningEvents_NoBiasBends()
+    {
+        // SC-7: DAW-friendly snaps a +21c bias to equal temperament: zero tuning
+        // events, zero bias bends, notes at the ET note number.
+        var result = ExportResult(Timeline(StableTunedNotes(21.0)),
+            new MusicalMidiExportOptions { EmitPitchBend = true, PitchNormalizationMode = PitchNormalizationMode.DawFriendly });
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        Assert.Empty(decoded.State.Values.Where(s => s.HasTuning));
+        Assert.Empty(decoded.Events.Values.SelectMany(e => e).Where(e => e.Event is PitchBendEvent));
+        var ons = decoded.Events.Values.SelectMany(e => e).Select(e => e.Event).OfType<NoteOnEvent>()
+            .Select(on => (int)on.NoteNumber).OrderBy(n => n).ToList();
+        Assert.Equal(new[] { 60, 62, 64, 65, 67, 69, 71, 72, 74, 76 }, ons);
+    }
+
+    [Fact]
+    public void OffMode_CleanFixture_ByteIdenticalToFidelity()
+    {
+        // SC-8: a clean synthetic fixture (no register noise) exports byte-identical
+        // bytes whether normalization is Fidelity or Off — the detector structurally
+        // rejects 2–3 note fixtures (bias 0) and the passes are no-ops on clean data.
+        var timeline = Timeline(
+            Note(0, 50_000, 60.0),
+            Note(100_000, 150_000, 62.2),
+            Note(200_000, 250_000, 64.0));
+
+        byte[] fidelity = ExportResult(timeline).Bytes;
+        byte[] off = ExportResult(timeline, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+            PitchNormalizationMode = PitchNormalizationMode.Off,
+        }).Bytes;
+
+        Assert.Equal(off, fidelity);
+    }
+
+    [Fact]
+    public void OffMode_NoTuning_NoDiagnosticsDomains()
+    {
+        var result = ExportResult(Timeline(StableTunedNotes(21.0)), new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+            PitchNormalizationMode = PitchNormalizationMode.Off,
+        });
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        Assert.Empty(decoded.State.Values.Where(s => s.HasTuning));
+        Assert.Empty(result.PitchDiagnostics.Domains);
+    }
+
+    [Fact]
+    public void Report_AllNineMandatedFields_PerDomain()
+    {
+        // SC-9: every per-domain report entry carries the nine mandated fields.
+        var result = ExportResult(Timeline(StableTunedNotes(21.0)));
+
+        DomainPitchStats d = Assert.Single(result.PitchDiagnostics.Domains);
+        Assert.Equal(10, d.Attacks);
+        Assert.Equal(0, d.RetriggerAttacks);
+        Assert.Equal(0, d.RawPitchSamples);
+        Assert.Equal(21.0, d.ResidualModeCents!.Value, 6);
+        Assert.Equal(0.0, d.StableResidualMadCents!.Value, 6);
+        Assert.Equal(1.0, d.BaselineConfidence!.Value, 6);
+        Assert.Equal(0, d.RawBendTransitions);
+        Assert.Equal(0, d.AfterDedup);
+        Assert.Equal(0, d.AfterDeadband);
+        Assert.Equal(0, d.ExpressiveTransitions);
+        Assert.Equal(21.0, d.TuningCents!.Value, 6);
+        Assert.True(d.Accepted);
+    }
+
+    [Fact]
+    public void Fidelity_TwoTunedDomains_OneTuningEventPerEndpoint()
+    {
+        // D13b: ONE domain → ONE active tuning state; two tuned domains each get
+        // exactly one tuning event on their own endpoint (invariant enforced).
+        var notes = StableTunedNotes(21.0)
+            .Concat(StableTunedNotes(21.0).Select(n => n with
+            {
+                ChannelId = "ym2608.0.fm.2",
+                StartSample = n.StartSample + 5_000_000,
+                EndSample = n.EndSample + 5_000_000,
+            }))
+            .ToArray();
+        var result = ExportResult(Timeline(notes));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        Assert.Equal(2, decoded.State.Values.Count(s => s.HasTuning));
+    }
 }

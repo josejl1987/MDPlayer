@@ -4,6 +4,24 @@ using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Midi;
 
+/// <summary>Pitch-normalization modes (D9/D11).</summary>
+internal enum PitchNormalizationMode
+{
+    /// <summary>DEFAULT: subtract the accepted per-domain bias and restore it via
+    /// RPN 0x0002 (+0x0001 coarse) channel tuning at tick 0 — played pitch equals
+    /// source pitch, bends carry only expressive deviation.</summary>
+    Fidelity,
+
+    /// <summary>OPT-IN: subtract an accepted SMALL bias (≤ DawFriendlySnapMaxCents)
+    /// and do NOT restore it — notes snap to equal temperament. Emits no tuning
+    /// events. A larger accepted bias is left raw with a warning.</summary>
+    DawFriendly,
+
+    /// <summary>Byte-identical legacy output: no normalization at all, no tuning,
+    /// no per-domain statistics.</summary>
+    Off,
+}
+
 /// <summary>
 /// Configurable thresholds for the pitch-normalization stage. Instrumentation-first
 /// (FR-6): these are CONSERVATIVE calibration placeholders — every value is
@@ -84,9 +102,19 @@ internal sealed class PitchNormalizationThresholds
     /// |bias| is at most this; a larger bias emits no tuning and is left raw.</summary>
     public double DawFriendlySnapMaxCents { get; init; } = 50.0;
 
-    /// <summary>Pass 3: |bias| beyond this is rejected outright (would require a
-    /// tuning state no MIDI channel should carry).</summary>
+    /// <summary>Pass 3 acceptance: |bias| beyond this is rejected outright (would
+    /// require a tuning state no MIDI channel should carry).</summary>
     public double CoarseBiasCapCents { get; init; } = 600.0;
+
+    /// <summary>
+    /// Pass 3 acceptance floor (first-run calibration, FR-6): a tuning center within
+    /// this many cents of equal temperament is NOT acted on. A sub-threshold bias is
+    /// indistinguishable from register noise (the deadband noise floor), and acting
+    /// on it would turn every exactly-integer note in the domain into a sub-LSB
+    /// noise bend. Rejected silently — "in tune" is high confidence, not low, so no
+    /// warning is emitted; the measured mode/MAD/coverage still reach the report.
+    /// </summary>
+    public double MinAcceptedBiasCents { get; init; } = 0.75;
 }
 
 /// <summary>A normalized pitch change: same sample, pitch expressed in the normalized
@@ -169,11 +197,23 @@ internal static class PitchNormalizationStage
 {
     public static PitchNormalizationModel Normalize(
         VisualizationTimeline timeline,
+        PitchNormalizationMode mode,
         PitchNormalizationThresholds thresholds,
         Func<NoteEvent, MidiTrackKey> keyFor,
         List<string>? warnings)
     {
         var notes = timeline.Notes ?? Array.Empty<NoteEvent>();
+
+        if (mode == PitchNormalizationMode.Off)
+        {
+            // Legacy passthrough: identity views (raw pitch, raw changes), no domain
+            // statistics — byte-identical to the pre-normalization exporter.
+            var identity = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
+            foreach (NoteEvent note in notes)
+                identity[note] = new NormalizedNoteView(note, note.InitialMidiNote, RawChanges(note.Pitch));
+            return new PitchNormalizationModel(identity, new Dictionary<MidiTrackKey, DomainPitchStats>());
+        }
+
         var notesByDomain = new Dictionary<MidiTrackKey, List<NoteEvent>>();
         foreach (NoteEvent note in notes)
         {
@@ -197,7 +237,22 @@ internal static class PitchNormalizationStage
         foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
         {
             TuningDetection detection = detectionByDomain[key];
-            double bias = detection.BiasCents / 100.0; // cents → semitones
+            // DAW-friendly snaps only small accepted biases (D9); a larger one is
+            // left raw (bias 0) with a warning — snapping it would audibly shift the part.
+            double bias;
+            if (detection.Accepted
+                && (mode != PitchNormalizationMode.DawFriendly
+                    || Math.Abs(detection.BiasCents) <= thresholds.DawFriendlySnapMaxCents + 1e-9))
+            {
+                bias = detection.BiasCents / 100.0; // cents → semitones
+            }
+            else
+            {
+                if (detection.Accepted && mode == PitchNormalizationMode.DawFriendly && warnings is not null)
+                    warnings.Add($"pitch tuning: domain '{key}' bias {detection.BiasCents:0.0}c exceeds the " +
+                        $"DAW-friendly snap cap {thresholds.DawFriendlySnapMaxCents:0.0}c — left raw, no snap");
+                bias = 0.0;
+            }
             var counters = new DomainCounters();
             foreach (NoteEvent note in domainNotes)
             {
@@ -229,6 +284,11 @@ internal static class PitchNormalizationStage
         }
         return new PitchNormalizationModel(views, domains);
     }
+
+    /// <summary>Off-mode identity changes: the raw list converted 1:1 (no collapse,
+    /// no dedup), preserving legacy byte-for-byte semantics.</summary>
+    private static IReadOnlyList<NormalizedPitchChange>? RawChanges(IReadOnlyList<PitchChange>? raw) =>
+        raw?.Select(c => new NormalizedPitchChange(c.SamplePosition, c.MidiNote)).ToList();
 
     /// <summary>Per-domain pipeline counters (monotone: never grows).</summary>
     private sealed class DomainCounters
@@ -477,6 +537,10 @@ internal static class PitchNormalizationStage
         {
             return Reject($"|bias| {mode:0.0}c > coarse cap {t.CoarseBiasCapCents:0.0}c");
         }
+        // Noise-floor gate (MinAcceptedBiasCents): a center within the deadband of
+        // equal temperament is "in tune" — not acted on, silently (no warning).
+        if (Math.Abs(mode) <= t.MinAcceptedBiasCents + centsEpsilon)
+            return new TuningDetection(0.0, false, attacks, retriggerAttacks, mode, mad, coverage);
 
         return new TuningDetection(mode, true, attacks, retriggerAttacks, mode, mad, coverage);
     }
