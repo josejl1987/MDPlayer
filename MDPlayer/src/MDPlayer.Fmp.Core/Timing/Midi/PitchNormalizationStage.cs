@@ -123,7 +123,7 @@ internal sealed record PitchNormalizationModel(
 ///   P0  same-sample final-wins collapse (mirrors BuildPitchAnchors — the stage
 ///       never flips a same-sample final write to an earlier one)
 ///   P1  exact-event dedup on a pitch grid (FR-2, pitch units ONLY)
-///   P2  deadband + hysteresis stable-run compression (FR-3)      [next unit]
+///   P2  deadband + hysteresis stable-run compression (FR-3)
 ///   P3  consecutive-identical suppression                         [next unit]
 ///   P4  per-domain tuning-bias subtraction (FR-4)                 [next unit]
 ///
@@ -158,14 +158,16 @@ internal static class PitchNormalizationStage
             return Array.Empty<NormalizedPitchChange>();
         List<PitchSample> samples = SameSampleCollapse(note.Pitch);
         samples = Pass1ExactDedup(note.InitialMidiNote, samples, thresholds.DedupGridCents);
-        // Pass 2 (deadband/hysteresis), Pass 3 (consecutive-identical) and Pass 4
-        // (per-domain bias subtraction) are added by the following work units.
+        samples = Pass2DeadbandHysteresis(note.InitialMidiNote, samples,
+            thresholds.DeadbandEnterCents, thresholds.DeadbandExitCents);
+        // Pass 3 (consecutive-identical) and Pass 4 (per-domain bias subtraction)
+        // are added by the following work units.
         return samples.Select(s => new NormalizedPitchChange(s.SamplePosition, s.MidiNote)).ToList();
     }
 
     /// <summary>Working pitch sample (decoder order is chronological, so list order
-    /// is source order).</summary>
-    private readonly record struct PitchSample(long SamplePosition, double MidiNote);
+    /// is source order). Internal so the passes are independently testable.</summary>
+    internal readonly record struct PitchSample(long SamplePosition, double MidiNote);
 
     /// <summary>P0: same-sample collapse, final (latest) write wins — the exact rule
     /// BuildPitchAnchors applies downstream, applied here so P1/P2 never decide a
@@ -212,4 +214,55 @@ internal static class PitchNormalizationStage
     /// count of grid steps from pitch 0 (round-half-away so grid cells are exact).</summary>
     private static long Quantize(double midiNote, double gridCents) =>
         (long)Math.Round(midiNote * 1200.0 / gridCents, MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// P2 deadband + MANDATORY hysteresis (FR-3 / SC-3). The FNUM noise floor
+    /// (~0.87c at fNumber ≈ 2000) sits at the deadband threshold, so a single
+    /// threshold would oscillate between retain/drop forever around the boundary;
+    /// hysteresis re-centers the band on the first retained value and the other
+    /// boundary value lands inside the new band → ONE stable state. The band is
+    /// always relative to the last RETAINED value (center); the run-start anchor
+    /// (the folded initial pitch) is the initial center.
+    ///
+    /// State machine (D5; Enter must stay &gt; Exit so a boundary value never ties):
+    ///   Suppress: dev = |c − center| ≤ Enter → DROP (stay Suppress)
+    ///             dev &gt; Enter            → RETAIN, center = c, mode = Pass
+    ///   Pass:     dev ≤ Exit             → RETAIN as new center, mode = Suppress
+    ///             dev &gt; Exit            → RETAIN, center = c, stay Pass
+    ///
+    /// Contract: worst-case suppressed drift is bounded by EnterCents (a dropped
+    /// change is always within Enter of the last retained center).
+    /// </summary>
+    internal static List<PitchSample> Pass2DeadbandHysteresis(
+        double initialMidiNote, IReadOnlyList<PitchSample> samples,
+        double enterCents, double exitCents)
+    {
+        // Float guard: cents computed as |Δ midi|·100 can land a hair above an exact
+        // boundary (0.5c shows up as 0.5 + 1e-17); the bounds are INCLUSIVE by design
+        // (D5: dev ≤ Enter drops, dev ≤ Exit retains), so compare against +ε.
+        const double centsEpsilon = 1e-9;
+        var result = new List<PitchSample>(samples.Count);
+        double center = initialMidiNote;
+        bool pass = false;
+        foreach (PitchSample s in samples)
+        {
+            double dev = Math.Abs(s.MidiNote - center) * 100.0; // cents (1 midi unit = 1 semitone = 100c)
+            if (!pass)
+            {
+                if (dev <= enterCents + centsEpsilon)
+                    continue; // suppressed: within the deadband of the current center
+                result.Add(s);
+                center = s.MidiNote;
+                pass = true;
+            }
+            else
+            {
+                result.Add(s);
+                center = s.MidiNote;
+                if (dev <= exitCents + centsEpsilon)
+                    pass = false; // settled within Exit → re-center and re-suppress
+            }
+        }
+        return result;
+    }
 }
