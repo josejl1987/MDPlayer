@@ -64,7 +64,30 @@ public sealed class MidiExportService
             {
                 Diagnostics = build.Diagnostics,
             };
-            byte[] bytes = exporter.Export(timeline).Bytes;
+            byte[] bytes;
+            ExportPerformanceSummary? performance = null;
+            if (request.EnablePerformanceReceipts)
+            {
+                var recorder = new ExportPerformanceRecorder(
+                    request.PerformanceFixture,
+                    new
+                    {
+                        Source = timeline.Source,
+                        SampleRate = timeline.SampleRate,
+                        StartSample = timeline.StartSample,
+                        EndSample = timeline.EndSample,
+                        NoteCount = (timeline.Notes ?? Array.Empty<NoteEvent>()).Count,
+                    },
+                    new { Request = request });
+                bytes = recorder.Measure("midi-planning-and-serialization",
+                    (timeline.Notes ?? Array.Empty<NoteEvent>()).Count,
+                    () => exporter.Export(timeline).Bytes);
+                performance = recorder.Complete();
+            }
+            else
+            {
+                bytes = exporter.Export(timeline).Bytes;
+            }
             return new MidiExportResult
             {
                 Succeeded = true,
@@ -73,7 +96,8 @@ public sealed class MidiExportService
                 TempoSource = build.Diagnostics.TempoSource.ToString(),
                 PhaseSource = build.Diagnostics.PhaseSource.ToString(),
                 PhaseUnknown = build.Diagnostics.PhaseUnknown,
-                Report = BuildReport(build, request.Ppq),
+                Report = BuildReport(build, request.Ppq, performance),
+                Performance = performance,
             };
         }
         catch (Exception ex)
@@ -267,7 +291,8 @@ public sealed class MidiExportService
         _ => null,
     };
 
-    private static IReadOnlyList<string> BuildReport(MusicalTimeMapBuildResult build, int ppq)
+    private static IReadOnlyList<string> BuildReport(MusicalTimeMapBuildResult build, int ppq,
+        ExportPerformanceSummary? performance = null)
     {
         var lines = new List<string>();
         var map = build.Map;
@@ -279,6 +304,8 @@ public sealed class MidiExportService
         if (map.Meter != null)
             lines.Add($"meter: {map.Meter}");
         lines.AddRange(d.Warnings);
+        if (performance is not null)
+            lines.AddRange(performance.ToHumanReadable());
         return lines;
     }
 }
