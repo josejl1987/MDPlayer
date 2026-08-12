@@ -1574,6 +1574,12 @@ The acceptance of a tuning center is deliberately conservative (coverage,
 distinct notes, MAD, persistence, per-chip caps) so synthetic fixtures and
 in-tune domains are structural no-ops.
 
+Fidelity mode depends on the target honoring RPN channel fine tuning
+(0x0002 + CC38), which some DAWs and hardware support patchily. If a track
+sounds slightly detuned or the tuning is ignored, use `--pitch-normalization
+daw` (snaps a small stable bias to equal temperament; expressive bends only)
+or `off`.
+
 **FR-055 — Pitch report flag**
 
 The CLI MUST expose `--pitch-report PATH`, mirroring `--timing-report`, writing
