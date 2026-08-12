@@ -183,4 +183,38 @@ public sealed class MidiCliOptionTests
         MidiOptions o = Parse("--timing-report", "report.json", "--output", "out.mid", Input);
         Assert.Equal("report.json", o.TimingReport);
     }
+
+    [Theory]
+    [InlineData("fidelity")]
+    [InlineData("daw")]
+    [InlineData("off")]
+    public void PitchNormalization_AcceptedValues(string value)
+    {
+        MidiOptions o = Parse("--pitch-normalization", value, "--output", "out.mid", Input);
+        Assert.Equal(value, o.PitchNormalization);
+    }
+
+    [Fact]
+    public void PitchNormalization_DefaultsToFidelity()
+    {
+        MidiOptions o = Parse("--output", "out.mid", Input);
+        Assert.Equal("fidelity", o.PitchNormalization);
+    }
+
+    [Theory]
+    [InlineData("super-tuned")]
+    [InlineData("on")]
+    public void PitchNormalization_UnknownValue_Rejected(string value)
+    {
+        ArgumentException ex = Assert.Throws<ArgumentException>(() =>
+            Parse("--pitch-normalization", value, "--output", "out.mid", Input));
+        Assert.Contains("--pitch-normalization", ex.Message);
+    }
+
+    [Fact]
+    public void PitchReport_PathParsed()
+    {
+        MidiOptions o = Parse("--pitch-report", "pitch.json", "--output", "out.mid", Input);
+        Assert.Equal("pitch.json", o.PitchReport);
+    }
 }

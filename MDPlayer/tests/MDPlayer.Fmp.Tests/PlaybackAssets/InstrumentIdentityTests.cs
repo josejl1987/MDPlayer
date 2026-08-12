@@ -116,13 +116,64 @@ public sealed class InstrumentIdentityTests
     [InlineData("dmg:1", "Ssg")]
     [InlineData("dmg:3", "Wavetable")]
     [InlineData("spc:src3", "Pcm")]
+    [InlineData("spc:src23:a1b2c3d4:12345678", "Pcm")]
     [InlineData("midi:channel-1:program-5", "Midi")]
+    [InlineData("sn76489:tone", "Ssg")]
+    [InlineData("sn76489:noise", "Ssg")]
     public void Identity_TypedCanonicalForms_RoundTrip(string canonical, string familyName)
     {
         Assert.True(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
         Assert.Equal(familyName, identity.Family.ToString());
         Assert.True(InstrumentIdentity.TryParse(identity.Canonical, out InstrumentIdentity roundTrip));
         Assert.Equal(identity, roundTrip);
+    }
+
+    [Theory]
+    // Short form emitted by SnesDspTimelineDecoder ("spc:src{source}").
+    [InlineData("spc:src3", 3)]
+    [InlineData("spc:src0", 0)]
+    [InlineData("spc:src23", 23)]
+    // Full canonical emitted by SpcInstrumentBuilder:
+    // spc:src{source}:{shortHash}:{adsr1}{adsr2}{gain}[n] — suffix captured verbatim.
+    [InlineData("spc:src3:1a2b3c4d", 3)]
+    [InlineData("spc:src3:1a2b3c4d:12345678", 3)]
+    [InlineData("spc:src3:1a2b3c4d:12345678n", 3)]
+    [InlineData("spc:src23:a1b2c3d4:98765432", 23)]
+    [InlineData("spc:src7:deadBEEF:00FF00ffn", 7)]
+    public void Identity_TryParse_SpcSourceForms_ParseAsPcmWithSourceNumber(string canonical, int source)
+    {
+        Assert.True(InstrumentIdentity.TryParse(canonical, out InstrumentIdentity identity));
+        Assert.Equal(IdentityFamily.Pcm, identity.Family);
+        Assert.Equal(source, identity.DedupNumber);
+        // The canonical is preserved VERBATIM — the suffix is the dedup equality key.
+        Assert.Equal(canonical, identity.Canonical);
+        Assert.Equal($"Sample {source:00}", identity.DisplayName);
+    }
+
+    [Theory]
+    [InlineData("spc:src")]
+    [InlineData("spc:srcx")]
+    [InlineData("spc:src-1")]
+    [InlineData("spc:src3:zzzz")]
+    [InlineData("spc:src3:1a2b3c4d:nothex")]
+    [InlineData("spc:src3:1a2b3c4d:12345678x")]
+    public void Identity_TryParse_MalformedSpcSource_Rejected(string canonical)
+    {
+        Assert.False(InstrumentIdentity.TryParse(canonical, out _));
+    }
+
+    [Fact]
+    public void Identity_TryParse_Sn76489Tokens_ParseAsSsgWithVerbatimCanonical()
+    {
+        Assert.True(InstrumentIdentity.TryParse("sn76489:tone", out var tone));
+        Assert.Equal(IdentityFamily.Ssg, tone.Family);
+        Assert.Equal("sn76489:tone", tone.Canonical);
+        Assert.Equal("sn76489:tone", tone.DisplayName);
+
+        Assert.True(InstrumentIdentity.TryParse("sn76489:noise", out var noise));
+        Assert.Equal(IdentityFamily.Ssg, noise.Family);
+        Assert.Equal("sn76489:noise", noise.Canonical);
+        Assert.NotEqual(tone, noise);
     }
 
     [Theory]

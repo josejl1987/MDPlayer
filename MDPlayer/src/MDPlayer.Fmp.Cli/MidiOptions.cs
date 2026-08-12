@@ -55,6 +55,13 @@ internal sealed class MidiOptions : BatchRenderSettings
     public bool EmitPitchBend { get; set; } = true;
     public int BendRange { get; set; } = 24;
     public bool UsePercussionChannel { get; set; } = true;
+
+    /// <summary>Pitch-normalization mode: fidelity | daw | off (validated at parse).</summary>
+    public string PitchNormalization { get; set; } = "fidelity";
+
+    /// <summary>Optional JSON path for the per-domain pitch report (--pitch-report).</summary>
+    public string PitchReport { get; set; }
+
     public TextWriter OutputWriter { get; set; } = Console.Out;
 }
 
@@ -96,6 +103,8 @@ internal static class MidiOptionsParser
                     case "--no-pitch-bend" when value == null: result.EmitPitchBend = false; break;
                     case "--bend-range": result.BendRange = reader.ReadInt(name); break;
                     case "--no-percussion-channel" when value == null: result.UsePercussionChannel = false; break;
+                    case "--pitch-normalization": result.PitchNormalization = ParsePitchNormalization(reader.RequireValue(name)); break;
+                    case "--pitch-report": result.PitchReport = reader.RequireValue(name); break;
                     default: throw new ArgumentException($"unknown option '{name}'");
                 }
             }
@@ -138,5 +147,11 @@ internal static class MidiOptionsParser
         "symbolic" => MidiTempoSource.Symbolic,
         "fixed" => MidiTempoSource.Fixed,
         _ => throw new ArgumentException($"unknown --tempo-source '{source}'"),
+    };
+
+    private static string ParsePitchNormalization(string value) => value.ToLowerInvariant() switch
+    {
+        "fidelity" or "daw" or "off" => value.ToLowerInvariant(),
+        _ => throw new ArgumentException($"unknown --pitch-normalization '{value}' (expected fidelity|daw|off)"),
     };
 }

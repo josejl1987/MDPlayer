@@ -87,6 +87,13 @@ internal static class MidiCommand
             EmitPitchBend = options.EmitPitchBend,
             BendRangeSemitones = options.BendRange,
             UsePercussionChannel = options.UsePercussionChannel,
+            PitchNormalizationMode = options.PitchNormalization switch
+            {
+                "fidelity" => PitchNormalizationMode.Fidelity,
+                "daw" => PitchNormalizationMode.DawFriendly,
+                "off" => PitchNormalizationMode.Off,
+                _ => throw new ArgumentException($"unknown --pitch-normalization '{options.PitchNormalization}'"),
+            },
         };
         var exporter = new MusicalMidiExporter(build.Map, options.Ppq, exportOptions)
         {
@@ -113,7 +120,46 @@ internal static class MidiCommand
         if (!string.IsNullOrWhiteSpace(options.TimingReport))
             WriteTimingReport(options.TimingReport, timeline, build, result, options.Ppq);
 
+        if (!string.IsNullOrWhiteSpace(options.PitchReport))
+            WritePitchReport(options.PitchReport, result);
+
         return 0;
+    }
+
+    /// <summary>
+    /// Writes the per-domain pitch-normalization report (FR-6 / SC-9): every domain
+    /// carries the nine mandated fields — attacks, raw pitch samples, residual mode,
+    /// stable residual MAD, baseline confidence, raw bend transitions, after
+    /// deadband, after dedup and expressive transitions — plus retrigger attacks,
+    /// the accepted tuning and the acceptance verdict. Mirrors WriteTimingReport.
+    /// </summary>
+    private static void WritePitchReport(string path, MusicalMidiExportResult export)
+    {
+        var report = new
+        {
+            domains = export.PitchDiagnostics.Domains.Select(d => new
+            {
+                domain = d.Key.ToString(),
+                attacks = d.Attacks,
+                retriggerAttacks = d.RetriggerAttacks,
+                rawPitchSamples = d.RawPitchSamples,
+                residualModeCents = d.ResidualModeCents,
+                stableResidualMadCents = d.StableResidualMadCents,
+                baselineConfidence = d.BaselineConfidence,
+                rawBendTransitions = d.RawBendTransitions,
+                afterDeadband = d.AfterDeadband,
+                afterDedup = d.AfterDedup,
+                expressiveTransitions = d.ExpressiveTransitions,
+                tuningCents = d.TuningCents,
+                accepted = d.Accepted,
+            }).ToArray(),
+            warnings = export.PitchDiagnostics.Warnings,
+        };
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            report,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".");
+        File.WriteAllText(path, json);
     }
 
     private static void WriteTimingReport(
@@ -145,9 +191,11 @@ internal static class MidiCommand
                 alternativeBpm = diagnostics.AlternativeBpm,
                 selectedScore = diagnostics.SelectedScore,
                 alternativeScore = diagnostics.AlternativeScore,
+                aliasMargin = diagnostics.AliasMargin,
                 tempoConfidence = diagnostics.TempoConfidence,
                 tempoAmbiguous = diagnostics.TempoAmbiguous,
                 phaseSample = diagnostics.PhaseSample,
+                sample0Quarter = diagnostics.SampleZeroQuarter,
             } : null,
             pitch = new
             {

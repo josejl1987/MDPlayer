@@ -1549,3 +1549,42 @@ MusicalTimeMap
 There is exactly one global MIDI origin translation.
 
 Tempo, beat phase, and meter/downbeat remain separate concepts.
+
+---
+
+## Pitch Normalization
+
+**FR-054 — Pitch-normalization mode flag**
+
+The CLI MUST expose `--pitch-normalization fidelity|daw|off`:
+
+* `fidelity` (default) — subtracts the accepted per-domain tuning bias and
+  restores it via RPN channel fine tuning (RPN 0x0002 + CC38) at tick 0; bends
+  carry only expressive deviation; played pitch equals source pitch on
+  RPN-supporting targets. The detector folds residuals into the current
+  semitone cell (±50c), so accepted biases always fit the fine range — the
+  coarse RPN 0x0001 path exists in the writer (IR completeness, D10) but no
+  stage bias can reach it.
+* `daw` — opt-in; snaps accepted biases up to the snap cap to equal
+  temperament and emits NO tuning events (deliberately changes absolute pitch
+  presentation).
+* `off` — byte-identical legacy output.
+
+The acceptance of a tuning center is deliberately conservative (coverage,
+distinct notes, MAD, persistence, per-chip caps) so synthetic fixtures and
+in-tune domains are structural no-ops.
+
+Fidelity mode depends on the target honoring RPN channel fine tuning
+(0x0002 + CC38), which some DAWs and hardware support patchily. If a track
+sounds slightly detuned or the tuning is ignored, use `--pitch-normalization
+daw` (snaps a small stable bias to equal temperament; expressive bends only)
+or `off`.
+
+**FR-055 — Pitch report flag**
+
+The CLI MUST expose `--pitch-report PATH`, mirroring `--timing-report`, writing
+per-domain JSON with at least: attacks, retrigger attacks, raw pitch samples,
+residual mode (cents), stable residual MAD (cents), baseline confidence,
+raw bend transitions, after-dedup, after-deadband and expressive transitions,
+plus the accepted tuning and warnings. Thresholds are configurable and
+calibrated from real corpus reports — never hardcoded final values.

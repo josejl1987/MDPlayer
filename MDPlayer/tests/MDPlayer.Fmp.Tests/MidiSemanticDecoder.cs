@@ -20,6 +20,18 @@ internal sealed class MidiSemanticDecoder
         public readonly Dictionary<int, EffectiveNote> ActiveNotes = new();
         public int? Program;
         public int? Bank;
+
+        /// <summary>RPN 0x0002 fine-tuning raw 14-bit value, centered at 0x2000
+        /// (0 = −100c, 0x2000 = 0c, 0x3FFF ≈ +100c). 0x2000 = no tuning.</summary>
+        public int FineTuningValue = 0x2000;
+
+        /// <summary>RPN 0x0001 coarse tuning in semitones (signed), 0 = none.</summary>
+        public int CoarseTuningSemitones;
+
+        /// <summary>Fine tuning in cents derived from <see cref="FineTuningValue"/>.</summary>
+        public double FineTuningCents => (FineTuningValue - 0x2000) * 100.0 / 8192.0;
+
+        public bool HasTuning => FineTuningValue != 0x2000 || CoarseTuningSemitones != 0;
     }
 
     internal sealed record EffectiveNote(int Note, long OnTick, int Velocity);
@@ -92,8 +104,9 @@ internal sealed class MidiSemanticDecoder
                         State(result, port, prog.Channel).Program = prog.ProgramNumber;
                         continue;
                     case ControlChangeEvent cc:
-                            ApplyControl(result, port, cc, pendingRpn);
-                            continue;
+                        TrackEvent(result, port, cc.Channel, new TimedEvent(tick, port, cc.Channel, cc));
+                        ApplyControl(result, port, cc, pendingRpn);
+                        continue;
                     default:
                         continue;
                 }
@@ -119,12 +132,27 @@ internal sealed class MidiSemanticDecoder
         }
         else if (cc.ControlNumber == 100)
         {
-            if (pendingRpn.TryGetValue(key, out int rpnMsb) && rpnMsb == 0 && cc.ControlValue == 0)
-                pendingRpn[key] = 0; // selecting RPN 0 (pitch-bend range)
+            // RPN number = (CC101 MSB << 7) | CC100 LSB. The exporter only uses
+            // RPNs with MSB 0: 0x0000 (bend range), 0x0001 (coarse tuning),
+            // 0x0002 (fine tuning). 127 = null-RPN unselect, tracked but inert.
+            if (pendingRpn.TryGetValue(key, out int rpnMsb) && rpnMsb == 0 && (byte)cc.ControlValue <= 2)
+                pendingRpn[key] = cc.ControlValue;
         }
-        else if (cc.ControlNumber == 6 && pendingRpn.TryGetValue(key, out int rpn) && rpn == 0)
+        else if (cc.ControlNumber == 6 && pendingRpn.TryGetValue(key, out int rpn))
         {
-            state.BendRange = cc.ControlValue;
+            if (rpn == 0)
+                state.BendRange = cc.ControlValue;
+            else if (rpn == 1)
+                state.CoarseTuningSemitones = ((byte)cc.ControlValue << 7) - 0x2000;
+            else if (rpn == 2)
+                state.FineTuningValue = (byte)cc.ControlValue << 7; // MSB; CC38 carries the LSB
+        }
+        else if (cc.ControlNumber == 38 && pendingRpn.TryGetValue(key, out int rpn38))
+        {
+            if (rpn38 == 1)
+                state.CoarseTuningSemitones |= cc.ControlValue; // LSB (0 in the exporter)
+            else if (rpn38 == 2)
+                state.FineTuningValue |= cc.ControlValue; // LSB of the 14-bit fine value
         }
     }
 
@@ -150,9 +178,12 @@ internal sealed class MidiSemanticDecoder
         return s;
     }
 
-    /// <summary>Effective pitch = note + sign-symmetric bend decode.</summary>
-    public static double EffectivePitch(int note, int signedBend, int bendRange) =>
-        note + DecodeBend(signedBend, bendRange);
+    /// <summary>Effective pitch = note + tuning (coarse semitones + fine cents) +
+    /// sign-symmetric bend decode. Tuning args default to 0 (no tuning) for
+    /// backward compatibility.</summary>
+    public static double EffectivePitch(int note, int signedBend, int bendRange,
+        int fineTuningCents = 0, int coarseTuningSemitones = 0) =>
+        note + coarseTuningSemitones + fineTuningCents / 100.0 + DecodeBend(signedBend, bendRange);
 
     /// <summary>Sign-symmetric bend decode: negative bend/8192*range, positive bend/8191*range.</summary>
     public static double DecodeBend(int signedBend, int bendRange) =>

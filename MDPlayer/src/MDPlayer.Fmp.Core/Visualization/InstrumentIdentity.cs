@@ -26,16 +26,17 @@ internal readonly record struct InstrumentIdentity(
     public static readonly InstrumentIdentity Empty = new(IdentityFamily.Pcm, 0, "");
 
     /// <summary>
-    /// Human display name. The normalized FM form renders as "FM 007"; wavetable
-    /// as "WAVE 3"; chip-positional FM/MIDI/PCM labels collapse to their family
-    /// ("FM", "MIDI", "PCM") since the track name already carries the chip and
-    /// channel. Everything else keeps the canonical string.
+    /// Human display name. The normalized FM form renders as "FM 007"; SNES DSP
+    /// sample voices as "Sample {source:00}"; wavetable as "WAVE 3"; chip-positional
+    /// FM/MIDI/PCM labels collapse to their family ("FM", "MIDI", "PCM") since the
+    /// track name already carries the chip and channel. Everything else keeps the
+    /// canonical string.
     /// </summary>
     public string DisplayName => Family switch
     {
         IdentityFamily.Fm => FmDisplayName,
         IdentityFamily.Wavetable => WavetableDisplayName,
-        IdentityFamily.Pcm => "PCM",
+        IdentityFamily.Pcm => PcmDisplayName,
         IdentityFamily.Midi => "MIDI",
         IdentityFamily.Ssg => SsgDisplayName,
         _ => Canonical,
@@ -81,6 +82,20 @@ internal readonly record struct InstrumentIdentity(
             return separator >= 0 && separator < Canonical.Length - 1
                 ? "WAVE " + Canonical[(separator + 1)..]
                 : "WAVE";
+        }
+    }
+
+    /// <summary>Human name for a PCM identity: "Sample {source:00}" for SNES DSP
+    /// sample voices (spc:srcN); "PCM" for chip-positional forms whose canonical
+    /// has no global sample number.</summary>
+    private string PcmDisplayName
+    {
+        get
+        {
+            if (Canonical is not null
+                && Canonical.StartsWith("spc:src", StringComparison.Ordinal))
+                return $"Sample {DedupNumber:00}";
+            return "PCM";
         }
     }
 
@@ -131,7 +146,6 @@ internal readonly record struct InstrumentIdentity(
             identity = new InstrumentIdentity(IdentityFamily.Pcm, 0, canonical);
             return true;
         }
-
         // Chip-prefixed decoder forms: "<chip>[:<instance>]:<family-token>:<suffix>"
         // (e.g. ym2203:0:fm:1, ymz280b:pcm:1, huc6280:wave:1, ay8910:0:tone:1). The
         // family token carries the semantic family; the positional canonical keeps
@@ -152,6 +166,26 @@ internal readonly record struct InstrumentIdentity(
             return true;
         }
         if (canonical.Contains(":tone:", StringComparison.Ordinal))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Ssg, 0, canonical);
+            return true;
+        }
+        // SNES DSP sample identity: the decoders emit the short form
+        // "spc:src{source}" (SnesDspTimelineDecoder) and the FULL canonical
+        // "spc:src{source}:{shortHash}:{adsr1}{adsr2}{gain}[n]"
+        // (SpcInstrumentBuilder). Accept both; the suffix (hash/ADSR/gain) is
+        // captured VERBATIM in Canonical — the dedup equality key — never
+        // re-derived. DedupNumber carries the source number for display.
+        if (canonical.StartsWith("spc:src", StringComparison.Ordinal)
+            && TryParseSpcSource(canonical, out int sourceNumber))
+        {
+            identity = new InstrumentIdentity(IdentityFamily.Pcm, sourceNumber, canonical);
+            return true;
+        }
+        // PSG voice-type tokens (SN76489): tone/noise are display-only semantics —
+        // PSG has no timbre identity (spec 30) — but they must parse so the
+        // exporter never collapses them to a placeholder.
+        if (canonical is "sn76489:tone" or "sn76489:noise")
         {
             identity = new InstrumentIdentity(IdentityFamily.Ssg, 0, canonical);
             return true;
@@ -186,14 +220,45 @@ internal readonly record struct InstrumentIdentity(
             identity = new InstrumentIdentity(IdentityFamily.Midi, 0, canonical);
             return true;
         }
-        // SPC (SNES DSP) sample voices: "spc:src<n>".
-        if (canonical.StartsWith("spc:src", StringComparison.Ordinal))
-        {
-            identity = new InstrumentIdentity(IdentityFamily.Pcm, 0, canonical);
-            return true;
-        }
         return false;
     }
+
+    /// <summary>Parses the source number of an "spc:srcN[:hex...][n]" identity:
+    /// ^spc:src(\d+)(?::[0-9a-fA-F]+)*n?$. The trailing suffix (short hash,
+    /// ADSR/gain, optional noise 'n') is validated as colon-hex groups but NOT
+    /// interpreted — Canonical keeps it verbatim.</summary>
+    private static bool TryParseSpcSource(string canonical, out int sourceNumber)
+    {
+        sourceNumber = 0;
+        const string prefix = "spc:src";
+        ReadOnlySpan<char> rest = canonical.AsSpan(prefix.Length);
+        int digits = 0;
+        while (digits < rest.Length && char.IsAsciiDigit(rest[digits]))
+            digits++;
+        if (digits == 0 || !int.TryParse(rest[..digits], out sourceNumber))
+            return false;
+        rest = rest[digits..];
+        if (rest.Length == 0)
+            return true; // short form: spc:srcN
+        if (rest[^1] == 'n')
+            rest = rest[..^1]; // optional noise suffix
+        while (rest.Length > 0)
+        {
+            if (rest[0] != ':')
+                return false;
+            rest = rest[1..];
+            int hex = 0;
+            while (hex < rest.Length && IsHexDigit(rest[hex]))
+                hex++;
+            if (hex == 0)
+                return false;
+            rest = rest[hex..];
+        }
+        return true;
+    }
+
+    private static bool IsHexDigit(char c) =>
+        c is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
 }
 
 /// <summary>

@@ -28,6 +28,18 @@ internal sealed class MusicalMidiExportOptions
     /// re-anchor, and an offset that cannot be represented fails loudly.</summary>
     public int BendRangeSemitones { get; init; } = 24;
 
+    /// <summary>Pitch-normalization mode (D11): Fidelity (default) subtracts the
+    /// accepted per-domain tuning bias and restores it via RPN channel tuning at
+    /// tick 0 — bends carry only expressive deviation; DawFriendly snaps small
+    /// biases to equal temperament and emits no tuning; Off reproduces the legacy
+    /// byte stream exactly.</summary>
+    public PitchNormalizationMode PitchNormalizationMode { get; init; } = PitchNormalizationMode.Fidelity;
+
+    /// <summary>Configurable pitch-normalization thresholds (FR-6, instrumentation
+    /// first): the conservative defaults are calibration placeholders meant to be
+    /// replaced from the first --pitch-report corpus runs. Null = defaults.</summary>
+    public PitchNormalizationThresholds? PitchNormalizationThresholds { get; init; }
+
     public bool EmitInstrumentMetadata { get; init; } = true;
 
     /// <summary>Emit loop/section markers on the conductor track.</summary>
@@ -103,6 +115,13 @@ internal sealed class MusicalMidiExportResult
     public required TimingDiagnostics Diagnostics { get; init; }
 
     /// <summary>
+    /// Per-domain pitch-normalization statistics (FR-6 / D12): attacks, raw pitch
+    /// samples, residual mode, stable-residual MAD, baseline confidence, pipeline
+    /// transition counts, accepted tuning and warnings. Surfaced by --pitch-report.
+    /// </summary>
+    public required PitchNormalizationDiagnostics PitchDiagnostics { get; init; }
+
+    /// <summary>
     /// The global minimal integer origin shift applied to every time-domain event
     /// (notes, bends, rhythm, markers, later tempo events) so no exported tick is
     /// negative (Patch C §21). Setup events — the first Set Tempo, Time Signature,
@@ -130,8 +149,11 @@ internal sealed class MusicalMidiExporter
 
     /// <summary>Number of source voices that fell back to a placeholder track (Patch
     /// E.3). Recorded so the timing report surfaces genuine unknowns rather than
-    /// silently collapsing them.</summary>
+    /// silently collapsing them. Counts DISTINCT unresolved channelIds (TrackKeyFor
+    /// runs in two passes, so per-call counting would over-report).</summary>
     private int _placeholderCount;
+
+    private readonly HashSet<string> _placeholderChannels = new();
 
     public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
     {
@@ -157,7 +179,21 @@ internal sealed class MusicalMidiExporter
     {
         ArgumentNullException.ThrowIfNull(sourceTimeline);
         VisualizationTimeline timeline = sourceTimeline.Timeline;
-        long originShiftTicks = ComputeOriginShiftTicks(timeline);
+
+        // Pitch-normalization stage (FR-1): runs BEFORE the origin shift so the
+        // shift covers the NORMALIZED event set (the set the exporter actually
+        // serializes). Every pitch consumer reads the normalized model. Detector
+        // rejections surface as Diagnostics warnings (low-confidence domains).
+        var pitchWarnings = new List<string>();
+        PitchNormalizationModel pitchModel = PitchNormalizationStage.Normalize(
+            timeline,
+            _options.PitchNormalizationMode,
+            _options.PitchNormalizationThresholds ?? PitchNormalizationThresholds.Default,
+            TrackKeyFor,
+            pitchWarnings);
+        if (pitchWarnings.Count > 0 && Diagnostics is not null)
+            Diagnostics.Warnings.AddRange(pitchWarnings);
+        long originShiftTicks = ComputeOriginShiftTicks(timeline, pitchModel);
 
         var conductor = new List<MidiEventBase>();
         BuildConductor(timeline, originShiftTicks, conductor);
@@ -198,7 +234,7 @@ internal sealed class MusicalMidiExporter
         Dictionary<MidiEndpoint, int> lastBendByEndpoint = new();
         foreach (PlannableNote pn in plannable.OrderBy(p => p.Slot.Index).ThenBy(p => p.Note.StartSample))
         {
-            EmitNote(pn.Slot, pn.Note, originShiftTicks, lastBendByEndpoint);
+            EmitNote(pn.Slot, pn.Note, pitchModel, originShiftTicks, lastBendByEndpoint);
         }
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
@@ -229,8 +265,9 @@ internal sealed class MusicalMidiExporter
 
         // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
         // that actually serialized a bend (Patch B): none on percussion or on tracks
-        // whose notes required no bend infrastructure.
-        EmitBendRangeSetup(allocator);
+        // whose notes required no bend infrastructure. Fidelity mode additionally
+        // emits the per-domain tuning RPN (FR-5).
+        EmitBendRangeSetup(allocator, pitchModel);
 
         ApplyQuantizationToGrid(allocator);
 
@@ -244,7 +281,12 @@ internal sealed class MusicalMidiExporter
                     $"Duplicate MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) allocated to more than one track.");
         }
 
-        var writer = new MidiFileWriter(_ppq);
+        // Placeholder diagnostics (FR-12 / request 33): a single summary warning so
+        // the report surfaces genuinely unresolved identities — the per-placeholder
+        // warnings above already name the channelId.
+        if (_placeholderCount > 0 && Diagnostics is not null)
+            Diagnostics.Warnings.Add($"placeholder-track-count={_placeholderCount}");
+
         var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
         foreach (MidiTrack track in tracks)
         {
@@ -259,14 +301,72 @@ internal sealed class MusicalMidiExporter
             });
             track.HasCanonicalEventOrder = true;
         }
+
+        // Endpoint-level pitch-bend canonicalization (Patch 1): after ALL musical
+        // events are planned, collapse multiple bends on the same endpoint at the
+        // same absolute tick to the single final effective bend, and suppress
+        // consecutive identical bends with no bend-range change in between. This
+        // closes the note-boundary handoff bug where an outgoing note's final bend
+        // and the incoming note's initial bend both land on the boundary tick.
+        // Removal only — never changes tick assignment and never re-links tracks.
+        if (SkipEndpointCanonicalization)
+        {
+            // Test-only comparison path: emit the pre-canonicalization state so the
+            // Smash Up acceptance check can quantify what the pass removes. The hard
+            // invariant below intentionally does NOT run here (it would throw on
+            // exactly the duplicates this path is meant to observe).
+        }
+        else
+        {
+            CanonicalizeEndpointPitchState(tracks);
+
+            // Hard invariant: after canonicalization, per (endpoint, tick) there is
+            // at most one PitchBend. Throws before any MIDI is serialized (FR-5).
+            ValidateNoDuplicateEndpointTickBends(tracks);
+
+            // Tuning/RPN invariants (D13b): per endpoint at most one MidiTuningEvent
+            // AND at most one MidiBendRangeEvent — ONE domain → ONE active tuning
+            // state is structural, never duplicated.
+            ValidateTuningSetupCounts(tracks);
+        }
+
+        var writer = new MidiFileWriter(_ppq);
         byte[] bytes = writer.Write(conductor, tracks);
+
+        var pitchDiagnostics = new PitchNormalizationDiagnostics();
+        pitchDiagnostics.Domains.AddRange(pitchModel.Domains.Values
+            .OrderBy(d => d.Key.ToString(), StringComparer.Ordinal));
+        pitchDiagnostics.Warnings.AddRange(pitchWarnings);
         return new MusicalMidiExportResult
         {
             Bytes = bytes,
             Tracks = tracks,
             Diagnostics = Diagnostics ?? NullDiagnostics,
+            PitchDiagnostics = pitchDiagnostics,
             OriginShiftTicks = originShiftTicks,
         };
+    }
+
+    /// <summary>Hard invariant (D13b): an endpoint carries at most one tuning event
+    /// and at most one bend-range event, so the tuning state on a channel is never
+    /// ambiguous. Throws before any MIDI is serialized.</summary>
+    private static void ValidateTuningSetupCounts(IReadOnlyList<MidiTrack> tracks)
+    {
+        var counts = new Dictionary<MidiEndpoint, (int Tuning, int Range)>();
+        foreach (MidiTrack track in tracks)
+        {
+            (int Tuning, int Range) c = counts.GetValueOrDefault(track.Endpoint);
+            c.Tuning += track.Events.Count(e => e is MidiTuningEvent);
+            c.Range += track.Events.Count(e => e is MidiBendRangeEvent);
+            counts[track.Endpoint] = c;
+        }
+        foreach ((MidiEndpoint endpoint, (int Tuning, int Range) c) in counts)
+        {
+            if (c.Tuning > 1 || c.Range > 1)
+                throw new InvalidOperationException(
+                    $"MIDI endpoint ({endpoint.Port}, {endpoint.Channel}) carries {c.Tuning} tuning and " +
+                    $"{c.Range} bend-range RPN setups — at most one of each is allowed (D13b).");
+        }
     }
 
     private readonly TimingDiagnostics NullDiagnostics = new()
@@ -275,6 +375,146 @@ internal sealed class MusicalMidiExporter
         TempoSource = TimingSource.DriverBeatAnchors,
         PhaseSource = TimingSource.DriverBeatAnchors,
     };
+
+    /// <summary>Test-only escape hatch used by the Smash Up acceptance check to
+    /// compare pre/post-canonicalization output. Default false — the canonicalization
+    /// pass always runs in production.</summary>
+    internal bool SkipEndpointCanonicalization { get; set; }
+
+    /// <summary>Test-observable counters for SC-19: the canonicalization pass must
+    /// perform exactly ONE sort and ONE grouped linear pass per track. Reset at the
+    /// start of <see cref="CanonicalizeEndpointPitchState"/>; instance-scoped so
+    /// parallel tests never share state.</summary>
+    internal int CanonicalizeSortCount;
+    internal int CanonicalizePassCount;
+
+    /// <summary>
+    /// Endpoint-level pitch-bend canonicalization (Patch 1, FR-1..FR-4). Runs once
+    /// after all musical events are planned and before validation/serialization.
+    /// Groups events semantically by <see cref="MidiEndpoint"/> (the endpoint
+    /// uniqueness invariant already guarantees one track per endpoint, so keying on
+    /// track.Endpoint is equivalent) and:
+    /// 1. Same-tick collapse (FR-2): per absolute tick, zero bends → nothing; one →
+    ///    retain; N → keep ONLY the bend with the greatest SourceOrder (later source
+    ///    state wins; on a tie the first in sorted order is kept — ties are
+    ///    impossible in practice because SourceOrder is globally monotonic).
+    /// 2. Consecutive-identical suppression (FR-4): a retained bend equal to the
+    ///    previous retained bend on the endpoint is dropped iff no MidiBendRangeEvent
+    ///    (RPN sensitivity change) occurred between them; the flag resets after each
+    ///    retained bend. NoteOff/NoteOn never touch the flag — NoteOff does not reset
+    ///    pitch bend.
+    /// Cross-tick bends are NEVER merged (FR-3). The pass only REMOVES events;
+    /// tick assignment is baked at event creation and unchanged (D4), and tracks
+    /// are never re-linked. Deterministic by SourceOrder, never collection iteration
+    /// order (FR-16). O(events log n): one sort + one grouped pass per track (FR-17).
+    /// </summary>
+    internal void CanonicalizeEndpointPitchState(IReadOnlyList<MidiTrack> tracks)
+    {
+        CanonicalizeSortCount = 0;
+        CanonicalizePassCount = 0;
+        foreach (MidiTrack track in tracks)
+        {
+            // ONE sort — the exact (Tick, Rank, SourceOrder) key AppendEvents uses,
+            // so the writer's later sort is a stable no-op and same-tick collapse is
+            // deterministic by SourceOrder, never insertion/iteration order.
+            List<MidiEventBase> sorted = track.Events
+                .OrderBy(e => e.Tick)
+                .ThenBy(MidiEventOrder.Rank)
+                .ThenBy(e => e.SourceOrder)
+                .ToList();
+            CanonicalizeSortCount++;
+
+            var rebuilt = new List<MidiEventBase>(sorted.Count);
+            int? lastEmittedBend = null;
+            bool sensitivityDirty = false;
+
+            // ONE grouped linear pass over consecutive same-tick runs.
+            int i = 0;
+            while (i < sorted.Count)
+            {
+                long tick = sorted[i].Tick;
+                int runEnd = i;
+                while (runEnd < sorted.Count && sorted[runEnd].Tick == tick)
+                    runEnd++;
+
+                // Same-tick run: bends are contiguous at Rank 3; keep the bend with
+                // the greatest SourceOrder (first in sorted order on a tie).
+                MidiPitchBendEvent? retained = null;
+                bool bendRangeInRun = false;
+                for (int j = i; j < runEnd; j++)
+                {
+                    switch (sorted[j])
+                    {
+                        case MidiBendRangeEvent:
+                            bendRangeInRun = true;
+                            break;
+                        case MidiPitchBendEvent bend when retained is null || bend.SourceOrder > retained.SourceOrder:
+                            retained = bend;
+                            break;
+                    }
+                }
+                // A bend-range event sorts before PitchBend within the tick, so one
+                // sharing this tick counts as "occurred between" the previous
+                // retained bend and this one — the sensitivity flag must be set
+                // before the suppression decision.
+                if (bendRangeInRun)
+                    sensitivityDirty = true;
+
+                if (retained is not null)
+                {
+                    if (!sensitivityDirty && lastEmittedBend is int last && retained.Bend == last)
+                    {
+                        // Consecutive-identical duplicate: dropped; the flag is NOT
+                        // reset (no retained bend was emitted).
+                        retained = null;
+                    }
+                    else
+                    {
+                        lastEmittedBend = retained.Bend;
+                        sensitivityDirty = false;
+                    }
+                }
+
+                for (int j = i; j < runEnd; j++)
+                {
+                    if (ReferenceEquals(sorted[j], retained) || sorted[j] is not MidiPitchBendEvent)
+                        rebuilt.Add(sorted[j]);
+                }
+                i = runEnd;
+            }
+            CanonicalizePassCount++;
+
+            // Rebuild the track's event list in place (never re-link the track).
+            track.Events.Clear();
+            track.Events.AddRange(rebuilt);
+        }
+    }
+
+    /// <summary>
+    /// Hard invariant (FR-5): after canonicalization, per (endpoint, tick) there is
+    /// at most one <see cref="MidiPitchBendEvent"/>. Any violation throws
+    /// <see cref="InvalidOperationException"/> naming the endpoint, tick, bend
+    /// values, track name and SourceOrder values — before any MIDI is serialized.
+    /// </summary>
+    internal static void ValidateNoDuplicateEndpointTickBends(IReadOnlyList<MidiTrack> tracks)
+    {
+        foreach (MidiTrack track in tracks)
+        {
+            foreach (IGrouping<long, MidiPitchBendEvent> group in track.Events
+                         .OfType<MidiPitchBendEvent>()
+                         .GroupBy(b => b.Tick))
+            {
+                MidiPitchBendEvent[] bends = group.ToArray();
+                if (bends.Length <= 1)
+                    continue;
+                throw new InvalidOperationException(
+                    $"Duplicate pitch-bend events on endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) " +
+                    $"at tick {group.Key}: bend values [{string.Join(", ", bends.Select(b => b.Bend))}], " +
+                    $"track '{track.Name}', " +
+                    $"SourceOrder values [{string.Join(", ", bends.Select(b => b.SourceOrder))}].");
+            }
+        }
+    }
 
     /// <summary>The unshifted absolute MIDI tick of a source sample (may be negative).</summary>
     private long TimeTick(long sample) => _map.SampleToTick(sample, _ppq);
@@ -308,24 +548,27 @@ internal sealed class MusicalMidiExporter
     /// contribute to the origin), so the two can never diverge. A note emits bends
     /// only when EmitPitchBend is set AND it has pitch changes OR a fractional /
     /// non-finite initial note; any other note produces a single round-pitch note
-    /// with no bend infrastructure.</summary>
-    private bool ShouldFoldPitch(NoteEvent note)
+    /// with no bend infrastructure. Operates on the NORMALIZED view (FR-1) — a note
+    /// whose normalized pitch is exactly integer and whose changes were compressed
+    /// away needs no bend infrastructure.</summary>
+    private bool ShouldFoldPitch(NormalizedNoteView view)
     {
         if (!_options.EmitPitchBend)
             return false;
-        if (note.Pitch is { Count: > 0 })
+        if (view.Changes is { Count: > 0 })
             return true;
-        return !double.IsFinite(note.InitialMidiNote)
-            || Math.Abs(note.InitialMidiNote - Math.Round(note.InitialMidiNote)) > 1e-6;
+        return !double.IsFinite(view.InitialMidiNote)
+            || Math.Abs(view.InitialMidiNote - Math.Round(view.InitialMidiNote)) > 1e-6;
     }
 
-    private void EmitNote(TrackSlot slot, NoteEvent note, long originShift,
+    private void EmitNote(TrackSlot slot, NoteEvent note, PitchNormalizationModel model, long originShift,
         Dictionary<MidiEndpoint, int> lastBendByEndpoint)
     {
         VoiceExportOverride voiceOverride = _options.OverrideFor(note.ChannelId);
         int vel = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
         int transpose = voiceOverride.TransposeSemitones;
-        bool needsBend = ShouldFoldPitch(note);
+        NormalizedNoteView view = model.Views[note];
+        bool needsBend = ShouldFoldPitch(view);
         int bendRange = _options.BendRangeSemitones;
         // Validate the source pitch domain regardless of bend emission (§ B.3 /
         // cross-cutting fail-loudly): a note whose true pitch is outside MIDI 0..127
@@ -342,7 +585,7 @@ internal sealed class MusicalMidiExporter
             long off = TimeTick(note.EndSample) + originShift;
             if (off <= on)
                 off = on + 1;
-            int pitch = Math.Clamp((int)Math.Round(note.InitialMidiNote) + transpose, 0, 127);
+            int pitch = Math.Clamp((int)Math.Round(view.InitialMidiNote) + transpose, 0, 127);
             ValidateNotePitch(note, pitch);
             var noBendEndpoint = slot.Track.Endpoint;
             if (lastBendByEndpoint.TryGetValue(noBendEndpoint, out int lastBend) && lastBend != 0)
@@ -357,8 +600,8 @@ internal sealed class MusicalMidiExporter
 
         // Build the pitch anchor list: folded-initial + causal changes, "final wins"
         // at the same sample, transposed exactly once, collapsed to same-tick.
-        double initialSource = double.IsFinite(note.InitialMidiNote) ? note.InitialMidiNote : 60;
-        var anchors = BuildPitchAnchors(note, initialSource, transpose);
+        double initialSource = double.IsFinite(view.InitialMidiNote) ? view.InitialMidiNote : 60;
+        var anchors = BuildPitchAnchors(view, initialSource, transpose);
 
         long startTick = TimeTick(note.StartSample);
         long endTick = TimeTick(note.EndSample);
@@ -446,16 +689,18 @@ internal sealed class MusicalMidiExporter
     }
 
     private List<(long Tick, double Target, int Order)> BuildPitchAnchors(
-        NoteEvent note, double initialSource, int transpose)
+        NormalizedNoteView view, double initialSource, int transpose)
     {
+        NoteEvent note = view.Source;
         ValidateSourcePitch(note);
         // Initial pitch first, then each causal finite change that occurs strictly
         // after the note start (at/after StartSample fold into the initial pitch)
-        // and before/at the note end. Transpose applied exactly once.
+        // and before/at the note end. Transpose applied exactly once. Changes come
+        // from the NORMALIZED view (FR-1) — the same set the origin shift covered.
         var pts = new List<(long Sample, double Target, int Order)>();
         pts.Add((note.StartSample, initialSource + transpose, -1));
         int seq = 0;
-        foreach (PitchChange c in note.Pitch)
+        foreach (NormalizedPitchChange c in view.Changes ?? Array.Empty<NormalizedPitchChange>())
         {
             if (!double.IsFinite(c.MidiNote))
                 continue;
@@ -597,7 +842,7 @@ internal sealed class MusicalMidiExporter
     /// their logical tick 0 and are not shifted. The shift is the smallest whole tick
     /// that makes every time-domain tick nonnegative — NOT aligned to quarter/bar.
     /// </summary>
-    private long ComputeOriginShiftTicks(VisualizationTimeline timeline)
+    private long ComputeOriginShiftTicks(VisualizationTimeline timeline, PitchNormalizationModel model)
     {
         long minTick = TimeTick(_map.FirstSample);
         void Consider(long tick) { if (tick < minTick) minTick = tick; }
@@ -607,9 +852,9 @@ internal sealed class MusicalMidiExporter
             if (!IsNoteEmitted(note))
                 continue;
             Consider(TimeTick(note.StartSample));
-            if (!ShouldFoldPitch(note))
+            if (!model.Views.TryGetValue(note, out NormalizedNoteView? view) || !ShouldFoldPitch(view))
                 continue;
-            foreach (PitchChange change in note.Pitch)
+            foreach (NormalizedPitchChange change in view.Changes ?? Array.Empty<NormalizedPitchChange>())
             {
                 if (change is null || !double.IsFinite(change.MidiNote)) continue;
                 Consider(TimeTick(change.SamplePosition));
@@ -651,6 +896,10 @@ internal sealed class MusicalMidiExporter
             if (!string.IsNullOrWhiteSpace(timeline.Source?.SourceFormat))
                 conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"src-format {timeline.Source.SourceFormat}")));
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(0, 0x01, $"sample-rate {timeline.SampleRate}")));
+            // Build provenance (FR-15): attributes uploaded MIDIs to the exact
+            // exporter binary. git-commit is omitted when the build had no
+            // resolvable SHA — never "git-commit=unknown".
+            AddBuildProvenance(conductor, WithSourceOrder, BuildMetadata.Version, BuildMetadata.GitCommit);
         }
 
         // First Set Tempo at tick 0 UNCONDITIONALLY (so no leading ticks run under an
@@ -705,11 +954,11 @@ internal sealed class MusicalMidiExporter
             conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
                 TimeTick(_map.FirstSample) + originShift,
                 0x01,
-                TimingConfidenceText())));
+                TimingConfidenceText(Diagnostics))));
         }
     }
 
-    private string TimingConfidenceText()
+    private string TimingConfidenceText(TimingDiagnostics? diagnostics)
     {
         var parts = new List<string>
         {
@@ -719,7 +968,40 @@ internal sealed class MusicalMidiExporter
             _map.FirstDownbeatQuarter is not null ? "downbeat=known" : "downbeat=unknown",
             $"sample0-quarter={_map.SampleToQuarterPosition(_map.StartSample):0.###}",
         };
+        // FR-9: expose the alias/confidence diagnostics when symbolic inference was
+        // actually used. Source of truth is TimingDiagnostics — no recompute here
+        // (DRY). NullDiagnostics / driver path keeps only the structural fields.
+        // Missing values serialize as "none"; no fabricated 1.0 (request 21).
+        if (diagnostics is not null && diagnostics.TempoInferred)
+        {
+            parts.Add($"selected-bpm={FormatDiagnosticDouble(diagnostics.SelectedBpm)}");
+            parts.Add($"selected-score={FormatDiagnosticDouble(diagnostics.SelectedScore)}");
+            parts.Add($"alternative-bpm={FormatDiagnosticDouble(diagnostics.AlternativeBpm)}");
+            parts.Add($"alternative-score={FormatDiagnosticDouble(diagnostics.AlternativeScore)}");
+            parts.Add($"alias-margin={FormatDiagnosticDouble(diagnostics.AliasMargin)}");
+            parts.Add($"tempo-confidence={FormatDiagnosticDouble(diagnostics.TempoConfidence)}");
+            parts.Add($"tempo-ambiguous={diagnostics.TempoAmbiguous.ToString().ToLowerInvariant()}");
+            parts.Add($"phase-sample={diagnostics.PhaseSample?.ToString() ?? "none"}");
+        }
         return "timing " + string.Join(";", parts);
+    }
+
+    /// <summary>Diagnostic doubles serialize as "0.###"; missing values as "none".</summary>
+    private static string FormatDiagnosticDouble(double? value) =>
+        value is double d ? d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "none";
+
+    /// <summary>
+    /// Build-provenance metadata events (FR-15): mdplayer-version is always
+    /// emitted; git-commit only when a short SHA is available (never
+    /// "git-commit=unknown"). Test-visible so the omission path is covered without
+    /// re-running a build.
+    /// </summary>
+    internal static void AddBuildProvenance(List<MidiEventBase> conductor,
+        Func<MidiEventBase, MidiEventBase> withOrder, string? version, string? gitCommit)
+    {
+        conductor.Add(withOrder(new MidiMetaTextEvent(0, 0x01, $"mdplayer-version {version}")));
+        if (!string.IsNullOrWhiteSpace(gitCommit))
+            conductor.Add(withOrder(new MidiMetaTextEvent(0, 0x01, $"git-commit {gitCommit}")));
     }
 
     private TrackAllocator BuildTracks(VisualizationTimeline timeline)
@@ -785,9 +1067,15 @@ internal sealed class MusicalMidiExporter
     /// Emits the fixed pitch-bend-range RPN setup (Patch B) once per melodic track
     /// that actually emits bends, at logical tick 0. A track that emits no bends
     /// gets no RPN setup. The range is the configured fixed value (default 24) —
-    /// never auto-expanded.
+    /// never auto-expanded. Fidelity mode (FR-5) additionally emits one channel
+    /// tuning RPN per TUNED melodic domain (accepted bias), before the bend-range
+    /// setup (smaller SourceOrder; both setups are null-RPN-terminated so their
+    /// order is semantics-independent). Tuning is emitted even when the domain's
+    /// normalized notes are all integer (no bends): without it those notes would
+    /// play at equal temperament instead of source pitch, violating FR-5's
+    /// played-pitch = source-pitch contract (D9).
     /// </summary>
-    private void EmitBendRangeSetup(TrackAllocator allocator)
+    private void EmitBendRangeSetup(TrackAllocator allocator, PitchNormalizationModel model)
     {
         int range = _options.BendRangeSemitones;
         if (range is < 1 or > 127)
@@ -801,6 +1089,28 @@ internal sealed class MusicalMidiExporter
             if (!slot.Track.Events.Any(e => e is MidiPitchBendEvent))
                 continue;
             AddTrackEvent(slot.Track, new MidiBendRangeEvent(0, slot.Index, slot.Channel, range));
+        }
+
+        if (_options.PitchNormalizationMode != PitchNormalizationMode.Fidelity)
+            return; // DAW-friendly snaps (no tuning events); Off emits legacy bytes.
+        foreach ((MidiTrackKey key, TrackSlot slot) in allocator.Slots.OrderBy(pair => pair.Value.Index))
+        {
+            if (slot.Percussive)
+                continue;
+            if (!model.Domains.TryGetValue(key, out DomainPitchStats? stats) || !stats.Accepted)
+                continue;
+            double bias = stats.TuningCents!.Value;
+            // Base-100 IR decomposition (D10): coarse semitones + fine cents. The
+            // split is FIXED at 100 because the RPN fine range is ±100c by spec —
+            // it is not a configurable threshold. The detector's residual is folded
+            // mod-100c (|TuningCents| ≤ 50c), so the coarse branch never engages
+            // from the stage; it exists so the IR/writer support a multi-semitone
+            // bias should the residual model ever change.
+            int coarse = (int)Math.Truncate(bias / 100.0);
+            int fine = (int)Math.Round(bias - coarse * 100.0);
+            if (coarse == 0 && fine == 0)
+                continue; // in-tune domain: bias is exactly 0, nothing to restore
+            AddTrackEvent(slot.Track, new MidiTuningEvent(0, slot.Index, slot.Channel, coarse, fine));
         }
     }
 
@@ -844,13 +1154,23 @@ internal sealed class MusicalMidiExporter
     /// change mid-note never retargets the note to another track.</summary>
     private MidiTrackKey TrackKeyFor(NoteEvent note)
     {
+        MidiTrackKey key;
         if (note.Domain is SourceDomainKey domain
             && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity typedInstrument))
-            return new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, typedInstrument);
-        if (!TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
-            || !InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
+            key = new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, typedInstrument);
+        else if (TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
+                 && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
+            key = new MidiTrackKey(device, voice, sourceChannel, instrument);
+        else
             return PlaceholderKey(note.ChannelId);
-        return new MidiTrackKey(device, voice, sourceChannel, instrument);
+        // SN76489 tone/noise is NOT an instrument (spec 30): PSG has no patch object
+        // comparable to FM, so the track is keyed by source channel only (channels
+        // are already split by VoiceKind.Psg index 0-2 / VoiceKind.Noise index 0).
+        // TryParse still accepts sn76489:* so it never placeholders; the semantic
+        // naming (SN76489 PSG CH1-3 / SN76489 Noise) carries the voice meaning.
+        if (key.Device.Type == ChipType.Sn76489)
+            key = key with { Instrument = InstrumentIdentity.Empty };
+        return key;
     }
 
     /// <summary>The MIDI track key owning a rhythm trigger, keyed by the rhythm
@@ -922,9 +1242,12 @@ internal sealed class MusicalMidiExporter
     /// in the exporter's placeholder diagnostics (Patch E.3).</summary>
     private MidiTrackKey PlaceholderKey(string channelId)
     {
-        _placeholderCount++;
-        if (Diagnostics is not null)
-            Diagnostics.Warnings.Add($"voice identity unresolved; collapsed to placeholder track: '{channelId}'");
+        if (_placeholderChannels.Add(channelId))
+        {
+            _placeholderCount++;
+            if (Diagnostics is not null)
+                Diagnostics.Warnings.Add($"voice identity unresolved; collapsed to placeholder track: '{channelId}'");
+        }
         return new(new DeviceId(ChipType.Unknown, StableIndex(channelId)), VoiceKind.Pcm,
             StableIndex(channelId), InstrumentIdentity.Empty);
     }
@@ -1028,9 +1351,11 @@ internal sealed class MusicalMidiExporter
 
         private static string IdentityNameFor(MidiTrackKey key, bool percussive, string channelId, int rhythmCountForChip)
         {
-            // Placeholder / unresolved instruments keep the per-channel name.
+            // Placeholder / unresolved instruments keep the per-channel name UNLESS
+            // the source domain is known — then the semantic source-domain name is
+            // used (FR-12: known domains never show a raw channelId unnecessarily).
             if (key.Instrument.IsEmpty)
-                return channelId;
+                return SourceDomainDisplayName(key) ?? channelId;
             if (percussive)
             {
                 // Semantic percussion name: "<CHIP> Rhythm" — the source "CH<n>"
@@ -1047,6 +1372,37 @@ internal sealed class MusicalMidiExporter
             // therefore always get distinct names.
             string chipName = key.Chip == ChipType.Unknown ? "CH" : $"{ChipPrefix(key.Chip)} CH";
             return $"{chipName}{key.SourceChannel + 1} - {instrument}";
+        }
+
+        /// <summary>
+        /// Semantic display name for a source domain WITHOUT an instrument identity
+        /// (FR-12 / request 31): "&lt;CHIP&gt; {word} CH{n}" or "&lt;CHIP&gt; Noise" —
+        /// e.g. "SN76489 PSG CH2", "SNES DSP Voice 1", "OKIM6295 Voice 1",
+        /// "YM2608 SSG CH1". Returns null for unknown/placeholder chips so the
+        /// caller falls back to the raw channelId. Used ONLY when the instrument is
+        /// Empty; with-instrument naming keeps the locked "&lt;CHIP&gt; CH&lt;n&gt; -
+        /// &lt;DisplayName&gt;" composition (test-locked hyphen convention, D14).
+        /// </summary>
+        private static string SourceDomainDisplayName(MidiTrackKey key)
+        {
+            if (key.Chip == ChipType.Unknown)
+                return null;
+            string chip = ChipPrefix(key.Chip);
+            if (key.VoiceFamily == VoiceKind.Noise)
+                return $"{chip} Noise";
+            string word = key.VoiceFamily switch
+            {
+                VoiceKind.Fm or VoiceKind.Fm3Operator => "FM",
+                VoiceKind.Ssg => "SSG",
+                VoiceKind.Psg => "PSG",
+                VoiceKind.PcmVoice => $"Voice {key.SourceChannel + 1}",
+                VoiceKind.Adpcm => $"Voice {key.SourceChannel + 1}",
+                VoiceKind.MidiChannel => "CH",
+                VoiceKind.Rhythm => "Rhythm",
+                VoiceKind.Pcm => "PCM",
+                _ => key.VoiceFamily.ToString(),
+            };
+            return $"{chip} {word} CH{key.SourceChannel + 1}";
         }
 
         /// <summary>Short voice name of a rhythm identity ("rhythm:top" → "top").</summary>
@@ -1072,6 +1428,8 @@ internal sealed class MusicalMidiExporter
             ChipType.Ymf262 => "YMF262",
             ChipType.Ymf278b => "YMF278B",
             ChipType.Ymz280b => "YMZ280B",
+            ChipType.Sn76489 => "SN76489",
+            ChipType.SnesDsp => "SNES DSP",
             _ => chip.ToString().ToUpperInvariant(),
         };
 
