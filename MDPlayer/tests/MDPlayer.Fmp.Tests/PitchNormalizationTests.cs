@@ -542,6 +542,48 @@ public sealed class PitchNormalizationTests
     }
 
     [Fact]
+    public void Fidelity_LargeSourceBias_FoldsToFineOnly_RoundTrips()
+    {
+        // A TRUE source bias beyond ±100c (here +240c = +2.4 st) is folded by the
+        // detector into the current semitone cell: every residual is +40c, so the
+        // accepted tuning is +40c — always inside the RPN fine range (±100c). The
+        // coarse RPN 0x0001 path can therefore never engage from the stage, and
+        // the fine-only restoration reproduces the source pitch exactly (played =
+        // source, FR-5). This is the regression proof for the DomainBiasCapCents
+        // removal (verify warning 2).
+        var result = ExportResult(Timeline(StableTunedNotes(240.0)));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        // The fold is visible in the report: accepted tuning +40c, not +240c.
+        DomainPitchStats d = Assert.Single(result.PitchDiagnostics.Domains);
+        Assert.True(d.Accepted);
+        Assert.Equal(40.0, d.TuningCents!.Value, 6);
+
+        // ONE domain → ONE active tuning state, fine-only (no coarse semitones).
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        Assert.Equal(40.0, decoded.State[tuned.Key].FineTuningCents, 1);
+        Assert.Equal(0, decoded.State[tuned.Key].CoarseTuningSemitones);
+
+        // Fine RPN 0x0002 + CC38 at tick 0, null-RPN unselect, exactly one tuning
+        // RPN select — and NO coarse RPN 0x0001 (CC100 == 1) anywhere.
+        var ccs = decoded.Events[tuned.Key].Where(e => e.Event is ControlChangeEvent).ToList();
+        Assert.Contains(ccs, e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 101
+            && ((ControlChangeEvent)e.Event).ControlValue == 0); // RPN select MSB
+        Assert.Contains(ccs, e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 100
+            && ((ControlChangeEvent)e.Event).ControlValue == 2); // RPN 0x0002 (fine)
+        Assert.Contains(ccs, e => e.Tick == 0 && ((ControlChangeEvent)e.Event).ControlNumber == 100
+            && ((ControlChangeEvent)e.Event).ControlValue == 127); // null RPN unselect
+        Assert.DoesNotContain(ccs, e => ((ControlChangeEvent)e.Event).ControlNumber == 100
+            && ((ControlChangeEvent)e.Event).ControlValue == 1); // no coarse select
+
+        // Played pitch = source pitch: note 62 + 40c = 62.4 (the +240c source bias).
+        var on = decoded.Events[tuned.Key].Select(e => e.Event).OfType<NoteOnEvent>().First();
+        Assert.Equal(62, on.NoteNumber);
+        Assert.Equal(62.4, MidiSemanticDecoder.EffectivePitch(on.NoteNumber, 0,
+            decoded.State[tuned.Key].BendRange, (int)Math.Round(decoded.State[tuned.Key].FineTuningCents)), 6);
+    }
+
+    [Fact]
     public void DawFriendly_SnapToEt_NoTuningEvents_NoBiasBends()
     {
         // SC-7: DAW-friendly snaps a +21c bias to equal temperament: zero tuning

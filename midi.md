@@ -1559,9 +1559,12 @@ Tempo, beat phase, and meter/downbeat remain separate concepts.
 The CLI MUST expose `--pitch-normalization fidelity|daw|off`:
 
 * `fidelity` (default) — subtracts the accepted per-domain tuning bias and
-  restores it via RPN channel tuning (RPN 0x0002 fine, plus RPN 0x0001 coarse
-  beyond ±100c) at tick 0; bends carry only expressive deviation; played pitch
-  equals source pitch on RPN-supporting targets.
+  restores it via RPN channel fine tuning (RPN 0x0002 + CC38) at tick 0; bends
+  carry only expressive deviation; played pitch equals source pitch on
+  RPN-supporting targets. The detector folds residuals into the current
+  semitone cell (±50c), so accepted biases always fit the fine range — the
+  coarse RPN 0x0001 path exists in the writer (IR completeness, D10) but no
+  stage bias can reach it.
 * `daw` — opt-in; snaps accepted biases up to the snap cap to equal
   temperament and emits NO tuning events (deliberately changes absolute pitch
   presentation).

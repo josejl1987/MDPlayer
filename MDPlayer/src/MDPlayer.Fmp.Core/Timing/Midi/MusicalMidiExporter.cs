@@ -1080,6 +1080,12 @@ internal sealed class MusicalMidiExporter
             if (!model.Domains.TryGetValue(key, out DomainPitchStats? stats) || !stats.Accepted)
                 continue;
             double bias = stats.TuningCents!.Value;
+            // Base-100 IR decomposition (D10): coarse semitones + fine cents. The
+            // split is FIXED at 100 because the RPN fine range is ±100c by spec —
+            // it is not a configurable threshold. The detector's residual is folded
+            // mod-100c (|TuningCents| ≤ 50c), so the coarse branch never engages
+            // from the stage; it exists so the IR/writer support a multi-semitone
+            // bias should the residual model ever change.
             int coarse = (int)Math.Truncate(bias / 100.0);
             int fine = (int)Math.Round(bias - coarse * 100.0);
             if (coarse == 0 && fine == 0)

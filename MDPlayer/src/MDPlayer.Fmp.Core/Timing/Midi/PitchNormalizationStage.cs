@@ -90,10 +90,6 @@ internal sealed class PitchNormalizationThresholds
     /// <summary>Pass 3 acceptance: minimum attack count before persistence applies.</summary>
     public int PersistenceMinAttacks { get; init; } = 8;
 
-    /// <summary>Pass 3: accepted |bias| cap — beyond this a coarse RPN 0x0001 path
-    /// is required instead of fine-only tuning.</summary>
-    public double DomainBiasCapCents { get; init; } = 100.0;
-
     /// <summary>Pass 3 per-chip cap: SNES DSP is typically source-pitched, so a bias
     /// beyond this is rejected (Smash Up cannot emit an audibly wrong tuning).</summary>
     public double SnesDspBiasCapCents { get; init; } = 15.0;
@@ -474,6 +470,14 @@ internal static class PitchNormalizationStage
                 retriggerAttacks++;
             else
                 attacks++;
+            // The residual is the deviation from equal temperament FOLDED into the
+            // current semitone cell: InitialMidiNote − round(InitialMidiNote) is
+            // always within ±0.5 st (±50c). The fold is deliberate and exact — the
+            // RPN fine-tuning range (±100c) covers it, so fine-only restoration
+            // always reproduces the source pitch. A coarse RPN 0x0001 engagement
+            // threshold is therefore unreachable from the stage (the former
+            // DomainBiasCapCents was removed for this reason); the coarse path lives
+            // on only in the IR/writer (D10) for a hypothetical multi-semitone bias.
             residuals.Add(((note.InitialMidiNote - Math.Round(note.InitialMidiNote)) * 100.0,
                 (int)Math.Round(note.InitialMidiNote)));
         }
