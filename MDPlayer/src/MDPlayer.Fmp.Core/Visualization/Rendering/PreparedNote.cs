@@ -12,6 +12,13 @@ internal sealed class PreparedNote
     public long StartSample { get; init; }
     public long EndSample { get; init; }
     public double InitialMidiNote { get; init; }
+
+    /// <summary>Pitch state at the note attack, prepared once for rasterization.</summary>
+    public double StartMidiNote { get; init; } = double.NaN;
+
+    /// <summary>Pitch state at the note end, prepared once for rasterization.</summary>
+    public double EndMidiNote { get; init; } = double.NaN;
+
     public VisualizationNoteMode Mode { get; init; }
 
     /// <summary>Instrument ID, retained for header/instrument formatting.</summary>

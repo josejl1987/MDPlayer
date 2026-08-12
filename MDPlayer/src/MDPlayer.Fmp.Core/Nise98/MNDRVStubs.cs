@@ -21,18 +21,21 @@ namespace MNDRV
         private double step = 0.0;
         private double MasterClock = 3579545.0;
 
-        public FMTimer(bool isOPM, Action CsmKeyOn, double MasterClock)
+        public FMTimer(bool isOPM, Action CsmKeyOn, double MasterClock, double sampleRate = 44100.0)
         {
+            if (!double.IsFinite(sampleRate) || sampleRate <= 0.0)
+                throw new ArgumentOutOfRangeException(nameof(sampleRate), "sample rate must be positive");
+
             this.isOPM = isOPM;
             this.CsmKeyOn = CsmKeyOn;
             this.MasterClock = MasterClock;
             if (isOPM)
             {
-                step = MasterClock / 64.0 / 1.0 / 44100.0;
+                step = MasterClock / 64.0 / 1.0 / sampleRate;
             }
             else
             {
-                step = MasterClock / 72.0 / 2.0 / 44100.0;
+                step = MasterClock / 72.0 / 2.0 / sampleRate;
             }
         }
 

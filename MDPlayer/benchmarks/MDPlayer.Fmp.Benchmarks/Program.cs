@@ -25,6 +25,23 @@ internal static class Program
         Console.WriteLine("MDPlayer Visualization Benchmark (§23.4)");
         Console.WriteLine();
 
+        if (args.Length > 0)
+        {
+            switch (args[0])
+            {
+                case "--perf-midi":
+                    return RunMidiFixture(args.Skip(1).Prepend("--midi-fixture").ToArray());
+                case "--perf-render":
+                    return RunPerfRender(args.Skip(1).ToArray());
+                case "--perf-encode":
+                    return RunPerfEncode(args.Skip(1).ToArray());
+                case "--perf-video":
+                    return args.Length > 1 && File.Exists(args[1])
+                        ? RunPhase2(args.Skip(1).ToArray())
+                        : 2;
+            }
+        }
+
         if (args.Length >= 2 && args[0] == "--profile")
         {
             ProfileReal.Run(args[1]);
@@ -99,6 +116,7 @@ internal static class Program
             Bpm = bpm,
             TempoSource = bpm is null ? Fmp.Application.Export.MidiTempoSource.Auto : Fmp.Application.Export.MidiTempoSource.Fixed,
             EnablePerformanceReceipts = true,
+            EnablePerformanceMetrics = true,
             PerformanceFixture = Path.GetFileName(fixture),
         };
         MidiExportResult export = new MidiExportService().Export(timeline, request);
@@ -121,6 +139,8 @@ internal static class Program
             emittedMidiEvents = allEvents.Length,
             phases = new object[] { new { phase = "capture", wallMilliseconds = captureWatch.ElapsedMilliseconds, cpuMilliseconds = 0L, allocatedBytes = captureBytes, eventCount = CountSourceEvents(timeline) } }.Concat(events.Cast<object>()),
             semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = 0, tracks = tracks.Count },
+            performance = export.PerformanceMetrics?.WithOuterStageTimings(
+                captureSeconds: captureWatch.Elapsed.TotalSeconds),
             output = new { sha256 = outputHash, sizeBytes = export.Bytes.Length },
             configuration = new { request.Ppq, request.Bpm, request.Quantize, request.EmitPitchBend, request.BendRangeSemitones, request.UsePercussionChannel, request.Velocity },
             environment = new { runtime = Environment.Version.ToString(), os = Environment.OSVersion.ToString(), processorCount = Environment.ProcessorCount },
@@ -129,6 +149,115 @@ internal static class Program
         string json = JsonSerializer.Serialize(receipt, new JsonSerializerOptions { WriteIndented = true });
         Console.WriteLine(json);
         Console.WriteLine($"real fixture: {Path.GetRelativePath(root, fixture)}; output sha256={outputHash}; bytes={export.Bytes.Length}");
+        return 0;
+    }
+
+    private static int RunPerfRender(string[] args)
+    {
+        int width = ReadIntOption(args, "--width", 1280);
+        int height = ReadIntOption(args, "--height", 720);
+        int frames = ReadIntOption(args, "--frames", 300);
+        VisualizationTimeline timeline = BuildSyntheticTimeline();
+        var renderer = new PanelOverlayRenderer(
+            timeline,
+            BenchmarkLayout.Build(timeline, width, height),
+            new PanelOverlayRenderer.Options
+            {
+                FpsNumerator = 60,
+                FpsDenominator = 1,
+                EnablePerformanceMetrics = true,
+            });
+        byte[] destination = new byte[renderer.FrameByteCount];
+        byte[] scopeGrid = new byte[renderer.ScopeFrameByteCount];
+        // The production Corrscope bridge supplies opaque RGBA. Match that
+        // contract so this renderer-only mode measures the same placement path
+        // as a real export rather than spending its time normalizing zero alpha.
+        for (int offset = 3; offset < scopeGrid.Length; offset += 4)
+            scopeGrid[offset] = 255;
+        SequentialCompositeSession session = renderer.CreateSequentialSession(scopeFramesAreOpaque: true);
+        session.Initialize(destination);
+        for (int index = 0; index < 30; index++)
+            session.RenderNext(index % renderer.TotalFrames, scopeGrid, destination);
+        renderer.ResetPerformanceMetrics();
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        Stopwatch watch = Stopwatch.StartNew();
+        for (int index = 0; index < frames; index++)
+            session.RenderNext((index + 30) % renderer.TotalFrames, scopeGrid, destination);
+        watch.Stop();
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "perf-render",
+            frames,
+            wallSeconds = watch.Elapsed.TotalSeconds,
+            fps = frames / Math.Max(1e-9, watch.Elapsed.TotalSeconds),
+            allocatedBytes,
+            allocatedBytesPerFrame = allocatedBytes / (double)Math.Max(1, frames),
+            peakRssBytes = Process.GetCurrentProcess().PeakWorkingSet64,
+            renderer = renderer.Performance,
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    private static int RunPerfEncode(string[] args)
+    {
+        string ffmpeg = Environment.GetEnvironmentVariable("FFMPEG") ?? "ffmpeg";
+        int width = ReadIntOption(args, "--width", 320);
+        int height = ReadIntOption(args, "--height", 180);
+        int frames = ReadIntOption(args, "--frames", 300);
+        var info = new ProcessStartInfo
+        {
+            FileName = ffmpeg,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string argument in new[]
+        {
+            "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
+            "-s", $"{width}x{height}", "-r", "60", "-i", "pipe:0", "-an", "-f", "null", "-"
+        })
+            info.ArgumentList.Add(argument);
+
+        using var process = new Process { StartInfo = info };
+        try
+        {
+            process.Start();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: encoder start failed: {ex.Message}");
+            return 2;
+        }
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        byte[] frame = new byte[checked(width * height * 4)];
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        Stopwatch watch = Stopwatch.StartNew();
+        for (int index = 0; index < frames; index++)
+            process.StandardInput.BaseStream.Write(frame, 0, frame.Length);
+        process.StandardInput.Close();
+        process.WaitForExit();
+        watch.Stop();
+        long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        string diagnostics = stderr.GetAwaiter().GetResult();
+        if (process.ExitCode != 0)
+        {
+            Console.Error.WriteLine($"error: encoder exited {process.ExitCode}: {diagnostics}");
+            return process.ExitCode;
+        }
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "perf-encode",
+            frames,
+            wallSeconds = watch.Elapsed.TotalSeconds,
+            fps = frames / Math.Max(1e-9, watch.Elapsed.TotalSeconds),
+            allocatedBytes,
+            allocatedBytesPerFrame = allocatedBytes / (double)Math.Max(1, frames),
+            peakRssBytes = Process.GetCurrentProcess().PeakWorkingSet64,
+            processStarts = 1,
+            fullFrameCopies = 0,
+        }, new JsonSerializerOptions { WriteIndented = true }));
         return 0;
     }
 
@@ -290,7 +419,6 @@ internal static class Program
 
         string outputDirectory = Path.Combine(
             Path.GetTempPath(), "mdplayer-fmp-benchmark-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(outputDirectory);
         try
         {
             var startInfo = new ProcessStartInfo
@@ -344,17 +472,51 @@ internal static class Program
             double compositionSeconds = GetDouble(stages, "scopeOverlayEncodeSeconds");
 
             Console.WriteLine($"  Track duration:           {trackSeconds:F3}s");
+            Console.WriteLine($"  Source playback/state:    {GetDouble(stages, "sourcePlaybackStateSeconds"):F3}s");
             Console.WriteLine($"  Timeline capture:         {GetDouble(stages, "timelineCaptureSeconds"):F3}s");
             Console.WriteLine($"  Stem export:              {GetDouble(stages, "stemExportSeconds"):F3}s");
+            Console.WriteLine($"  Audio processing:         {GetDouble(stages, "audioProcessingSeconds"):F3}s");
             Console.WriteLine($"  Energy analysis:          {GetDouble(stages, "energyAnalysisSeconds"):F3}s");
             Console.WriteLine($"  Corrscope wait:           {GetDouble(stages, "corrscopeWaitSeconds"):F3}s");
             Console.WriteLine($"  Overlay CPU:              {GetDouble(stages, "overlayCpuSeconds"):F3}s");
             Console.WriteLine($"  FFmpeg write wait:        {GetDouble(stages, "ffmpegWriteWaitSeconds"):F3}s");
+            Console.WriteLine($"  Pixel conversion:         {GetDouble(stages, "pixelConversionSeconds"):F3}s");
+            Console.WriteLine($"  Mux/finalization:         {GetDouble(stages, "muxFinalizationSeconds"):F3}s");
+            Console.WriteLine($"  Render CPU:               {GetDouble(stages, "renderSeconds"):F3}s");
+            Console.WriteLine($"  Scope frame read:         {GetDouble(stages, "scopeFrameReadSeconds"):F3}s");
+            Console.WriteLine($"  Dynamic layer:            {GetDouble(stages, "dynamicLayerSeconds"):F3}s");
+            Console.WriteLine($"  Frame-state update:       {GetDouble(stages, "frameStateUpdateSeconds"):F3}s");
+            Console.WriteLine($"  Compositing:              {GetDouble(stages, "compositingSeconds"):F3}s");
+            Console.WriteLine($"  Layout:                   {GetDouble(stages, "layoutSeconds"):F3}s");
+            Console.WriteLine($"  Static layer:             {GetDouble(stages, "staticLayerSeconds"):F3}s");
+            Console.WriteLine($"  Text:                     {GetDouble(stages, "textSeconds"):F3}s");
+            Console.WriteLine($"  Piano roll:               {GetDouble(stages, "pianoRollSeconds"):F3}s");
+            Console.WriteLine($"  Waveform:                 {GetDouble(stages, "waveformSeconds"):F3}s");
+            Console.WriteLine($"  Full/partial redraws:     {GetLong(stages, "fullRedraws")}/{GetLong(stages, "partialRedraws")}");
+            Console.WriteLine($"  Full-frame copies:        {GetLong(stages, "fullFrameCopies")}");
+            long frameCount = GetLong(stages, "frameCount");
+            long copiedBytes = GetLong(stages, "copiedBytes");
+            Console.WriteLine($"  Full-frame copies/frame:  {GetLong(stages, "fullFrameCopies") / (double)Math.Max(1, frameCount):F2}");
+            Console.WriteLine($"  Copied bytes:             {copiedBytes}");
+            Console.WriteLine($"  Copied bytes/frame:       {copiedBytes / (double)Math.Max(1, frameCount):F1}");
+            Console.WriteLine($"  Piano-roll cursor moves:  {GetLong(stages, "pianoRollCursorAdvances")}");
+            Console.WriteLine($"  Visible notes visited:    {GetLong(stages, "visibleNotesVisited")}");
+            Console.WriteLine($"  Peak RSS:                 {GetLong(stages, "peakWorkingSetBytes")} bytes");
+            long pipelineFrames = frameCount;
+            long pipelineAllocated = GetLong(stages, "allocatedBytes");
+            Console.WriteLine($"  Allocated bytes/frame:    {(pipelineAllocated / (double)Math.Max(1, pipelineFrames)):F1}");
+            Console.WriteLine($"  Queue wait:               {GetDouble(stages, "queueWaitSeconds"):F3}s");
+            Console.WriteLine($"  Renderer idle:            {GetDouble(stages, "rendererIdleSeconds"):F3}s");
+            Console.WriteLine($"  Renderer blocked:         {GetDouble(stages, "rendererBlockedSeconds"):F3}s");
+            Console.WriteLine($"  Encoder idle:             {GetDouble(stages, "encoderIdleSeconds"):F3}s");
+            Console.WriteLine($"  Encoder blocked:          {GetDouble(stages, "encoderBlockedSeconds"):F3}s");
+            Console.WriteLine($"  Queue high-water:         {GetLong(stages, "maxQueueDepth")}");
             Console.WriteLine($"  Scope+overlay+encode:     {compositionSeconds:F3}s");
             Console.WriteLine($"  Overall total:            {totalSeconds:F3}s (wall {wallSeconds:F3}s)");
             Console.WriteLine($"  Effective output FPS:     {GetDouble(root, "effectiveOutputFps"):F1}");
             Console.WriteLine($"  Real-time factor:         {GetDouble(root, "realTimeFactor"):F2}x");
             Console.WriteLine($"  Encoder:                  {GetString(root, "encoder")}");
+            Console.WriteLine($"  Bottleneck:               {ClassifyVideoBottleneck(stages)}");
             Console.WriteLine($"  Output size:              {GetLong(root, "outputSizeBytes")} bytes");
             return 0;
         }
@@ -404,6 +566,21 @@ internal static class Program
 
     private static string GetString(JsonElement element, string name)
         => element.TryGetProperty(name, out JsonElement value) ? value.GetString() ?? "" : "";
+
+    private static string ClassifyVideoBottleneck(JsonElement stages)
+    {
+        double scopeRead = GetDouble(stages, "scopeFrameReadSeconds");
+        double render = GetDouble(stages, "renderSeconds");
+        double encoderBlocked = GetDouble(stages, "encoderBlockedSeconds");
+        double source = GetDouble(stages, "sourcePlaybackStateSeconds");
+        if (scopeRead > render && scopeRead > encoderBlocked)
+            return "SOURCE/SCOPE";
+        if (encoderBlocked > render && encoderBlocked > scopeRead)
+            return "ENCODER";
+        if (render > source)
+            return "RENDERER";
+        return "SOURCE STATE";
+    }
 
     /// <summary>
     /// Builds a synthetic timeline covering all 12 panel families with notes,

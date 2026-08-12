@@ -22,8 +22,7 @@ internal static class ToolResolver
                 return candidate;
         }
 
-        string appDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? ".";
-        string appPath = Path.Combine(appDir, filename);
+        string appPath = Path.Combine(AppContext.BaseDirectory, filename);
         if (File.Exists(appPath))
             return appPath;
 

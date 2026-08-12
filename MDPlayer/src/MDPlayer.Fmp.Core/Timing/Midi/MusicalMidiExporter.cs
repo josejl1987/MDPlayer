@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Diagnostics;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 
@@ -53,6 +54,13 @@ internal sealed class MusicalMidiExportOptions
 
     /// <summary>Per-voice transforms keyed by <c>ChannelId</c>. A missing entry keeps defaults.</summary>
     public IReadOnlyList<VoiceExportOverride> VoiceOverrides { get; init; } = Array.Empty<VoiceExportOverride>();
+
+    /// <summary>Enables the opt-in Phase 2 work receipt.</summary>
+    public bool EnablePerformanceMetrics { get; init; }
+
+    /// <summary>Optional symbolic-tempo counters collected by the application
+    /// boundary around map construction.</summary>
+    public TempoInferenceCounters TempoInferenceCounters { get; init; }
 
     /// <summary>Resolve the override for a channel, or the voice's default if none.</summary>
     public VoiceExportOverride OverrideFor(string channelId)
@@ -128,6 +136,9 @@ internal sealed class MusicalMidiExportResult
     /// RPN, program and bank — stay at their logical tick 0 and are NOT shifted.
     /// </summary>
     public long OriginShiftTicks { get; init; }
+
+    /// <summary>Nested stage timings and operation counts when requested.</summary>
+    public MidiPerformanceSnapshot? Performance { get; set; }
 }
 
 /// <summary>
@@ -141,6 +152,8 @@ internal sealed class MusicalMidiExporter
     private readonly MusicalTimeMap _map;
     private readonly int _ppq;
     private readonly MusicalMidiExportOptions _options;
+    private MidiPerformanceMetrics? _performance;
+    private long _allocatedBefore;
 
     /// <summary>Deterministic monotonic source-sequence key assigned to every exported
     /// event (conductor, program, note, bend, …) so the writer's equal-tick/equal-rank
@@ -154,6 +167,13 @@ internal sealed class MusicalMidiExporter
     private int _placeholderCount;
 
     private readonly HashSet<string> _placeholderChannels = new();
+    private Dictionary<NoteEvent, MidiTrackKey> _noteTrackKeyCache =
+        new(ReferenceEqualityComparer.Instance);
+    private Dictionary<RhythmEvent, MidiTrackKey> _rhythmTrackKeyCache =
+        new(ReferenceEqualityComparer.Instance);
+    private readonly List<(long Position, double Target, int Order)> _pitchAnchorScratch = new();
+    private readonly List<PlannedPitchState> _pitchStateScratch = new();
+    private readonly List<(long Tick, int OldBase, int NewBase, int InitialBend)> _reanchorScratch = new();
 
     public MusicalMidiExporter(MusicalTimeMap map, int ppq, MusicalMidiExportOptions? options = null)
     {
@@ -179,11 +199,26 @@ internal sealed class MusicalMidiExporter
     {
         ArgumentNullException.ThrowIfNull(sourceTimeline);
         VisualizationTimeline timeline = sourceTimeline.Timeline;
+        _noteTrackKeyCache = new Dictionary<NoteEvent, MidiTrackKey>(
+            timeline.Notes?.Count ?? 0, ReferenceEqualityComparer.Instance);
+        _rhythmTrackKeyCache = new Dictionary<RhythmEvent, MidiTrackKey>(
+            timeline.Rhythm?.Count ?? 0, ReferenceEqualityComparer.Instance);
+        _performance = _options.EnablePerformanceMetrics ? new MidiPerformanceMetrics() : null;
+        _performance?.SetTempoInferenceCounters(_options.TempoInferenceCounters);
+        _allocatedBefore = _performance is null ? 0 : GC.GetAllocatedBytesForCurrentThread();
+        if (_performance is not null)
+        {
+            _performance.SourceEvents = (timeline.Notes?.Count ?? 0)
+                + (timeline.Rhythm?.Count ?? 0)
+                + (timeline.Timing?.Length ?? 0)
+                + (timeline.Beats?.Length ?? 0);
+        }
 
         // Pitch-normalization stage (FR-1): runs BEFORE the origin shift so the
         // shift covers the NORMALIZED event set (the set the exporter actually
         // serializes). Every pitch consumer reads the normalized model. Detector
         // rejections surface as Diagnostics warnings (low-confidence domains).
+        long stageStart = _performance?.StartStage(MidiPerformanceStage.Normalize) ?? 0;
         var pitchWarnings = new List<string>();
         PitchNormalizationModel pitchModel = PitchNormalizationStage.Normalize(
             timeline,
@@ -193,12 +228,17 @@ internal sealed class MusicalMidiExporter
             pitchWarnings);
         if (pitchWarnings.Count > 0 && Diagnostics is not null)
             Diagnostics.Warnings.AddRange(pitchWarnings);
-        long originShiftTicks = ComputeOriginShiftTicks(timeline, pitchModel);
+        _performance?.StopStage(MidiPerformanceStage.Normalize, stageStart);
 
+        stageStart = _performance?.StartStage(MidiPerformanceStage.DomainAnalysis) ?? 0;
+        SourceEventIndex sourceIndex = BuildSourceEventIndex(timeline, pitchModel);
+        long originShiftTicks = ComputeOriginShiftTicks(sourceIndex, timeline);
         var conductor = new List<MidiEventBase>();
         BuildConductor(timeline, originShiftTicks, conductor);
 
-        TrackAllocator allocator = BuildTracks(timeline);
+        PreparePitchScratch(sourceIndex);
+        TrackAllocator allocator = BuildTracks(sourceIndex);
+        _performance?.StopStage(MidiPerformanceStage.DomainAnalysis, stageStart);
 
         // Unpitched noise is excluded from the melodic export (no pitch exists);
         // surface it as a diagnostic so the exclusion is never silent.
@@ -208,22 +248,48 @@ internal sealed class MusicalMidiExporter
                 $"{unpitchedNoise} unpitched noise note(s) excluded from the melodic MIDI export " +
                 "(SSG noise has no pitch to serialize)");
 
-        var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>();
-        var plannable = new List<PlannableNote>();
-        foreach (NoteEvent note in (timeline.Notes ?? Array.Empty<NoteEvent>())
-                     .Where(IsNoteEmitted)
-                     .OrderBy(n => TrackKeyFor(n), Comparer<MidiTrackKey>.Create(CompareTrackKeys))
-                     .ThenBy(n => n.StartSample)
-                     .ThenByDescending(n => n.EndSample)
-                     .ThenBy(n => n.InitialMidiNote))
+        stageStart = _performance?.StartStage(MidiPerformanceStage.EventGeneration) ?? 0;
+        var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>(sourceIndex.Notes.Count);
+        var plannable = new List<PlannableNote>(sourceIndex.Notes.Count);
+        foreach (IndexedNote indexedNote in sourceIndex.Notes)
         {
-            MidiTrackKey key = TrackKeyFor(note);
+            NoteEvent note = indexedNote.Note;
+            MidiTrackKey key = indexedNote.Key;
             TrackSlot? slot = allocator.SlotFor(key);
             if (slot is null)
                 continue;
-            if (!emittedNoteTicks.Add((key, TimeTick(note.StartSample))))
-                continue;
-            plannable.Add(new PlannableNote(slot, note));
+            plannable.Add(new PlannableNote(slot, note, key));
+        }
+        plannable.Sort(static (a, b) =>
+        {
+            int c = a.Slot.Index.CompareTo(b.Slot.Index);
+            if (c != 0) return c;
+            c = a.Note.StartSample.CompareTo(b.Note.StartSample);
+            if (c != 0) return c;
+            c = b.Note.EndSample.CompareTo(a.Note.EndSample);
+            return c != 0 ? c : a.Note.InitialMidiNote.CompareTo(b.Note.InitialMidiNote);
+        });
+        int plannableWrite = 0;
+        for (int index = 0; index < plannable.Count; index++)
+        {
+            PlannableNote candidate = plannable[index];
+            MidiTrackKey key = candidate.Key;
+            if (emittedNoteTicks.Add((key, TimeTick(candidate.Note.StartSample)))
+                && plannableWrite < plannable.Count)
+            {
+                plannable[plannableWrite++] = candidate;
+            }
+            else if (_performance is not null)
+            {
+                _performance.SuppressedMidiEvents++;
+            }
+        }
+        if (plannableWrite < plannable.Count)
+            plannable.RemoveRange(plannableWrite, plannable.Count - plannableWrite);
+        if (_performance is not null)
+        {
+            _performance.TimelineSorts++;
+            _performance.TemporaryCollections++;
         }
 
         // Pitch/note planning happens once per note, in ENDPOINT order, so the
@@ -231,22 +297,23 @@ internal sealed class MusicalMidiExporter
         // resets are decided deterministically. This also steps through the MIDI
         // tick domain AFTER same-tick pitch collapse so re-anchors never fabricate
         // synthetic 1-tick internal notes.
-        Dictionary<MidiEndpoint, int> lastBendByEndpoint = new();
-        foreach (PlannableNote pn in plannable.OrderBy(p => p.Slot.Index).ThenBy(p => p.Note.StartSample))
+        Dictionary<MidiEndpoint, int> lastBendByEndpoint =
+            new(allocator.Tracks.Count);
+        foreach (PlannableNote pn in plannable)
         {
             EmitNote(pn.Slot, pn.Note, pitchModel, originShiftTicks, lastBendByEndpoint);
         }
+        _performance?.StopStage(MidiPerformanceStage.EventGeneration, stageStart);
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
         // track is keyed by its instrument identity (R9), and the percussion pitch is
         // allocated per identity so distinct instruments get distinct drum notes.
-        var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>();
+        var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
         int nextDrum = _options.PercussionNoteBase;
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
-            if (!IsRhythmEmitted(rhythm))
-                continue;
-            MidiTrackKey rhythmKey = RhythmKeyFor(rhythm);
+            RhythmEvent rhythm = indexedRhythm.Rhythm;
+            MidiTrackKey rhythmKey = indexedRhythm.Key;
             TrackSlot slot = allocator.SlotFor(rhythmKey);
             if (slot is null)
                 continue;
@@ -259,8 +326,9 @@ internal sealed class MusicalMidiExporter
                 drumNoteByIdentity[rhythmKey] = note;
             }
             long on = TimeTick(rhythm.SamplePosition) + originShiftTicks;
-            AddTrackEvent(slot.Track, new MidiNoteEvent(on, slot.Index, slot.Channel, note, 100, NoteOn: true));
-            AddTrackEvent(slot.Track, new MidiNoteEvent(on + ShortHitTicks, slot.Index, slot.Channel, note, 100, NoteOn: false));
+            AddTrackEvent(slot.Track, PackedMidiEvent.Note(on, slot.Index, slot.Channel, note, 100, noteOn: true));
+            AddTrackEvent(slot.Track, PackedMidiEvent.Note(
+                on + ShortHitTicks, slot.Index, slot.Channel, note, 100, noteOn: false));
         }
 
         // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
@@ -274,8 +342,9 @@ internal sealed class MusicalMidiExporter
         // Endpoint uniqueness is enforced as a hard invariant across the exported
         // track set, in addition to the writer's own guard.
         var uniqueEndpoints = new HashSet<MidiEndpoint>();
-        foreach (MidiTrack track in allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value))
+        for (int index = 1; index <= allocator.Tracks.Count; index++)
         {
+            MidiTrack track = allocator.Tracks[index];
             if (!uniqueEndpoints.Add(track.Endpoint))
                 throw new InvalidOperationException(
                     $"Duplicate MIDI endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) allocated to more than one track.");
@@ -287,19 +356,36 @@ internal sealed class MusicalMidiExporter
         if (_placeholderCount > 0 && Diagnostics is not null)
             Diagnostics.Warnings.Add($"placeholder-track-count={_placeholderCount}");
 
-        var tracks = allocator.Tracks.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToList();
+        stageStart = _performance?.StartStage(MidiPerformanceStage.TrackConstruction) ?? 0;
+        var tracks = new List<MidiTrack>(allocator.Tracks.Count);
+        for (int index = 1; index <= allocator.Tracks.Count; index++)
+            tracks.Add(allocator.Tracks[index]);
+        _performance?.StopStage(MidiPerformanceStage.TrackConstruction, stageStart);
+        stageStart = _performance?.StartStage(MidiPerformanceStage.EventNormalization) ?? 0;
         foreach (MidiTrack track in tracks)
         {
             // Canonicalize once here; MidiFileWriter can stream planner-owned
             // tracks without materializing a second sorted copy.
-            track.Events.Sort((a, b) =>
+            if (track.UsesPackedEvents)
             {
-                int c = a.Tick.CompareTo(b.Tick);
-                if (c != 0) return c;
-                c = MidiEventOrder.Rank(a).CompareTo(MidiEventOrder.Rank(b));
-                return c != 0 ? c : a.SourceOrder.CompareTo(b.SourceOrder);
-            });
+                track.PackedEvents.Sort(ComparePackedMidiEvents);
+            }
+            else
+            {
+                track.Events.Sort((a, b) =>
+                {
+                    int c = a.Tick.CompareTo(b.Tick);
+                    if (c != 0) return c;
+                    c = MidiEventOrder.Rank(a).CompareTo(MidiEventOrder.Rank(b));
+                    return c != 0 ? c : a.SourceOrder.CompareTo(b.SourceOrder);
+                });
+            }
             track.HasCanonicalEventOrder = true;
+            if (_performance is not null)
+            {
+                _performance.TimelineSorts++;
+                _performance.TimelineScans++;
+            }
         }
 
         // Endpoint-level pitch-bend canonicalization (Patch 1): after ALL musical
@@ -318,7 +404,15 @@ internal sealed class MusicalMidiExporter
         }
         else
         {
+            int before = tracks.Sum(TrackEventCount);
             CanonicalizeEndpointPitchState(tracks);
+            if (_performance is not null)
+            {
+                int after = tracks.Sum(TrackEventCount);
+                _performance.BendEventsSuppressed += Math.Max(0, before - after);
+                _performance.TimelineSorts += CanonicalizeSortCount;
+                _performance.TimelineScans += CanonicalizePassCount;
+            }
 
             // Hard invariant: after canonicalization, per (endpoint, tick) there is
             // at most one PitchBend. Throws before any MIDI is serialized (FR-5).
@@ -329,9 +423,18 @@ internal sealed class MusicalMidiExporter
             // state is structural, never duplicated.
             ValidateTuningSetupCounts(tracks);
         }
+        _performance?.StopStage(MidiPerformanceStage.EventNormalization, stageStart);
 
+        stageStart = _performance?.StartStage(MidiPerformanceStage.SmfSerialization) ?? 0;
         var writer = new MidiFileWriter(_ppq);
         byte[] bytes = writer.Write(conductor, tracks);
+        _performance?.StopStage(MidiPerformanceStage.SmfSerialization, stageStart);
+
+        if (_performance is not null)
+        {
+            _performance.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - _allocatedBefore;
+            _performance.PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64;
+        }
 
         var pitchDiagnostics = new PitchNormalizationDiagnostics();
         pitchDiagnostics.Domains.AddRange(pitchModel.Domains.Values
@@ -344,6 +447,7 @@ internal sealed class MusicalMidiExporter
             Diagnostics = Diagnostics ?? NullDiagnostics,
             PitchDiagnostics = pitchDiagnostics,
             OriginShiftTicks = originShiftTicks,
+            Performance = _performance?.Snapshot(),
         };
     }
 
@@ -356,8 +460,19 @@ internal sealed class MusicalMidiExporter
         foreach (MidiTrack track in tracks)
         {
             (int Tuning, int Range) c = counts.GetValueOrDefault(track.Endpoint);
-            c.Tuning += track.Events.Count(e => e is MidiTuningEvent);
-            c.Range += track.Events.Count(e => e is MidiBendRangeEvent);
+            if (track.UsesPackedEvents)
+            {
+                foreach (PackedMidiEvent evt in track.PackedEvents)
+                {
+                    c.Tuning += evt.Kind == PackedMidiEventKind.Tuning ? 1 : 0;
+                    c.Range += evt.Kind == PackedMidiEventKind.BendRange ? 1 : 0;
+                }
+            }
+            else
+            {
+                c.Tuning += track.Events.Count(e => e is MidiTuningEvent);
+                c.Range += track.Events.Count(e => e is MidiBendRangeEvent);
+            }
             counts[track.Endpoint] = c;
         }
         foreach ((MidiEndpoint endpoint, (int Tuning, int Range) c) in counts)
@@ -367,6 +482,15 @@ internal sealed class MusicalMidiExporter
                     $"MIDI endpoint ({endpoint.Port}, {endpoint.Channel}) carries {c.Tuning} tuning and " +
                     $"{c.Range} bend-range RPN setups — at most one of each is allowed (D13b).");
         }
+    }
+
+    private static int ComparePackedMidiEvents(PackedMidiEvent left, PackedMidiEvent right)
+    {
+        int compare = left.Tick.CompareTo(right.Tick);
+        if (compare != 0)
+            return compare;
+        compare = MidiEventOrder.Rank(left).CompareTo(MidiEventOrder.Rank(right));
+        return compare != 0 ? compare : left.SourceOrder.CompareTo(right.SourceOrder);
     }
 
     private readonly TimingDiagnostics NullDiagnostics = new()
@@ -414,27 +538,41 @@ internal sealed class MusicalMidiExporter
         CanonicalizePassCount = 0;
         foreach (MidiTrack track in tracks)
         {
-            // ONE sort — the exact (Tick, Rank, SourceOrder) key AppendEvents uses,
-            // so the writer's later sort is a stable no-op and same-tick collapse is
-            // deterministic by SourceOrder, never insertion/iteration order.
-            List<MidiEventBase> sorted = track.Events
-                .OrderBy(e => e.Tick)
-                .ThenBy(MidiEventOrder.Rank)
-                .ThenBy(e => e.SourceOrder)
-                .ToList();
-            CanonicalizeSortCount++;
+            if (track.UsesPackedEvents)
+            {
+                CanonicalizePackedEndpointPitchState(track);
+                continue;
+            }
 
-            var rebuilt = new List<MidiEventBase>(sorted.Count);
+            // Export has already applied this exact ordering in the preceding
+            // EventNormalization stage. Direct test/diagnostic callers may pass
+            // unsorted tracks, so retain the defensive in-place sort for them.
+            // This removes a complete duplicate sort and temporary list from the
+            // production export path.
+            if (!track.HasCanonicalEventOrder)
+            {
+                track.Events.Sort(static (a, b) =>
+                {
+                    int c = a.Tick.CompareTo(b.Tick);
+                    if (c != 0) return c;
+                    c = MidiEventOrder.Rank(a).CompareTo(MidiEventOrder.Rank(b));
+                    return c != 0 ? c : a.SourceOrder.CompareTo(b.SourceOrder);
+                });
+                CanonicalizeSortCount++;
+            }
+
+            List<MidiEventBase> events = track.Events;
             int? lastEmittedBend = null;
             bool sensitivityDirty = false;
 
             // ONE grouped linear pass over consecutive same-tick runs.
             int i = 0;
-            while (i < sorted.Count)
+            int write = 0;
+            while (i < events.Count)
             {
-                long tick = sorted[i].Tick;
+                long tick = events[i].Tick;
                 int runEnd = i;
-                while (runEnd < sorted.Count && sorted[runEnd].Tick == tick)
+                while (runEnd < events.Count && events[runEnd].Tick == tick)
                     runEnd++;
 
                 // Same-tick run: bends are contiguous at Rank 3; keep the bend with
@@ -443,7 +581,7 @@ internal sealed class MusicalMidiExporter
                 bool bendRangeInRun = false;
                 for (int j = i; j < runEnd; j++)
                 {
-                    switch (sorted[j])
+                    switch (events[j])
                     {
                         case MidiBendRangeEvent:
                             bendRangeInRun = true;
@@ -477,17 +615,77 @@ internal sealed class MusicalMidiExporter
 
                 for (int j = i; j < runEnd; j++)
                 {
-                    if (ReferenceEquals(sorted[j], retained) || sorted[j] is not MidiPitchBendEvent)
-                        rebuilt.Add(sorted[j]);
+                    if (ReferenceEquals(events[j], retained) || events[j] is not MidiPitchBendEvent)
+                        events[write++] = events[j];
                 }
                 i = runEnd;
             }
             CanonicalizePassCount++;
 
-            // Rebuild the track's event list in place (never re-link the track).
-            track.Events.Clear();
-            track.Events.AddRange(rebuilt);
+            // Compact the existing list in place (never re-link the track).
+            if (write < events.Count)
+                events.RemoveRange(write, events.Count - write);
         }
+    }
+
+    private void CanonicalizePackedEndpointPitchState(MidiTrack track)
+    {
+        List<PackedMidiEvent> events = track.PackedEvents;
+        if (!track.HasCanonicalEventOrder)
+        {
+            events.Sort(ComparePackedMidiEvents);
+            CanonicalizeSortCount++;
+        }
+
+        int? lastEmittedBend = null;
+        bool sensitivityDirty = false;
+        int write = 0;
+        for (int i = 0; i < events.Count;)
+        {
+            long tick = events[i].Tick;
+            int runEnd = i;
+            while (runEnd < events.Count && events[runEnd].Tick == tick)
+                runEnd++;
+
+            int retainedIndex = -1;
+            bool bendRangeInRun = false;
+            for (int j = i; j < runEnd; j++)
+            {
+                PackedMidiEvent evt = events[j];
+                if (evt.Kind == PackedMidiEventKind.BendRange)
+                    bendRangeInRun = true;
+                else if (evt.Kind == PackedMidiEventKind.PitchBend
+                    && (retainedIndex < 0 || evt.SourceOrder > events[retainedIndex].SourceOrder))
+                    retainedIndex = j;
+            }
+            if (bendRangeInRun)
+                sensitivityDirty = true;
+
+            if (retainedIndex >= 0)
+            {
+                PackedMidiEvent retained = events[retainedIndex];
+                if (!sensitivityDirty && lastEmittedBend is int last && retained.A == last)
+                {
+                    retainedIndex = -1;
+                }
+                else
+                {
+                    lastEmittedBend = retained.A;
+                    sensitivityDirty = false;
+                }
+            }
+
+            for (int j = i; j < runEnd; j++)
+            {
+                PackedMidiEvent evt = events[j];
+                if (j == retainedIndex || evt.Kind != PackedMidiEventKind.PitchBend)
+                    events[write++] = evt;
+            }
+            i = runEnd;
+        }
+        CanonicalizePassCount++;
+        if (write < events.Count)
+            events.RemoveRange(write, events.Count - write);
     }
 
     /// <summary>
@@ -500,6 +698,27 @@ internal sealed class MusicalMidiExporter
     {
         foreach (MidiTrack track in tracks)
         {
+            if (track.UsesPackedEvents)
+            {
+                long currentTick = long.MinValue;
+                bool seenBend = false;
+                for (int index = 0; index < track.PackedEvents.Count; index++)
+                {
+                    PackedMidiEvent evt = track.PackedEvents[index];
+                    if (evt.Kind != PackedMidiEventKind.PitchBend)
+                        continue;
+                    if (evt.Tick == currentTick && seenBend)
+                    {
+                        throw new InvalidOperationException(
+                            $"Duplicate pitch-bend events on endpoint ({track.Endpoint.Port}, {track.Endpoint.Channel}) " +
+                            $"at tick {evt.Tick}: packed events remain after canonicalization.");
+                    }
+                    currentTick = evt.Tick;
+                    seenBend = true;
+                }
+                continue;
+            }
+
             foreach (IGrouping<long, MidiPitchBendEvent> group in track.Events
                          .OfType<MidiPitchBendEvent>()
                          .GroupBy(b => b.Tick))
@@ -515,6 +734,9 @@ internal sealed class MusicalMidiExporter
             }
         }
     }
+
+    private static int TrackEventCount(MidiTrack track) =>
+        track.UsesPackedEvents ? track.PackedEvents.Count : track.Events.Count;
 
     /// <summary>The unshifted absolute MIDI tick of a source sample (may be negative).</summary>
     private long TimeTick(long sample) => _map.SampleToTick(sample, _ppq);
@@ -590,18 +812,20 @@ internal sealed class MusicalMidiExporter
             var noBendEndpoint = slot.Track.Endpoint;
             if (lastBendByEndpoint.TryGetValue(noBendEndpoint, out int lastBend) && lastBend != 0)
             {
-                AddTrackEvent(slot.Track, new MidiPitchBendEvent(on, slot.Index, slot.Channel, 0));
+                AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(on, slot.Index, slot.Channel, 0));
                 lastBendByEndpoint[noBendEndpoint] = 0;
             }
-            AddTrackEvent(slot.Track, new MidiNoteEvent(on, slot.Index, slot.Channel, pitch, vel, NoteOn: true));
-            AddTrackEvent(slot.Track, new MidiNoteEvent(off, slot.Index, slot.Channel, pitch, vel, NoteOn: false));
+            AddTrackEvent(slot.Track, PackedMidiEvent.Note(on, slot.Index, slot.Channel, pitch, vel, noteOn: true));
+            AddTrackEvent(slot.Track, PackedMidiEvent.Note(off, slot.Index, slot.Channel, pitch, vel, noteOn: false));
             return;
         }
 
         // Build the pitch anchor list: folded-initial + causal changes, "final wins"
         // at the same sample, transposed exactly once, collapsed to same-tick.
         double initialSource = double.IsFinite(view.InitialMidiNote) ? view.InitialMidiNote : 60;
+        long pitchStageStart = _performance?.StartStage(MidiPerformanceStage.PitchAnalysis) ?? 0;
         var anchors = BuildPitchAnchors(view, initialSource, transpose);
+        _performance?.StopStage(MidiPerformanceStage.PitchAnalysis, pitchStageStart);
 
         long startTick = TimeTick(note.StartSample);
         long endTick = TimeTick(note.EndSample);
@@ -609,7 +833,8 @@ internal sealed class MusicalMidiExporter
             endTick = startTick + 1; // real collapsed note: minimum 1 tick (§29).
 
         int baseNote = SelectBaseNote(anchors[0].Target, bendRange, note);
-        var pitchStates = new List<PlannedPitchState>();
+        List<PlannedPitchState> pitchStates = _pitchStateScratch;
+        pitchStates.Clear();
         MidiEndpoint endpoint = slot.Track.Endpoint;
 
         // Re-anchor loop over the pitch states in tick order. Between the current
@@ -617,7 +842,8 @@ internal sealed class MusicalMidiExporter
         // base. When a state exits baseNote +- range, re-anchor at that tick.
         long currentBaseFrom = startTick;
         int currentBase = baseNote;
-        var reanchors = new List<(long Tick, int OldBase, int NewBase, int InitialBend)>();
+        List<(long Tick, int OldBase, int NewBase, int InitialBend)> reanchors = _reanchorScratch;
+        reanchors.Clear();
         for (int i = 1; i < anchors.Count; i++)
         {
             (long tick, double target, _) = anchors[i];
@@ -654,17 +880,22 @@ internal sealed class MusicalMidiExporter
         // equals this note's required initial bend (never assume NoteOff restores 0).
         int beforeOn = lastBendByEndpoint.TryGetValue(endpoint, out int last) ? last : 0;
         if (beforeOn != initialBend)
-            AddTrackEvent(slot.Track, new MidiPitchBendEvent(startTick + originShift, slot.Index, slot.Channel, initialBend));
+            AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
+                startTick + originShift, slot.Index, slot.Channel, initialBend));
         lastBendByEndpoint[endpoint] = initialBend;
 
-        AddTrackEvent(slot.Track, new MidiNoteEvent(startTick + originShift, slot.Index, slot.Channel, baseNote, vel, NoteOn: true));
+        AddTrackEvent(slot.Track, PackedMidiEvent.Note(
+            startTick + originShift, slot.Index, slot.Channel, baseNote, vel, noteOn: true));
 
         // Topological emission: pitch states (incl. re-anchor initial bends) in
         // tick order; a re-anchor additionally notes-off the old base and notes-on
         // the new base at the re-anchor tick (order NoteOff, PitchBend, NoteOn via
         // the writer's rank).
         int reIdx = 0;
-        foreach (PlannedPitchState state in pitchStates.OrderBy(s => s.Tick).ThenBy(s => s.EncodedBend))
+        // BuildPitchAnchors returns monotonic MIDI ticks, and this loop appends
+        // states in anchor order. Re-sorting the states here was redundant work
+        // on every bend-bearing note and could only preserve the existing order.
+        foreach (PlannedPitchState state in pitchStates)
         {
             long t = state.Tick;
             if (reIdx < reanchors.Count && reanchors[reIdx].Tick <= t)
@@ -672,23 +903,28 @@ internal sealed class MusicalMidiExporter
                 var re = reanchors[reIdx];
                 if (re.Tick == t)
                 {
-                    AddTrackEvent(slot.Track, new MidiNoteEvent(t + originShift, slot.Index, slot.Channel, re.OldBase, vel, NoteOn: false));
-                    AddTrackEvent(slot.Track, new MidiPitchBendEvent(t + originShift, slot.Index, slot.Channel, re.InitialBend));
-                    AddTrackEvent(slot.Track, new MidiNoteEvent(t + originShift, slot.Index, slot.Channel, re.NewBase, vel, NoteOn: true));
+                    AddTrackEvent(slot.Track, PackedMidiEvent.Note(
+                        t + originShift, slot.Index, slot.Channel, re.OldBase, vel, noteOn: false));
+                    AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
+                        t + originShift, slot.Index, slot.Channel, re.InitialBend));
+                    AddTrackEvent(slot.Track, PackedMidiEvent.Note(
+                        t + originShift, slot.Index, slot.Channel, re.NewBase, vel, noteOn: true));
                     lastBendByEndpoint[endpoint] = re.InitialBend;
                     reIdx++;
                     continue;
                 }
             }
-            AddTrackEvent(slot.Track, new MidiPitchBendEvent(t + originShift, slot.Index, slot.Channel, state.EncodedBend));
+            AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
+                t + originShift, slot.Index, slot.Channel, state.EncodedBend));
             lastBendByEndpoint[endpoint] = state.EncodedBend;
         }
 
         // Final note-off on the current base.
-        AddTrackEvent(slot.Track, new MidiNoteEvent(endTick + originShift, slot.Index, slot.Channel, currentBase, vel, NoteOn: false));
+        AddTrackEvent(slot.Track, PackedMidiEvent.Note(
+            endTick + originShift, slot.Index, slot.Channel, currentBase, vel, noteOn: false));
     }
 
-    private List<(long Tick, double Target, int Order)> BuildPitchAnchors(
+    private List<(long Position, double Target, int Order)> BuildPitchAnchors(
         NormalizedNoteView view, double initialSource, int transpose)
     {
         NoteEvent note = view.Source;
@@ -697,37 +933,95 @@ internal sealed class MusicalMidiExporter
         // after the note start (at/after StartSample fold into the initial pitch)
         // and before/at the note end. Transpose applied exactly once. Changes come
         // from the NORMALIZED view (FR-1) — the same set the origin shift covered.
-        var pts = new List<(long Sample, double Target, int Order)>();
+        List<(long Position, double Target, int Order)> pts = _pitchAnchorScratch;
+        pts.Clear();
         pts.Add((note.StartSample, initialSource + transpose, -1));
         int seq = 0;
+        bool pointsOrdered = true;
+        long lastSample = note.StartSample;
+        int lastOrder = -1;
         foreach (NormalizedPitchChange c in view.Changes ?? Array.Empty<NormalizedPitchChange>())
         {
+            if (_performance is not null)
+                _performance.PitchCalculations++;
             if (!double.IsFinite(c.MidiNote))
                 continue;
             // Ignore changes before note start and at/after NoteOff.
             if (c.SamplePosition < note.StartSample || c.SamplePosition >= note.EndSample)
                 continue;
-            pts.Add((c.SamplePosition, c.MidiNote + transpose, seq++));
+            int order = seq++;
+            if (c.SamplePosition < lastSample
+                || c.SamplePosition == lastSample && order < lastOrder)
+            {
+                pointsOrdered = false;
+            }
+            lastSample = c.SamplePosition;
+            lastOrder = order;
+            pts.Add((c.SamplePosition, c.MidiNote + transpose, order));
         }
-        // Same-sample collapse: final (highest source order) wins, source order kept.
-        List<(long Sample, double Target, int Order)> collapsed = pts
-            .GroupBy(p => p.Sample)
-            .Select(g => g.OrderBy(p => p.Order).Last())
-            .OrderBy(p => p.Sample)
-            .ThenBy(p => p.Order)
-            .ToList();
-        // Same-tick collapse in the MIDI tick domain: final (latest source order) wins.
-        List<(long Tick, double Target, int Order)> byTick = collapsed
-            .Select(p => (Tick: TimeTick(p.Sample), p.Target, p.Order))
-            .OrderBy(p => p.Tick)
-            .ThenBy(p => p.Order)
-            .ToList();
-        var collapsedByTick = byTick
-            .GroupBy(p => p.Tick)
-            .Select(g => g.OrderBy(p => p.Order).Last())
-            .OrderBy(p => p.Tick)
-            .ToList();
-        return collapsedByTick;
+        // Same-sample collapse: final (highest source order) wins. Explicit
+        // in-place sorting avoids the GroupBy/Select/OrderBy chain and its
+        // iterator/group allocations on every pitch-bearing note.
+        if (!pointsOrdered)
+        {
+            pts.Sort(static (a, b) =>
+            {
+                int c = a.Position.CompareTo(b.Position);
+                return c != 0 ? c : a.Order.CompareTo(b.Order);
+            });
+            if (_performance is not null)
+                _performance.TimelineSorts++;
+        }
+        int write = 0;
+        for (int read = 0; read < pts.Count;)
+        {
+            int end = read + 1;
+            while (end < pts.Count && pts[end].Position == pts[read].Position)
+                end++;
+            pts[write++] = pts[end - 1];
+            read = end;
+        }
+        if (write < pts.Count)
+            pts.RemoveRange(write, pts.Count - write);
+
+        // Convert the compacted sample positions to MIDI ticks in place. The
+        // tuple layout is unchanged, so a second per-note anchor list would only
+        // duplicate storage before the same-tick collapse.
+        bool anchorsOrdered = true;
+        long lastTick = long.MinValue;
+        int lastTickOrder = int.MinValue;
+        for (int index = 0; index < pts.Count; index++)
+        {
+            (long sample, double target, int order) = pts[index];
+            long tick = TimeTick(sample);
+            if (tick < lastTick || tick == lastTick && order < lastTickOrder)
+                anchorsOrdered = false;
+            lastTick = tick;
+            lastTickOrder = order;
+            pts[index] = (tick, target, order);
+        }
+        if (!anchorsOrdered)
+        {
+            pts.Sort(static (a, b) =>
+            {
+                int c = a.Position.CompareTo(b.Position);
+                return c != 0 ? c : a.Order.CompareTo(b.Order);
+            });
+            if (_performance is not null)
+                _performance.TimelineSorts++;
+        }
+        write = 0;
+        for (int read = 0; read < pts.Count;)
+        {
+            int end = read + 1;
+            while (end < pts.Count && pts[end].Position == pts[read].Position)
+                end++;
+            pts[write++] = pts[end - 1];
+            read = end;
+        }
+        if (write < pts.Count)
+            pts.RemoveRange(write, pts.Count - write);
+        return pts;
     }
 
     private int SelectBaseNote(double target, int range, NoteEvent note)
@@ -751,11 +1045,26 @@ internal sealed class MusicalMidiExporter
         return evt;
     }
 
-    /// <summary>Appends an event to a track with a deterministic source-sequence key.</summary>
-    private void AddTrackEvent(MidiTrack track, MidiEventBase evt)
+    private PackedMidiEvent WithPackedSourceOrder(PackedMidiEvent evt)
     {
         evt.SourceOrder = _sourceOrder++;
-        track.Events.Add(evt);
+        return evt;
+    }
+
+    /// <summary>Appends an event to a track with a deterministic source-sequence key.</summary>
+    private void AddTrackEvent(MidiTrack track, PackedMidiEvent evt)
+    {
+        evt.SourceOrder = _sourceOrder++;
+        track.AddPacked(evt);
+        if (_performance is not null)
+        {
+            _performance.GeneratedMidiEvents++;
+            if (evt.Kind == PackedMidiEventKind.PitchBend)
+            {
+                _performance.BendEventsEmitted++;
+                _performance.PitchCalculations++;
+            }
+        }
     }
 
     /// <summary>Sign-symmetric 14-bit bend for a semitone offset within the fixed range:
@@ -820,12 +1129,28 @@ internal sealed class MusicalMidiExporter
         };
         if (gridTicks <= 0)
             return;
-        foreach ((int index, MidiTrack track) in allocator.Tracks.OrderBy(pair => pair.Key))
+        for (int index = 1; index <= allocator.Tracks.Count; index++)
         {
-            foreach (MidiEventBase evt in track.Events)
+            MidiTrack track = allocator.Tracks[index];
+            if (track.UsesPackedEvents)
             {
-                if (evt is MidiNoteEvent note && note.NoteOn)
+                for (int eventIndex = 0; eventIndex < track.PackedEvents.Count; eventIndex++)
                 {
+                    PackedMidiEvent evt = track.PackedEvents[eventIndex];
+                    if (evt.Kind != PackedMidiEventKind.NoteOn)
+                        continue;
+                    // Quantize start to the nearest grid line; keep end duration.
+                    long group = (evt.Tick + gridTicks / 2) / gridTicks * gridTicks;
+                    evt.Tick = Math.Max(0, group);
+                    track.PackedEvents[eventIndex] = evt;
+                }
+            }
+            else
+            {
+                foreach (MidiEventBase evt in track.Events)
+                {
+                    if (evt is not MidiNoteEvent note || !note.NoteOn)
+                        continue;
                     // Quantize start to the nearest grid line; keep end duration.
                     long group = (note.Tick + gridTicks / 2) / gridTicks * gridTicks;
                     note.Tick = Math.Max(0, group);
@@ -842,30 +1167,10 @@ internal sealed class MusicalMidiExporter
     /// their logical tick 0 and are not shifted. The shift is the smallest whole tick
     /// that makes every time-domain tick nonnegative — NOT aligned to quarter/bar.
     /// </summary>
-    private long ComputeOriginShiftTicks(VisualizationTimeline timeline, PitchNormalizationModel model)
+    private long ComputeOriginShiftTicks(SourceEventIndex sourceIndex, VisualizationTimeline timeline)
     {
-        long minTick = TimeTick(_map.FirstSample);
+        long minTick = sourceIndex.MinimumTick;
         void Consider(long tick) { if (tick < minTick) minTick = tick; }
-
-        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
-        {
-            if (!IsNoteEmitted(note))
-                continue;
-            Consider(TimeTick(note.StartSample));
-            if (!model.Views.TryGetValue(note, out NormalizedNoteView? view) || !ShouldFoldPitch(view))
-                continue;
-            foreach (NormalizedPitchChange change in view.Changes ?? Array.Empty<NormalizedPitchChange>())
-            {
-                if (change is null || !double.IsFinite(change.MidiNote)) continue;
-                Consider(TimeTick(change.SamplePosition));
-            }
-        }
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
-        {
-            if (rhythm is null || !IsRhythmEmitted(rhythm))
-                continue;
-            Consider(TimeTick(rhythm.SamplePosition));
-        }
         if (_options.EmitMarkers)
         {
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
@@ -1004,7 +1309,76 @@ internal sealed class MusicalMidiExporter
             conductor.Add(withOrder(new MidiMetaTextEvent(0, 0x01, $"git-commit {gitCommit}")));
     }
 
-    private TrackAllocator BuildTracks(VisualizationTimeline timeline)
+    private SourceEventIndex BuildSourceEventIndex(
+        VisualizationTimeline timeline, PitchNormalizationModel model)
+    {
+        var notes = new List<IndexedNote>(timeline.Notes?.Count ?? 0);
+        long minimumTick = TimeTick(_map.FirstSample);
+        int maximumPitchChanges = 0;
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (_performance is not null)
+                _performance.SourceEventsProcessed++;
+            if (note is null || !IsNoteEmitted(note))
+            {
+                if (_performance is not null)
+                    _performance.SourceEventsSkipped++;
+                continue;
+            }
+            int eventCapacity = 2;
+            int pitchChangeCount = 0;
+            if (model.Views.TryGetValue(note, out NormalizedNoteView view) && ShouldFoldPitch(view))
+            {
+                pitchChangeCount = view.Changes?.Count ?? 0;
+                maximumPitchChanges = Math.Max(maximumPitchChanges, pitchChangeCount);
+                // A pitch change can remain a bend or become a three-event
+                // re-anchor (NoteOff, bend, NoteOn). This is an upper bound,
+                // computed before emission, so the packed track never grows in
+                // the source-event loop.
+                eventCapacity = 5 + 3 * pitchChangeCount;
+            }
+            notes.Add(new IndexedNote(note, TrackKeyFor(note), eventCapacity));
+            minimumTick = Math.Min(minimumTick, TimeTick(note.StartSample));
+            if (pitchChangeCount > 0)
+            {
+                foreach (NormalizedPitchChange change in view.Changes ?? Array.Empty<NormalizedPitchChange>())
+                {
+                    if (double.IsFinite(change.MidiNote))
+                        minimumTick = Math.Min(minimumTick, TimeTick(change.SamplePosition));
+                }
+            }
+        }
+
+        var rhythms = new List<IndexedRhythm>(timeline.Rhythm?.Count ?? 0);
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (_performance is not null)
+                _performance.SourceEventsProcessed++;
+            if (rhythm is null || !IsRhythmEmitted(rhythm))
+            {
+                if (_performance is not null)
+                    _performance.SourceEventsSkipped++;
+                continue;
+            }
+            rhythms.Add(new IndexedRhythm(rhythm, RhythmKeyFor(rhythm)));
+            minimumTick = Math.Min(minimumTick, TimeTick(rhythm.SamplePosition));
+        }
+        return new SourceEventIndex(notes, rhythms, minimumTick, maximumPitchChanges);
+    }
+
+    private void PreparePitchScratch(SourceEventIndex sourceIndex)
+    {
+        // BuildSourceEventIndex already inspected every normalized note while
+        // calculating its emission capacity. Reuse that result instead of
+        // walking the complete note index a second time merely to size scratch
+        // buffers.
+        int maximumChanges = sourceIndex.MaximumPitchChanges;
+        _pitchAnchorScratch.EnsureCapacity(maximumChanges + 1);
+        _pitchStateScratch.EnsureCapacity(maximumChanges);
+        _reanchorScratch.EnsureCapacity(maximumChanges);
+    }
+
+    private TrackAllocator BuildTracks(SourceEventIndex sourceIndex)
     {
         var allocator = new TrackAllocator();
         int index = 1;
@@ -1018,6 +1392,7 @@ internal sealed class MusicalMidiExporter
         // override must resolve against that real channel — not a synthetic key.
         var keyOrder = new List<MidiTrackKey>();
         var representativeByKey = new Dictionary<MidiTrackKey, string>();
+        var eventCapacityByKey = new Dictionary<MidiTrackKey, int>();
         var seen = new HashSet<MidiTrackKey>();
         void AddKey(MidiTrackKey key, string channelId)
         {
@@ -1027,17 +1402,17 @@ internal sealed class MusicalMidiExporter
                 representativeByKey[key] = channelId;
             }
         }
-        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        foreach (IndexedNote indexedNote in sourceIndex.Notes)
         {
-            if (note is null || !IsNoteEmitted(note))
-                continue;
-            AddKey(TrackKeyFor(note), note.ChannelId);
+            AddKey(indexedNote.Key, indexedNote.Note.ChannelId);
+            eventCapacityByKey[indexedNote.Key] =
+                eventCapacityByKey.GetValueOrDefault(indexedNote.Key) + indexedNote.EventCapacity;
         }
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
-            if (rhythm is null || !IsRhythmEmitted(rhythm))
-                continue;
-            AddKey(RhythmKeyFor(rhythm), rhythm.ChannelId);
+            AddKey(indexedRhythm.Key, indexedRhythm.Rhythm.ChannelId);
+            eventCapacityByKey[indexedRhythm.Key] =
+                eventCapacityByKey.GetValueOrDefault(indexedRhythm.Key) + 2;
         }
         keyOrder.Sort(CompareTrackKeys);
 
@@ -1046,10 +1421,13 @@ internal sealed class MusicalMidiExporter
         // Percussion naming needs the set of distinct rhythm identities per chip:
         // a chip with exactly one rhythm voice gets the clean "<CHIP> Rhythm" name,
         // and multiple voices are disambiguated by their short voice name.
-        var rhythmCountByChip = keyOrder
-            .Where(key => key.Instrument.Family == IdentityFamily.Rhythm)
-            .GroupBy(key => key.Chip)
-            .ToDictionary(group => group.Key, group => group.Count());
+        var rhythmCountByChip = new Dictionary<ChipType, int>();
+        foreach (MidiTrackKey key in keyOrder)
+        {
+            if (key.Instrument.Family != IdentityFamily.Rhythm)
+                continue;
+            rhythmCountByChip[key.Chip] = rhythmCountByChip.GetValueOrDefault(key.Chip) + 1;
+        }
 
         foreach (MidiTrackKey key in keyOrder)
         {
@@ -1057,8 +1435,9 @@ internal sealed class MusicalMidiExporter
             VoiceExportOverride voiceOverride = _options.OverrideFor(channelId);
             if (!voiceOverride.Include)
                 continue; // excluded voice: no track, no notes.
-            allocator.Add(key, index++, channelId, voiceOverride, _options, WithSourceOrder,
-                rhythmCountByChip.GetValueOrDefault(key.Chip));
+            allocator.Add(key, index++, channelId, voiceOverride, _options, WithPackedSourceOrder,
+                rhythmCountByChip.GetValueOrDefault(key.Chip),
+                eventCapacityByKey.GetValueOrDefault(key) + 2);
         }
         return allocator;
     }
@@ -1080,21 +1459,39 @@ internal sealed class MusicalMidiExporter
         int range = _options.BendRangeSemitones;
         if (range is < 1 or > 127)
             throw new ArgumentOutOfRangeException(nameof(_options), "Bend range must be in [1, 127].");
-        foreach ((MidiTrackKey key, TrackSlot slot) in allocator.Slots.OrderBy(pair => pair.Value.Index))
+        var orderedSlots = new List<KeyValuePair<MidiTrackKey, TrackSlot>>(allocator.Slots.Count);
+        foreach (KeyValuePair<MidiTrackKey, TrackSlot> pair in allocator.Slots)
+            orderedSlots.Add(pair);
+        orderedSlots.Sort(static (a, b) => a.Value.Index.CompareTo(b.Value.Index));
+
+        for (int index = 0; index < orderedSlots.Count; index++)
         {
+            MidiTrackKey key = orderedSlots[index].Key;
+            TrackSlot slot = orderedSlots[index].Value;
             if (slot.Percussive)
                 continue;
             // Only emit the RPN setup on tracks that actually serialized a bend; a
             // constant-pitch melodic track needs no bend infrastructure.
-            if (!slot.Track.Events.Any(e => e is MidiPitchBendEvent))
+            bool hasBend = false;
+            for (int eventIndex = 0; eventIndex < slot.Track.PackedEvents.Count; eventIndex++)
+            {
+                if (slot.Track.PackedEvents[eventIndex].Kind == PackedMidiEventKind.PitchBend)
+                {
+                    hasBend = true;
+                    break;
+                }
+            }
+            if (!hasBend)
                 continue;
-            AddTrackEvent(slot.Track, new MidiBendRangeEvent(0, slot.Index, slot.Channel, range));
+            AddTrackEvent(slot.Track, PackedMidiEvent.BendRange(0, slot.Index, slot.Channel, range));
         }
 
         if (_options.PitchNormalizationMode != PitchNormalizationMode.Fidelity)
             return; // DAW-friendly snaps (no tuning events); Off emits legacy bytes.
-        foreach ((MidiTrackKey key, TrackSlot slot) in allocator.Slots.OrderBy(pair => pair.Value.Index))
+        for (int index = 0; index < orderedSlots.Count; index++)
         {
+            MidiTrackKey key = orderedSlots[index].Key;
+            TrackSlot slot = orderedSlots[index].Value;
             if (slot.Percussive)
                 continue;
             if (!model.Domains.TryGetValue(key, out DomainPitchStats? stats) || !stats.Accepted)
@@ -1110,7 +1507,7 @@ internal sealed class MusicalMidiExporter
             int fine = (int)Math.Round(bias - coarse * 100.0);
             if (coarse == 0 && fine == 0)
                 continue; // in-tune domain: bias is exactly 0, nothing to restore
-            AddTrackEvent(slot.Track, new MidiTuningEvent(0, slot.Index, slot.Channel, coarse, fine));
+            AddTrackEvent(slot.Track, PackedMidiEvent.Tuning(0, slot.Index, slot.Channel, coarse, fine));
         }
     }
 
@@ -1154,6 +1551,9 @@ internal sealed class MusicalMidiExporter
     /// change mid-note never retargets the note to another track.</summary>
     private MidiTrackKey TrackKeyFor(NoteEvent note)
     {
+        if (_noteTrackKeyCache.TryGetValue(note, out MidiTrackKey cached))
+            return cached;
+
         MidiTrackKey key;
         if (note.Domain is SourceDomainKey domain
             && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity typedInstrument))
@@ -1162,7 +1562,11 @@ internal sealed class MusicalMidiExporter
                  && InstrumentIdentity.TryParse(note.InstrumentId, out InstrumentIdentity instrument))
             key = new MidiTrackKey(device, voice, sourceChannel, instrument);
         else
-            return PlaceholderKey(note.ChannelId);
+        {
+            key = PlaceholderKey(note.ChannelId);
+            _noteTrackKeyCache[note] = key;
+            return key;
+        }
         // SN76489 tone/noise is NOT an instrument (spec 30): PSG has no patch object
         // comparable to FM, so the track is keyed by source channel only (channels
         // are already split by VoiceKind.Psg index 0-2 / VoiceKind.Noise index 0).
@@ -1170,6 +1574,7 @@ internal sealed class MusicalMidiExporter
         // naming (SN76489 PSG CH1-3 / SN76489 Noise) carries the voice meaning.
         if (key.Device.Type == ChipType.Sn76489)
             key = key with { Instrument = InstrumentIdentity.Empty };
+        _noteTrackKeyCache[note] = key;
         return key;
     }
 
@@ -1178,22 +1583,33 @@ internal sealed class MusicalMidiExporter
     /// the raw voice-name string — so a future rename cannot change grouping.</summary>
     private MidiTrackKey RhythmKeyFor(RhythmEvent rhythm)
     {
+        if (_rhythmTrackKeyCache.TryGetValue(rhythm, out MidiTrackKey cached))
+            return cached;
+
         if (rhythm.Domain is SourceDomainKey domain)
         {
             string domainInstrument = string.IsNullOrWhiteSpace(rhythm.InstrumentId)
                 ? $"rhythm:{rhythm.Voice.ToLowerInvariant()}" : rhythm.InstrumentId;
             if (!InstrumentIdentity.TryParse(domainInstrument, out InstrumentIdentity domainIdentity))
                 domainIdentity = new InstrumentIdentity(IdentityFamily.Rhythm, 0, $"rhythm:{domainInstrument}");
-            return new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, domainIdentity);
+            MidiTrackKey key = new(domain.Device, domain.VoiceFamily, domain.Index, domainIdentity);
+            _rhythmTrackKeyCache[rhythm] = key;
+            return key;
         }
         if (!TryParseSourceDomain(rhythm.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel))
-            return PlaceholderKey(rhythm.ChannelId);
+        {
+            MidiTrackKey key = PlaceholderKey(rhythm.ChannelId);
+            _rhythmTrackKeyCache[rhythm] = key;
+            return key;
+        }
         string normalized = string.IsNullOrWhiteSpace(rhythm.InstrumentId)
             ? $"rhythm:{rhythm.Voice.ToLowerInvariant()}"
             : rhythm.InstrumentId;
         if (!InstrumentIdentity.TryParse(normalized, out InstrumentIdentity instrument))
             instrument = new InstrumentIdentity(IdentityFamily.Rhythm, 0, $"rhythm:{normalized}");
-        return new MidiTrackKey(device, voice, sourceChannel, instrument);
+        MidiTrackKey result = new(device, voice, sourceChannel, instrument);
+        _rhythmTrackKeyCache[rhythm] = result;
+        return result;
     }
 
     private static bool TryParseSourceDomain(string channelId, out DeviceId device,
@@ -1269,8 +1685,8 @@ internal sealed class MusicalMidiExporter
         private readonly Dictionary<SourceDomainKey, int> _requestedChannelsByDomain = new();
 
         public void Add(MidiTrackKey key, int index, string channelId, VoiceExportOverride voiceOverride,
-            MusicalMidiExportOptions options, Func<MidiEventBase, MidiEventBase> withOrder,
-            int rhythmCountForChip = 0)
+            MusicalMidiExportOptions options, Func<PackedMidiEvent, PackedMidiEvent> withOrder,
+            int rhythmCountForChip = 0, int initialEventCapacity = 0)
         {
             TrackSlot? existing = SlotFor(key);
             if (existing is not null)
@@ -1278,7 +1694,7 @@ internal sealed class MusicalMidiExporter
             bool percussive = key.Instrument.Family == IdentityFamily.Rhythm;
             string name = IdentityNameFor(key, percussive, channelId, rhythmCountForChip);
             MidiEndpoint endpoint = ResolveEndpoint(key, percussive, options, voiceOverride);
-            var track = new MidiTrack { Name = name, Endpoint = endpoint };
+            var track = new MidiTrack(initialEventCapacity) { Name = name, Endpoint = endpoint };
             Tracks[index] = track;
             int channel = endpoint.Channel;
             MidiVoiceDomain domain = new(key.Device, key.VoiceFamily, key.SourceChannel,
@@ -1298,9 +1714,9 @@ internal sealed class MusicalMidiExporter
                 // setup is also the captured "silent-period state" — no silence-only
                 // track is created (R6).
                 if (voiceOverride.Bank is int bank)
-                    track.Events.Add(withOrder(new MidiBankEvent(0, index, channel, bank)));
+                    track.AddPacked(withOrder(PackedMidiEvent.Bank(0, index, channel, bank)));
                 if (voiceOverride.Program is int program)
-                    track.Events.Add(withOrder(new MidiProgramEvent(0, index, channel, program)));
+                    track.AddPacked(withOrder(PackedMidiEvent.Program(0, index, channel, program)));
             }
         }
 
@@ -1331,15 +1747,28 @@ internal sealed class MusicalMidiExporter
 
         private MidiEndpoint AllocateEndpoint(int? requestedChannel, bool percussive, MidiTrackKey key)
         {
-            IEnumerable<int> channels = percussive
-                ? new[] { 9 }
-                : Enumerable.Range(0, 16).Where(channel => channel != 9);
-            if (requestedChannel is int requested)
-                channels = new[] { requested };
             for (int port = 0; port <= byte.MaxValue; port++)
             {
-                foreach (int channel in channels)
+                if (requestedChannel is int requested)
                 {
+                    var endpoint = new MidiEndpoint((byte)port, requested);
+                    if (_usedEndpoints.Add(endpoint))
+                        return endpoint;
+                    continue;
+                }
+
+                if (percussive)
+                {
+                    var endpoint = new MidiEndpoint((byte)port, 9);
+                    if (_usedEndpoints.Add(endpoint))
+                        return endpoint;
+                    continue;
+                }
+
+                for (int channel = 0; channel < 16; channel++)
+                {
+                    if (channel == 9)
+                        continue;
                     var endpoint = new MidiEndpoint((byte)port, channel);
                     if (_usedEndpoints.Add(endpoint))
                         return endpoint;
@@ -1441,8 +1870,17 @@ internal sealed class MusicalMidiExporter
         public IEnumerable<MidiTrack> Values => Tracks.Values;
     }
 
+    private sealed record SourceEventIndex(
+        List<IndexedNote> Notes,
+        List<IndexedRhythm> Rhythms,
+        long MinimumTick,
+        int MaximumPitchChanges);
+
+    private readonly record struct IndexedNote(NoteEvent Note, MidiTrackKey Key, int EventCapacity);
+    private readonly record struct IndexedRhythm(RhythmEvent Rhythm, MidiTrackKey Key);
+
     /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
-    private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note);
+    private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note, MidiTrackKey Key);
 
     /// <summary>A planned pitch event at an absolute MIDI tick: the target pitch and its
     /// encoded bend, resolved through tick-domain collapse and re-anchoring.</summary>

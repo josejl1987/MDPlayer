@@ -131,7 +131,7 @@ internal sealed class FmpCaptureSession : IPlaybackCaptureSession
             _events.OnDevice(device);
         using var audio = new MdsoundFmpChipSink(Timing.SampleRate, ssgGainDb: _options.SsgGainDb);
         var sink = new FmpPlaybackEventSinkAdapter(_events, audio);
-        var runtime = new FmpRuntime(sink, _assets, _fileSystem);
+        var runtime = new FmpRuntime(sink, _assets, _fileSystem, controlTickRate: Timing.SampleRate);
         WavWriter writer = null;
         try
         {

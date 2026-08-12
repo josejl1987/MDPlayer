@@ -26,6 +26,8 @@ internal sealed class CorrscopeFrameSource : IScopeFrameSource
     private byte[]? _discardBuffer;
     private bool _disposed;
 
+    public bool FramesAreOpaque => true;
+
     public CorrscopeFrameSource(
         Func<Process> startProcess,
         int frameByteCount)

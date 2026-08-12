@@ -16,6 +16,13 @@ namespace Fmp.Core.Visualization.Rendering;
 internal interface IScopeFrameSource : IDisposable
 {
     /// <summary>
+    /// True when every source pixel already has opaque alpha. The production
+    /// Corrscope bridge emits opaque RGBA; internal waveform sources retain
+    /// their own alpha and therefore return false.
+    /// </summary>
+    bool FramesAreOpaque => false;
+
+    /// <summary>
     /// Reads the scope grid frame for <paramref name="frameIndex"/> into
     /// <paramref name="destination"/>. The destination must be at least
     /// <c>CorrscopeGridWidth * CorrscopeGridHeight * 4</c> bytes.

@@ -124,6 +124,70 @@ public sealed class SymbolicTempoInferencePruningTests
         Assert.True(evaluatedPhases > 0, "corpus must exercise fully evaluated phases too");
     }
 
+    [Fact]
+    public void LogDominantTermScoring_MatchesReferenceSubdivisionFormula()
+    {
+        var rng = new Random(20260812);
+        foreach (OnsetSet set in BuildCorpus(rng))
+        {
+            double bpm = RepresentativeBpms[rng.Next(RepresentativeBpms.Length)];
+            double spq = Sr * 60.0 / bpm;
+            double[] normalized = set.Samples.Select(sample => sample / spq).ToArray();
+            double totalWeight = set.Weights.Sum();
+
+            for (int phase = 0; phase < PhaseSteps; phase++)
+            {
+                double phaseQuarters = phase / (double)PhaseSteps;
+                double expected = ReferenceScore(
+                    normalized, set.Weights, phaseQuarters, totalWeight);
+                double actual = SymbolicTempoInference.ScoreForPhase(
+                    normalized, set.Weights, null, phaseQuarters,
+                    incumbentScore: 0, totalWeight, acc: null);
+                Assert.Equal(expected, actual);
+            }
+        }
+    }
+
+    private static double ReferenceScore(
+        double[] normalized,
+        double[] weights,
+        double phaseQuarters,
+        double totalWeight)
+    {
+        double weightedFit = 0;
+        for (int index = 0; index < normalized.Length; index++)
+        {
+            double quarter = normalized[index] - phaseQuarters;
+            double residual = quarter - Math.Round(quarter);
+            if (residual == 0.5)
+                residual = -0.5;
+            weightedFit += weights[index] * ReferenceSubdivisionFit(residual);
+        }
+        return weightedFit / totalWeight;
+    }
+
+    private static double ReferenceSubdivisionFit(double residual)
+    {
+        const double denominator = 2.0 * 0.08 * 0.08;
+        double best = Math.Exp(-residual * residual / denominator);
+        best = Math.Max(best, 0.96 * Math.Exp(
+            -(residual * 2 - Math.Round(residual * 2)) *
+            (residual * 2 - Math.Round(residual * 2)) / denominator));
+        best = Math.Max(best, 0.92 * Math.Exp(
+            -(residual * 3 - Math.Round(residual * 3)) *
+            (residual * 3 - Math.Round(residual * 3)) / denominator));
+        best = Math.Max(best, 0.88 * Math.Exp(
+            -(residual * 4 - Math.Round(residual * 4)) *
+            (residual * 4 - Math.Round(residual * 4)) / denominator));
+        best = Math.Max(best, 0.80 * Math.Exp(
+            -(residual * 6 - Math.Round(residual * 6)) *
+            (residual * 6 - Math.Round(residual * 6)) / denominator));
+        best = Math.Max(best, 0.72 * Math.Exp(
+            -(residual * 8 - Math.Round(residual * 8)) *
+            (residual * 8 - Math.Round(residual * 8)) / denominator));
+        return best;
+    }
+
     // ---- Corpus -----------------------------------------------------------------
 
     private readonly record struct OnsetSet(long[] Samples, double[] Weights);

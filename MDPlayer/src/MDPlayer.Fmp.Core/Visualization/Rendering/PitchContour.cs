@@ -15,10 +15,15 @@ internal static class PitchContour
     /// compatibility; pitch semantics are independent of output frame rate.
     /// </summary>
     public static double PitchAtSample(PreparedNote note, long sample, double samplesPerFrame)
+        => PitchAtSample(note.InitialMidiNote, note.Pitch, sample);
+
+    internal static double PitchAtSample(
+        double initialMidiNote,
+        PreparedPitchPoint[] pitch,
+        long sample)
     {
-        PreparedPitchPoint[] pitch = note.Pitch;
         if (pitch.Length == 0)
-            return note.InitialMidiNote;
+            return initialMidiNote;
 
         // Upper-bound search: first point strictly after the sample.
         int low = 0;
@@ -32,7 +37,7 @@ internal static class PitchContour
                 high = middle;
         }
 
-        return low == 0 ? note.InitialMidiNote : pitch[low - 1].MidiNote;
+        return low == 0 ? initialMidiNote : pitch[low - 1].MidiNote;
     }
 
     /// <summary>

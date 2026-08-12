@@ -21,11 +21,16 @@ Usage:
 
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from corrscope.config import yaml
 from corrscope.corrscope import CorrScope, Arguments, pushd
 from corrscope.outputs import FFmpegOutputConfig, Output, Stop
+from corrscope.settings.global_prefs import Parallelism
+
+
+_RAW_STDOUT = sys.stdout.buffer
 
 
 class RawFramesOutputConfig(FFmpegOutputConfig):
@@ -43,7 +48,10 @@ class RawFramesOutput(Output):
 
     def __init__(self, corr_cfg, cfg):
         super().__init__(corr_cfg, cfg)
-        self._stream = sys.stdout.buffer
+        # CorrScope's parallel renderer emits legacy diagnostics through
+        # sys.stdout. Keep the original binary transport handle independent of
+        # the temporary text-stream redirection around CorrScope.play().
+        self._stream = _RAW_STDOUT
         self._closed = False
         self._expected = None
 
@@ -107,19 +115,27 @@ def main():
     yaml_path = Path(sys.argv[1]).resolve()
     cfg_dir = str(yaml_path.parent)
 
-    def progress(p):
-        # Progress must go to stderr — stdout carries the raw frame stream.
-        print(p, file=sys.stderr, flush=True)
-
     try:
         with pushd(cfg_dir):
             cfg = yaml.load(yaml_path)
+            render_cores = max(1, min(4, os.cpu_count() or 1))
             arg = Arguments(
                 cfg_dir=cfg_dir,
                 outputs=[RawFramesOutputConfig(path=None)],
-                progress=progress,
+                parallelism=Parallelism(
+                    parallel=render_cores > 1,
+                    max_render_cores=render_cores,
+                ),
+                # Corrscope's default progress callback prints to stdout,
+                # which is the binary frame transport here. A no-op keeps the
+                # transport clean and avoids per-progress flush work.
+                progress=lambda _progress: None,
             )
-            CorrScope(cfg, arg).play()
+            # Corrscope's parallel worker path has legacy progress/debug prints
+            # on stdout. Keep those on stderr because stdout is raw frame data;
+            # RawFramesOutput captured the original binary stream above.
+            with redirect_stdout(sys.stderr):
+                CorrScope(cfg, arg).play()
         # Flush explicitly so interpreter shutdown has nothing left to write —
         # the consumer may close the pipe immediately after the last frame.
         try:

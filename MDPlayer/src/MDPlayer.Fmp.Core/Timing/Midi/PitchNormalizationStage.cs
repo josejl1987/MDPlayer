@@ -115,7 +115,7 @@ internal sealed class PitchNormalizationThresholds
 
 /// <summary>A normalized pitch change: same sample, pitch expressed in the normalized
 /// domain (raw source pitch minus the domain's accepted tuning bias).</summary>
-internal sealed record NormalizedPitchChange(long SamplePosition, double MidiNote);
+internal readonly record struct NormalizedPitchChange(long SamplePosition, double MidiNote);
 
 /// <summary>
 /// Normalized pitch view of ONE source note. Consumers (ShouldFoldPitch,
@@ -124,7 +124,7 @@ internal sealed record NormalizedPitchChange(long SamplePosition, double MidiNot
 /// SAME normalized event set (FR-1 coupling — ticks never drift from the set the
 /// exporter actually serializes).
 /// </summary>
-internal sealed record NormalizedNoteView(
+internal readonly record struct NormalizedNoteView(
     NoteEvent Source,
     double InitialMidiNote,
     IReadOnlyList<NormalizedPitchChange>? Changes);
@@ -230,6 +230,10 @@ internal static class PitchNormalizationStage
 
         var views = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
         var domains = new Dictionary<MidiTrackKey, DomainPitchStats>(notesByDomain.Count);
+        // Every normalization pass is remove-only and runs serially. Reuse one
+        // working buffer across notes instead of allocating a temporary list
+        // for each note; the final normalized list is still owned by the view.
+        var samplesScratch = new List<PitchSample>();
         foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
         {
             TuningDetection detection = detectionByDomain[key];
@@ -253,7 +257,8 @@ internal static class PitchNormalizationStage
             foreach (NoteEvent note in domainNotes)
             {
                 counters.RawPitchSamples += note.Pitch?.Count ?? 0;
-                var (changes, counts) = NormalizeChanges(note, thresholds, bias);
+                var (changes, counts) = NormalizeChanges(
+                    note, thresholds, bias, samplesScratch);
                 counters.RawTransitions += counts.RawTransitions;
                 counters.AfterDedup += counts.AfterDedup;
                 counters.AfterDeadband += counts.AfterDeadband;
@@ -283,8 +288,19 @@ internal static class PitchNormalizationStage
 
     /// <summary>Off-mode identity changes: the raw list converted 1:1 (no collapse,
     /// no dedup), preserving legacy byte-for-byte semantics.</summary>
-    private static IReadOnlyList<NormalizedPitchChange>? RawChanges(IReadOnlyList<PitchChange>? raw) =>
-        raw?.Select(c => new NormalizedPitchChange(c.SamplePosition, c.MidiNote)).ToList();
+    private static IReadOnlyList<NormalizedPitchChange>? RawChanges(IReadOnlyList<PitchChange>? raw)
+    {
+        if (raw is null)
+            return null;
+
+        var changes = new List<NormalizedPitchChange>(raw.Count);
+        for (int index = 0; index < raw.Count; index++)
+        {
+            PitchChange change = raw[index];
+            changes.Add(new NormalizedPitchChange(change.SamplePosition, change.MidiNote));
+        }
+        return changes;
+    }
 
     /// <summary>Per-domain pipeline counters (monotone: never grows).</summary>
     private sealed class DomainCounters
@@ -297,26 +313,44 @@ internal static class PitchNormalizationStage
     }
 
     /// <summary>Per-note intermediate pass counts (RawTransitions is post-P0).</summary>
-    private sealed record PassCounts(int RawTransitions, int AfterDedup, int AfterDeadband);
+    private readonly record struct PassCounts(
+        int RawTransitions,
+        int AfterDedup,
+        int AfterDeadband);
 
     private static (IReadOnlyList<NormalizedPitchChange>? Changes, PassCounts Counts) NormalizeChanges(
-        NoteEvent note, PitchNormalizationThresholds thresholds, double biasSemitones)
+        NoteEvent note,
+        PitchNormalizationThresholds thresholds,
+        double biasSemitones,
+        List<PitchSample> samples)
     {
         if (note.Pitch is null)
-            return (null, new PassCounts(0, 0, 0));
+            return (null, new PassCounts());
         if (note.Pitch.Count == 0)
-            return (Array.Empty<NormalizedPitchChange>(), new PassCounts(0, 0, 0));
-        List<PitchSample> samples = SameSampleCollapse(note.Pitch);
+            return (Array.Empty<NormalizedPitchChange>(), new PassCounts());
+        // All four remove-only passes share one working list. The previous
+        // implementation allocated a replacement list for every pass, even
+        // though each pass only removes entries and preserves source order.
+        samples.Clear();
+        if (samples.Capacity < note.Pitch.Count)
+            samples.Capacity = note.Pitch.Count;
+        SameSampleCollapseInPlace(samples, note.Pitch);
         int rawTransitions = samples.Count;
-        samples = Pass1ExactDedup(note.InitialMidiNote, samples, thresholds.DedupGridCents);
+        Pass1ExactDedupInPlace(note.InitialMidiNote, samples, thresholds.DedupGridCents);
         int afterDedup = samples.Count;
-        samples = Pass2DeadbandHysteresis(note.InitialMidiNote, samples,
+        Pass2DeadbandHysteresisInPlace(note.InitialMidiNote, samples,
             thresholds.DeadbandEnterCents, thresholds.DeadbandExitCents);
         int afterDeadband = samples.Count;
-        samples = Pass3ConsecutiveIdentical(samples);
+        Pass3ConsecutiveIdenticalInPlace(samples);
         // P4: affine bias subtraction — normalized = raw − domainBias (D9 model:
         // sourcePitch(t) = nominalNote + bias + expressive(t)).
-        return (samples.Select(s => new NormalizedPitchChange(s.SamplePosition, s.MidiNote - biasSemitones)).ToList(),
+        var changes = new List<NormalizedPitchChange>(samples.Count);
+        for (int index = 0; index < samples.Count; index++)
+        {
+            PitchSample sample = samples[index];
+            changes.Add(new NormalizedPitchChange(sample.SamplePosition, sample.MidiNote - biasSemitones));
+        }
+        return (changes,
             new PassCounts(rawTransitions, afterDedup, afterDeadband));
     }
 
@@ -324,20 +358,17 @@ internal static class PitchNormalizationStage
     /// is source order). Internal so the passes are independently testable.</summary>
     internal readonly record struct PitchSample(long SamplePosition, double MidiNote);
 
-    /// <summary>P0: same-sample collapse, final (latest) write wins — the exact rule
-    /// BuildPitchAnchors applies downstream, applied here so P1/P2 never decide a
-    /// same-sample race against an earlier write.</summary>
-    private static List<PitchSample> SameSampleCollapse(IReadOnlyList<PitchChange> raw)
+    private static void SameSampleCollapseInPlace(
+        List<PitchSample> collapsed, IReadOnlyList<PitchChange> raw)
     {
-        var collapsed = new List<PitchSample>(raw.Count);
-        foreach (PitchChange c in raw)
+        for (int index = 0; index < raw.Count; index++)
         {
-            if (collapsed.Count > 0 && collapsed[^1].SamplePosition == c.SamplePosition)
-                collapsed[^1] = new PitchSample(c.SamplePosition, c.MidiNote);
+            PitchChange change = raw[index];
+            if (collapsed.Count > 0 && collapsed[^1].SamplePosition == change.SamplePosition)
+                collapsed[^1] = new PitchSample(change.SamplePosition, change.MidiNote);
             else
-                collapsed.Add(new PitchSample(c.SamplePosition, c.MidiNote));
+                collapsed.Add(new PitchSample(change.SamplePosition, change.MidiNote));
         }
-        return collapsed;
     }
 
     /// <summary>
@@ -349,20 +380,22 @@ internal static class PitchNormalizationStage
     /// anchor itself is never. Pitch units ONLY; FNUM-resolution differences (≈0.87c)
     /// are deliberately NOT deduped here — the deadband owns them.
     /// </summary>
-    private static List<PitchSample> Pass1ExactDedup(
-        double initialMidiNote, IReadOnlyList<PitchSample> samples, double gridCents)
+    private static void Pass1ExactDedupInPlace(
+        double initialMidiNote, List<PitchSample> samples, double gridCents)
     {
-        var result = new List<PitchSample>(samples.Count);
         long lastQuantized = Quantize(initialMidiNote, gridCents);
-        foreach (PitchSample s in samples)
+        int write = 0;
+        for (int read = 0; read < samples.Count; read++)
         {
-            long q = Quantize(s.MidiNote, gridCents);
-            if (q == lastQuantized)
+            PitchSample sample = samples[read];
+            long quantized = Quantize(sample.MidiNote, gridCents);
+            if (quantized == lastQuantized)
                 continue; // exact-quantized duplicate of the previous retained state
-            result.Add(s);
-            lastQuantized = q;
+            samples[write++] = sample;
+            lastQuantized = quantized;
         }
-        return result;
+        if (write < samples.Count)
+            samples.RemoveRange(write, samples.Count - write);
     }
 
     /// <summary>Quantized grid index of a continuous-semitone pitch on a cents grid:
@@ -392,33 +425,46 @@ internal static class PitchNormalizationStage
         double initialMidiNote, IReadOnlyList<PitchSample> samples,
         double enterCents, double exitCents)
     {
+        var result = new List<PitchSample>(samples.Count);
+        for (int index = 0; index < samples.Count; index++)
+            result.Add(samples[index]);
+        Pass2DeadbandHysteresisInPlace(initialMidiNote, result, enterCents, exitCents);
+        return result;
+    }
+
+    private static void Pass2DeadbandHysteresisInPlace(
+        double initialMidiNote, List<PitchSample> samples,
+        double enterCents, double exitCents)
+    {
         // Float guard: cents computed as |Δ midi|·100 can land a hair above an exact
         // boundary (0.5c shows up as 0.5 + 1e-17); the bounds are INCLUSIVE by design
         // (D5: dev ≤ Enter drops, dev ≤ Exit retains), so compare against +ε.
         const double centsEpsilon = 1e-9;
-        var result = new List<PitchSample>(samples.Count);
         double center = initialMidiNote;
         bool pass = false;
-        foreach (PitchSample s in samples)
+        int write = 0;
+        for (int read = 0; read < samples.Count; read++)
         {
-            double dev = Math.Abs(s.MidiNote - center) * 100.0; // cents (1 midi unit = 1 semitone = 100c)
+            PitchSample sample = samples[read];
+            double dev = Math.Abs(sample.MidiNote - center) * 100.0; // cents (1 midi unit = 1 semitone = 100c)
             if (!pass)
             {
                 if (dev <= enterCents + centsEpsilon)
                     continue; // suppressed: within the deadband of the current center
-                result.Add(s);
-                center = s.MidiNote;
+                samples[write++] = sample;
+                center = sample.MidiNote;
                 pass = true;
             }
             else
             {
-                result.Add(s);
-                center = s.MidiNote;
+                samples[write++] = sample;
+                center = sample.MidiNote;
                 if (dev <= exitCents + centsEpsilon)
                     pass = false; // settled within Exit → re-center and re-suppress
             }
         }
-        return result;
+        if (write < samples.Count)
+            samples.RemoveRange(write, samples.Count - write);
     }
 
     /// <summary>
@@ -432,13 +478,24 @@ internal static class PitchNormalizationStage
     internal static List<PitchSample> Pass3ConsecutiveIdentical(IReadOnlyList<PitchSample> samples)
     {
         var result = new List<PitchSample>(samples.Count);
-        foreach (PitchSample s in samples)
-        {
-            if (result.Count > 0 && result[^1].MidiNote == s.MidiNote)
-                continue; // equal to the previous retained state
-            result.Add(s);
-        }
+        for (int index = 0; index < samples.Count; index++)
+            result.Add(samples[index]);
+        Pass3ConsecutiveIdenticalInPlace(result);
         return result;
+    }
+
+    private static void Pass3ConsecutiveIdenticalInPlace(List<PitchSample> samples)
+    {
+        int write = 0;
+        for (int read = 0; read < samples.Count; read++)
+        {
+            PitchSample sample = samples[read];
+            if (write > 0 && samples[write - 1].MidiNote == sample.MidiNote)
+                continue; // equal to the previous retained state
+            samples[write++] = sample;
+        }
+        if (write < samples.Count)
+            samples.RemoveRange(write, samples.Count - write);
     }
 
     /// <summary>

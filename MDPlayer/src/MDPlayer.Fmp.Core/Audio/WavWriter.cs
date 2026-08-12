@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 
 namespace Fmp.Core.Audio;
 
@@ -44,9 +45,14 @@ internal class WavWriter : IDisposable
         }
 
         Span<byte> target = _scratch.AsSpan(0, byteCount);
-        for (int i = 0; i < samples.Length; i++)
+        if (BitConverter.IsLittleEndian)
         {
-            BinaryPrimitives.WriteInt16LittleEndian(target.Slice(i * 2, 2), samples[i]);
+            MemoryMarshal.AsBytes(samples).CopyTo(target);
+        }
+        else
+        {
+            for (int i = 0; i < samples.Length; i++)
+                BinaryPrimitives.WriteInt16LittleEndian(target.Slice(i * 2, 2), samples[i]);
         }
 
         _stream.Write(_scratch, 0, byteCount);

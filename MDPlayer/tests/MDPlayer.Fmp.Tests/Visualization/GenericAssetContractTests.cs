@@ -74,7 +74,7 @@ public sealed class GenericAssetContractTests
         }
         decoder.Process(new TimedChipWrite(100, device.Id, 0, 2, 0x40));
         decoder.Process(new TimedChipWrite(100, device.Id, 0, 3, 0x01));
-        decoder.Process(new TimedChipWrite(100, device.Id, 0, 4, 0x1F));
+        decoder.Process(new TimedChipWrite(100, device.Id, 0, 4, 0x9F)); // ON=1, AL=0x1F
         decoder.Process(new TimedChipWrite(100, device.Id, 0, 5, 0xFF));
         decoder.Complete(1_000);
 

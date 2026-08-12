@@ -42,6 +42,7 @@ internal static class VisualizationRendererOptions
             OutroSeconds = introOutro ? Math.Min(0.45, playback.TailSeconds) : 0,
             AnalysisOverlay = AnalysisOverlayScene.Empty,
             Energy = energy as ChannelEnergyEnvelope[] ?? (energy?.ToArray()),
+            EnablePerformanceMetrics = true,
         };
     }
 

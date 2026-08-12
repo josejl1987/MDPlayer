@@ -19,6 +19,7 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     private readonly PanelOverlayRenderer _overlay;
     private readonly IScopeFrameSource? _scopeFrames;
     private readonly byte[]? _scopeBuffer;
+    private long _scopeFrameReadTicks;
     private bool _disposed;
 
     public VisualizationFrameRenderer(
@@ -36,9 +37,27 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     public int Width => _overlay.Width;
     public int Height => _overlay.Height;
     public int FrameByteCount => _overlay.FrameByteCount;
+    public int ScopeFrameByteCount => _overlay.ScopeFrameByteCount;
     public long TotalFrames => _overlay.TotalFrames;
     public int OverlayFpsNumerator => _overlay.FpsNumerator;
     public int OverlayFpsDenominator => _overlay.FpsDenominator;
+    internal RenderPerformanceSnapshot Performance => _overlay.Performance;
+    internal double ScopeFrameReadSeconds =>
+        _scopeFrameReadTicks / (double)Stopwatch.Frequency;
+
+    internal void ReadScopeFrame(long frameIndex, Span<byte> destination)
+    {
+        if (_scopeFrames is null)
+            return;
+        if (destination.Length < ScopeFrameByteCount)
+            throw new ArgumentException(
+                $"Destination requires at least {ScopeFrameByteCount} bytes.",
+                nameof(destination));
+
+        long readStart = Stopwatch.GetTimestamp();
+        _scopeFrames.ReadFrame(checked((int)frameIndex), destination);
+        _scopeFrameReadTicks += Stopwatch.GetTimestamp() - readStart;
+    }
 
     /// <summary>
     /// True when a scope frame source (Corrscope bridge or the internal
@@ -104,7 +123,8 @@ internal sealed class VisualizationFrameRenderer : IDisposable
         _overlay.RenderCompositeFrame(
             frameIndex,
             _scopeBuffer!,
-            destination);
+            destination,
+            _scopeFrames.FramesAreOpaque);
     }
 
     public byte[] RenderFrame(long frameIndex)
@@ -113,6 +133,14 @@ internal sealed class VisualizationFrameRenderer : IDisposable
         RenderFrame(frameIndex, frame);
         return frame;
     }
+
+    /// <summary>
+    /// Creates the sequential export session. Unlike random-access
+    /// <see cref="RenderFrame(long, Span{byte})"/>, this preserves the static
+    /// surface and restores only the dynamic regions between adjacent frames.
+    /// </summary>
+    internal SequentialSession CreateSequentialSession()
+        => new(this, _overlay.CreateSequentialSession(_scopeFrames?.FramesAreOpaque == true));
 
     /// <summary>
     /// Renders the static/layout-only path (chrome, metadata bars, title and
@@ -140,5 +168,51 @@ internal sealed class VisualizationFrameRenderer : IDisposable
         _disposed = true;
         _scopeFrames?.Dispose();
         _overlay.Dispose();
+    }
+
+    internal sealed class SequentialSession
+    {
+        private readonly VisualizationFrameRenderer _owner;
+        private readonly SequentialCompositeSession _overlay;
+
+        internal SequentialSession(
+            VisualizationFrameRenderer owner,
+            SequentialCompositeSession overlay)
+        {
+            _owner = owner;
+            _overlay = overlay;
+        }
+
+        internal void Initialize(Span<byte> destination)
+            => _overlay.Initialize(destination);
+
+        internal void RenderNext(long frameIndex, Span<byte> destination)
+            => RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, destination);
+
+        internal void RenderNext(
+            long frameIndex,
+            ReadOnlySpan<byte> scopeGrid,
+            Span<byte> destination)
+        {
+            if (_owner._scopeFrames is null)
+            {
+                _overlay.RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, destination);
+                return;
+            }
+
+            if (scopeGrid.IsEmpty)
+            {
+                _owner.ReadScopeFrame(frameIndex, _owner._scopeBuffer!);
+                scopeGrid = _owner._scopeBuffer;
+            }
+            else if (scopeGrid.Length < _owner.ScopeFrameByteCount)
+            {
+                throw new ArgumentException(
+                    $"Scope grid requires at least {_owner.ScopeFrameByteCount} bytes.",
+                    nameof(scopeGrid));
+            }
+
+            _overlay.RenderNext(frameIndex, scopeGrid, destination);
+        }
     }
 }

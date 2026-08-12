@@ -62,7 +62,7 @@ internal sealed class VisualizationPipeline
         var result = new Result();
         var eventSink = new TimelineDecoderEventSink(_sampleRate);
         var sink = new FmpPlaybackEventSinkAdapter(eventSink);
-        var runtime = new FmpRuntime(sink, _assets, _fileSystem);
+        var runtime = new FmpRuntime(sink, _assets, _fileSystem, controlTickRate: _sampleRate);
         Stopwatch timeout = options.TimeoutSeconds is > 0 ? Stopwatch.StartNew() : null;
 
         try

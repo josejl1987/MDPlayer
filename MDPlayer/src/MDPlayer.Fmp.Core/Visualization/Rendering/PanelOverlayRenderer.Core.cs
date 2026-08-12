@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Fmp.Core.Analysis;
 
@@ -23,6 +24,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         public AnalysisOverlayScene AnalysisOverlay { get; set; } = AnalysisOverlayScene.Empty;
         public VisualizationPalette Palette { get; set; } = VisualizationPalette.Default;
         public int MotionBlurSamples { get; set; } = 1;
+        public bool EnablePerformanceMetrics { get; set; }
 
         /// <summary>
         /// Presentation fade-in for the title bars and musical grid. The CLI
@@ -61,6 +63,16 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         public string[] SampleRowLabels = Array.Empty<string>();
         /// <summary>Row index (index into <see cref="SampleRowLabels"/>) for each <see cref="PreparedPanel.SamplePlayback"/> entry.</summary>
         public int[] SampleRowByPlaybackIndex = Array.Empty<int>();
+
+        // Dense cursor ids assigned once when a sequential session is created.
+        // Keeping them beside the panel avoids hashing the backing arrays on
+        // every frame.
+        public int MainNoteStreamId = -1;
+        public int[] OperatorNoteStreamIds = Array.Empty<int>();
+        public int RhythmStreamId = -1;
+        public int PlaybackStreamId = -1;
+        public int NoiseStreamId = -1;
+        public int AggregateStreamId = -1;
     }
 
     private static readonly HashSet<int> BlackPitchClasses = new() { 1, 3, 6, 8, 10 };
@@ -171,10 +183,24 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly byte[] _staticFrame;
     private readonly byte[] _motionBlurScratch;
     private readonly OverlayRect[] _dynamicRestoreRects;
+    private readonly OverlayRect[] _dynamicRestoreRectsWithScope;
+    private readonly RectCopyPlan[] _dynamicRestorePlans;
+    private readonly RectCopyPlan[] _dynamicRestorePlansWithScope;
+    private readonly ScopeCopyPlan[] _scopeCopyPlans;
     private readonly PitchCamera[] _cameras;
     private readonly VisualizationPresentation _presentation;
     private readonly OverlayColor[] _panelAccents;
     private readonly ChannelEnergyEnvelope[] _energyByPanel;
+    private readonly bool[] _hasAudioEnergyByPanel;
+    private readonly int[] _activityLabelCounts;
+    private readonly string[] _activityLabelCache;
+    private readonly string[] _headerStateInputs;
+    private readonly string[] _headerStateOutputs;
+    private readonly int[] _headerStateWidths;
+    private readonly string[] _headerPatchInputs;
+    private readonly string[] _headerPatchOutputs;
+    private readonly int[] _headerPatchWidths;
+    private readonly ChipPanelHeaderBuilder.Cursor[] _chipHeaderCursors;
     private readonly bool _unicodePresentationRendered;
     private readonly double _samplesPerFrame;
     private readonly long _taperSamples;
@@ -182,6 +208,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly long _outroSamples;
     private readonly EffectsMode _effects;
     private readonly AnalysisOverlayScene _analysisOverlay;
+    private readonly RenderPerformanceMetrics _performance;
+    private SequentialRenderState? _activeSequentialState;
 
     /// <summary>
     /// Active-note flash (§9.1): 120 ms, 40% white mix, 120% max size, cubic
@@ -240,6 +268,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             throw new ArgumentException("Timeline end precedes its start.", nameof(timeline));
 
         _options = options ?? new Options();
+        _performance = new RenderPerformanceMetrics(_options.EnablePerformanceMetrics);
         _options.Palette ??= VisualizationPalette.Default;
         if (_options.MotionBlurSamples is < 1 or > 8)
             throw new ArgumentOutOfRangeException(nameof(options), "Motion blur samples must be between 1 and 8.");
@@ -261,6 +290,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _taperSamples = (long)Math.Round(0.060 * timeline.SampleRate);
         _effects = _options.Effects;
         _analysisOverlay = _options.AnalysisOverlay ?? AnalysisOverlayScene.Empty;
+        long layoutStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         _timeGrid = VisualizationTimeGridBuilder.Build(timeline, _options.TimeGrid);
 
         // Build the prepared scene once: notes/rhythm are sorted, colors are
@@ -276,7 +306,23 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             noteColorMode: _options.NoteColor,
             palette: _options.Palette);
         _panels = BuildPanels();
+        _activityLabelCounts = new int[_panels.Length];
+        _activityLabelCache = new string[_panels.Length];
+        _headerStateInputs = new string[_panels.Length];
+        _headerStateOutputs = new string[_panels.Length];
+        _headerStateWidths = new int[_panels.Length];
+        Array.Fill(_headerStateWidths, int.MinValue);
+        _headerPatchInputs = new string[_panels.Length];
+        _headerPatchOutputs = new string[_panels.Length];
+        _headerPatchWidths = new int[_panels.Length];
+        Array.Fill(_headerPatchWidths, int.MinValue);
+        _chipHeaderCursors = new ChipPanelHeaderBuilder.Cursor[_panels.Length];
+        for (int index = 0; index < _chipHeaderCursors.Length; index++)
+            _chipHeaderCursors[index] = new ChipPanelHeaderBuilder.Cursor();
+        Array.Fill(_activityLabelCounts, int.MinValue);
         _cameras = BuildCameras();
+        if (_performance.Enabled)
+            _performance.LayoutTicks += Stopwatch.GetTimestamp() - layoutStart;
         _staticFrame = new byte[FrameByteCount];
         _motionBlurScratch = _options.MotionBlurSamples > 1
             ? new byte[FrameByteCount]
@@ -286,7 +332,11 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _clockBySecond = BuildClockStrings(_totalClockString);
         _fullFallbackClockWidth = BitmapFont.MeasureText($"00:00 / {_totalClockString}", 2);
         _loopLabelByFrame = BuildLoopLabels();
-        _dynamicRestoreRects = BuildDynamicRestoreRects();
+        _dynamicRestoreRects = BuildDynamicRestoreRects(scopeFramePresent: false);
+        _dynamicRestoreRectsWithScope = BuildDynamicRestoreRects(scopeFramePresent: true);
+        _dynamicRestorePlans = BuildRectCopyPlans(_dynamicRestoreRects);
+        _dynamicRestorePlansWithScope = BuildRectCopyPlans(_dynamicRestoreRectsWithScope);
+        _scopeCopyPlans = BuildScopeCopyPlans();
 
         // Per-panel accents come straight from the prepared scene — the builder
         // resolved them from each panel's stable semantic identity.
@@ -298,6 +348,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
         // §6.4: build a per-panel energy lookup keyed by panel index.
         _energyByPanel = BuildEnergyLookup(_options.Energy);
+        _hasAudioEnergyByPanel = BuildAudioEnergyFlags(_energyByPanel);
 
         // Validate glyph coverage before the static layer is built. Missing
         // non-ASCII glyphs are a publish-time error, never a bitmap '?'.
@@ -309,6 +360,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             _options.PreferAntialiasedText);
 
         BuildTextHierarchy();
+        long staticLayerStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         BuildStaticFrame(_staticFrame, drawFallbackText: !_unicodePresentationRendered);
 
         if (_unicodePresentationRendered)
@@ -322,6 +374,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             UnicodeStaticTextRenderer.TryDraw(
                 _staticFrame, Width, Height, _layout, _presentation, _options.FontPath, trackLabels);
         }
+        if (_performance.Enabled)
+            _performance.StaticLayerTicks += Stopwatch.GetTimestamp() - staticLayerStart;
     }
 
     public int Width => _layout.Width;
@@ -333,6 +387,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     public int FpsNumerator => _options.FpsNumerator;
     public int FpsDenominator => _options.FpsDenominator;
     public OverlayLayout Layout => _layout;
+    internal RenderPerformanceSnapshot Performance => _performance.Snapshot(Width, Height);
+
+    internal void ResetPerformanceMetrics() => _performance.Reset();
 
     public long TotalFrames
     {
@@ -381,21 +438,24 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// compositor, which composites the scope and overlay in memory and encodes
     /// once. Pass an empty <paramref name="scopeGrid"/> to skip the scope rows.
     /// </summary>
-    public void RenderCompositeFrame(long frameIndex, ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
+    public void RenderCompositeFrame(
+        long frameIndex, ReadOnlySpan<byte> scopeGrid, Span<byte> destination,
+        bool scopeFramesAreOpaque = false)
     {
         if (_options.MotionBlurSamples > 1)
         {
-            RenderMotionBlurFrame(frameIndex, scopeGrid, destination);
+            RenderMotionBlurFrame(frameIndex, scopeGrid, destination, scopeFramesAreOpaque);
             return;
         }
 
-        RenderCompositeFrameSingle(frameIndex, scopeGrid, destination);
+        RenderCompositeFrameSingle(frameIndex, scopeGrid, destination, scopeFramesAreOpaque);
     }
 
     private void RenderCompositeFrameSingle(
         long frameIndex,
         ReadOnlySpan<byte> scopeGrid,
-        Span<byte> destination)
+        Span<byte> destination,
+        bool scopeFramesAreOpaque = false)
     {
         ValidateFrame(frameIndex, destination);
         if (!scopeGrid.IsEmpty)
@@ -407,14 +467,35 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 nameof(scopeGrid));
         }
 
+        long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
         _staticFrame.AsSpan().CopyTo(destination);
+        if (_performance.Enabled)
+        {
+            _performance.Frames++;
+            _performance.FullRedraws++;
+            _performance.FullFrameCopies++;
+            _performance.SurfaceCopies++;
+            _performance.CopiedBytes += FrameByteCount;
+            _performance.RenderedPixels += (long)Width * Height;
+        }
         // The playhead is a background time reference: draw it before the scope
         // rows so the (opaque) waveform can cover it, keeping the current-sample
         // signal visible exactly at the playhead column.
+        long compositingStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawPlayheads(destination);
         if (!scopeGrid.IsEmpty)
-            PlaceScopeRows(scopeGrid, destination);
+            PlaceScopeRows(scopeGrid, destination, scopeFramesAreOpaque);
+        if (_performance.Enabled)
+            _performance.CompositingTicks += Stopwatch.GetTimestamp() - compositingStart;
+        long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawDynamicCore(frameIndex, destination);
+        if (_performance.Enabled)
+        {
+            _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
+            _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
+            _performance.FinishFrame(allocatedBefore);
+        }
     }
 
     /// <summary>Draws the per-panel playhead cursor (playhead position is a fixed
@@ -428,7 +509,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private void RenderMotionBlurFrame(
         long frameIndex,
         ReadOnlySpan<byte> scopeGrid,
-        Span<byte> destination)
+        Span<byte> destination,
+        bool scopeFramesAreOpaque = false)
     {
         // The temporal scratch frame is prepared once and reused to keep the
         // hot path allocation-free. Serialize users of that scratch buffer so
@@ -445,7 +527,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     frameIndex + firstOffset + sample,
                     0,
                     TotalFrames - 1);
-                RenderCompositeFrameSingle(sampledFrame, scopeGrid, _motionBlurScratch);
+                RenderCompositeFrameSingle(
+                    sampledFrame, scopeGrid, _motionBlurScratch, scopeFramesAreOpaque);
                 if (sample == 0)
                 {
                     _motionBlurScratch.AsSpan().CopyTo(destination);
@@ -464,33 +547,385 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     internal void RenderForSession(
         long frameIndex,
         ReadOnlySpan<byte> scopeGrid,
-        Span<byte> destination)
+        Span<byte> destination,
+        SequentialRenderState state,
+        bool scopeFramesAreOpaque = false)
     {
         if (_options.MotionBlurSamples > 1)
         {
-            RenderMotionBlurFrame(frameIndex, scopeGrid, destination);
+            RenderMotionBlurFrame(frameIndex, scopeGrid, destination, scopeFramesAreOpaque);
             return;
         }
 
         ValidateFrameForSession(frameIndex, destination);
-        RestoreDynamicRegions(destination);
-        PlaceScopeRowsForSession(scopeGrid, destination);
-        DrawDynamicForSession(frameIndex, destination);
+        if (_performance.Enabled)
+        {
+            _performance.Frames++;
+            _performance.PartialRedraws++;
+        }
+        long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+        long compositingStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        RestoreDynamicRegions(destination, scopeFramePresent: !scopeGrid.IsEmpty);
+        PlaceScopeRowsForSession(scopeGrid, destination, scopeFramesAreOpaque);
+        if (_performance.Enabled)
+            _performance.CompositingTicks += Stopwatch.GetTimestamp() - compositingStart;
+        long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        DrawDynamicForSession(frameIndex, destination, state);
+        if (_performance.Enabled)
+        {
+            _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
+            _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
+            _performance.FinishFrame(allocatedBefore);
+        }
     }
 
-    internal SequentialCompositeSession CreateSequentialSession()
-        => new(this);
+    internal SequentialCompositeSession CreateSequentialSession(bool scopeFramesAreOpaque = false)
+        => new(this, scopeFramesAreOpaque);
+
+    internal SequentialRenderState CreateSequentialRenderState()
+    {
+        var streams = new List<PreparedNote[]>();
+        var rhythmStreams = new List<PreparedRhythmEvent[]>();
+        var noiseStreams = new List<NoiseStateEvent[]>();
+        var playbackStreams = new List<SamplePlaybackEvent[]>();
+        var aggregateStreams = new List<AggregateHitEvent[]>();
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+        {
+            PanelData panel = _panels[panelIndex];
+            PreparedPanel prepared = _panels[panelIndex].Prepared;
+            panel.MainNoteStreamId = streams.Count;
+            streams.Add(prepared.MainNotes);
+            panel.OperatorNoteStreamIds = new int[prepared.OperatorNotes.Length];
+            for (int operatorIndex = 0; operatorIndex < prepared.OperatorNotes.Length; operatorIndex++)
+            {
+                panel.OperatorNoteStreamIds[operatorIndex] = streams.Count;
+                streams.Add(prepared.OperatorNotes[operatorIndex]);
+            }
+
+            panel.RhythmStreamId = rhythmStreams.Count;
+            rhythmStreams.Add(prepared.Rhythm);
+            panel.NoiseStreamId = noiseStreams.Count;
+            noiseStreams.Add(prepared.Noise);
+            panel.PlaybackStreamId = playbackStreams.Count;
+            playbackStreams.Add(prepared.SamplePlayback);
+            panel.AggregateStreamId = aggregateStreams.Count;
+            aggregateStreams.Add(prepared.AggregateHits);
+        }
+        return new SequentialRenderState(
+            streams.ToArray(),
+            rhythmStreams.ToArray(),
+            noiseStreams.ToArray(),
+            playbackStreams.ToArray(),
+            aggregateStreams.ToArray(),
+            _timeGrid,
+            _performance);
+    }
+
+    internal sealed class SequentialRenderState
+    {
+        private readonly int[] _nextIndexes;
+        private readonly int[] _activeIndexes;
+        private readonly long[] _lastWindowStarts;
+        private readonly long[] _lastActiveSamples;
+        private readonly int[] _rhythmIndexes;
+        private readonly long[] _lastRhythmSamples;
+        private readonly int[] _noiseIndexes;
+        private readonly long[] _lastNoiseSamples;
+        private readonly int[] _playbackIndexes;
+        private readonly long[] _lastPlaybackSamples;
+        private readonly int[] _aggregateIndexes;
+        private readonly long[] _lastAggregateSamples;
+        private readonly int[] _timeGridIndexes;
+        private readonly long[] _lastTimeGridSamples;
+        private readonly RenderPerformanceMetrics _performance;
+
+        internal SequentialRenderState(
+            PreparedNote[][] streams,
+            PreparedRhythmEvent[][] rhythmStreams,
+            NoiseStateEvent[][] noiseStreams,
+            SamplePlaybackEvent[][] playbackStreams,
+            AggregateHitEvent[][] aggregateStreams,
+            VisualizationTimeGridLine[] timeGrid,
+            RenderPerformanceMetrics performance)
+        {
+            _performance = performance;
+            _nextIndexes = new int[streams.Length];
+            _activeIndexes = new int[streams.Length];
+            _lastWindowStarts = new long[streams.Length];
+            _lastActiveSamples = new long[streams.Length];
+            Array.Fill(_lastWindowStarts, long.MinValue);
+            Array.Fill(_lastActiveSamples, long.MinValue);
+
+            _rhythmIndexes = new int[rhythmStreams.Length];
+            _lastRhythmSamples = new long[rhythmStreams.Length];
+            Array.Fill(_lastRhythmSamples, long.MinValue);
+
+            _noiseIndexes = new int[noiseStreams.Length];
+            _lastNoiseSamples = new long[noiseStreams.Length];
+            Array.Fill(_lastNoiseSamples, long.MinValue);
+
+            _playbackIndexes = new int[playbackStreams.Length];
+            _lastPlaybackSamples = new long[playbackStreams.Length];
+            Array.Fill(_lastPlaybackSamples, long.MinValue);
+
+            _aggregateIndexes = new int[aggregateStreams.Length];
+            _lastAggregateSamples = new long[aggregateStreams.Length];
+            Array.Fill(_lastAggregateSamples, long.MinValue);
+
+            _timeGridIndexes = new int[1];
+            _lastTimeGridSamples = new long[1];
+            Array.Fill(_lastTimeGridSamples, long.MinValue);
+            _ = timeGrid;
+        }
+
+        internal bool TryGetFirst(int streamId, PreparedNote[] notes, long windowStart, out int first)
+        {
+            if ((uint)streamId >= (uint)_nextIndexes.Length
+                || windowStart < _lastWindowStarts[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _nextIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < notes.Length && notes[next].StartSample < windowStart)
+                next++;
+            if (_performance.Enabled)
+                _performance.PianoRollCursorAdvances += next - before;
+            _nextIndexes[streamId] = next;
+            _lastWindowStarts[streamId] = windowStart;
+            first = Math.Max(0, next - 1);
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetRhythmFirst(
+            int streamId, PreparedRhythmEvent[] events, long sample, out int first)
+        {
+            if ((uint)streamId >= (uint)_rhythmIndexes.Length
+                || sample < _lastRhythmSamples[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _rhythmIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < events.Length && events[next].SamplePosition < sample)
+                next++;
+            _rhythmIndexes[streamId] = next;
+            _lastRhythmSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            first = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetNoiseFirst(
+            int streamId, NoiseStateEvent[] events, long sample, out int first)
+        {
+            if ((uint)streamId >= (uint)_noiseIndexes.Length
+                || sample < _lastNoiseSamples[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _noiseIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < events.Length && events[next].StartSample < sample)
+                next++;
+            _noiseIndexes[streamId] = next;
+            _lastNoiseSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            first = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetPlaybackFirst(
+            int streamId, SamplePlaybackEvent[] events, long sample, out int first)
+        {
+            if ((uint)streamId >= (uint)_playbackIndexes.Length
+                || sample < _lastPlaybackSamples[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _playbackIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < events.Length && events[next].StartSample < sample)
+                next++;
+            _playbackIndexes[streamId] = next;
+            _lastPlaybackSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            first = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetAggregateFirst(
+            int streamId, AggregateHitEvent[] events, long sample, out int first)
+        {
+            if ((uint)streamId >= (uint)_aggregateIndexes.Length
+                || sample < _lastAggregateSamples[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _aggregateIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < events.Length && events[next].SamplePosition < sample)
+                next++;
+            _aggregateIndexes[streamId] = next;
+            _lastAggregateSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            first = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetAggregateUpper(
+            int streamId, AggregateHitEvent[] events, long sample, out int upper)
+        {
+            if ((uint)streamId >= (uint)_aggregateIndexes.Length
+                || sample < _lastAggregateSamples[streamId])
+            {
+                upper = 0;
+                return false;
+            }
+
+            int next = _aggregateIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < events.Length && events[next].SamplePosition <= sample)
+                next++;
+            _aggregateIndexes[streamId] = next;
+            _lastAggregateSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            upper = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetTimeGridFirst(
+            VisualizationTimeGridLine[] lines, long sample, out int first)
+        {
+            const int streamId = 0;
+            if (sample < _lastTimeGridSamples[streamId])
+            {
+                first = 0;
+                return false;
+            }
+
+            int next = _timeGridIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < lines.Length && lines[next].Sample < sample)
+                next++;
+            _timeGridIndexes[streamId] = next;
+            _lastTimeGridSamples[streamId] = sample;
+            if (_performance.Enabled)
+                _performance.SourceCursorAdvances += next - before;
+            first = next;
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+
+        internal bool TryGetActive(int streamId, PreparedNote[] notes, long sample, out PreparedNote active)
+        {
+            active = null;
+            if ((uint)streamId >= (uint)_activeIndexes.Length
+                || sample < _lastActiveSamples[streamId])
+            {
+                return false;
+            }
+
+            int next = _activeIndexes[streamId];
+            int before = next;
+            long stateStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            while (next < notes.Length && notes[next].StartSample <= sample)
+                next++;
+            if (_performance.Enabled)
+                _performance.PianoRollCursorAdvances += next - before;
+            _activeIndexes[streamId] = next;
+            _lastActiveSamples[streamId] = sample;
+
+            for (int index = next - 1, lower = Math.Max(0, next - 2); index >= lower; index--)
+            {
+                PreparedNote note = notes[index];
+                if (note.StartSample <= sample && sample < note.EndSample)
+                {
+                    active = note;
+                    break;
+                }
+            }
+            if (_performance.Enabled)
+                _performance.FrameStateTicks += Stopwatch.GetTimestamp() - stateStart;
+            return true;
+        }
+    }
 
     internal void ValidateFrameForSession(long frameIndex, Span<byte> destination)
         => ValidateFrame(frameIndex, destination);
 
-    internal void RestoreDynamicRegions(Span<byte> destination)
+    internal void RestoreDynamicRegions(Span<byte> destination, bool scopeFramePresent = false)
     {
-        foreach (OverlayRect rect in _dynamicRestoreRects)
-            CopyRect(_staticFrame, destination, rect);
+        long restoredPixels = 0;
+        RectCopyPlan[] restorePlans = scopeFramePresent
+            ? _dynamicRestorePlansWithScope
+            : _dynamicRestorePlans;
+        int stride = Width * 4;
+        foreach (RectCopyPlan plan in restorePlans)
+        {
+            int sourceOffset = plan.Offset;
+            int destinationOffset = plan.Offset;
+            for (int row = 0; row < plan.Rows; row++)
+            {
+                _staticFrame.AsSpan(sourceOffset, plan.RowBytes)
+                    .CopyTo(destination.Slice(destinationOffset, plan.RowBytes));
+                sourceOffset += stride;
+                destinationOffset += stride;
+                if (_performance.Enabled)
+                {
+                    _performance.SurfaceCopies++;
+                    _performance.CopiedBytes += plan.RowBytes;
+                }
+            }
+            if (_performance.Enabled)
+                restoredPixels += (long)plan.RowBytes / 4 * plan.Rows;
+        }
+        if (_performance.Enabled)
+        {
+            long framePixels = (long)Width * Height;
+            _performance.RenderedPixels += restoredPixels;
+            _performance.AvoidedPixels += Math.Max(0, framePixels - restoredPixels);
+        }
     }
 
-    internal void PlaceScopeRowsForSession(ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
+    internal void PlaceScopeRowsForSession(
+        ReadOnlySpan<byte> scopeGrid, Span<byte> destination, bool scopeFramesAreOpaque = false)
     {
         if (scopeGrid.IsEmpty)
             return;
@@ -499,11 +934,25 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             throw new ArgumentException(
                 $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
                 nameof(scopeGrid));
-        PlaceScopeRows(scopeGrid, destination);
+        PlaceScopeRows(scopeGrid, destination, scopeFramesAreOpaque);
     }
 
-    internal void DrawDynamicForSession(long frameIndex, Span<byte> destination)
-        => DrawDynamicCore(frameIndex, destination);
+    internal void DrawDynamicForSession(
+        long frameIndex,
+        Span<byte> destination,
+        SequentialRenderState state)
+    {
+        SequentialRenderState? previous = _activeSequentialState;
+        _activeSequentialState = state;
+        try
+        {
+            DrawDynamicCore(frameIndex, destination);
+        }
+        finally
+        {
+            _activeSequentialState = previous;
+        }
+    }
 
     private void ValidateFrame(long frameIndex, Span<byte> destination)
     {
@@ -525,13 +974,20 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             FpsDenominator);
         long currentSample = Math.Min(_timeline.EndSample, _timeline.StartSample + relativeSample);
 
+        long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawClock(destination, currentSample);
         DrawLoopLabel(destination, frameIndex);
         DrawProgress(destination, currentSample);
         DrawAnalysisHud(destination, currentSample);
         DrawAnalysisHarmonyStrip(destination, currentSample);
         DrawAnalysisProgressMarkers(destination, currentSample);
+        if (_performance.Enabled)
+            _performance.TextTicks += Stopwatch.GetTimestamp() - textStart;
+
+        long layoutStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawTimeGrid(destination, currentSample);
+        if (_performance.Enabled)
+            _performance.LayoutTicks += Stopwatch.GetTimestamp() - layoutStart;
 
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
@@ -541,9 +997,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // region, and no piano-roll / pitch-gutter / operator content.
             if (_layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
             {
+                long waveformStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                 if (drawSemantic)
                     DrawOverviewDynamicPanel(destination, panel, currentSample);
                 DrawEnergyScopeBorder(destination, panel.Index, currentSample);
+                if (_performance.Enabled)
+                    _performance.WaveformTicks += Stopwatch.GetTimestamp() - waveformStart;
                 continue;
             }
 
@@ -555,34 +1014,49 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 switch (panel.TrackKind)
                 {
                     case VisualizationTrackKind.Pitched:
-                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
+                        long pitchedStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        (double Min, double Max) pitchedRange = GetPitchRange(panel, currentSample);
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false, pitchedRange);
                         if (drawSemantic)
                         {
                             if (panel.Prepared.UsesSsgModes)
-                                DrawSsgPanel(destination, panel, currentSample);
+                                DrawSsgPanel(destination, panel, currentSample, pitchedRange);
                             else
-                                DrawPitchedPanel(destination, panel, currentSample, false);
+                                DrawPitchedPanel(destination, panel, currentSample, false, pitchedRange);
                         }
+                        if (_performance.Enabled)
+                            _performance.PianoRollTicks += Stopwatch.GetTimestamp() - pitchedStart;
                         break;
                     case VisualizationTrackKind.FmOperatorGroup:
-                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, true);
+                        long fmStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        (double Min, double Max) fmRange = GetPitchRange(panel, currentSample);
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, true, fmRange);
                         if (drawSemantic)
                         {
-                            DrawPitchedPanel(destination, panel, currentSample, true);
-                            DrawFm3OperatorRibbons(destination, panel, currentSample);
+                            DrawPitchedPanel(destination, panel, currentSample, true, fmRange);
+                            DrawFm3OperatorRibbons(destination, panel, currentSample, fmRange);
                         }
+                        if (_performance.Enabled)
+                            _performance.PianoRollTicks += Stopwatch.GetTimestamp() - fmStart;
                         break;
                     case VisualizationTrackKind.WaveTable:
-                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false);
+                        long wavetableStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        (double Min, double Max) wavetableRange = GetPitchRange(panel, currentSample);
+                        DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false, wavetableRange);
                         if (drawSemantic)
                         {
-                            DrawPitchedPanel(destination, panel, currentSample, false);
+                            DrawPitchedPanel(destination, panel, currentSample, false, wavetableRange);
                             DrawWavetablePanel(destination, panel, currentSample);
                         }
+                        if (_performance.Enabled)
+                            _performance.WaveformTicks += Stopwatch.GetTimestamp() - wavetableStart;
                         break;
                     case VisualizationTrackKind.Sample:
+                        long sampleStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                         if (drawSemantic)
                             DrawPcmVoicePanel(destination, panel, currentSample);
+                        if (_performance.Enabled)
+                            _performance.WaveformTicks += Stopwatch.GetTimestamp() - sampleStart;
                         break;
                     case VisualizationTrackKind.Noise:
                         if (drawSemantic)
@@ -608,7 +1082,10 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
                 // Per-channel dynamic state in the panel header is retained
                 // for the diagnostic grid.
+                long headerStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                 DrawDynamicPanelHeader(destination, panel, currentSample);
+                if (_performance.Enabled)
+                    _performance.TextTicks += Stopwatch.GetTimestamp() - headerStart;
             }
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
@@ -664,7 +1141,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
-        int first = LowerBoundTimeGrid(windowStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetTimeGridFirst(_timeGrid, windowStart, out first) ?? false))
+            first = LowerBoundTimeGrid(windowStart);
         for (int index = first; index < _timeGrid.Length; index++)
         {
             VisualizationTimeGridLine line = _timeGrid[index];
@@ -952,14 +1431,15 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         return candidate;
     }
 
-    private OverlayRect[] BuildDynamicRestoreRects()
+    private OverlayRect[] BuildDynamicRestoreRects(bool scopeFramePresent)
     {
         // The presentation fade temporarily covers both metadata bars. They
         // must be restored every frame so a previous fade cannot persist in
-        // the sequential buffer. The scope itself is also dynamic: Corrscope replaces its pixels and
-        // DrawEnergyScopeBorder draws on its perimeter. Restore the complete
-        // scope rectangle before placing the next Corrscope strip so the
-        // sequential session cannot retain a previous frame's border.
+        // the sequential buffer. The scope itself is also dynamic: Corrscope
+        // replaces its pixels and DrawEnergyScopeBorder draws on its perimeter.
+        // When a scope frame is supplied, that body is already overwritten
+        // before dynamic drawing, so only its static gutter needs restoring.
+        // With no scope frame, restore the complete body from the static layer.
         // A few clipped contact/grid primitives intentionally terminate on a
         // region edge. Restore the one-pixel static seam as well so a
         // sequential session cannot retain an edge pixel that a direct frame
@@ -973,8 +1453,27 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
             rects.Add(_layout.GetHeaderRect(panelIndex));
-            rects.Add(_layout.GetTimelineRect(panelIndex));
-            rects.Add(_layout.GetScopeRect(panelIndex));
+            OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+            bool integratedScope =
+                _layout.Variant == VisualizationLayoutVariant.DiagnosticGrid
+                && _layout.HasRoll;
+            if (scopeFramePresent && integratedScope)
+            {
+                // Corrscope replaces the complete body to the right of the
+                // pitch gutter before dynamic semantic drawing. Restore only
+                // the gutter; copying the scope body from the static layer is
+                // redundant memory traffic in this path.
+                int gutter = Math.Min(_layout.PitchLabelWidth, timeline.Width);
+                if (gutter > 0)
+                    rects.Add(new OverlayRect(
+                        timeline.X, timeline.Y, gutter, timeline.Height));
+            }
+            else
+            {
+                rects.Add(timeline);
+            }
+            if (!integratedScope)
+                rects.Add(_layout.GetScopeRect(panelIndex));
         }
 
         // Restore runs before every dynamic draw, so copying a superset of a
@@ -1037,36 +1536,52 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         return merged.ToArray();
     }
 
-    private void CopyRect(byte[] source, Span<byte> destination, OverlayRect rect)
+    private RectCopyPlan[] BuildRectCopyPlans(OverlayRect[] rects)
     {
-        int left = Math.Clamp(rect.X, 0, Width);
-        int right = Math.Clamp(rect.Right, 0, Width);
-        int top = Math.Clamp(rect.Y, 0, Height);
-        int bottom = Math.Clamp(rect.Bottom, 0, Height);
-        int rowBytes = (right - left) * 4;
-        if (rowBytes <= 0 || bottom <= top)
-            return;
-        // Restore runs before every dynamic draw, so copying a superset of a
-        // region is always safe. An in-bounds rect's rows are contiguous in
-        // memory only when the rect spans the full frame width; for narrower
-        // rects a stride gap separates rows. Rather than issue one CopyTo per
-        // row (the dominant cost when dozens of rects are restored every
-        // frame), copy the full-width slab that covers the rect's rows: it is
-        // one contiguous CopyTo, and the extra pixels are static chrome that
-        // the subsequent dynamic draws repaint anyway.
-        if (rect.Y >= 0 && rect.Bottom <= Height)
+        var plans = new List<RectCopyPlan>(rects.Length);
+        foreach (OverlayRect rect in rects)
         {
-            int offset = (rect.Y * Width) * 4;
-            int byteCount = (rect.Bottom - rect.Y) * Width * 4;
-            source.AsSpan(offset, byteCount)
-                .CopyTo(destination.Slice(offset, byteCount));
-            return;
+            int left = Math.Clamp(rect.X, 0, Width);
+            int right = Math.Clamp(rect.Right, 0, Width);
+            int top = Math.Clamp(rect.Y, 0, Height);
+            int bottom = Math.Clamp(rect.Bottom, 0, Height);
+            int rowBytes = (right - left) * 4;
+            if (rowBytes <= 0 || bottom <= top)
+                continue;
+            plans.Add(new RectCopyPlan(
+                (top * Width + left) * 4,
+                rowBytes,
+                bottom - top));
         }
-        for (int y = top; y < bottom; y++)
+        return plans.ToArray();
+    }
+
+    private ScopeCopyPlan[] BuildScopeCopyPlans()
+    {
+        int sourceWidth = _layout.CorrscopeGridWidth;
+        int sourceStride = sourceWidth * 4;
+        int scopeHeight = _layout.ScopeHeight;
+        var plans = new List<ScopeCopyPlan>(_panels.Length);
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
-            source.AsSpan((y * Width + left) * 4, rowBytes)
-                .CopyTo(destination.Slice((y * Width + left) * 4, rowBytes));
+            int row = panelIndex / _layout.ColumnCount;
+            int column = panelIndex % _layout.ColumnCount;
+            OverlayRect scope = _layout.GetScopeRect(panelIndex);
+            int copyWidth = Math.Min(sourceWidth / _layout.ColumnCount, scope.Width);
+            if (copyWidth <= 0 || scopeHeight <= 0)
+                continue;
+
+            int srcY = row * scopeHeight;
+            int srcX = _layout.Variant == VisualizationLayoutVariant.DiagnosticGrid
+                ? scope.X
+                : column * copyWidth;
+            plans.Add(new ScopeCopyPlan(
+                srcY * sourceStride + srcX * 4,
+                (scope.Y * Width + scope.X) * 4,
+                copyWidth * 4,
+                scopeHeight));
         }
+        return plans.ToArray();
     }
 
     public byte[] RenderFrame(long frameIndex)
@@ -1106,30 +1621,31 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// one cell per column; the cell for panel <c>row*ColumnCount + column</c>
     /// starts at <c>column * PanelWidth</c> within row <c>row</c>.
     /// </summary>
-    private void PlaceScopeRows(ReadOnlySpan<byte> scopeGrid, Span<byte> destination)
+    private void PlaceScopeRows(
+        ReadOnlySpan<byte> scopeGrid, Span<byte> destination, bool scopeFramesAreOpaque = false)
     {
-        int sourceWidth = _layout.CorrscopeGridWidth;
-        int sourceStride = sourceWidth * 4;
-        int scopeHeight = _layout.ScopeHeight;
-
-        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+        int sourceStride = _layout.CorrscopeGridWidth * 4;
+        int destinationStride = Width * 4;
+        foreach (ScopeCopyPlan plan in _scopeCopyPlans)
         {
-            int row = panelIndex / _layout.ColumnCount;
-            int column = panelIndex % _layout.ColumnCount;
-            OverlayRect scope = _layout.GetScopeRect(panelIndex);
-            int copyWidth = Math.Min(sourceWidth / _layout.ColumnCount, scope.Width);
-            int srcY = row * scopeHeight;
-            int srcX = _layout.Variant == VisualizationLayoutVariant.DiagnosticGrid
-                ? scope.X
-                : column * copyWidth;
-            for (int y = 0; y < scopeHeight; y++)
+            int src = plan.SourceOffset;
+            int dst = plan.DestinationOffset;
+            for (int y = 0; y < plan.Rows; y++)
             {
-                int src = (srcY + y) * sourceStride + srcX * 4;
-                int dst = ((scope.Y + y) * Width + scope.X) * 4;
-                int copyBytes = copyWidth * 4;
-                scopeGrid.Slice(src, copyBytes).CopyTo(destination.Slice(dst, copyBytes));
-                for (int x = 0; x < copyBytes; x += 4)
-                    destination[dst + x + 3] = 255;
+                if (_performance.Enabled)
+                {
+                    _performance.ScopeCopies++;
+                    _performance.CopiedBytes += plan.RowBytes;
+                }
+                scopeGrid.Slice(src, plan.RowBytes)
+                    .CopyTo(destination.Slice(dst, plan.RowBytes));
+                if (!scopeFramesAreOpaque)
+                {
+                    for (int x = 0; x < plan.RowBytes; x += 4)
+                        destination[dst + x + 3] = 255;
+                }
+                src += sourceStride;
+                dst += destinationStride;
             }
         }
     }
@@ -1153,6 +1669,26 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 lookup[i] = env;
         }
         return lookup;
+    }
+
+    private static bool[] BuildAudioEnergyFlags(ChannelEnergyEnvelope[] energy)
+    {
+        var flags = new bool[energy.Length];
+        for (int panelIndex = 0; panelIndex < energy.Length; panelIndex++)
+        {
+            float[] activity = energy[panelIndex]?.FrameActivity;
+            if (activity is null)
+                continue;
+            for (int index = 0; index < activity.Length; index++)
+            {
+                if (activity[index] > 0.02f)
+                {
+                    flags[panelIndex] = true;
+                    break;
+                }
+            }
+        }
+        return flags;
     }
 
     private PanelData[] BuildPanels()
@@ -1402,7 +1938,13 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         }
     }
 
-    private void DrawPitchGrid(Span<byte> frame, PanelData panel, PitchCamera camera, long currentSample, bool reserveFm3OperatorRibbons)
+    private void DrawPitchGrid(
+        Span<byte> frame,
+        PanelData panel,
+        PitchCamera camera,
+        long currentSample,
+        bool reserveFm3OperatorRibbons,
+        (double Min, double Max)? sharedRange = null)
     {
         OverlayRect lane = _layout.GetPitchedLaneRect(panel.Index, reserveFm3OperatorRibbons);
         OverlayRect timeline = _layout.GetTimelineRect(panel.Index);
@@ -1414,7 +1956,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             return;
         }
 
-        var (minMidi, maxMidi) = camera.GetPreciseRange(currentSample);
+        var (minMidi, maxMidi) = sharedRange ?? camera.GetPreciseRange(currentSample);
         DrawPitchGridRange(frame, lane, timeline, minMidi, maxMidi);
     }
 
@@ -1479,6 +2021,35 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         }
     }
 
+    private readonly struct RectCopyPlan
+    {
+        public RectCopyPlan(int offset, int rowBytes, int rows)
+        {
+            Offset = offset;
+            RowBytes = rowBytes;
+            Rows = rows;
+        }
+
+        public int Offset { get; }
+        public int RowBytes { get; }
+        public int Rows { get; }
+    }
+
+    private readonly struct ScopeCopyPlan
+    {
+        public ScopeCopyPlan(int sourceOffset, int destinationOffset, int rowBytes, int rows)
+        {
+            SourceOffset = sourceOffset;
+            DestinationOffset = destinationOffset;
+            RowBytes = rowBytes;
+            Rows = rows;
+        }
+
+        public int SourceOffset { get; }
+        public int DestinationOffset { get; }
+        public int RowBytes { get; }
+        public int Rows { get; }
+    }
 
 
 

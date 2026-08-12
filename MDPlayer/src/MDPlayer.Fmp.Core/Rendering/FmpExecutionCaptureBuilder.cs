@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-
 namespace Fmp.Core.Rendering;
 
 /// <summary>
@@ -147,8 +145,7 @@ internal sealed class FmpExecutionCaptureBuilder : IFmpExecutionCaptureSink, IDi
         return _sequence;
     }
 
-    private static string Sha256(byte[] data) =>
-        Convert.ToHexString(SHA256.HashData(data));
+    private static string Sha256(byte[] data) => CaptureHasher.Sha256Hex(data);
 
     /// <summary>Access to the captured banks (test/diagnostic intra-session use only).</summary>
     public IReadOnlyList<Ppz8BankSnapshot> Banks => _banks;

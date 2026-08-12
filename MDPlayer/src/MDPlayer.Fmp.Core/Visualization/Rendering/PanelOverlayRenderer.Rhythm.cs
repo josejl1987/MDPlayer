@@ -14,7 +14,10 @@ internal sealed partial class PanelOverlayRenderer
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         PreparedRhythmEvent[] rhythm = panel.Prepared.Rhythm;
-        int first = LowerBoundRhythm(rhythm, windowStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetRhythmFirst(
+                panel.RhythmStreamId, rhythm, windowStart, out first) ?? false))
+            first = LowerBoundRhythm(rhythm, windowStart);
         PanelRowDefinition[] rows = panel.Prepared.Rows;
         if (rows.Length == 0)
             return;
@@ -26,7 +29,7 @@ internal sealed partial class PanelOverlayRenderer
             PreparedRhythmEvent evt = rhythm[index];
             if (evt.SamplePosition >= windowEnd)
                 break;
-            int voice = Array.FindIndex(rows, row => string.Equals(row.Id, evt.Voice, StringComparison.Ordinal));
+            int voice = evt.RowIndex;
             if (voice < 0)
             {
                 // Legacy captures can contain a percussion identity that was

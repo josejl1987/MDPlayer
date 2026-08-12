@@ -767,7 +767,7 @@ internal sealed class VgmPlaybackBackend : IPlaybackBackend
 
         try
         {
-            VgmDocument document = VgmDocument.Parse(VgmInput.Read(input.FullName));
+            VgmDocument document = VgmDocumentCache.Load(input.FullName);
             ChipTimelineDecoderRegistry decoderRegistry = ChipTimelineDecoderRegistry.CreateDefault();
             bool visualizable = document.Devices.Any(device =>
                 decoderRegistry.HasDecoder(device.Id.Type));
@@ -797,7 +797,7 @@ internal sealed class VgmPlaybackBackend : IPlaybackBackend
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(eventSink);
-        VgmDocument document = VgmDocument.Parse(VgmInput.Read(input.FullName));
+        VgmDocument document = VgmDocumentCache.Load(input.FullName);
         return new VgmCaptureSession(document, options, eventSink);
     }
 }
@@ -848,8 +848,13 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
             }
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_options.OutputAudioPath ?? "capture.wav")) ?? ".");
-        using var audio = new VgmAudioRenderer(_document.Devices, Timing.SampleRate, _document.Assets);
+        VgmAudioRenderer? audio = null;
+        if (!string.IsNullOrWhiteSpace(_options.OutputAudioPath))
+        {
+            Directory.CreateDirectory(
+                Path.GetDirectoryName(Path.GetFullPath(_options.OutputAudioPath)) ?? ".");
+            audio = new VgmAudioRenderer(_document.Devices, Timing.SampleRate, _document.Assets);
+        }
         foreach (VgmSampleAsset asset in _document.Assets)
         {
             _events.OnSampleAsset(new TimedSampleAssetEvent(
@@ -858,7 +863,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                 $"vgm:{asset.Device}:{asset.StartAddress:X8}:{asset.Data.Length:X8}",
                 asset.Kind,
                 asset.Data.Length));
-            audio.LoadAsset(asset);
+            audio?.LoadAsset(asset);
         }
         WavWriter writer = null;
         try
@@ -893,7 +898,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                     write.Address,
                     write.Data);
                 _events.OnChipWrite(normalized);
-                audio.Write(normalized);
+                audio?.Write(normalized);
                 SamplePosition = target;
             }
 
@@ -904,6 +909,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
         finally
         {
             writer?.Close();
+            audio?.Dispose();
         }
     }
 
@@ -930,7 +936,9 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
             {
                 if (pass > 0 && write.SourceSample < loop.Value)
                     continue;
-                yield return write with { SourceSample = write.SourceSample + offset };
+                yield return offset == 0
+                    ? write
+                    : write with { SourceSample = write.SourceSample + offset };
             }
         }
     }
@@ -947,7 +955,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
         checked((long)Math.Round(sourceSample * Timing.SampleRate / 44_100.0, MidpointRounding.AwayFromZero));
 
     private static void RenderUntil(
-        VgmAudioRenderer audio,
+        VgmAudioRenderer? audio,
         WavWriter writer,
         short[] buffer,
         ref long rendered,
@@ -957,6 +965,11 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
     {
         if (target < rendered)
             throw new InvalidOperationException("VGM events are not monotonic after loop expansion.");
+        if (audio is null)
+        {
+            rendered = target;
+            return;
+        }
         int remaining;
         while (rendered < target)
         {
@@ -1022,6 +1035,7 @@ internal sealed class VgmAudioRenderer : IDisposable
     private readonly int _sampleRate;
     private readonly ChipType? _channelFilterType;
     private readonly int _channelFilter;
+    private int[][] _opnaOutput;
     private int _hucSelectedChannel;
     private int _sn76489LatchedChannel;
     private int _ym2151SelectedChannel;
@@ -2263,14 +2277,22 @@ internal sealed class VgmAudioRenderer : IDisposable
         if (_opna != null)
         {
             int frameCount = count / 2;
-            int[][] opna = [new int[frameCount], new int[frameCount]];
-            _opna.Render(opna, frameCount);
+            EnsureOpnaOutputCapacity(frameCount);
+            _opna.Render(_opnaOutput, frameCount);
             for (int index = 0; index < frameCount; index++)
             {
-                output[index * 2] = (short)Math.Clamp(output[index * 2] + opna[0][index], short.MinValue, short.MaxValue);
-                output[index * 2 + 1] = (short)Math.Clamp(output[index * 2 + 1] + opna[1][index], short.MinValue, short.MaxValue);
+                output[index * 2] = (short)Math.Clamp(output[index * 2] + _opnaOutput[0][index], short.MinValue, short.MaxValue);
+                output[index * 2 + 1] = (short)Math.Clamp(output[index * 2 + 1] + _opnaOutput[1][index], short.MinValue, short.MaxValue);
             }
         }
+    }
+
+    private void EnsureOpnaOutputCapacity(int frameCount)
+    {
+        if (_opnaOutput != null && _opnaOutput[0].Length >= frameCount)
+            return;
+
+        _opnaOutput = [new int[frameCount], new int[frameCount]];
     }
 
     public void Dispose()
@@ -2330,6 +2352,47 @@ internal sealed class VgmAudioRenderer : IDisposable
         foreach (KeyValuePair<int, MDSound.K051649> entry in _k051649)
             entry.Value.Stop((byte)entry.Key);
         _opna?.Dispose();
+    }
+}
+
+/// <summary>
+/// Bounded process-local cache for the immutable parsed VGM document. Probe,
+/// capture-open, and isolated-stem rendering can all observe the same input in
+/// one export; retaining one validated document avoids reparsing it three times.
+/// The cache has one entry and is invalidated when path, size, or mtime changes.
+/// </summary>
+internal static class VgmDocumentCache
+{
+    private static readonly object Gate = new();
+    private static string _path;
+    private static long _length = -1;
+    private static long _lastWriteTicks = long.MinValue;
+    private static VgmDocument _document;
+
+    public static VgmDocument Load(string inputPath)
+    {
+        string fullPath = Path.GetFullPath(inputPath);
+        FileInfo info = new(fullPath);
+        if (!info.Exists)
+            throw new FileNotFoundException("VGM input was not found.", fullPath);
+
+        lock (Gate)
+        {
+            if (_document is not null
+                && string.Equals(_path, fullPath, StringComparison.Ordinal)
+                && _length == info.Length
+                && _lastWriteTicks == info.LastWriteTimeUtc.Ticks)
+            {
+                return _document;
+            }
+
+            VgmDocument parsed = VgmDocument.Parse(VgmInput.Read(fullPath));
+            _path = fullPath;
+            _length = info.Length;
+            _lastWriteTicks = info.LastWriteTimeUtc.Ticks;
+            _document = parsed;
+            return parsed;
+        }
     }
 }
 

@@ -66,6 +66,9 @@ public sealed class SymbolicTempoInferenceInstrumentationTests
         Assert.True(counters.ScoreForPhaseCalls > 0, "ScoreForPhase should be invoked");
         Assert.True(counters.SubdivisionFitEvals >= counters.ScoreForPhaseCalls,
             "each phase scores at least one SubdivisionFit evaluation");
+        Assert.True(counters.ScorePhasesPruned > 0, "the phase search should prune work");
+        Assert.True(counters.OnsetEvaluationsAvoided > 0,
+            "phase pruning should avoid onset evaluations");
         Assert.Equal(timeline.Notes!.Count, counters.OnsetCount);
     }
 }

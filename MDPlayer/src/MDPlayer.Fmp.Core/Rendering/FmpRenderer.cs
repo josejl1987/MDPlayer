@@ -34,7 +34,7 @@ internal class FmpRenderer
         // the synthesizer; it forwards untouched until a collector is attached
         // for an asset-dump render.
         _observingSink = new PlaybackAssetObservingChipSink(_sink);
-        _runtime = new FmpRuntime(_observingSink, assets, fileSystem);
+        _runtime = new FmpRuntime(_observingSink, assets, fileSystem, controlTickRate: sampleRate);
     }
 
     /// <summary>

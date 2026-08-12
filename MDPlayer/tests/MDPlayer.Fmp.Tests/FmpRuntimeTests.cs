@@ -2,6 +2,7 @@ using Fmp.Core.Audio;
 using Fmp.Core.IO;
 using Fmp.Core.Rendering;
 using Fmp.Core.Tracing;
+using MNDRV;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -138,6 +139,32 @@ public class FmpRuntimeTests
         {
             if (File.Exists(tracePath)) File.Delete(tracePath);
         }
+    }
+
+    [Fact]
+    public void FmTimer_TimerBHasSameWallClockPeriodAtCommonSampleRates()
+    {
+        double duration44100 = MeasureTimerBPeriod(44100);
+        double duration48000 = MeasureTimerBPeriod(48000);
+
+        Assert.InRange(Math.Abs(duration44100 - duration48000), 0.0, 0.00001);
+    }
+
+    private static double MeasureTimerBPeriod(int sampleRate)
+    {
+        var timer = new FMTimer(false, null, 7987200, sampleRate);
+        timer.WriteReg(0x26, 0);
+        timer.WriteReg(0x27, 0x0a);
+
+        int ticks = 0;
+        while ((timer.ReadStatus() & 0x02) == 0 && ticks < 10_000)
+        {
+            timer.timer();
+            ticks++;
+        }
+
+        Assert.True(ticks < 10_000, "Timer B did not overflow within the test limit.");
+        return (double)ticks / sampleRate;
     }
 }
 

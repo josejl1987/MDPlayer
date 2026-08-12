@@ -13,8 +13,11 @@ namespace Fmp.Core.Timing;
 /// </summary>
 internal readonly record struct TempoInferenceCounters(
     int OnsetCount,
+    int UniqueSampleCount,
     long ScoreForPhaseCalls,
-    long SubdivisionFitEvals);
+    long SubdivisionFitEvals,
+    long ScorePhasesPruned,
+    long OnsetEvaluationsAvoided);
 
 /// <summary>The ambiguity of a symbolic tempo inference result.</summary>
 internal enum TempoAmbiguity
@@ -30,7 +33,8 @@ internal sealed record TempoCandidate(
     double Bpm,
     long PhaseSample,
     double Score,
-    TempoAmbiguity Ambiguity);
+    TempoAmbiguity Ambiguity,
+    double PhaseOffsetSamples = double.NaN);
 
 /// <summary>
 /// Batch 3: infers tempo and phase from symbolic onsets (note-ons, rhythm hits)
@@ -45,6 +49,20 @@ internal static class SymbolicTempoInference
     private const double MaxBpm = 240.0;
     private const double BpmStep = 1.0;
     private const int PhaseSteps = 96;          // ~ one 32nd of a quarter at most
+    private static readonly double LogEighthWeight = Math.Log(0.96);
+    private static readonly double LogTripletEighthWeight = Math.Log(0.92);
+    private static readonly double LogSixteenthWeight = Math.Log(0.88);
+    private static readonly double LogTripletSixteenthWeight = Math.Log(0.80);
+    private static readonly double LogThirtySecondWeight = Math.Log(0.72);
+    private static readonly double[] PhaseQuarters = BuildPhaseQuarters();
+
+    private static double[] BuildPhaseQuarters()
+    {
+        var phases = new double[PhaseSteps];
+        for (int index = 0; index < phases.Length; index++)
+            phases[index] = index / (double)PhaseSteps;
+        return phases;
+    }
 
     /// <summary>Relative tie epsilon for phase-selection comparisons (TI-HOIST).
     /// The hoisted factoring (<c>normalized[i] - phaseQuarters</c> vs the original
@@ -58,19 +76,6 @@ internal static class SymbolicTempoInference
     /// Internal so the pruning equivalence test can replicate the update rules
     /// exactly (TI-PRUNE).</summary>
     internal const double ScoreTieEpsilon = 1e-12;
-
-    /// <summary>Subdivision lattice, in quarter units, with their scores (Patch D.1).
-    /// Higher weight = "more aligned at this subdivision". Used uniformly for onset
-    /// and duration scoring. No new subdivisions beyond these.</summary>
-    private static readonly (double QuarterUnits, double Weight)[] Subdivisions = new[]
-    {
-        (1.0,   1.00),   // quarter
-        (0.5,   0.96),   // eighth
-        (1.0/3, 0.92),   // eighth triplet
-        (0.25,  0.88),   // sixteenth
-        (1.0/6, 0.80),   // sixteenth triplet
-        (0.125, 0.72),   // thirty-second
-    };
 
     /// <summary>Default build: no instrumentation, no counter allocation, no
     /// counter increments on the hot path (acc is null throughout).</summary>
@@ -100,7 +105,10 @@ internal static class SymbolicTempoInference
         Onset[] onsets = CollectOnsets(timeline);
         acc.OnsetCount = onsets.Length;
         MusicalTimeMapBuildResult result = BuildCore(timeline, options, beatOffsetQuarter, onsets, acc);
-        counters = new TempoInferenceCounters(acc.OnsetCount, acc.ScoreForPhaseCalls, acc.SubdivisionFitEvals);
+        counters = new TempoInferenceCounters(
+            acc.OnsetCount, acc.UniqueSampleCount,
+            acc.ScoreForPhaseCalls, acc.SubdivisionFitEvals,
+            acc.ScorePhasesPruned, acc.OnsetEvaluationsAvoided);
         return result;
     }
 
@@ -118,7 +126,7 @@ internal static class SymbolicTempoInference
         }
 
         (double bestBpm, long bestPhaseSample, double bestScore, List<TempoCandidate> candidates) =
-            Search(onsets, timeline.SampleRate, acc);
+            Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
 
         var diagnostics = new TimingDiagnostics
         {
@@ -136,8 +144,12 @@ internal static class SymbolicTempoInference
         // (Patch D.2/D.3/D.4).
         if (candidates.Count > 1)
         {
+            long[] durations = CollectDurations(timeline);
+            Onset[] accents = CollectAccents(timeline);
             var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
-                timeline, bestBpm, candidates, onsets, timeline.SampleRate, bestPhaseSample, bestScore, acc);
+                bestBpm, candidates, samples, weights,
+                timeline.SampleRate, durations, accents,
+                bestPhaseSample, bestScore, acc);
             // The ResolveHalfDouble combined score is the decision metric, so it is
             // the SelectedScore reported for BOTH the selected and (below) the
             // alternative — the two are directly comparable.
@@ -237,20 +249,43 @@ internal static class SymbolicTempoInference
     private static (double bpm, long phaseSample, double score, List<TempoCandidate>) Search(
         Onset[] onsets,
         int sampleRate,
-        CounterAccumulator? acc)
+        CounterAccumulator? acc,
+        out long[] samples,
+        out double[] weights)
     {
-        // Order onsets; we only need their sample positions and weights.
-        long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
-        double[] weights = onsets
-            .GroupBy(o => o.Sample)
-            .OrderBy(g => g.Key)
-            .Select(g => g.Sum(o => o.Weight))
-            .ToArray();
+        // CollectOnsets already returns (sample, weight)-ordered onsets. Fold the
+        // contiguous sample runs directly instead of materializing Select,
+        // Distinct, GroupBy, and OrderBy pipelines for every export.
+        int uniqueSampleCount = 0;
+        long previousSample = long.MinValue;
+        for (int index = 0; index < onsets.Length; index++)
+        {
+            long sample = onsets[index].Sample;
+            if (uniqueSampleCount == 0 || sample != previousSample)
+            {
+                uniqueSampleCount++;
+                previousSample = sample;
+            }
+        }
+        samples = new long[uniqueSampleCount];
+        weights = new double[uniqueSampleCount];
+        if (acc is not null)
+            acc.UniqueSampleCount = uniqueSampleCount;
+        int uniqueIndex = -1;
+        for (int index = 0; index < onsets.Length; index++)
+        {
+            Onset onset = onsets[index];
+            if (uniqueIndex < 0 || samples[uniqueIndex] != onset.Sample)
+            {
+                uniqueIndex++;
+                samples[uniqueIndex] = onset.Sample;
+            }
+            weights[uniqueIndex] += onset.Weight;
+        }
 
         double bestScore = -1;
         double bestBpm = 0;
         double bestPhase = 0;
-        var candidates = new List<TempoCandidate>();
 
         int steps = (int)Math.Ceiling((MaxBpm - MinBpm) / BpmStep);
         // TI-HOIST: suffix sums over onset weights (weightSuffix[i] = sum of
@@ -270,33 +305,36 @@ internal static class SymbolicTempoInference
         for (int i = 0; i < weights.Length; i++)
             totalWeight += weights[i];
 
+        // Phase scoring depends only on the onset's fractional quarter position.
+        // Keep that modulo-one value instead of repeating Math.Round on the full
+        // normalized sample for every phase.
+        double[] fractionalQuarters = new double[samples.Length];
         for (int b = 0; b <= steps; b++)
         {
             double bpm = MinBpm + b * BpmStep;
             double spq = sampleRate * 60.0 / bpm;
             if (spq <= 0)
                 continue;
-            // TI-HOIST: onset samples normalized to quarter units once per tempo;
-            // the phase loop then only subtracts (phaseSamples / spq).
-            double[] normalized = new double[samples.Length];
+            // Normalize and reduce each onset once per tempo. The phase loop then
+            // only subtracts the phase offset and wraps into [-0.5, 0.5].
             for (int i = 0; i < samples.Length; i++)
-                normalized[i] = samples[i] / spq;
+            {
+                double normalized = samples[i] / spq;
+                fractionalQuarters[i] = normalized - Math.Floor(normalized);
+            }
             // Sample-weighted phase search over one quarter period.
-            double localBestScore = -1;
-            double localBestPhase = 0;
             for (int p = 0; p < PhaseSteps; p++)
             {
                 double phaseSamples = spq * p / PhaseSteps; // phase as sample offset in [0,spq)
-                double phaseQuarters = phaseSamples / spq;
-                // TI-PRUNE: incumbent = the per-BPM best achieved so far
-                // (localBestScore is always <= the global bestScore, so skipping
-                // phases that cannot beat it cannot affect the global winner).
-                double score = ScoreForPhase(normalized, weights, weightSuffix, phaseQuarters, localBestScore, totalWeight, acc);
-                if (score > localBestScore * (1 + ScoreTieEpsilon))
-                {
-                    localBestScore = score;
-                    localBestPhase = phaseSamples;
-                }
+                double phaseQuarters = PhaseQuarters[p];
+                // TI-GLOBAL-PRUNE: only the global winner is needed during the
+                // broad scan. Using the global incumbent makes the suffix bound
+                // useful for every later BPM instead of resetting it to zero at
+                // each BPM. Exact coarse scores are reconstructed only for the
+                // bounded half/double family after the winner is known.
+                double score = ScoreForFractionalPhase(
+                    fractionalQuarters, weights, weightSuffix, phaseQuarters,
+                    bestScore, totalWeight, acc);
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -304,11 +342,13 @@ internal static class SymbolicTempoInference
                     bestPhase = phaseSamples;
                 }
             }
-            candidates.Add(new TempoCandidate(bpm, (long)localBestPhase, localBestScore,
-                localBestScore > 0 && IsMetricalFamilyRatio(bestBpm / bpm) && Math.Abs(bestBpm / bpm - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
-                    : localBestScore > 0 && IsMetricalFamilyRatio(bestBpm / bpm) && Math.Abs(bestBpm / bpm - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
-                    : TempoAmbiguity.None));
         }
+
+        // ResolveHalfDouble needs the exact coarse winner for at most four
+        // neighboring BPMs. Rebuild only that bounded family rather than keeping
+        // a score for every BPM searched above.
+        var candidates = BuildFamilyCandidates(
+            bestBpm, samples, weights, weightSuffix, totalWeight, sampleRate, acc);
 
         // Improve the phase resolution within the winning tempo directly via onsets.
         double winSpq = sampleRate * 60.0 / bestBpm;
@@ -317,6 +357,54 @@ internal static class SymbolicTempoInference
         // Report the REFINED phase's score as the winner's score (previously the
         // coarse-grid score was reported alongside the refined phase — incoherent).
         return (bestBpm, bestPhaseSample, refinedScore, candidates);
+    }
+
+    private static List<TempoCandidate> BuildFamilyCandidates(
+        double bestBpm,
+        long[] samples,
+        double[] weights,
+        double[] weightSuffix,
+        double totalWeight,
+        int sampleRate,
+        CounterAccumulator? acc)
+    {
+        double[] ratios = { 0.25, 0.5, 1.0, 2.0, 4.0 };
+        var candidates = new List<TempoCandidate>(ratios.Length);
+        double[] fractionalQuarters = new double[samples.Length];
+        foreach (double ratio in ratios)
+        {
+            double bpm = bestBpm / ratio;
+            if (bpm < MinBpm || bpm > MaxBpm)
+                continue;
+
+            double spq = sampleRate * 60.0 / bpm;
+            for (int i = 0; i < samples.Length; i++)
+            {
+                double normalized = samples[i] / spq;
+                fractionalQuarters[i] = normalized - Math.Floor(normalized);
+            }
+
+            double localBestScore = -1;
+            double localBestPhase = 0;
+            for (int p = 0; p < PhaseSteps; p++)
+            {
+                double phaseSamples = spq * p / PhaseSteps;
+                double phaseQuarters = PhaseQuarters[p];
+                double score = ScoreForFractionalPhase(
+                    fractionalQuarters, weights, weightSuffix, phaseQuarters,
+                    localBestScore, totalWeight, acc);
+                if (score > localBestScore * (1 + ScoreTieEpsilon))
+                {
+                    localBestScore = score;
+                    localBestPhase = phaseSamples;
+                }
+            }
+
+            candidates.Add(new TempoCandidate(
+                bpm, (long)localBestPhase, localBestScore, TempoAmbiguity.None, localBestPhase));
+        }
+
+        return candidates;
     }
 
     /// <summary>Subdivision-aware, weight-normalized phase score (Patch D.1/D.2): each
@@ -338,7 +426,87 @@ internal static class SymbolicTempoInference
     internal static double ScoreForPhase(double[] normalized, double[] weights, double[]? weightSuffix,
         double phaseQuarters, double incumbentScore, double totalWeight, CounterAccumulator? acc)
     {
-        if (acc is not null) acc.ScoreForPhaseCalls++;
+        if (acc is null)
+        {
+            return weightSuffix is null
+                ? ScoreForPhaseUnprunedNoCounters(normalized, weights, phaseQuarters, totalWeight)
+                : ScoreForPhasePrunedNoCounters(
+                    normalized, weights, weightSuffix, phaseQuarters, incumbentScore, totalWeight);
+        }
+
+        acc.ScoreForPhaseCalls++;
+        if (weightSuffix is null)
+            return ScoreForPhaseUnprunedCounted(normalized, weights, phaseQuarters, totalWeight, acc);
+
+        return ScoreForPhasePrunedCounted(
+            normalized, weights, weightSuffix, phaseQuarters,
+            incumbentScore, totalWeight, acc);
+    }
+
+    private static double ScoreForFractionalPhase(
+        double[] fractionalQuarters,
+        double[] weights,
+        double[]? weightSuffix,
+        double phaseQuarters,
+        double incumbentScore,
+        double totalWeight,
+        CounterAccumulator? acc)
+    {
+        if (acc is not null)
+            acc.ScoreForPhaseCalls++;
+        if (totalWeight <= 0)
+            return 0;
+
+        double weightedFit = 0;
+        double threshold = weightSuffix is null
+            ? double.NegativeInfinity
+            : incumbentScore * totalWeight /
+                (1 + 8.0 * fractionalQuarters.Length * double.Epsilon);
+        int fitEvaluations = 0;
+        for (int i = 0; i < fractionalQuarters.Length; i++)
+        {
+            if (weightSuffix is not null
+                && weightedFit + weightSuffix[i] <= threshold)
+            {
+                if (acc is not null)
+                {
+                    acc.SubdivisionFitEvals += fitEvaluations;
+                    acc.ScorePhasesPruned++;
+                    acc.OnsetEvaluationsAvoided += fractionalQuarters.Length - i;
+                }
+                return 0;
+            }
+
+            double residual = FractionalResidual(fractionalQuarters[i], phaseQuarters);
+            double bestFit = acc is null
+                ? SubdivisionFit(residual)
+                : SubdivisionFitCounted(residual, ref fitEvaluations);
+            weightedFit += weights[i] * bestFit;
+        }
+
+        if (acc is not null)
+            acc.SubdivisionFitEvals += fitEvaluations;
+        return weightedFit / totalWeight;
+    }
+
+    private static double FractionalResidual(double fractionalQuarter, double phaseQuarters)
+    {
+        double residual = fractionalQuarter - phaseQuarters;
+        if (residual < -0.5)
+            residual += 1.0;
+        else if (residual > 0.5)
+            residual -= 1.0;
+        return residual == 0.5 ? -0.5 : residual;
+    }
+
+    private static double ScoreForPhasePrunedCounted(
+        double[] normalized, double[] weights, double[] weightSuffix,
+        double phaseQuarters, double incumbentScore, double totalWeight,
+        CounterAccumulator acc)
+    {
+        if (totalWeight <= 0)
+            return 0;
+
         // TI-PRUNE fix: totalWeight is precomputed by the caller (once per Search /
         // refine scan), never re-summed per phase. The prune bound becomes a single
         // threshold computed once per phase: threshold = incumbentScore * totalWeight
@@ -348,6 +516,7 @@ internal static class SymbolicTempoInference
         double boundMargin = 8.0 * normalized.Length * double.Epsilon;
         double threshold = incumbentScore * totalWeight / (1 + boundMargin);
         double weightedFit = 0;
+        int fitEvaluations = 0;
         for (int i = 0; i < normalized.Length; i++)
         {
             // TI-PRUNE: before onset i, onsets 0..i-1 are already accumulated, so
@@ -369,15 +538,74 @@ internal static class SymbolicTempoInference
             // the correct choice: pruning on the equality would be harmless, but
             // evaluating it is what the unpruned run does, so this maximizes
             // fidelity while remaining provably argmax-exact.
-            if (weightSuffix is not null && totalWeight > 0
-                && weightedFit + weightSuffix[i] <= threshold)
+            if (weightedFit + weightSuffix[i] <= threshold)
             {
+                acc.SubdivisionFitEvals += fitEvaluations;
+                acc.ScorePhasesPruned++;
+                acc.OnsetEvaluationsAvoided += normalized.Length - i;
                 return 0; // pruned: cannot beat incumbent; 0 never triggers the strict-'>' updates
             }
             double quarter = normalized[i] - phaseQuarters;
             double residual = quarter - Math.Round(quarter);
             if (residual == 0.5) residual = -0.5;
-            double bestFit = SubdivisionFit(residual, acc);
+            double bestFit = SubdivisionFitCounted(residual, ref fitEvaluations);
+            weightedFit += weights[i] * bestFit;
+        }
+        acc.SubdivisionFitEvals += fitEvaluations;
+        return totalWeight > 0 ? weightedFit / totalWeight : 0;
+    }
+
+    private static double ScoreForPhasePrunedNoCounters(
+        double[] normalized, double[] weights, double[] weightSuffix,
+        double phaseQuarters, double incumbentScore, double totalWeight)
+    {
+        if (totalWeight <= 0)
+            return 0;
+
+        double boundMargin = 8.0 * normalized.Length * double.Epsilon;
+        double threshold = incumbentScore * totalWeight / (1 + boundMargin);
+        double weightedFit = 0;
+        for (int i = 0; i < normalized.Length; i++)
+        {
+            if (weightedFit + weightSuffix[i] <= threshold)
+                return 0;
+            double quarter = normalized[i] - phaseQuarters;
+            double residual = quarter - Math.Round(quarter);
+            if (residual == 0.5) residual = -0.5;
+            weightedFit += weights[i] * SubdivisionFit(residual);
+        }
+        return totalWeight > 0 ? weightedFit / totalWeight : 0;
+    }
+
+    private static double ScoreForPhaseUnprunedCounted(
+        double[] normalized, double[] weights, double phaseQuarters,
+        double totalWeight, CounterAccumulator acc)
+    {
+        double weightedFit = 0;
+        int fitEvaluations = 0;
+        for (int i = 0; i < normalized.Length; i++)
+        {
+            double quarter = normalized[i] - phaseQuarters;
+            double residual = quarter - Math.Round(quarter);
+            if (residual == 0.5) residual = -0.5;
+            double bestFit = SubdivisionFitCounted(residual, ref fitEvaluations);
+            weightedFit += weights[i] * bestFit;
+        }
+        acc.SubdivisionFitEvals += fitEvaluations;
+        return totalWeight > 0 ? weightedFit / totalWeight : 0;
+    }
+
+    private static double ScoreForPhaseUnprunedNoCounters(
+        double[] normalized, double[] weights, double phaseQuarters,
+        double totalWeight)
+    {
+        double weightedFit = 0;
+        for (int i = 0; i < normalized.Length; i++)
+        {
+            double quarter = normalized[i] - phaseQuarters;
+            double residual = quarter - Math.Round(quarter);
+            if (residual == 0.5) residual = -0.5;
+            double bestFit = SubdivisionFit(residual);
             weightedFit += weights[i] * bestFit;
         }
         return totalWeight > 0 ? weightedFit / totalWeight : 0;
@@ -387,21 +615,182 @@ internal static class SymbolicTempoInference
     /// lattice: the highest weighted subdivision the residual lands within a small
     /// tolerance of an integer multiple, else a decaying fit to the quarter grid.</summary>
     private static double SubdivisionFit(double normalizedResidualQuarter)
-        => SubdivisionFit(normalizedResidualQuarter, acc: null);
-
-    private static double SubdivisionFit(double normalizedResidualQuarter, CounterAccumulator? acc)
     {
-        double best = 0;
-        foreach ((double units, double weight) in Subdivisions)
+        const double denominator = 2.0 * 0.08 * 0.08;
+        const double quarterWeight = 1.00;
+        const double eighthWeight = 0.96;
+        const double tripletEighthWeight = 0.92;
+        const double sixteenthWeight = 0.88;
+        const double tripletSixteenthWeight = 0.80;
+        const double thirtySecondWeight = 0.72;
+        const double inverseDenominator = 1.0 / denominator;
+
+        double deviation = normalizedResidualQuarter;
+        double bestDeviationSquared = deviation * deviation;
+        double bestLog = -bestDeviationSquared * inverseDenominator;
+        double bestWeight = quarterWeight;
+        if (bestLog >= LogEighthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        double scaled = normalizedResidualQuarter * 2.0;
+        deviation = scaled - Math.Round(scaled);
+        double deviationSquared = deviation * deviation;
+        double fitLog = LogEighthWeight - deviationSquared * inverseDenominator;
+        if (fitLog > bestLog)
         {
-            if (acc is not null) acc.SubdivisionFitEvals++;
-            // Is normalizedResidualQuarter a multiple of `units` (within a sliver)?
-            double scaled = normalizedResidualQuarter / units;
-            double deviation = scaled - Math.Round(scaled);
-            double fit = weight * Math.Exp(-deviation * deviation / (2.0 * 0.08 * 0.08));
-            if (fit > best) best = fit;
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = eighthWeight;
         }
-        return best;
+        if (bestLog >= LogTripletEighthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 3.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogTripletEighthWeight - deviationSquared * inverseDenominator;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = tripletEighthWeight;
+        }
+        if (bestLog >= LogSixteenthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 4.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogSixteenthWeight - deviationSquared * inverseDenominator;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = sixteenthWeight;
+        }
+        if (bestLog >= LogTripletSixteenthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 6.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogTripletSixteenthWeight - deviationSquared * inverseDenominator;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = tripletSixteenthWeight;
+        }
+        if (bestLog >= LogThirtySecondWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 8.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogThirtySecondWeight - deviationSquared * inverseDenominator;
+        if (fitLog > bestLog)
+        {
+            bestDeviationSquared = deviationSquared;
+            bestWeight = thirtySecondWeight;
+        }
+        return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+    }
+
+    private static double SubdivisionFitCounted(
+        double normalizedResidualQuarter, ref int fitEvaluations)
+    {
+        // Subdivisions is ordered by descending maximum possible fit. Once the
+        // current fit reaches the next term's weight, no later term can replace
+        // it because exp(x) <= 1. The exits are exact maxima bounds, not an
+        // approximation, and preserve the original strict `fit > best` rule.
+        const double sigma = 0.08;
+        const double denominator = 2.0 * sigma * sigma;
+        const double quarterWeight = 1.00;
+        const double eighthWeight = 0.96;
+        const double tripletEighthWeight = 0.92;
+        const double sixteenthWeight = 0.88;
+        const double tripletSixteenthWeight = 0.80;
+        const double thirtySecondWeight = 0.72;
+        const double inverseDenominator = 1.0 / denominator;
+
+        // normalizedResidualQuarter is already the signed residual from the
+        // nearest quarter. It is in [-0.5, 0.5], so the first lattice term needs
+        // neither a division nor another round.
+        double deviation = normalizedResidualQuarter;
+        double bestDeviationSquared = deviation * deviation;
+        double bestLog = -bestDeviationSquared * inverseDenominator;
+        double bestWeight = quarterWeight;
+        fitEvaluations++;
+        if (bestLog >= LogEighthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        double scaled = normalizedResidualQuarter * 2.0;
+        deviation = scaled - Math.Round(scaled);
+        double deviationSquared = deviation * deviation;
+        double fitLog = LogEighthWeight - deviationSquared * inverseDenominator;
+        fitEvaluations++;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = eighthWeight;
+        }
+        if (bestLog >= LogTripletEighthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 3.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogTripletEighthWeight - deviationSquared * inverseDenominator;
+        fitEvaluations++;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = tripletEighthWeight;
+        }
+        if (bestLog >= LogSixteenthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 4.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogSixteenthWeight - deviationSquared * inverseDenominator;
+        fitEvaluations++;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = sixteenthWeight;
+        }
+        if (bestLog >= LogTripletSixteenthWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 6.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogTripletSixteenthWeight - deviationSquared * inverseDenominator;
+        fitEvaluations++;
+        if (fitLog > bestLog)
+        {
+            bestLog = fitLog;
+            bestDeviationSquared = deviationSquared;
+            bestWeight = tripletSixteenthWeight;
+        }
+        if (bestLog >= LogThirtySecondWeight)
+            return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
+
+        scaled = normalizedResidualQuarter * 8.0;
+        deviation = scaled - Math.Round(scaled);
+        deviationSquared = deviation * deviation;
+        fitLog = LogThirtySecondWeight - deviationSquared * inverseDenominator;
+        fitEvaluations++;
+        if (fitLog > bestLog)
+        {
+            bestDeviationSquared = deviationSquared;
+            bestWeight = thirtySecondWeight;
+        }
+        return bestWeight * Math.Exp(-bestDeviationSquared / denominator);
     }
 
     private static (long PhaseSample, double Score) RefinePhase(long[] samples, double[] weights, double spq, double bestPhase, int sampleRate)
@@ -454,14 +843,16 @@ internal static class SymbolicTempoInference
     /// combined scores of each — the margin between them feeds confidence.
     /// </summary>
     private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
-        ResolveHalfDouble(VisualizationTimeline timeline, double bestBpm, List<TempoCandidate> candidates,
-            Onset[] onsets, int sampleRate, long searchPhaseSample, double searchRefinedScore, CounterAccumulator? acc)
+        ResolveHalfDouble(double bestBpm, List<TempoCandidate> candidates,
+            long[] samples, double[] weights, int sampleRate,
+            long[] durations, Onset[] accents,
+            long searchPhaseSample, double searchRefinedScore, CounterAccumulator? acc)
     {
         // The full power-of-two metrical family around the winning tempo, so the
         // exact half/double is always represented even if its raw grid score was
         // muted by the density of the other tempo.
         double[] ratios = { 0.25, 0.5, 1.0, 2.0, 4.0 };
-        var scored = new List<(TempoCandidate Candidate, double Score)>();
+        var scored = new List<(TempoCandidate Candidate, double Score)>(ratios.Length);
         foreach (double ratio in ratios)
         {
             double bpm = bestBpm / ratio;
@@ -473,36 +864,52 @@ internal static class SymbolicTempoInference
             // refined phase (Search now reports it), so the combined score uses it.
             if (Math.Abs(ratio - 1.0) < 1e-12)
             {
-                double reuseDurationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
-                double reuseAccentScore = AccentFitScore(timeline, bpm, sampleRate);
+                double reuseDurationScore = DurationSubdivisionScore(durations, bpm, sampleRate);
+                double reuseAccentScore = AccentFitScore(accents, bpm, sampleRate);
                 double reusePrior = TempoPrior(bpm);
                 double reuseCombined = 0.55 * searchRefinedScore + 0.20 * reuseDurationScore + 0.10 * reuseAccentScore + 0.15 * reusePrior;
                 scored.Add((new TempoCandidate(bpm, searchPhaseSample, reuseCombined, TempoAmbiguity.None), reuseCombined));
                 continue;
             }
-            long[] samples = onsets.Select(o => o.Sample).Distinct().OrderBy(s => s).ToArray();
-            double[] weights = onsets.GroupBy(o => o.Sample).Select(g => g.Sum(o => o.Weight)).ToArray();
             double spq = sampleRate * 60.0 / bpm;
-            // TI-HOIST: per-tempo onset normalization for the coarse phase scan.
-            double[] normalized = new double[samples.Length];
-            for (int i = 0; i < samples.Length; i++)
-                normalized[i] = samples[i] / spq;
-            double totalWeight = 0;
-            for (int i = 0; i < weights.Length; i++)
-                totalWeight += weights[i];
-            // Best phase via a coarse scan.
-            double bestPhase = -1, bestPhaseScore = -1;
-            for (int p = 0; p < PhaseSteps; p++)
+            TempoCandidate? coarse = FindCandidate(candidates, bpm);
+            double bestPhase;
+            double bestPhaseScore;
+            if (coarse is not null && double.IsFinite(coarse.PhaseOffsetSamples))
             {
-                double phaseSamples = spq * p / PhaseSteps;
-                double phaseQuarters = phaseSamples / spq;
-                // TI-PRUNE: unpruned (null suffix), see RefinePhase comment.
-                double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
-                if (score > bestPhaseScore * (1 + ScoreTieEpsilon)) { bestPhaseScore = score; bestPhase = phaseSamples; }
+                // Search already evaluated this BPM's complete coarse phase
+                // lattice. Reusing its incumbent avoids rescoring the same
+                // onset/subdivision pairs during metrical-family resolution.
+                bestPhase = coarse.PhaseOffsetSamples;
+                bestPhaseScore = coarse.Score;
+            }
+            else
+            {
+                // Defensive fallback for callers constructing candidates without
+                // the cached phase offset.
+                double[] normalized = new double[samples.Length];
+                for (int i = 0; i < samples.Length; i++)
+                    normalized[i] = samples[i] / spq;
+                double totalWeight = 0;
+                for (int i = 0; i < weights.Length; i++)
+                    totalWeight += weights[i];
+                bestPhase = -1;
+                bestPhaseScore = -1;
+                for (int p = 0; p < PhaseSteps; p++)
+                {
+                    double phaseSamples = spq * p / PhaseSteps;
+                    double phaseQuarters = PhaseQuarters[p];
+                    double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
+                    if (score > bestPhaseScore * (1 + ScoreTieEpsilon))
+                    {
+                        bestPhaseScore = score;
+                        bestPhase = phaseSamples;
+                    }
+                }
             }
             (long phaseSample, _) = RefinePhase(samples, weights, spq, bestPhase, sampleRate, acc);
-            double durationScore = DurationSubdivisionScore(timeline, bpm, sampleRate);
-            double accentScore = AccentFitScore(timeline, bpm, sampleRate);
+            double durationScore = DurationSubdivisionScore(durations, bpm, sampleRate);
+            double accentScore = AccentFitScore(accents, bpm, sampleRate);
             double prior = TempoPrior(bpm);
             double combined = 0.55 * bestPhaseScore + 0.20 * durationScore + 0.10 * accentScore + 0.15 * prior;
             scored.Add((new TempoCandidate(bpm, phaseSample, combined,
@@ -511,23 +918,46 @@ internal static class SymbolicTempoInference
                     : TempoAmbiguity.None), combined));
         }
 
-        TempoCandidate bestCandidate = scored.OrderByDescending(s => s.Score).First().Candidate;
-        double bestScore = scored.Max(s => s.Score);
-        // Nearest half/double alternative from the pool.
-        var alternatives = scored
-            .Where(s => Math.Abs(s.Score - bestScore) > 1e-9
-                && IsMetricalFamilyRatio(bestCandidate.Bpm / s.Candidate.Bpm))
-            .OrderByDescending(s => s.Score)
-            .ToList();
-        // Pick the pool's top-scoring candidate as the anchor for the closest such.
+        // The family is bounded to five candidates. Select the same stable
+        // first-on-tie winners as OrderByDescending/Max without creating an
+        // iterator chain and a second alternatives list.
+        TempoCandidate bestCandidate = scored[0].Candidate;
+        double bestScore = scored[0].Score;
+        for (int index = 1; index < scored.Count; index++)
+        {
+            (TempoCandidate candidate, double score) = scored[index];
+            if (score > bestScore)
+            {
+                bestCandidate = candidate;
+                bestScore = score;
+            }
+        }
+
         double? altBpm = null;
         double? altScore = null;
-        if (alternatives.Count > 0)
+        for (int index = 0; index < scored.Count; index++)
         {
-            altBpm = alternatives[0].Candidate.Bpm;
-            altScore = alternatives[0].Score;
+            (TempoCandidate candidate, double score) = scored[index];
+            if (Math.Abs(score - bestScore) <= 1e-9
+                || !IsMetricalFamilyRatio(bestCandidate.Bpm / candidate.Bpm))
+                continue;
+            if (altScore is null || score > altScore.Value)
+            {
+                altBpm = candidate.Bpm;
+                altScore = score;
+            }
         }
         return (bestCandidate, altBpm, bestScore, altScore);
+    }
+
+    private static TempoCandidate? FindCandidate(List<TempoCandidate> candidates, double bpm)
+    {
+        for (int index = 0; index < candidates.Count; index++)
+        {
+            if (Math.Abs(candidates[index].Bpm - bpm) < 1e-9)
+                return candidates[index];
+        }
+        return null;
     }
 
     private static bool IsMetricalFamilyRatio(double ratio)
@@ -547,12 +977,8 @@ internal static class SymbolicTempoInference
     /// coarser or finer subdivision. Octave choice is delegated to
     /// <see cref="TempoPrior"/>.
     /// </summary>
-    private static double DurationSubdivisionScore(VisualizationTimeline timeline, double bpm, int sampleRate)
+    private static double DurationSubdivisionScore(long[] durations, double bpm, int sampleRate)
     {
-        long[] durations = (timeline.Notes ?? Array.Empty<NoteEvent>())
-            .Where(n => n.EndSample > n.StartSample)
-            .Select(n => n.EndSample - n.StartSample)
-            .ToArray();
         if (durations.Length == 0)
             return 0;
         double spq = sampleRate * 60.0 / bpm;
@@ -577,9 +1003,9 @@ internal static class SymbolicTempoInference
     private static double DyadicFit(double quarters, double sigma)
     {
         double best = 0;
-        for (int k = 2; k <= 14; k++)
+        for (int index = 0; index < DyadicMultipliers.Length; index++)
         {
-            double scaled = quarters * Math.Pow(2, k);
+            double scaled = quarters * DyadicMultipliers[index];
             double deviation = scaled - Math.Round(scaled);
             if (deviation == 0.5) deviation = -0.5;
             double fit = Math.Exp(-deviation * deviation / (2.0 * sigma * sigma));
@@ -595,6 +1021,8 @@ internal static class SymbolicTempoInference
     /// strong onset evidence on its own.</summary>
     private const double PriorCenterBpm = 115.0;
     private const double PriorSigmaBpm = 70.0;
+    private static readonly double[] DyadicMultipliers =
+        [4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0];
 
     /// <summary>
     /// Broad musical tempo prior (Patch D.4): gently prefers the common beat band
@@ -620,23 +1048,9 @@ internal static class SymbolicTempoInference
     /// Returns a neutral 0.5 when no accent onsets exist, so a song without
     /// percussion is neither favored nor penalized.
     /// </summary>
-    private static double AccentFitScore(VisualizationTimeline timeline, double bpm, int sampleRate)
+    private static double AccentFitScore(Onset[] accented, double bpm, int sampleRate)
     {
-        var accented = new List<Onset>();
-        var seen = new HashSet<long>();
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
-        {
-            if (rhythm is null || !seen.Add(rhythm.SamplePosition))
-                continue;
-            accented.Add(new Onset(rhythm.SamplePosition, WeightFor(rhythm.Strength, high: true)));
-        }
-        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
-        {
-            if (hit is null || !seen.Add(hit.SamplePosition))
-                continue;
-            accented.Add(new Onset(hit.SamplePosition, 1.0));
-        }
-        if (accented.Count == 0)
+        if (accented.Length == 0)
             return 0.5;
 
         double spq = sampleRate * 60.0 / bpm;
@@ -675,7 +1089,43 @@ internal static class SymbolicTempoInference
             double weight = 0.6; // normal note attack
             list.Add(new Onset(note.StartSample, weight));
         }
-        return list.OrderBy(o => o.Sample).ThenBy(o => o.Weight).ToArray();
+        Onset[] ordered = list.ToArray();
+        Array.Sort(ordered, static (left, right) =>
+        {
+            int sample = left.Sample.CompareTo(right.Sample);
+            return sample != 0 ? sample : left.Weight.CompareTo(right.Weight);
+        });
+        return ordered;
+    }
+
+    private static long[] CollectDurations(VisualizationTimeline timeline)
+    {
+        var durations = new List<long>();
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note.EndSample > note.StartSample)
+                durations.Add(note.EndSample - note.StartSample);
+        }
+        return durations.ToArray();
+    }
+
+    private static Onset[] CollectAccents(VisualizationTimeline timeline)
+    {
+        var seen = new HashSet<long>();
+        var accented = new List<Onset>();
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null || !seen.Add(rhythm.SamplePosition))
+                continue;
+            accented.Add(new Onset(rhythm.SamplePosition, WeightFor(rhythm.Strength, high: true)));
+        }
+        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
+        {
+            if (hit is null || !seen.Add(hit.SamplePosition))
+                continue;
+            accented.Add(new Onset(hit.SamplePosition, 1.0));
+        }
+        return accented.ToArray();
     }
 
     private static double WeightFor(float strength, bool high) =>
@@ -690,7 +1140,10 @@ internal static class SymbolicTempoInference
     internal sealed class CounterAccumulator
     {
         public int OnsetCount;
+        public int UniqueSampleCount;
         public long ScoreForPhaseCalls;
         public long SubdivisionFitEvals;
+        public long ScorePhasesPruned;
+        public long OnsetEvaluationsAvoided;
     }
 }

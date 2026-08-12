@@ -81,6 +81,9 @@ public sealed class MidiExportRequest
 
     /// <summary>Stable fixture/input label written to machine-readable receipts.</summary>
     public string PerformanceFixture { get; init; } = "application-midi-export";
+
+    /// <summary>Enables nested Core MIDI stage timings and work counters.</summary>
+    public bool EnablePerformanceMetrics { get; init; }
 }
 
 /// <summary>Per-voice MIDI export transform (mirrors the Core exporter override).</summary>
@@ -150,6 +153,9 @@ public sealed class MidiExportResult
     public bool PhaseUnknown { get; init; }
 
     public ExportPerformanceSummary? Performance { get; init; }
+
+    /// <summary>Core nested stage timings and work counters, when requested.</summary>
+    public MidiPerformanceSnapshot? PerformanceMetrics { get; init; }
 
     /// <summary>Planner-owned tracks retained for benchmark semantic counters.</summary>
     internal IReadOnlyList<MidiTrack>? Tracks { get; init; }

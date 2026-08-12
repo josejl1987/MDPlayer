@@ -101,40 +101,46 @@ internal sealed partial class PanelOverlayRenderer
     private string ActivityLabel(PanelData panel, long currentSample)
     {
         // Device overview: "N active" where N counts the active channels.
-        int activeCount = CountActiveChannels(panel.Prepared, currentSample);
+        int activeCount = CountActiveChannels(panel, currentSample);
+        string cached = _activityLabelCache[panel.Index];
+        if (_activityLabelCounts[panel.Index] == activeCount && cached is not null)
+            return cached;
+
         int total = panel.Prepared.MainNotes.Length > 0 || panel.Prepared.Rhythm.Length > 0
             ? Math.Max(activeCount, 1)
             : activeCount;
-        return activeCount > 0
+        string label = activeCount > 0
             ? $"{activeCount} active"
             : total > 0 ? "idle" : "silent";
+        _activityLabelCounts[panel.Index] = activeCount;
+        _activityLabelCache[panel.Index] = label;
+        return label;
     }
 
-    private int CountActiveChannels(PreparedPanel prepared, long currentSample)
+    private int CountActiveChannels(PanelData panel, long currentSample)
     {
+        PreparedPanel prepared = panel.Prepared;
         int count = 0;
         if (ContainsRecentNote(prepared.MainNotes,
+                panel.MainNoteStreamId,
                 currentSample - (long)Math.Round(0.5 * _timeline.SampleRate), currentSample))
             count++;
-        foreach (PreparedNote[] ops in prepared.OperatorNotes)
+        int operatorCount = Math.Min(prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length);
+        for (int operatorIndex = 0; operatorIndex < operatorCount; operatorIndex++)
         {
-            if (ContainsRecentNote(ops,
+            if (ContainsRecentNote(prepared.OperatorNotes[operatorIndex],
+                    panel.OperatorNoteStreamIds[operatorIndex],
                     currentSample - (long)Math.Round(0.5 * _timeline.SampleRate), currentSample))
                 count++;
         }
-        int rhythmFirst = LowerBoundRhythm(prepared.Rhythm, currentSample - (long)Math.Round(0.5 * _timeline.SampleRate));
+        long recentStart = currentSample - (long)Math.Round(0.5 * _timeline.SampleRate);
+        int rhythmFirst;
+        if (!(_activeSequentialState?.TryGetRhythmFirst(
+                panel.RhythmStreamId, prepared.Rhythm, recentStart, out rhythmFirst) ?? false))
+            rhythmFirst = LowerBoundRhythm(prepared.Rhythm, recentStart);
         if (rhythmFirst < prepared.Rhythm.Length && prepared.Rhythm[rhythmFirst].SamplePosition <= currentSample)
             count++;
         return count;
-    }
-
-    private bool HasCurrentActivity(PanelData panel, long currentSample)
-    {
-        if (HasRecentActivity(panel.Index, currentSample))
-            return true;
-        if (HasPanelContactActivity(panel, currentSample))
-            return true;
-        return FindActive(panel.Prepared.MainNotes, currentSample) != null;
     }
 
     private bool HasTrackAudio(int panelIndex) => HasEnergyEnvelope(panelIndex) && HasAudioEnergy(panelIndex);
@@ -152,14 +158,28 @@ internal sealed partial class PanelOverlayRenderer
         return false;
     }
 
+    private bool HasCurrentActivity(PanelData panel, long currentSample)
+    {
+        if (HasRecentActivity(panel.Index, currentSample))
+            return true;
+        if (HasPanelContactActivity(panel, currentSample))
+            return true;
+        return FindActive(panel.Prepared.MainNotes, panel.MainNoteStreamId, currentSample) != null;
+    }
+
     private string CurrentStateText(PanelData panel, long currentSample)
     {
-        PreparedNote active = FindActive(panel.Prepared.MainNotes, currentSample);
+        PreparedNote active = FindActive(panel.Prepared.MainNotes, panel.MainNoteStreamId, currentSample);
         if (active == null && panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
         {
-            foreach (PreparedNote[] operatorNotes in panel.Prepared.OperatorNotes)
+            int operatorCount = Math.Min(
+                panel.Prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length);
+            for (int operatorIndex = 0; operatorIndex < operatorCount; operatorIndex++)
             {
-                active = FindActive(operatorNotes, currentSample);
+                active = FindActive(
+                    panel.Prepared.OperatorNotes[operatorIndex],
+                    panel.OperatorNoteStreamIds[operatorIndex],
+                    currentSample);
                 if (active != null)
                     break;
             }

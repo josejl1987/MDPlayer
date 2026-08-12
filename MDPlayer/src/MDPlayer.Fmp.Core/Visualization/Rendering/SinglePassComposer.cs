@@ -22,6 +22,7 @@ internal sealed class SinglePassComposer
     }
     internal interface IRawFrameSource : IDisposable
     {
+        bool FramesAreOpaque => false;
         bool Read(byte[] buffer, int count);
         void Drain();
     }
@@ -33,6 +34,7 @@ internal sealed class SinglePassComposer
     {
         private readonly Stream _stream;
         public ProcessRawFrameSource(Stream stream) => _stream = stream;
+        public bool FramesAreOpaque => true;
         public bool Read(byte[] buffer, int count) => ReadExactly(_stream, buffer, count);
         public void Drain() => SinglePassComposer.Drain(_stream);
         public void Dispose() { }
@@ -46,7 +48,13 @@ internal sealed class SinglePassComposer
         double BlockingSeconds = 0,
         double WallTimeSeconds = 0,
         long FrameCount = 0,
-        int QueueCapacity = 3);
+        int QueueCapacity = 3,
+        RenderPerformanceSnapshot? Renderer = null,
+        double ScopeFrameReadSeconds = 0,
+        double QueueWaitSeconds = 0,
+        double RendererBlockedSeconds = 0,
+        double EncoderIdleSeconds = 0,
+        double MuxFinalizationSeconds = 0);
 
     public sealed class Options
     {
@@ -169,7 +177,8 @@ internal sealed class SinglePassComposer
 
             Stream ffmpegIn = ffmpeg.StandardInput.BaseStream;
             using IRawFrameSource source = (sourceFactory ?? new ProcessRawFrameSourceFactory()).Create(corrProcess);
-            SequentialCompositeSession session = overlayRenderer.CreateSequentialSession();
+            SequentialCompositeSession session =
+                overlayRenderer.CreateSequentialSession(source.FramesAreOpaque);
             bool anyGrid = false;
             ComposeMetrics pipelineMetrics;
             try
@@ -214,7 +223,7 @@ internal sealed class SinglePassComposer
                     includeQueueWaitInCorrscopeMetrics: true,
                     cancellationToken,
                     abortProducer: () => { try { corrProcess.Kill(entireProcessTree: true); } catch { } });
-                LastMetrics = pipelineMetrics;
+                LastMetrics = pipelineMetrics with { Renderer = overlayRenderer.Performance };
                 ffmpeg.StandardInput.Close();
 
                 // Corrscope emits one more frame than the overlay expects
@@ -345,6 +354,7 @@ internal sealed class SinglePassComposer
             int outFrameBytes = overlayRenderer.FrameByteCount;
             Stream input = process.StandardInput.BaseStream;
             ComposeMetrics pipelineMetrics;
+            long finalizationStart = 0;
             try
             {
                 pipelineMetrics = RunFramePipeline(
@@ -380,10 +390,11 @@ internal sealed class SinglePassComposer
                     includeQueueWaitInCorrscopeMetrics: false,
                     CancellationToken.None,
                     abortProducer: null);
-                LastMetrics = pipelineMetrics;
+                LastMetrics = pipelineMetrics with { Renderer = overlayRenderer.Performance };
             }
             finally
             {
+                finalizationStart = Stopwatch.GetTimestamp();
                 try { process.StandardInput.Close(); } catch { }
             }
 
@@ -395,6 +406,14 @@ internal sealed class SinglePassComposer
                 throw new TimeoutException(
                     $"ffmpeg exceeded the {_options.TimeoutMinutes}-minute timeout");
             }
+
+            LastMetrics = LastMetrics with
+            {
+                MuxFinalizationSeconds =
+                    (finalizationStart > 0
+                        ? Stopwatch.GetTimestamp() - finalizationStart
+                        : 0) / (double)Stopwatch.Frequency,
+            };
 
             string stderr = stderrTask.GetAwaiter().GetResult();
             if (process.ExitCode != 0 || !File.Exists(tempPath))
@@ -491,7 +510,10 @@ internal sealed class SinglePassComposer
             process.Start();
             Task<string> stderrTask = process.StandardError.ReadToEndAsync();
             Stream input = process.StandardInput.BaseStream;
+            VisualizationFrameRenderer.SequentialSession session =
+                frameRenderer.CreateSequentialSession();
             ComposeMetrics pipelineMetrics;
+            long finalizationStart = 0;
             try
             {
                 // Bounded producer/consumer pipeline: the frame renderer fills
@@ -500,19 +522,32 @@ internal sealed class SinglePassComposer
                 // (overlay rendering is the principal bottleneck).
                 pipelineMetrics = RunFramePipeline(
                     _options.QueueCapacity,
-                    gridFrameBytes: 0,
+                    gridFrameBytes: frameRenderer.HasScopeSource
+                        ? frameRenderer.ScopeFrameByteCount
+                        : 0,
                     outFrameBytes: frameRenderer.FrameByteCount,
                     totalFrames: frameRenderer.TotalFrames,
                     (slot, frameIndex) =>
                     {
-                        slot.HasGrid = false;
+                        if (frameRenderer.HasScopeSource)
+                        {
+                            frameRenderer.ReadScopeFrame(frameIndex, slot.Grid);
+                            slot.HasGrid = true;
+                        }
+                        else
+                        {
+                            slot.HasGrid = false;
+                        }
                         ReportProgress(progress, frameIndex, frameRenderer.TotalFrames);
                         return true;
                     },
                     (slot, frameIndex, metrics) =>
                     {
                         long stageStart = Stopwatch.GetTimestamp();
-                        frameRenderer.RenderFrame(frameIndex, slot.Frame);
+                        session.RenderNext(
+                            frameIndex,
+                            slot.HasGrid ? slot.Grid : ReadOnlySpan<byte>.Empty,
+                            slot.Frame);
                         metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
 
                         stageStart = Stopwatch.GetTimestamp();
@@ -528,14 +563,19 @@ internal sealed class SinglePassComposer
                         metrics.FfmpegWriteTicks += Stopwatch.GetTimestamp() - stageStart;
                         return true;
                     },
-                    slot => { },
+                    slot => session.Initialize(slot.Frame),
                     includeQueueWaitInCorrscopeMetrics: false,
                     cancellationToken,
                     abortProducer: null);
-                LastMetrics = pipelineMetrics;
+                LastMetrics = pipelineMetrics with
+                {
+                    Renderer = frameRenderer.Performance,
+                    ScopeFrameReadSeconds = frameRenderer.ScopeFrameReadSeconds,
+                };
             }
             finally
             {
+                finalizationStart = Stopwatch.GetTimestamp();
                 try { process.StandardInput.Close(); } catch { }
             }
 
@@ -547,6 +587,14 @@ internal sealed class SinglePassComposer
                 throw new TimeoutException(
                     $"ffmpeg exceeded the {_options.TimeoutMinutes}-minute timeout");
             }
+
+            LastMetrics = LastMetrics with
+            {
+                MuxFinalizationSeconds =
+                    (finalizationStart > 0
+                        ? Stopwatch.GetTimestamp() - finalizationStart
+                        : 0) / (double)Stopwatch.Frequency,
+            };
 
             string stderr = stderrTask.GetAwaiter().GetResult();
             if (process.ExitCode != 0 || !File.Exists(tempPath))
@@ -597,7 +645,11 @@ internal sealed class SinglePassComposer
                 BlockingTicks / (double)Stopwatch.Frequency,
                 (Stopwatch.GetTimestamp() - wallStart) / (double)Stopwatch.Frequency,
                 FrameCount,
-                queueCapacity);
+                queueCapacity,
+                null,
+                QueueWaitTicks / (double)Stopwatch.Frequency,
+                BlockingTicks / (double)Stopwatch.Frequency,
+                QueueWaitTicks / (double)Stopwatch.Frequency);
         }
     }
 

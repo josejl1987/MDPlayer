@@ -9,16 +9,11 @@ internal sealed class SourceTimeline
         Timeline = timeline;
         Notes = timeline.Notes ?? Array.Empty<NoteEvent>();
         Rhythm = timeline.Rhythm ?? Array.Empty<RhythmEvent>();
-        NotesByDomain = Notes.Where(n => n?.Domain is not null)
-            .GroupBy(n => n.Domain!.Value)
-            .ToDictionary(g => g.Key, g => (IReadOnlyList<NoteEvent>)g.ToArray());
     }
 
     public VisualizationTimeline Timeline { get; }
     public IReadOnlyList<NoteEvent> Notes { get; }
     public IReadOnlyList<RhythmEvent> Rhythm { get; }
-    public IReadOnlyDictionary<SourceDomainKey, IReadOnlyList<NoteEvent>> NotesByDomain { get; }
-
     public static SourceTimeline Create(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);

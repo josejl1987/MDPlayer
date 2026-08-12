@@ -67,45 +67,67 @@ internal static class VisualizationFrameRendererFactory
         ArgumentNullException.ThrowIfNull(workspace);
         ArgumentNullException.ThrowIfNull(runtime);
 
-        PanelOverlayRenderer overlay = VisualizationComposition.CreateRenderer(
-            prepared.Timeline,
-            prepared.Layout,
-            VisualizationRendererOptions.Build(
-                prepared.Request,
-                prepared.Presentation,
-                introOutro,
-                prepared.Energy));
-
-        IScopeFrameSource? scope =
-            scopePolicy == ScopeFrameSourcePolicy.Interactive
-                ? CreateInteractiveScopeSource(prepared, overlay)
-                : CreateProductionScopeSource(prepared, workspace, runtime, overlay);
-
-        if (scope is null
-            && scopePolicy == ScopeFrameSourcePolicy.Production
-            && prepared.Scope.Enabled
-            && prepared.Layout.Geometry.HasScopes)
+        // Corrscope startup imports Matplotlib and can take hundreds of
+        // milliseconds. It is independent of the CPU overlay construction, so
+        // start it after its YAML is ready and let the pipe provide bounded
+        // backpressure while the static layer is built below.
+        IScopeFrameSource? scope = null;
+        try
         {
-            // No external bridge: fall back to the shared internal
-            // master-waveform source so preview, review and final all render
-            // the same scope content. This is the same fallback contract as
-            // Corrscope's own master-waveform mode.
-            scope = MasterWaveformFrameSource.TryCreate(
-                overlay,
-                prepared.MasterAudioPath,
-                overlay.FpsNumerator,
-                overlay.FpsDenominator);
-
-            if (scope is null)
+            if (scopePolicy == ScopeFrameSourcePolicy.Production)
             {
-                Console.Error.WriteLine(
-                    "warning: no scope source available (Corrscope/Python/bridge " +
-                    "missing and no usable master WAV); scope regions will render " +
-                    "transparent in preview, review AND final");
+                int scopeFrameByteCount = checked(
+                    prepared.Layout.Geometry.CorrscopeGridWidth
+                    * prepared.Layout.Geometry.CorrscopeGridHeight * 4);
+                scope = CreateProductionScopeSource(
+                    prepared, workspace, runtime, scopeFrameByteCount);
             }
-        }
 
-        return new VisualizationFrameRenderer(overlay, scope);
+            PanelOverlayRenderer overlay = VisualizationComposition.CreateRenderer(
+                prepared.Timeline,
+                prepared.Layout,
+                VisualizationRendererOptions.Build(
+                    prepared.Request,
+                    prepared.Presentation,
+                    introOutro,
+                    prepared.Energy));
+
+            if (scopePolicy == ScopeFrameSourcePolicy.Interactive)
+                scope = CreateInteractiveScopeSource(prepared, overlay);
+
+            if (scope is null
+                && scopePolicy == ScopeFrameSourcePolicy.Production
+                && prepared.Scope.Enabled
+                && prepared.Layout.Geometry.HasScopes)
+            {
+                // No external bridge: fall back to the shared internal
+                // master-waveform source so preview, review and final all render
+                // the same scope content. This is the same fallback contract as
+                // Corrscope's own master-waveform mode.
+                scope = MasterWaveformFrameSource.TryCreate(
+                    overlay,
+                    prepared.MasterAudioPath,
+                    overlay.FpsNumerator,
+                    overlay.FpsDenominator);
+
+                if (scope is null)
+                {
+                    Console.Error.WriteLine(
+                        "warning: no scope source available (Corrscope/Python/bridge " +
+                        "missing and no usable master WAV); scope regions will render " +
+                        "transparent in preview, review AND final");
+                }
+            }
+
+            return new VisualizationFrameRenderer(overlay, scope);
+        }
+        catch
+        {
+            // If overlay construction fails after the external process starts,
+            // do not leave a producer process or pipe behind.
+            scope?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -144,7 +166,7 @@ internal static class VisualizationFrameRendererFactory
         PreparedVisualizationSource prepared,
         VisualizationWorkspace workspace,
         RenderRuntimeOptions runtime,
-        PanelOverlayRenderer overlay)
+        int scopeFrameByteCount)
     {
         if (!prepared.Scope.Enabled || !prepared.Layout.Geometry.HasScopes)
             return null;
@@ -208,7 +230,7 @@ internal static class VisualizationFrameRendererFactory
                 pythonPath,
                 bridgePath,
                 workspace.CorrscopeConfigPath),
-            overlay.ScopeFrameByteCount);
+            scopeFrameByteCount);
     }
 }
 

@@ -149,7 +149,7 @@ internal class ScopeRenderer
         }
 
         var broadcast = new BroadcastChipSink(broadcastSinks);
-        var runtime = new FmpRuntime(broadcast, _assets, _fileSystem);
+        var runtime = new FmpRuntime(broadcast, _assets, _fileSystem, controlTickRate: _sampleRate);
 
         foreach (var state in stemStates)
             state.Sink.Start();

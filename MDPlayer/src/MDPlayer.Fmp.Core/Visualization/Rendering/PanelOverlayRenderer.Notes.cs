@@ -13,31 +13,40 @@ internal sealed partial class PanelOverlayRenderer
             or VisualizationNoteMode.SsgEnvelopeToneNoise
             or VisualizationNoteMode.SsgEnvelopeNoise;
 
-    private void DrawPitchedPanel(Span<byte> frame, PanelData panel, long currentSample, bool reserveFm3OperatorRibbons)
+    private void DrawPitchedPanel(
+        Span<byte> frame,
+        PanelData panel,
+        long currentSample,
+        bool reserveFm3OperatorRibbons,
+        (double Min, double Max)? sharedRange = null)
     {
         OverlayRect lane = _layout.GetPitchedLaneRect(panel.Index, reserveFm3OperatorRibbons);
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
-        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        (double minMidi, double maxMidi) = sharedRange ?? GetPitchRange(panel, currentSample);
         int preferredRibbonHeight = NormalRibbonHeight(lane, minMidi, maxMidi);
         DrawVisibleNotes(
             frame, panel, panel.Prepared.MainNotes, lane, currentSample, false,
             windowStart, windowEnd, windowSamples, minMidi, maxMidi, _layout.GetPlayheadX(panel.Index),
-            preferredRibbonHeight);
+            preferredRibbonHeight, panel.MainNoteStreamId);
     }
 
-    private void DrawSsgPanel(Span<byte> frame, PanelData panel, long currentSample)
+    private void DrawSsgPanel(
+        Span<byte> frame,
+        PanelData panel,
+        long currentSample,
+        (double Min, double Max)? sharedRange = null)
     {
         OverlayRect lane = _layout.GetPitchedLaneRect(panel.Index, false);
         PreparedNote[] notes = panel.Prepared.MainNotes;
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
-        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        (double minMidi, double maxMidi) = sharedRange ?? GetPitchRange(panel, currentSample);
         int playheadX = _layout.GetPlayheadX(panel.Index);
         int preferredRibbonHeight = NormalRibbonHeight(lane, minMidi, maxMidi);
-        int first = FindFirstVisibleIndex(notes, windowStart);
+        int first = FindFirstVisibleIndex(notes, panel.MainNoteStreamId, windowStart);
 
         for (int index = first; index < notes.Length; index++)
         {
@@ -50,10 +59,14 @@ internal sealed partial class PanelOverlayRenderer
             bool noiseOnly = note.Mode is VisualizationNoteMode.SsgNoise or VisualizationNoteMode.SsgEnvelopeNoise;
             if (noiseOnly)
             {
-                DrawNoiseStrip(frame, panel, note, lane, currentSample);
+                DrawNoiseStrip(
+                    frame, panel, note, lane, currentSample,
+                    windowStart, windowEnd, windowSamples);
                 continue;
             }
 
+            if (_performance.Enabled)
+                _performance.VisibleNotesVisited++;
             DrawNote(
                 frame, panel, note, lane, currentSample, false,
                 windowStart, windowEnd, windowSamples, minMidi, maxMidi, playheadX,
@@ -74,9 +87,10 @@ internal sealed partial class PanelOverlayRenderer
         double panelMinMidi,
         double panelMaxMidi,
         int playheadX,
-        int preferredRibbonHeight)
+        int preferredRibbonHeight,
+        int streamId = -1)
     {
-        int first = FindFirstVisibleIndex(notes, windowStart);
+        int first = FindFirstVisibleIndex(notes, streamId, windowStart);
 
         for (int index = first; index < notes.Length; index++)
         {
@@ -85,6 +99,8 @@ internal sealed partial class PanelOverlayRenderer
                 break;
             if (note.EndSample <= windowStart)
                 continue;
+            if (_performance.Enabled)
+                _performance.VisibleNotesVisited++;
             DrawNote(
                 frame, panel, note, lane, currentSample, operatorRibbon,
                 windowStart, windowEnd, windowSamples, panelMinMidi, panelMaxMidi, playheadX,
@@ -231,7 +247,10 @@ internal sealed partial class PanelOverlayRenderer
         // pitch (bends, vibrato, portamento). There is no detached pitch line.
         // §13.4: FM3 operator ribbons render at ×0.6 opacity.
         double opOpacity = operatorRibbon ? 0.6 : 1.0;
-        DrawPitchRibbon(frame, panel, note, lane, currentSample, leftX, rightX, fill, minMidi, maxMidi, ribbonHeight, opOpacity, flashAmount, active, energy);
+        DrawPitchRibbon(
+            frame, panel, note, lane, currentSample, leftX, rightX, fill,
+            minMidi, maxMidi, ribbonHeight, opOpacity, flashAmount, active, energy,
+            playheadX, windowStart, windowSamples / lane.Width);
 
         // Onset cap (§8.5): a bright, opaque, accent-bordered bar at the note
         // start, enlarged for the first ~110 ms. Retriggers get a double cap
@@ -242,14 +261,18 @@ internal sealed partial class PanelOverlayRenderer
         int capWidth = Math.Max(3, lane.Width / CapWidthDivisor);
         if (onsetVisible)
         {
+            double startMidi = note.StartMidiNote;
+            if (double.IsNaN(startMidi))
+            {
+                startMidi = PitchContour.PitchAtSample(
+                    note, note.StartSample, _samplesPerFrame);
+            }
             double ageMs = (currentSample - note.StartSample) * 1000.0 / _timeline.SampleRate;
             bool enlarged = ageMs >= 0 && ageMs < OnsetCapEnlargedMs;
             int capX = (int)Math.Round(
                 _layout.SampleToX(note.StartSample, currentSample, _timeline.SampleRate, lane));
-            int capCentreY = MidiToY(
-                PitchContour.PitchAtSample(note, note.StartSample, _samplesPerFrame),
-                minMidi, maxMidi, lane);
             int capHeight = ribbonHeight + (enlarged ? 4 : 2);
+            int capCentreY = MidiToY(startMidi, minMidi, maxMidi, lane);
             int capTop = Math.Clamp(capCentreY - capHeight / 2, lane.Y, lane.Bottom - 1);
             int capBottom = Math.Clamp(capCentreY + (capHeight - capHeight / 2), lane.Y, lane.Bottom);
             if (capBottom > capTop && capX >= lane.X && capX < lane.Right)
@@ -283,7 +306,8 @@ internal sealed partial class PanelOverlayRenderer
             {
                 double rippleAgeMs = (currentSample - note.StartSample) * 1000.0 / _timeline.SampleRate;
                 if (rippleAgeMs >= 0 && rippleAgeMs < RippleMs)
-                    DrawOnsetRipple(frame, panel, note, lane, currentSample, minMidi, maxMidi, rippleAgeMs);
+                    DrawOnsetRipple(
+                        frame, panel, note, lane, startMidi, minMidi, maxMidi, rippleAgeMs);
             }
         }
 
@@ -299,8 +323,14 @@ internal sealed partial class PanelOverlayRenderer
                 int endX = (int)Math.Round(rightX);
                 if (endX >= lane.X && endX < lane.Right)
                 {
+                    double endMidi = note.EndMidiNote;
+                    if (double.IsNaN(endMidi))
+                    {
+                        endMidi = PitchContour.PitchAtSample(
+                            note, note.EndSample, _samplesPerFrame);
+                    }
                     int endCentreY = MidiToY(
-                        PitchContour.PitchAtSample(note, note.EndSample, _samplesPerFrame),
+                        endMidi,
                         minMidi, maxMidi, lane);
                     int endTop = Math.Clamp(endCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
                     int endBottom = Math.Clamp(endCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
@@ -313,8 +343,14 @@ internal sealed partial class PanelOverlayRenderer
         {
             // The note continues past the visible window: a half-visible end
             // marker at the panel edge instead of a release cap.
+            double endMidi = note.EndMidiNote;
+            if (double.IsNaN(endMidi))
+            {
+                endMidi = PitchContour.PitchAtSample(
+                    note, note.EndSample, _samplesPerFrame);
+            }
             int markerCentreY = MidiToY(
-                PitchContour.PitchAtSample(note, note.EndSample, _samplesPerFrame),
+                endMidi,
                 minMidi, maxMidi, lane);
             int markerTop = Math.Clamp(markerCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
             int markerBottom = Math.Clamp(markerCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
@@ -354,12 +390,14 @@ internal sealed partial class PanelOverlayRenderer
         {
             // Active pitch marker: a small bright marker centered on the pitch
             // contour at the playhead, making vibrato and bends easier to follow.
+            double activeMidi = active
+                ? PitchContour.PitchAtSample(note, currentSample, _samplesPerFrame)
+                : double.NaN;
             if (active)
             {
-                double actualMidi = PitchContour.PitchAtSample(note, currentSample, _samplesPerFrame);
-                if (actualMidi >= 0)
+                if (activeMidi >= 0)
                 {
-                    int markerY = MidiToY(actualMidi, minMidi, maxMidi, lane);
+                    int markerY = MidiToY(activeMidi, minMidi, maxMidi, lane);
                     if (lane.Contains(playheadX, markerY))
                     {
                         DrawContactFlare(frame, playheadX, markerY, accent, lane);
@@ -381,12 +419,11 @@ internal sealed partial class PanelOverlayRenderer
             // outside the viewport, draw a chevron at the edge.
             if (active && _cameras[panel.Index] != null)
             {
-                double actualMidi = PitchContour.PitchAtSample(note, currentSample, _samplesPerFrame);
                 double lo = panelMinMidi;
                 double hi = panelMaxMidi;
-                if (actualMidi < lo)
+                if (activeMidi < lo)
                     DrawChevron(frame, playheadX, lane.Y, true, accent.Lighten(0.5), lane);
-                else if (actualMidi >= hi)
+                else if (activeMidi >= hi)
                     DrawChevron(frame, playheadX, lane.Bottom - 1, false, accent.Lighten(0.5), lane);
             }
         }
@@ -462,14 +499,14 @@ internal sealed partial class PanelOverlayRenderer
         PanelData panel,
         PreparedNote note,
         OverlayRect lane,
-        long currentSample,
+        double onsetMidi,
         double minMidi,
         double maxMidi,
         double ageMs)
     {
         int playheadX = _layout.GetPlayheadX(panel.Index);
         int centreY = MidiToY(
-            PitchContour.PitchAtSample(note, note.StartSample, _samplesPerFrame),
+            onsetMidi,
             minMidi, maxMidi, lane);
         if (!lane.Contains(playheadX, centreY))
             return;
@@ -605,7 +642,10 @@ internal sealed partial class PanelOverlayRenderer
         double opacityFactor = 1.0,
         double flashAmount = 0,
         bool active = false,
-        float energy = 0)
+        float energy = 0,
+        int playheadX = 0,
+        long windowStart = 0,
+        double samplesPerPixel = 0)
     {
         int firstX = Math.Max(lane.X, (int)Math.Ceiling(leftX - 1e-9));
         int lastXExclusive = Math.Min(lane.Right, (int)Math.Floor(rightX + 1e-9));
@@ -615,8 +655,11 @@ internal sealed partial class PanelOverlayRenderer
         double leftCoverage = Math.Clamp(firstX - leftX, 0, 1);
         double rightCoverage = Math.Clamp(rightX - lastXExclusive, 0, 1);
 
-        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
-        double samplesPerPixel = _layout.WindowSeconds * _timeline.SampleRate / lane.Width;
+        if (samplesPerPixel <= 0)
+        {
+            windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+            samplesPerPixel = _layout.WindowSeconds * _timeline.SampleRate / lane.Width;
+        }
         double half = ribbonHeight / 2.0;
 
         bool stipple = note.Mode is VisualizationNoteMode.SsgToneNoise
@@ -628,7 +671,8 @@ internal sealed partial class PanelOverlayRenderer
 
         int firstColumn = Math.Max(lane.X, firstX - 1);
         int lastColumn = Math.Min(lane.Right - 1, lastXExclusive);
-        int playheadX = _layout.GetPlayheadX(panel.Index);
+        if (playheadX == 0)
+            playheadX = _layout.GetPlayheadX(panel.Index);
         int pitchSegment = -1;
 
         // Normal releases taper the final 40–80 ms of the ribbon (§8.6);
@@ -1004,9 +1048,18 @@ internal sealed partial class PanelOverlayRenderer
         PanelData panel,
         PreparedNote note,
         OverlayRect lane,
-        long currentSample)
+        long currentSample,
+        long windowStart,
+        long windowEnd,
+        double windowSamples)
     {
-        if (!TryClipTimeSpanFractional(note.StartSample, note.EndSample, currentSample, lane,
+        if (!TryClipTimeSpanFractional(
+                note.StartSample,
+                note.EndSample,
+                windowStart,
+                windowEnd,
+                windowSamples,
+                lane,
             out double leftX, out double rightX))
             return;
 

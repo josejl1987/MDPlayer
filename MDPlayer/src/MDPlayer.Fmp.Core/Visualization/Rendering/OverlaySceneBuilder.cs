@@ -125,6 +125,7 @@ internal static class OverlaySceneBuilder
                     .Select(e => new PreparedRhythmEvent
                     {
                         Voice = e.Voice,
+                        RowIndex = FindRhythmRow(topologyPanel.Rows, e.Voice),
                         SamplePosition = e.SamplePosition,
                         Strength = e.Strength,
                         Pan = e.Pan,
@@ -297,6 +298,16 @@ internal static class OverlaySceneBuilder
             StartSample = timeline.StartSample,
             EndSample = timeline.EndSample,
         };
+    }
+
+    private static int FindRhythmRow(IReadOnlyList<PanelRowDefinition> rows, string voice)
+    {
+        for (int index = 0; index < rows.Count; index++)
+        {
+            if (string.Equals(rows[index].Id, voice, StringComparison.Ordinal))
+                return index;
+        }
+        return -1;
     }
 
     private static VisualizationTrackDescriptor CreateTrackDescriptor(
@@ -652,12 +663,17 @@ internal static class OverlaySceneBuilder
             note.ChannelId,
             note.InitialMidiNote);
         var activeFill = fill.Lighten(0.3);
+        PreparedPitchPoint[] pitch = BuildPitchPoints(note, pitchToleranceSemitones);
 
         return new PreparedNote
         {
             StartSample = note.StartSample,
             EndSample = note.EndSample,
             InitialMidiNote = note.InitialMidiNote,
+            StartMidiNote = PitchContour.PitchAtSample(
+                note.InitialMidiNote, pitch, note.StartSample),
+            EndMidiNote = PitchContour.PitchAtSample(
+                note.InitialMidiNote, pitch, note.EndSample),
             Mode = note.Mode,
             InstrumentId = note.InstrumentId,
             Text = PrepareInstrumentText(note.InstrumentId, instruments),
@@ -670,7 +686,7 @@ internal static class OverlaySceneBuilder
             ActiveFill = activeFill,
             CapFill = fill.Lighten(0.45),
             Accent = fill.Lighten(0.5),
-            Pitch = BuildPitchPoints(note, pitchToleranceSemitones),
+            Pitch = pitch,
         };
     }
 

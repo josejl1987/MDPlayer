@@ -73,6 +73,116 @@ internal sealed record MidiTuningEvent(
     int CoarseSemitones,
     int FineCents) : MidiEventBase(TickIn);
 
+/// <summary>
+/// Compact production MIDI IR. Ordinary channel events carry only fixed-width
+/// values; the richer polymorphic records remain a compatibility view for tests
+/// and callers that inspect an exported track after serialization.
+/// </summary>
+internal enum PackedMidiEventKind : byte
+{
+    NoteOff,
+    NoteOn,
+    Tempo,
+    TimeSignature,
+    Bank,
+    Program,
+    BendRange,
+    PitchBend,
+    Tuning,
+}
+
+internal struct PackedMidiEvent
+{
+    public long Tick;
+    public int SourceOrder;
+    public int Track;
+    public int A;
+    public int B;
+    public int Channel;
+    public PackedMidiEventKind Kind;
+
+    public static PackedMidiEvent Note(
+        long tick, int track, int channel, int note, int velocity, bool noteOn)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = note,
+            B = velocity,
+            Kind = noteOn ? PackedMidiEventKind.NoteOn : PackedMidiEventKind.NoteOff,
+        };
+
+    public static PackedMidiEvent Bank(long tick, int track, int channel, int bank)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = bank,
+            Kind = PackedMidiEventKind.Bank,
+        };
+
+    public static PackedMidiEvent Program(long tick, int track, int channel, int program)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = program,
+            Kind = PackedMidiEventKind.Program,
+        };
+
+    public static PackedMidiEvent PitchBend(long tick, int track, int channel, int bend)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = bend,
+            Kind = PackedMidiEventKind.PitchBend,
+        };
+
+    public static PackedMidiEvent BendRange(long tick, int track, int channel, int semitones)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = semitones,
+            Kind = PackedMidiEventKind.BendRange,
+        };
+
+    public static PackedMidiEvent Tuning(
+        long tick, int track, int channel, int coarseSemitones, int fineCents)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = coarseSemitones,
+            B = fineCents,
+            Kind = PackedMidiEventKind.Tuning,
+        };
+
+    public static PackedMidiEvent Tempo(long tick, int microsecondsPerQuarter)
+        => new()
+        {
+            Tick = tick,
+            A = microsecondsPerQuarter,
+            Kind = PackedMidiEventKind.Tempo,
+        };
+
+    public static PackedMidiEvent TimeSignature(long tick, int numerator, int denominator)
+        => new()
+        {
+            Tick = tick,
+            A = numerator,
+            B = denominator,
+            Kind = PackedMidiEventKind.TimeSignature,
+        };
+}
+
 /// <summary>End of Track is appended automatically.</summary>
 internal static class MidiEventOrder
 {
@@ -96,4 +206,18 @@ internal static class MidiEventOrder
             _ => 5,
         };
     }
+
+    public static int Rank(PackedMidiEvent evt) => evt.Kind switch
+    {
+        PackedMidiEventKind.NoteOff => 0,
+        PackedMidiEventKind.Tempo => 1,
+        PackedMidiEventKind.TimeSignature => 1,
+        PackedMidiEventKind.BendRange => 2,
+        PackedMidiEventKind.Tuning => 2,
+        PackedMidiEventKind.Bank => 2,
+        PackedMidiEventKind.Program => 2,
+        PackedMidiEventKind.PitchBend => 3,
+        PackedMidiEventKind.NoteOn => 4,
+        _ => 5,
+    };
 }

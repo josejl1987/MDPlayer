@@ -19,22 +19,22 @@ namespace Fmp.Core.Visualization.Rendering;
 /// </summary>
 internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 {
-    // Same color the branch used for the FFmpeg master-waveform fallback.
-    private static readonly byte[] Color = { 0x7A, 0xA4, 0xFF, 0x70 };
-
-    private readonly PanelOverlayRenderer _overlay;
     private readonly int _sampleRate;
     private readonly int _fpsNumerator;
     private readonly int _fpsDenominator;
     private readonly int _channels;
     private readonly long _dataStart;
     private readonly long _totalSamples;
+    private readonly long _pastSamples;
+    private readonly long _windowSamples;
     private readonly int _gridWidth;
     private readonly int _gridHeight;
     private readonly FileStream _stream;
     private readonly int _bucketSize;
     private readonly int[] _minimums;
     private readonly int[] _maximums;
+    private readonly ScopeCell[] _cells;
+    private readonly ColumnEnvelope[] _columnEnvelopes;
 
     private MasterWaveformFrameSource(
         PanelOverlayRenderer overlay,
@@ -48,7 +48,6 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         int gridWidth,
         int gridHeight)
     {
-        _overlay = overlay;
         _sampleRate = sampleRate;
         _fpsNumerator = fpsNumerator;
         _fpsDenominator = fpsDenominator;
@@ -58,6 +57,9 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         _gridWidth = gridWidth;
         _gridHeight = gridHeight;
         _stream = stream;
+        _pastSamples = (long)Math.Round(overlay.Layout.PastSeconds * sampleRate);
+        long futureSamples = (long)Math.Round(overlay.Layout.FutureSeconds * sampleRate);
+        _windowSamples = Math.Max(0, _pastSamples + futureSamples);
         long visibleSamples = Math.Max(1, (long)Math.Round(overlay.Layout.WindowSeconds * sampleRate));
         long targetBuckets = Math.Max(1, (long)gridWidth * 2);
         _bucketSize = (int)Math.Clamp(
@@ -65,6 +67,8 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         int bucketCount = checked((int)((totalSamples + _bucketSize - 1) / _bucketSize));
         _minimums = new int[bucketCount];
         _maximums = new int[bucketCount];
+        _cells = BuildCells(overlay.Layout, _gridWidth, _gridHeight);
+        _columnEnvelopes = BuildColumnEnvelopes(_cells, _windowSamples);
         BuildPeakEnvelope();
     }
 
@@ -216,29 +220,25 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 
         long currentSample = OverlayLayout.FrameToSample(
             frameIndex, _sampleRate, _fpsNumerator, _fpsDenominator);
-        long startSample = _overlay.Layout.WindowStartSample(currentSample, _sampleRate);
-        long endSample = _overlay.Layout.WindowEndSample(currentSample, _sampleRate);
-        long windowSamples = Math.Max(0, endSample - startSample);
+        long startSample = currentSample - _pastSamples;
 
-        int panelCount = _overlay.Layout.PanelCount;
-        int columnCount = _overlay.Layout.ColumnCount;
-        int scopeHeight = _overlay.Layout.ScopeHeight;
+        // Every scope cell shows the same master-waveform window. A layout can
+        // produce a few distinct cell widths due to integer column rounding;
+        // prepare each width once, then reuse it for every cell with that width.
+        foreach (ColumnEnvelope envelope in _columnEnvelopes)
+            PrepareColumns(envelope, startSample);
 
-        for (int panelIndex = 0; panelIndex < panelCount; panelIndex++)
+        foreach (ScopeCell cell in _cells)
         {
-            int row = panelIndex / columnCount;
-            OverlayRect scope = _overlay.Layout.GetScopeRect(panelIndex);
-            int cellWidth = Math.Min(_gridWidth - scope.X, scope.Width);
-            if (cellWidth <= 0 || scopeHeight <= 0)
-                continue;
+            ColumnEnvelope envelope = _columnEnvelopes[cell.EnvelopeIndex];
             DrawCell(
                 destination,
-                scope.X,
-                row * scopeHeight,
-                cellWidth,
-                scopeHeight,
-                startSample,
-                windowSamples);
+                cell.X,
+                cell.Y,
+                cell.Width,
+                cell.Height,
+                envelope.Minimums,
+                envelope.Maximums);
         }
     }
 
@@ -291,31 +291,18 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
         int cellY,
         int width,
         int height,
-        long startSample,
-        long windowSamples)
+        int[] preparedMinimums,
+        int[] preparedMaximums)
     {
         int yCenter = cellY + height / 2;
         int scale = Math.Max(1, height / 2 - 1);
 
         for (int x = 0; x < width; x++)
         {
-            int min = 0;
-            int max = 0;
-            long sampleStart = startSample + x * windowSamples / width;
-            long sampleEnd = startSample + (x + 1L) * windowSamples / width;
-            if (sampleEnd <= sampleStart) sampleEnd = sampleStart + 1;
-            if (sampleEnd > 0 && sampleStart < _totalSamples)
-            {
-                sampleStart = Math.Max(0, sampleStart);
-                sampleEnd = Math.Min(_totalSamples, sampleEnd);
-                int firstBucket = (int)Math.Clamp(sampleStart / _bucketSize, 0, _minimums.Length - 1);
-                int lastBucket = (int)Math.Clamp((sampleEnd - 1) / _bucketSize, 0, _minimums.Length - 1);
-                for (int bucket = firstBucket; bucket <= lastBucket; bucket++)
-                {
-                    min = Math.Min(min, _minimums[bucket]);
-                    max = Math.Max(max, _maximums[bucket]);
-                }
-            }
+            int min;
+            int max;
+            min = preparedMinimums[x];
+            max = preparedMaximums[x];
 
             int yTop = yCenter - ((max * scale + 16384) >> 15);
             int yBottom = yCenter - ((min * scale + 16384) >> 15);
@@ -330,11 +317,127 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
             for (int y = yTop; y <= yBottom; y++)
             {
                 int offset = (y * _gridWidth + cellX + x) * 4;
-                destination[offset] = Color[0];
-                destination[offset + 1] = Color[1];
-                destination[offset + 2] = Color[2];
-                destination[offset + 3] = Color[3];
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    destination.Slice(offset, sizeof(uint)),
+                    0x70FFA47Au);
             }
         }
+    }
+
+    private void PrepareColumns(ColumnEnvelope envelope, long startSample)
+    {
+        int width = envelope.Width;
+        int[] minimums = envelope.Minimums;
+        int[] maximums = envelope.Maximums;
+        long[] startOffsets = envelope.StartOffsets;
+        long[] endOffsets = envelope.EndOffsets;
+        for (int x = 0; x < width; x++)
+        {
+            int min = 0;
+            int max = 0;
+            long sampleStart = startSample + startOffsets[x];
+            long sampleEnd = startSample + endOffsets[x];
+            if (sampleEnd <= sampleStart)
+                sampleEnd = sampleStart + 1;
+            if (sampleEnd > 0 && sampleStart < _totalSamples)
+            {
+                sampleStart = Math.Max(0, sampleStart);
+                sampleEnd = Math.Min(_totalSamples, sampleEnd);
+                int firstBucket = (int)Math.Clamp(sampleStart / _bucketSize, 0, _minimums.Length - 1);
+                int lastBucket = (int)Math.Clamp((sampleEnd - 1) / _bucketSize, 0, _minimums.Length - 1);
+                for (int bucket = firstBucket; bucket <= lastBucket; bucket++)
+                {
+                    min = Math.Min(min, _minimums[bucket]);
+                    max = Math.Max(max, _maximums[bucket]);
+                }
+            }
+            minimums[x] = min;
+            maximums[x] = max;
+        }
+    }
+
+    private static ScopeCell[] BuildCells(OverlayLayout layout, int gridWidth, int gridHeight)
+    {
+        int scopeHeight = layout.ScopeHeight;
+        var cells = new ScopeCell[layout.PanelCount];
+        int cellCount = 0;
+        for (int panelIndex = 0; panelIndex < layout.PanelCount; panelIndex++)
+        {
+            OverlayRect scope = layout.GetScopeRect(panelIndex);
+            int width = Math.Min(gridWidth - scope.X, scope.Width);
+            if (width <= 0 || scopeHeight <= 0)
+                continue;
+            cells[cellCount++] = new ScopeCell(
+                scope.X,
+                (panelIndex / layout.ColumnCount) * scopeHeight,
+                width,
+                Math.Min(gridHeight - ((panelIndex / layout.ColumnCount) * scopeHeight), scopeHeight),
+                0);
+        }
+
+        if (cellCount == cells.Length)
+            return cells;
+        Array.Resize(ref cells, cellCount);
+        return cells;
+    }
+
+    private static ColumnEnvelope[] BuildColumnEnvelopes(ScopeCell[] cells, long windowSamples)
+    {
+        var envelopes = new ColumnEnvelope[cells.Length];
+        int count = 0;
+        for (int cellIndex = 0; cellIndex < cells.Length; cellIndex++)
+        {
+            int width = cells[cellIndex].Width;
+            int envelopeIndex = -1;
+            for (int index = 0; index < count; index++)
+            {
+                if (envelopes[index].Width == width)
+                {
+                    envelopeIndex = index;
+                    break;
+                }
+            }
+
+            if (envelopeIndex < 0)
+            {
+                envelopeIndex = count++;
+                envelopes[envelopeIndex] = new ColumnEnvelope(width, windowSamples);
+            }
+
+            cells[cellIndex] = cells[cellIndex] with { EnvelopeIndex = envelopeIndex };
+        }
+
+        Array.Resize(ref envelopes, count);
+        return envelopes;
+    }
+
+    private readonly record struct ScopeCell(
+        int X,
+        int Y,
+        int Width,
+        int Height,
+        int EnvelopeIndex);
+
+    private sealed class ColumnEnvelope
+    {
+        public ColumnEnvelope(int width, long windowSamples)
+        {
+            Width = width;
+            Minimums = new int[width];
+            Maximums = new int[width];
+            StartOffsets = new long[width];
+            EndOffsets = new long[width];
+            for (int x = 0; x < width; x++)
+            {
+                StartOffsets[x] = x * windowSamples / width;
+                EndOffsets[x] = (x + 1L) * windowSamples / width;
+            }
+        }
+
+        public int Width { get; }
+        public int[] Minimums { get; }
+        public int[] Maximums { get; }
+        public long[] StartOffsets { get; }
+        public long[] EndOffsets { get; }
     }
 }

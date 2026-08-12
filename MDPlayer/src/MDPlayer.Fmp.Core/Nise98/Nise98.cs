@@ -85,7 +85,7 @@ namespace Fmp.Core.Nise98
             //ongenBoardType
             public enmOngenBoardType ongen = enmOngenBoardType.SpeakBoard;
 
-            public fmStatus(enmOngenBoardType ongen)
+            public fmStatus(enmOngenBoardType ongen, double sampleRate = 44100.0)
             {
                 this.ongen = ongen;
                 if (ongen == enmOngenBoardType.PC9801_26K)
@@ -108,13 +108,13 @@ namespace Fmp.Core.Nise98
                     AdpcmMem = null;
                 }
 
-                timer = new MNDRV.FMTimer(false, null, 7987200);// OPNATimer(55467, 7987200);
+                timer = new MNDRV.FMTimer(false, null, 7987200, sampleRate);// OPNATimer(55467, 7987200);
             }
         }
 
         public void Init(Action<string, object[]> msgWrite, Action<ChipDatum> opnaWrite,
             fileTemp fileTemp, enmOngenBoardType ongen = enmOngenBoardType.PC9801_86B,
-            IFmpFileSystem fileSystem = null)
+            IFmpFileSystem fileSystem = null, double sampleRate = 44100.0)
         {
             Log.WriteLine(musicDriverInterface.LogLevel.DEBUG, "<Nise98>Init");
 
@@ -129,37 +129,38 @@ namespace Fmp.Core.Nise98
 
             if (ongen == enmOngenBoardType.None)
             {
-                fmReg088 = new fmStatus(enmOngenBoardType.None);
-                fmReg188 = new fmStatus(enmOngenBoardType.None);
-                fmReg288 = new fmStatus(enmOngenBoardType.None);
-                fmReg388 = new fmStatus(enmOngenBoardType.None);
+                fmReg088 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg188 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg288 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg388 = new fmStatus(enmOngenBoardType.None, sampleRate);
                 pA460h = 0xfc;
             }
             else if (ongen == enmOngenBoardType.PC9801_26K)
             {
-                fmReg088 = new fmStatus(enmOngenBoardType.None);
-                fmReg188 = new fmStatus(enmOngenBoardType.PC9801_26K);
-                fmReg288 = new fmStatus(enmOngenBoardType.None);
-                fmReg388 = new fmStatus(enmOngenBoardType.None);
+                fmReg088 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg188 = new fmStatus(enmOngenBoardType.PC9801_26K, sampleRate);
+                fmReg288 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg388 = new fmStatus(enmOngenBoardType.None, sampleRate);
                 pA460h = 0xfc;
             }
             else if (ongen == enmOngenBoardType.PC9801_86B)
             {
-                fmReg088 = new fmStatus(enmOngenBoardType.None);
-                fmReg188 = new fmStatus(enmOngenBoardType.PC9801_86B);
-                fmReg288 = new fmStatus(enmOngenBoardType.None);
-                fmReg388 = new fmStatus(enmOngenBoardType.None);
+                fmReg088 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg188 = new fmStatus(enmOngenBoardType.PC9801_86B, sampleRate);
+                fmReg288 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg388 = new fmStatus(enmOngenBoardType.None, sampleRate);
                 pA460h = 0b0100_0001;
             }
             else if (ongen == enmOngenBoardType.SpeakBoard)
             {
-                fmReg088 = new fmStatus(enmOngenBoardType.SpeakBoard);
-                fmReg188 = new fmStatus(enmOngenBoardType.None);
-                fmReg288 = new fmStatus(enmOngenBoardType.None);
-                fmReg388 = new fmStatus(enmOngenBoardType.None);
+                fmReg088 = new fmStatus(enmOngenBoardType.SpeakBoard, sampleRate);
+                fmReg188 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg288 = new fmStatus(enmOngenBoardType.None, sampleRate);
+                fmReg388 = new fmStatus(enmOngenBoardType.None, sampleRate);
                 pA460h = 0xfc;
             }
         }
+
 
         public NiseDos GetDos() { return dos; }
 

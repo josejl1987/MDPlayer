@@ -25,6 +25,12 @@ internal static class CaptureHasher
     /// <summary>Bumped whenever the canonical byte encoding changes.</summary>
     public const uint CaptureHashVersion = 2;
 
+    /// <summary>Canonical lowercase-hex SHA-256 of arbitrary bytes. Shared by
+    /// the capture builder (bank snapshots) and the hasher itself so the two
+    /// siblings always agree on hex case and encoding.</summary>
+    internal static string Sha256Hex(ReadOnlySpan<byte> data) =>
+        Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
     private static void WriteU8(Span<byte> dst, ref int off, byte value) => dst[off++] = value;
 
     private static void WriteU32(Span<byte> dst, ref int off, uint value)
@@ -126,6 +132,6 @@ internal static class CaptureHasher
         WriteU32(buffer, ref off, (uint)capture.LoopCount);
         WriteString(buffer, ref off, capture.TerminationReason ?? "");
 
-        return Convert.ToHexString(SHA256.HashData(buffer.AsSpan(0, off))).ToLowerInvariant();
+        return Sha256Hex(buffer.AsSpan(0, off));
     }
 }

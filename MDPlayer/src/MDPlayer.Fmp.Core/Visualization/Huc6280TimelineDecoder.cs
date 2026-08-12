@@ -5,6 +5,9 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
 {
     private readonly int[] _frequency = new int[6];
     private readonly int[] _volume = new int[6];
+    private readonly bool[] _on = new bool[6];
+    private readonly bool[] _dda = new bool[6];
+    private readonly bool[] _noise = new bool[6];
     private readonly int[] _left = new int[6];
     private readonly int[] _right = new int[6];
     private readonly byte[][] _waveRam = new byte[6][];
@@ -56,10 +59,19 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
                 break;
             case 4:
                 _volume[_selectedChannel] = write.Data & 0x1F;
+                _on[_selectedChannel] = (write.Data & 0x80) != 0;
+                _dda[_selectedChannel] = (write.Data & 0x40) != 0;
                 break;
             case 5:
                 _left[_selectedChannel] = (write.Data >> 4) & 0x0F;
                 _right[_selectedChannel] = write.Data & 0x0F;
+                break;
+            case 7:
+                // NE (bit 7) + NF (bits 4-0). The noise generator is only
+                // wired to the shared wave slot of channels 4 and 5; writing
+                // $07 while a channel below 4 is selected has no audio effect.
+                _noise[_selectedChannel] = _selectedChannel >= 4
+                    && (write.Data & 0x80) != 0;
                 break;
             case 6:
                 _waveRam[_selectedChannel][_waveIndex[_selectedChannel]] = (byte)(write.Data & 0x1F);
@@ -84,19 +96,41 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
 
     private void UpdateChannel(int channel, long sample)
     {
-        Pitch pitch = DecodePitch(channel);
-        bool active = pitch.MidiNote >= 0
-            && _volume[channel] > 0
-            && (_left[channel] > 0 || _right[channel] > 0);
-        if (!active)
+        if (!_on[channel]
+            || _dda[channel]
+            || _volume[channel] <= 0
+            || (_left[channel] <= 0 && _right[channel] <= 0))
         {
             Close(ref _notes[channel], sample);
             return;
         }
 
-        if (_notes[channel] != null
-            && Math.Abs(_notes[channel].Pitch.MidiNote - pitch.MidiNote) < 0.0001)
-            return;
+        bool noise = _noise[channel];
+        Pitch pitch = DecodePitch(channel);
+
+        // Noise consumes the wave slot as an unpitched restrike; a sustained
+        // tone follows frequency writes without splitting (FM AddPitch rule).
+        if (noise)
+        {
+            if (_notes[channel] != null
+                && _notes[channel]!.Mode == VisualizationNoteMode.SsgNoise)
+                return;
+        }
+        else
+        {
+            if (pitch.MidiNote < 0)
+            {
+                Close(ref _notes[channel], sample);
+                return;
+            }
+            if (_notes[channel] != null
+                && _notes[channel]!.Mode == VisualizationNoteMode.SsgTone)
+            {
+                if (Math.Abs(_notes[channel]!.Pitch.MidiNote - pitch.MidiNote) >= 0.0001)
+                    _notes[channel]!.AddPitch(sample, pitch);
+                return;
+            }
+        }
 
         bool retrigger = _notes[channel] != null;
         Close(ref _notes[channel], sample);
@@ -106,9 +140,10 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
         _notes[channel] = new MutableNote(
             new VoiceId(_device.Id, VoiceKind.Wavetable, channel),
             sample,
-            pitch,
+            noise ? Pitch.Unpitched : pitch,
             instrument,
-            retrigger);
+            retrigger,
+            noise ? VisualizationNoteMode.SsgNoise : VisualizationNoteMode.SsgTone);
     }
 
     private void UpdateWaveform(int channel, long sample)
@@ -149,7 +184,7 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
                 note.Pitch.MidiNote,
                 note.Pitch.FrequencyHz,
                 note.InstrumentId,
-                VisualizationNoteMode.SsgTone,
+                note.Mode,
                 note.IsRetrigger,
                 note.PitchChanges.ToArray());
         }
@@ -168,13 +203,14 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
 
     private sealed class MutableNote
     {
-        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId, bool retrigger)
+        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId, bool retrigger, VisualizationNoteMode mode)
         {
             Voice = voice;
             StartSample = startSample;
             Pitch = pitch;
             InstrumentId = instrumentId;
             IsRetrigger = retrigger;
+            Mode = mode;
         }
 
         public VoiceId Voice { get; }
@@ -182,6 +218,17 @@ internal sealed class Huc6280TimelineDecoder : IChipTimelineDecoder
         public Pitch Pitch { get; }
         public string InstrumentId { get; }
         public bool IsRetrigger { get; }
+        public VisualizationNoteMode Mode { get; }
         public List<PitchChange> PitchChanges { get; } = [];
+
+        public void AddPitch(long sample, Pitch pitch)
+        {
+            if (pitch.MidiNote < 0)
+                return;
+            double previous = PitchChanges.Count == 0 ? Pitch.MidiNote : PitchChanges[^1].MidiNote;
+            if (Math.Abs(previous - pitch.MidiNote) < 0.0001)
+                return;
+            PitchChanges.Add(new PitchChange(sample, pitch.FrequencyHz, pitch.MidiNote));
+        }
     }
 }

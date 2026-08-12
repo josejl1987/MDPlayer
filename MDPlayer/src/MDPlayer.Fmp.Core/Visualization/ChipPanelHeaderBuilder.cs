@@ -9,9 +9,68 @@ namespace Fmp.Core.Visualization;
 /// </summary>
 internal static class ChipPanelHeaderBuilder
 {
+    /// <summary>
+    /// Reusable sequential cursor for one prepared S-DSP panel. Header state is
+    /// source state, so advancing the cursor is equivalent to applying all state
+    /// changes up to the current frame; it must not rescan either history.
+    /// </summary>
+    internal sealed class Cursor
+    {
+        internal int VoiceStateIndex;
+        internal int PlaybackIndex;
+        internal int PlaybackIdentityIndex = -1;
+        internal long LastSample = long.MinValue;
+        internal int VoiceIndex = -1;
+        internal int Source;
+        internal sbyte VolumeLeft = 127;
+        internal sbyte VolumeRight = 127;
+        internal bool Noise;
+        internal bool PitchMod;
+        internal bool EchoSend;
+        internal string ShortHash = "";
+        internal PanelHeaderData Header;
+        internal int HeaderSource;
+        internal sbyte HeaderVolumeLeft;
+        internal sbyte HeaderVolumeRight;
+        internal bool HeaderNoise;
+        internal bool HeaderPitchMod;
+        internal bool HeaderEchoSend;
+
+        internal void Rewind()
+        {
+            VoiceStateIndex = 0;
+            PlaybackIndex = 0;
+            PlaybackIdentityIndex = -1;
+            LastSample = long.MinValue;
+            Source = 0;
+            VolumeLeft = 127;
+            VolumeRight = 127;
+            Noise = false;
+            PitchMod = false;
+            EchoSend = false;
+            ShortHash = "";
+            Header = null;
+            HeaderSource = 0;
+            HeaderVolumeLeft = 0;
+            HeaderVolumeRight = 0;
+            HeaderNoise = false;
+            HeaderPitchMod = false;
+            HeaderEchoSend = false;
+        }
+    }
+
     public static bool TryBuild(
         PreparedPanel panel,
         long currentSample,
+        out PanelHeaderData header)
+    {
+        return TryBuild(panel, currentSample, new Cursor(), out header);
+    }
+
+    public static bool TryBuild(
+        PreparedPanel panel,
+        long currentSample,
+        Cursor cursor,
         out PanelHeaderData header)
     {
         header = null;
@@ -20,71 +79,111 @@ internal static class ChipPanelHeaderBuilder
 
         string voiceId = panel.SpcVoiceStates[0].VoiceId;
         int separator = voiceId.LastIndexOf('.');
-        if (separator < 0
-            || !int.TryParse(voiceId[(separator + 1)..], out int voiceIndex))
+        if (cursor.VoiceIndex < 0
+            && (separator < 0
+                || !int.TryParse(voiceId[(separator + 1)..], out cursor.VoiceIndex)))
             return false;
         // Some rips emit events for a pseudo-voice outside the 8-voice S-DSP
         // range (e.g. a key-off broadcast). Those panels cannot carry a
         // per-voice chip header; fall back to the generic label.
-        if (voiceIndex < 0 || voiceIndex >= SnesDspPresentation.VoiceCount)
+        if (cursor.VoiceIndex < 0 || cursor.VoiceIndex >= SnesDspPresentation.VoiceCount)
             return false;
 
-        int source = 0;
-        sbyte volumeLeft = 127;
-        sbyte volumeRight = 127;
-        bool noise = false;
-        bool pitchMod = false;
-        bool echoSend = false;
-        foreach (SpcVoiceStateEvent state in panel.SpcVoiceStates)
+        if (currentSample < cursor.LastSample)
+            cursor.Rewind();
+        // Rewind clears the cached voice identity, so restore it after a
+        // backwards/random-access query without reparsing every frame.
+        if (cursor.VoiceIndex < 0)
         {
+            if (separator < 0
+                || !int.TryParse(voiceId[(separator + 1)..], out cursor.VoiceIndex))
+                return false;
+        }
+
+        SpcVoiceStateEvent[] states = panel.SpcVoiceStates;
+        while (cursor.VoiceStateIndex < states.Length
+            && states[cursor.VoiceStateIndex].SamplePosition <= currentSample)
+        {
+            SpcVoiceStateEvent state = states[cursor.VoiceStateIndex++];
             if (state.SamplePosition > currentSample)
                 break;
             switch (state.State)
             {
                 case nameof(SpcSemanticEventKind.SourceLatched):
-                    source = state.Value;
+                    cursor.Source = state.Value;
                     break;
                 case nameof(SpcSemanticEventKind.VolumeChanged):
-                    volumeLeft = unchecked((sbyte)state.Value);
-                    volumeRight = unchecked((sbyte)state.Value2);
+                    cursor.VolumeLeft = unchecked((sbyte)state.Value);
+                    cursor.VolumeRight = unchecked((sbyte)state.Value2);
                     break;
                 case nameof(SpcSemanticEventKind.NoiseChanged):
-                    noise = state.Value != 0;
+                    cursor.Noise = state.Value != 0;
                     break;
                 case nameof(SpcSemanticEventKind.PitchModChanged):
-                    pitchMod = state.Value != 0;
+                    cursor.PitchMod = state.Value != 0;
                     break;
                 case nameof(SpcSemanticEventKind.EchoSendChanged):
-                    echoSend = state.Value != 0;
+                    cursor.EchoSend = state.Value != 0;
                     break;
             }
         }
 
-        string shortHash = "";
-        foreach (SamplePlaybackEvent playback in panel.SamplePlayback)
+        SamplePlaybackEvent[] playbackEvents = panel.SamplePlayback;
+        while (cursor.PlaybackIndex < playbackEvents.Length
+            && playbackEvents[cursor.PlaybackIndex].EndSample <= currentSample)
         {
-            if (playback.StartSample > currentSample)
-                break;
-            if (playback.StartSample <= currentSample && currentSample < playback.EndSample)
+            cursor.PlaybackIndex++;
+            cursor.PlaybackIdentityIndex = -1;
+        }
+
+        string shortHash = cursor.ShortHash;
+        if (cursor.PlaybackIdentityIndex != cursor.PlaybackIndex)
+        {
+            shortHash = "";
+            if (cursor.PlaybackIndex < playbackEvents.Length)
             {
+                SamplePlaybackEvent playback = playbackEvents[cursor.PlaybackIndex];
+                if (playback.StartSample <= currentSample && currentSample < playback.EndSample)
+                {
                 int hashSeparator = playback.SampleId.LastIndexOf(':');
                 shortHash = hashSeparator >= 0
                     ? playback.SampleId[(hashSeparator + 1)..]
                     : playback.SampleId;
-                break;
+                }
             }
+            cursor.PlaybackIdentityIndex = cursor.PlaybackIndex;
         }
 
-        SnesDspPanelHeader chipHeader = SnesDspPresentation.BuildHeader(
-            voiceIndex,
-            source,
-            shortHash,
-            noise,
-            pitchMod,
-            echoSend,
-            volumeLeft,
-            volumeRight);
-        header = new PanelHeaderData(chipHeader.Label);
+        bool headerDirty = cursor.Header is null
+            || cursor.HeaderSource != cursor.Source
+            || cursor.HeaderVolumeLeft != cursor.VolumeLeft
+            || cursor.HeaderVolumeRight != cursor.VolumeRight
+            || cursor.HeaderNoise != cursor.Noise
+            || cursor.HeaderPitchMod != cursor.PitchMod
+            || cursor.HeaderEchoSend != cursor.EchoSend
+            || !string.Equals(cursor.ShortHash, shortHash, StringComparison.Ordinal);
+        if (headerDirty)
+        {
+            SnesDspPanelHeader chipHeader = SnesDspPresentation.BuildHeader(
+                cursor.VoiceIndex,
+                cursor.Source,
+                shortHash,
+                cursor.Noise,
+                cursor.PitchMod,
+                cursor.EchoSend,
+                cursor.VolumeLeft,
+                cursor.VolumeRight);
+            cursor.ShortHash = shortHash;
+            cursor.Header = new PanelHeaderData(chipHeader.Label);
+            cursor.HeaderSource = cursor.Source;
+            cursor.HeaderVolumeLeft = cursor.VolumeLeft;
+            cursor.HeaderVolumeRight = cursor.VolumeRight;
+            cursor.HeaderNoise = cursor.Noise;
+            cursor.HeaderPitchMod = cursor.PitchMod;
+            cursor.HeaderEchoSend = cursor.EchoSend;
+        }
+        cursor.LastSample = currentSample;
+        header = cursor.Header;
         return true;
     }
 }

@@ -18,11 +18,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.*" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="Avalonia" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The in-process preview resolves FMP.COM from the GUI base directory. -->
+    <None Include="..\MDPlayer.Fmp.Cli\FMP.COM">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

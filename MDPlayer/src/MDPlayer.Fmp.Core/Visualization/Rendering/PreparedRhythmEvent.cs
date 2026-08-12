@@ -4,6 +4,8 @@ namespace Fmp.Core.Visualization.Rendering;
 internal sealed class PreparedRhythmEvent
 {
     public string Voice { get; init; } = "";
+    /// <summary>Prepared row index; -1 retains the legacy final-row fallback.</summary>
+    public int RowIndex { get; init; } = -1;
     public long SamplePosition { get; init; }
     public float Strength { get; init; }
     public float Pan { get; init; }

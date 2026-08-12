@@ -66,19 +66,53 @@ internal sealed record VisualizationStageMetrics
 {
     public double BackendResolutionSeconds { get; init; }
     public double PreparationSeconds { get; init; }
+    public double SourcePlaybackStateSeconds { get; init; }
     public double TimelineCaptureSeconds { get; init; }
     public double StemExportSeconds { get; init; }
+    public double AudioProcessingSeconds { get; init; }
     public double EnergyAnalysisSeconds { get; init; }
     public double ScopeOverlayEncodeSeconds { get; init; }
     public double OverallSeconds { get; init; }
     public double CorrscopeWaitSeconds { get; init; }
     public double OverlayCpuSeconds { get; init; }
     public double FfmpegWriteWaitSeconds { get; init; }
+    public double PixelConversionSeconds { get; init; }
+    public double MuxFinalizationSeconds { get; init; }
     public int MaxQueueDepth { get; init; }
     public long StarvationCount { get; init; }
     public double BlockingSeconds { get; init; }
     public double PipelineWallTimeSeconds { get; init; }
     public long FrameCount { get; init; }
+    public double ScopeFrameReadSeconds { get; init; }
+    public double RenderSeconds { get; init; }
+    public double DynamicLayerSeconds { get; init; }
+    public double FrameStateUpdateSeconds { get; init; }
+    public double CompositingSeconds { get; init; }
+    public double LayoutSeconds { get; init; }
+    public double StaticLayerSeconds { get; init; }
+    public double TextSeconds { get; init; }
+    public double PianoRollSeconds { get; init; }
+    public double WaveformSeconds { get; init; }
+    public long FullRedraws { get; init; }
+    public long PartialRedraws { get; init; }
+    public long UnchangedFrames { get; init; }
+    public long RenderedPixels { get; init; }
+    public long AvoidedPixels { get; init; }
+    public long SurfaceCopies { get; init; }
+    public long FullFrameCopies { get; init; }
+    public long ScopeCopies { get; init; }
+    public long CopiedBytes { get; init; }
+    public long SourceCursorAdvances { get; init; }
+    public long PianoRollCursorAdvances { get; init; }
+    public long VisibleNotesVisited { get; init; }
+    public long AllocatedBytes { get; init; }
+    public double AllocatedBytesPerFrame { get; init; }
+    public long PeakWorkingSetBytes { get; init; }
+    public double QueueWaitSeconds { get; init; }
+    public double RendererIdleSeconds { get; init; }
+    public double RendererBlockedSeconds { get; init; }
+    public double EncoderIdleSeconds { get; init; }
+    public double EncoderBlockedSeconds { get; init; }
 }
 
 /// <summary>
@@ -247,19 +281,53 @@ internal static class VisualizationResultBuilder
         {
             BackendResolutionSeconds = backendResolution,
             PreparationSeconds = preparation,
+            SourcePlaybackStateSeconds = capture,
             TimelineCaptureSeconds = capture,
             StemExportSeconds = stemExport,
+            AudioProcessingSeconds = stemExport,
             EnergyAnalysisSeconds = energy,
             ScopeOverlayEncodeSeconds = composition,
             OverallSeconds = overall,
             CorrscopeWaitSeconds = m?.CorrscopeWaitSeconds ?? 0,
             OverlayCpuSeconds = m?.OverlayCpuSeconds ?? 0,
             FfmpegWriteWaitSeconds = m?.FfmpegWriteWaitSeconds ?? 0,
+            PixelConversionSeconds = 0,
+            MuxFinalizationSeconds = m?.MuxFinalizationSeconds ?? 0,
             MaxQueueDepth = m?.MaxQueueDepth ?? 0,
             StarvationCount = m?.StarvationCount ?? 0,
             BlockingSeconds = m?.BlockingSeconds ?? 0,
             PipelineWallTimeSeconds = m?.WallTimeSeconds ?? 0,
             FrameCount = m?.FrameCount ?? 0,
+            ScopeFrameReadSeconds = m?.ScopeFrameReadSeconds ?? 0,
+            RenderSeconds = m?.Renderer?.RenderSeconds ?? 0,
+            DynamicLayerSeconds = m?.Renderer?.DynamicSeconds ?? 0,
+            FrameStateUpdateSeconds = m?.Renderer?.FrameStateSeconds ?? 0,
+            CompositingSeconds = m?.Renderer?.CompositingSeconds ?? 0,
+            LayoutSeconds = m?.Renderer?.LayoutSeconds ?? 0,
+            StaticLayerSeconds = m?.Renderer?.StaticLayerSeconds ?? 0,
+            TextSeconds = m?.Renderer?.TextSeconds ?? 0,
+            PianoRollSeconds = m?.Renderer?.PianoRollSeconds ?? 0,
+            WaveformSeconds = m?.Renderer?.WaveformSeconds ?? 0,
+            FullRedraws = m?.Renderer?.FullRedraws ?? 0,
+            PartialRedraws = m?.Renderer?.PartialRedraws ?? 0,
+            UnchangedFrames = m?.Renderer?.UnchangedFrames ?? 0,
+            RenderedPixels = m?.Renderer?.RenderedPixels ?? 0,
+            AvoidedPixels = m?.Renderer?.AvoidedPixels ?? 0,
+            SurfaceCopies = m?.Renderer?.SurfaceCopies ?? 0,
+            FullFrameCopies = m?.Renderer?.FullFrameCopies ?? 0,
+            ScopeCopies = m?.Renderer?.ScopeCopies ?? 0,
+            CopiedBytes = m?.Renderer?.CopiedBytes ?? 0,
+            SourceCursorAdvances = m?.Renderer?.SourceCursorAdvances ?? 0,
+            PianoRollCursorAdvances = m?.Renderer?.PianoRollCursorAdvances ?? 0,
+            VisibleNotesVisited = m?.Renderer?.VisibleNotesVisited ?? 0,
+            AllocatedBytes = m?.Renderer?.AllocatedBytes ?? 0,
+            AllocatedBytesPerFrame = m?.Renderer?.AllocatedBytesPerFrame ?? 0,
+            PeakWorkingSetBytes = m?.Renderer?.PeakWorkingSetBytes ?? 0,
+            QueueWaitSeconds = m?.QueueWaitSeconds ?? 0,
+            RendererIdleSeconds = m?.QueueWaitSeconds ?? 0,
+            RendererBlockedSeconds = m?.RendererBlockedSeconds ?? 0,
+            EncoderIdleSeconds = m?.EncoderIdleSeconds ?? 0,
+            EncoderBlockedSeconds = m?.FfmpegWriteWaitSeconds ?? 0,
         };
 }
 

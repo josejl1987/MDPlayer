@@ -58,6 +58,11 @@ internal static class CorrscopeInstaller
     public static string VenvCorrRelativePath { get; } =
         OperatingSystem.IsWindows() ? Path.Combine("Scripts", "corr.exe") : Path.Combine("bin", "corr");
 
+    private static readonly object CacheGate = new();
+    private static string? CachedAutoPython;
+    private static string? CachedExplicitPath;
+    private static string? CachedExplicitPython;
+
     /// <summary>
     /// Makes Corrscope available and returns the Python interpreter that can
     /// import it. When <paramref name="explicitCorrPath"/> is supplied it is
@@ -67,6 +72,35 @@ internal static class CorrscopeInstaller
     /// and the package installed; if none succeeds this throws.
     /// </summary>
     public static string Ensure(TimeSpan timeout, string explicitCorrPath = null)
+    {
+        lock (CacheGate)
+        {
+            bool isExplicit = !string.IsNullOrWhiteSpace(explicitCorrPath);
+            string? cachedPython = isExplicit
+                ? string.Equals(CachedExplicitPath, explicitCorrPath, StringComparison.Ordinal)
+                    ? CachedExplicitPython
+                    : null
+                : CachedAutoPython;
+            if (cachedPython is not null && File.Exists(cachedPython))
+            {
+                return cachedPython;
+            }
+
+            string python = EnsureUncached(timeout, explicitCorrPath);
+            if (isExplicit)
+            {
+                CachedExplicitPath = explicitCorrPath;
+                CachedExplicitPython = python;
+            }
+            else
+            {
+                CachedAutoPython = python;
+            }
+            return python;
+        }
+    }
+
+    private static string EnsureUncached(TimeSpan timeout, string explicitCorrPath)
     {
         if (!string.IsNullOrWhiteSpace(explicitCorrPath))
         {

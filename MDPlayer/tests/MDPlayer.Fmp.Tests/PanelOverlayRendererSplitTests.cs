@@ -123,6 +123,28 @@ public sealed class PanelOverlayRendererSplitTests
     }
 
     [Fact]
+    public void CompositeFrame_OpaqueScopeFastPathMatchesAlphaNormalization()
+    {
+        var renderer = CreateRenderer();
+        int gridBytes = renderer.Width * renderer.Layout.CorrscopeGridHeight * 4;
+        var grid = new byte[gridBytes];
+        for (int index = 0; index < grid.Length; index += 4)
+        {
+            grid[index] = (byte)(index / 4 % 251);
+            grid[index + 1] = 17;
+            grid[index + 2] = 83;
+            grid[index + 3] = 255;
+        }
+
+        var normalized = new byte[renderer.FrameByteCount];
+        var opaqueFastPath = new byte[renderer.FrameByteCount];
+        renderer.RenderCompositeFrame(0, grid, normalized);
+        renderer.RenderCompositeFrame(0, grid, opaqueFastPath, scopeFramesAreOpaque: true);
+
+        Assert.Equal(SHA256.HashData(normalized), SHA256.HashData(opaqueFastPath));
+    }
+
+    [Fact]
     public void CompositeFrame_RejectsUndersizedScopeGrid()
     {
         var renderer = CreateRenderer();

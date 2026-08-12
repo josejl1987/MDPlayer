@@ -28,7 +28,23 @@ internal static class MusicalTimeMapBuilder
     public static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
         MusicalTimeMapOptions options)
+        => BuildCore(timeline, options, instrumentTempoSearch: false, out _);
+
+    /// <summary>Builds the same map while exposing symbolic-search work counts
+    /// for the opt-in export performance receipt.</summary>
+    internal static MusicalTimeMapBuildResult Build(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        out TempoInferenceCounters tempoCounters)
+        => BuildCore(timeline, options, instrumentTempoSearch: true, out tempoCounters);
+
+    private static MusicalTimeMapBuildResult BuildCore(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        bool instrumentTempoSearch,
+        out TempoInferenceCounters tempoCounters)
     {
+        tempoCounters = default;
         ArgumentNullException.ThrowIfNull(timeline);
         ArgumentNullException.ThrowIfNull(options);
         if (timeline.SampleRate <= 0)
@@ -68,7 +84,9 @@ internal static class MusicalTimeMapBuilder
         {
             // Batch 3: fall back to onset-driven inference when no symbolic timing
             // evidence exists.
-            return SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter);
+            return instrumentTempoSearch
+                ? SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, out tempoCounters)
+                : SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter);
         }
 
         // Deterministic source application:

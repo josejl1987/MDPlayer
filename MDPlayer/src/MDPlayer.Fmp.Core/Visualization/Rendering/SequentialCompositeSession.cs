@@ -8,11 +8,15 @@ namespace Fmp.Core.Visualization.Rendering;
 internal sealed class SequentialCompositeSession
 {
     private readonly PanelOverlayRenderer _renderer;
+    private readonly PanelOverlayRenderer.SequentialRenderState _state;
+    private readonly bool _scopeFramesAreOpaque;
     private bool _initialized;
 
-    internal SequentialCompositeSession(PanelOverlayRenderer renderer)
+    internal SequentialCompositeSession(PanelOverlayRenderer renderer, bool scopeFramesAreOpaque = false)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
+        _state = _renderer.CreateSequentialRenderState();
+        _scopeFramesAreOpaque = scopeFramesAreOpaque;
     }
 
     public void Initialize(Span<byte> destination)
@@ -34,6 +38,7 @@ internal sealed class SequentialCompositeSession
         if (!_initialized)
             throw new InvalidOperationException("The sequential session must be initialized first.");
 
-        _renderer.RenderForSession(frameIndex, scopeGrid, destination);
+        _renderer.RenderForSession(
+            frameIndex, scopeGrid, destination, _state, _scopeFramesAreOpaque);
     }
 }

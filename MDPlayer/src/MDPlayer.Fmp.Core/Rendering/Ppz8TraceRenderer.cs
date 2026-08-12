@@ -82,7 +82,6 @@ internal sealed class Ppz8TraceRenderer : IDisposable
     {
         // Apply every remaining event whose mapped output frame equals the
         // generated frame we are about to produce, in global sequence order.
-        int applied = 0;
         for (; _cursor < _events.Count; _cursor++)
         {
             var e = _events[_cursor];
@@ -94,7 +93,6 @@ internal sealed class Ppz8TraceRenderer : IDisposable
             if (frame < generatedFrame)
                 continue; // mapped earlier; already handled by a prior pass
             ApplyCommand(e);
-            applied++;
         }
     }
 

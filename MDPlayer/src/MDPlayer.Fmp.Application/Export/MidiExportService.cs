@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
@@ -35,9 +36,14 @@ public sealed class MidiExportService
         }
 
         MusicalTimeMapBuildResult build;
+        TempoInferenceCounters tempoCounters = default;
+        Stopwatch? tempoWatch = request.EnablePerformanceMetrics ? Stopwatch.StartNew() : null;
         try
         {
-            build = MusicalTimeMapBuilder.Build(timeline, ToMapOptions(request));
+            build = request.EnablePerformanceMetrics
+                ? MusicalTimeMapBuilder.Build(timeline, ToMapOptions(request), out tempoCounters)
+                : MusicalTimeMapBuilder.Build(timeline, ToMapOptions(request));
+            tempoWatch?.Stop();
         }
         catch (MusicalTimingException ex)
         {
@@ -60,11 +66,14 @@ public sealed class MidiExportService
                 EmitMarkers = request.EmitMarkers,
                 EmitConductorMetadata = request.EmitConductorMetadata,
                 VoiceOverrides = ToVoiceOverrides(request.VoiceOptions),
+                EnablePerformanceMetrics = request.EnablePerformanceMetrics,
+                TempoInferenceCounters = tempoCounters,
             })
             {
                 Diagnostics = build.Diagnostics,
             };
             byte[] bytes;
+            MusicalMidiExportResult? coreResult = null;
             ExportPerformanceSummary? performance = null;
             if (request.EnablePerformanceReceipts)
             {
@@ -81,12 +90,17 @@ public sealed class MidiExportService
                     new { Request = request });
                 bytes = recorder.Measure("midi-planning-and-serialization",
                     (timeline.Notes ?? Array.Empty<NoteEvent>()).Count,
-                    () => exporter.Export(timeline).Bytes);
+                    () =>
+                    {
+                        coreResult = exporter.Export(timeline);
+                        return coreResult.Bytes;
+                    });
                 performance = recorder.Complete();
             }
             else
             {
-                bytes = exporter.Export(timeline).Bytes;
+                coreResult = exporter.Export(timeline);
+                bytes = coreResult.Bytes;
             }
             return new MidiExportResult
             {
@@ -98,6 +112,11 @@ public sealed class MidiExportService
                 PhaseUnknown = build.Diagnostics.PhaseUnknown,
                 Report = BuildReport(build, request.Ppq, performance),
                 Performance = performance,
+                PerformanceMetrics = coreResult?.Performance is { } corePerformance
+                    ? corePerformance.WithOuterStageTimings(
+                        tempoGridSeconds: tempoWatch?.Elapsed.TotalSeconds ?? 0)
+                    : null,
+                Tracks = coreResult?.Tracks,
             };
         }
         catch (Exception ex)

@@ -5,38 +5,37 @@ namespace Fmp.Core.Visualization.Rendering;
 // CPU pixel primitives remain a single implementation shared by all panels.
 internal sealed partial class PanelOverlayRenderer
 {
-    private void DrawFm3OperatorRibbons(Span<byte> frame, PanelData panel, long currentSample)
+    private void DrawFm3OperatorRibbons(
+        Span<byte> frame,
+        PanelData panel,
+        long currentSample,
+        (double Min, double Max)? sharedRange = null)
     {
         OverlayRect ribbons = _layout.GetFm3OperatorRect(panel.Index);
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
         double windowSamples = _layout.WindowSeconds * _timeline.SampleRate;
-        (double minMidi, double maxMidi) = GetPitchRange(panel, currentSample);
+        (double minMidi, double maxMidi) = sharedRange ?? GetPitchRange(panel, currentSample);
         int playheadX = _layout.GetPlayheadX(panel.Index);
         int rowHeight = Math.Max(1, ribbons.Height / 4);
-        for (int op = 0; op < 4; op++)
+        int operatorCount = Math.Min(
+            4,
+            Math.Min(panel.Prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length));
+        for (int op = 0; op < operatorCount; op++)
         {
             var row = new OverlayRect(ribbons.X + 20, ribbons.Y + op * rowHeight, Math.Max(1, ribbons.Width - 20), rowHeight);
             DrawVisibleNotes(
                 frame, panel, panel.Prepared.OperatorNotes[op], row, currentSample, true,
-                windowStart, windowEnd, windowSamples, minMidi, maxMidi, playheadX, 0);
+                windowStart, windowEnd, windowSamples, minMidi, maxMidi, playheadX, 0,
+                panel.OperatorNoteStreamIds[op]);
         }
     }
 
 
     private bool HasAudioEnergy(int panelIndex)
-    {
-        ChannelEnergyEnvelope env = panelIndex < _energyByPanel.Length ? _energyByPanel[panelIndex] : null;
-        float[] activity = env?.FrameActivity;
-        if (activity == null)
-            return false;
-        for (int index = 0; index < activity.Length; index++)
-        {
-            if (activity[index] > 0.02f)
-                return true;
-        }
-        return false;
-    }
+        => panelIndex >= 0
+            && panelIndex < _hasAudioEnergyByPanel.Length
+            && _hasAudioEnergyByPanel[panelIndex];
 
     private bool HasEnergyEnvelope(int panelIndex)
         => panelIndex < _energyByPanel.Length && _energyByPanel[panelIndex] != null;
@@ -99,42 +98,57 @@ internal sealed partial class PanelOverlayRenderer
         long recentStart = currentSample - (long)Math.Round(0.500 * _timeline.SampleRate);
         if (panelIndex < _panels.Length)
         {
-            PreparedPanel prepared = _panels[panelIndex].Prepared;
-            if (ContainsRecentNote(prepared.MainNotes, recentStart, currentSample))
+            PanelData panel = _panels[panelIndex];
+            PreparedPanel prepared = panel.Prepared;
+            if (ContainsRecentNote(
+                    prepared.MainNotes, panel.MainNoteStreamId, recentStart, currentSample))
                 return true;
-            if (_panels[panelIndex].TrackKind == VisualizationTrackKind.FmOperatorGroup)
+            if (panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
             {
-                foreach (PreparedNote[] operatorNotes in prepared.OperatorNotes)
+                int operatorCount = Math.Min(
+                    prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length);
+                for (int operatorIndex = 0; operatorIndex < operatorCount; operatorIndex++)
                 {
-                    if (ContainsRecentNote(operatorNotes, recentStart, currentSample))
+                    if (ContainsRecentNote(
+                            prepared.OperatorNotes[operatorIndex],
+                            panel.OperatorNoteStreamIds[operatorIndex],
+                            recentStart,
+                            currentSample))
                         return true;
                 }
             }
-            if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Percussion)
+            if (panel.TrackKind == VisualizationTrackKind.Percussion)
             {
                 PreparedRhythmEvent[] events = prepared.Rhythm;
-                int first = LowerBoundRhythm(events, recentStart);
+                int first;
+                if (!(_activeSequentialState?.TryGetRhythmFirst(
+                        panel.RhythmStreamId, events, recentStart, out first) ?? false))
+                    first = LowerBoundRhythm(events, recentStart);
                 if (first < events.Length && events[first].SamplePosition <= currentSample)
                     return true;
             }
-            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Sample)
+            else if (panel.TrackKind == VisualizationTrackKind.Sample)
             {
-                if (ContainsRecentSample(prepared.SamplePlayback, recentStart, currentSample))
+                if (ContainsRecentSample(
+                        prepared.SamplePlayback, panel.PlaybackStreamId, recentStart, currentSample))
                     return true;
             }
-            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.Noise
-                && ContainsRecentNoise(prepared.Noise, recentStart, currentSample))
+            else if (panel.TrackKind == VisualizationTrackKind.Noise
+                && ContainsRecentNoise(
+                    prepared.Noise, panel.NoiseStreamId, recentStart, currentSample))
                 return true;
-            else if (_panels[panelIndex].TrackKind == VisualizationTrackKind.AggregateActivity
-                && ContainsRecentAggregate(prepared.AggregateHits, recentStart, currentSample))
+            else if (panel.TrackKind == VisualizationTrackKind.AggregateActivity
+                && ContainsRecentAggregate(
+                    prepared.AggregateHits, panel.AggregateStreamId, recentStart, currentSample))
                 return true;
         }
         return false;
     }
 
-    private static bool ContainsRecentNote(PreparedNote[] notes, long recentStart, long currentSample)
+    private bool ContainsRecentNote(
+        PreparedNote[] notes, int streamId, long recentStart, long currentSample)
     {
-        int first = FindFirstVisibleIndex(notes, recentStart);
+        int first = FindFirstVisibleIndex(notes, streamId, recentStart);
         for (int index = first; index < notes.Length; index++)
         {
             PreparedNote note = notes[index];
@@ -146,9 +160,13 @@ internal sealed partial class PanelOverlayRenderer
         return false;
     }
 
-    private static bool ContainsRecentSample(SamplePlaybackEvent[] events, long recentStart, long currentSample)
+    private bool ContainsRecentSample(
+        SamplePlaybackEvent[] events, int streamId, long recentStart, long currentSample)
     {
-        int first = LowerBoundPlayback(events, recentStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetPlaybackFirst(
+                streamId, events, recentStart, out first) ?? false))
+            first = LowerBoundPlayback(events, recentStart);
         for (int index = first; index < events.Length; index++)
         {
             SamplePlaybackEvent value = events[index];
@@ -160,9 +178,13 @@ internal sealed partial class PanelOverlayRenderer
         return false;
     }
 
-    private static bool ContainsRecentNoise(NoiseStateEvent[] events, long recentStart, long currentSample)
+    private bool ContainsRecentNoise(
+        NoiseStateEvent[] events, int streamId, long recentStart, long currentSample)
     {
-        int first = LowerBoundNoiseByStart(events, recentStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetNoiseFirst(
+                streamId, events, recentStart, out first) ?? false))
+            first = LowerBoundNoiseByStart(events, recentStart);
         if (first > 0)
             first--;
         for (int index = first; index < events.Length; index++)
@@ -191,9 +213,13 @@ internal sealed partial class PanelOverlayRenderer
         return low;
     }
 
-    private static bool ContainsRecentAggregate(AggregateHitEvent[] events, long recentStart, long currentSample)
+    private bool ContainsRecentAggregate(
+        AggregateHitEvent[] events, int streamId, long recentStart, long currentSample)
     {
-        int first = LowerBoundAggregate(events, recentStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetAggregateFirst(
+                streamId, events, recentStart, out first) ?? false))
+            first = LowerBoundAggregate(events, recentStart);
         for (int index = first; index < events.Length; index++)
         {
             AggregateHitEvent value = events[index];
@@ -226,7 +252,10 @@ internal sealed partial class PanelOverlayRenderer
         if (panel.TrackKind == VisualizationTrackKind.Percussion)
         {
             PreparedRhythmEvent[] events = panel.Prepared.Rhythm;
-            int first = LowerBoundRhythm(events, currentSample - tolerance);
+            int first;
+            if (!(_activeSequentialState?.TryGetRhythmFirst(
+                    panel.RhythmStreamId, events, currentSample - tolerance, out first) ?? false))
+                first = LowerBoundRhythm(events, currentSample - tolerance);
             for (int index = first; index < events.Length; index++)
             {
                 long sample = events[index].SamplePosition;
@@ -238,7 +267,10 @@ internal sealed partial class PanelOverlayRenderer
         }
         else if (panel.TrackKind == VisualizationTrackKind.Sample)
         {
-            int first = LowerBoundPlayback(panel.Prepared.SamplePlayback, currentSample);
+            int first;
+            if (!(_activeSequentialState?.TryGetPlaybackFirst(
+                    panel.PlaybackStreamId, panel.Prepared.SamplePlayback, currentSample, out first) ?? false))
+                first = LowerBoundPlayback(panel.Prepared.SamplePlayback, currentSample);
             for (int index = first; index < panel.Prepared.SamplePlayback.Length; index++)
             {
                 SamplePlaybackEvent value = panel.Prepared.SamplePlayback[index];
@@ -250,7 +282,10 @@ internal sealed partial class PanelOverlayRenderer
         }
         else if (panel.TrackKind == VisualizationTrackKind.Noise)
         {
-            int first = LowerBoundNoiseByStart(panel.Prepared.Noise, currentSample - tolerance);
+            int first;
+            if (!(_activeSequentialState?.TryGetNoiseFirst(
+                    panel.NoiseStreamId, panel.Prepared.Noise, currentSample - tolerance, out first) ?? false))
+                first = LowerBoundNoiseByStart(panel.Prepared.Noise, currentSample - tolerance);
             if (first > 0)
                 first--;
             for (int index = first; index < panel.Prepared.Noise.Length; index++)
@@ -265,7 +300,11 @@ internal sealed partial class PanelOverlayRenderer
         }
         else if (panel.TrackKind == VisualizationTrackKind.AggregateActivity)
         {
-            int first = LowerBoundAggregate(panel.Prepared.AggregateHits, currentSample - tolerance);
+            int first;
+            if (!(_activeSequentialState?.TryGetAggregateFirst(
+                    panel.AggregateStreamId, panel.Prepared.AggregateHits,
+                    currentSample - tolerance, out first) ?? false))
+                first = LowerBoundAggregate(panel.Prepared.AggregateHits, currentSample - tolerance);
             for (int index = first; index < panel.Prepared.AggregateHits.Length; index++)
             {
                 long hitSample = panel.Prepared.AggregateHits[index].SamplePosition;
@@ -361,8 +400,12 @@ internal sealed partial class PanelOverlayRenderer
         return rightX > leftX;
     }
 
-    private static int FindFirstVisibleIndex(PreparedNote[] notes, long windowStart)
+    private int FindFirstVisibleIndex(PreparedNote[] notes, int streamId, long windowStart)
     {
+        if (_activeSequentialState?.TryGetFirst(
+                streamId, notes, windowStart, out int sequentialFirst) == true)
+            return sequentialFirst;
+
         int low = 0;
         int high = notes.Length;
         while (low < high)
@@ -391,7 +434,15 @@ internal sealed partial class PanelOverlayRenderer
         return low;
     }
 
-    private static PreparedNote FindActive(PreparedNote[] notes, long sample)
+    private PreparedNote FindActive(PreparedNote[] notes, int streamId, long sample)
+    {
+        if (_activeSequentialState?.TryGetActive(
+                streamId, notes, sample, out PreparedNote active) == true)
+            return active;
+        return FindActiveBinary(notes, sample);
+    }
+
+    private static PreparedNote FindActiveBinary(PreparedNote[] notes, long sample)
     {
         int low = 0;
         int high = notes.Length;

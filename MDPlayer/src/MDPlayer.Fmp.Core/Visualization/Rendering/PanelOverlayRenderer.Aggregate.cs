@@ -26,7 +26,8 @@ internal sealed partial class PanelOverlayRenderer
             OverlayRect cell = new(lane.X + column * cellWidth, lane.Y + row * cellHeight,
                 column == columns - 1 ? lane.Right - lane.X - column * cellWidth : cellWidth,
                 row == rows - 1 ? lane.Bottom - lane.Y - row * cellHeight : cellHeight);
-            AggregateHitEvent? active = FindRecentHit(panel.Prepared.AggregateHits, subVoices[slot], currentSample);
+            AggregateHitEvent? active = FindRecentHit(
+                panel.Prepared.AggregateHits, panel.AggregateStreamId, subVoices[slot], currentSample);
             double brightness = active is AggregateHitEvent hit
                 ? Math.Clamp(1 - (currentSample - hit.SamplePosition) /
                     Math.Max(1.0, AggregateDecaySeconds * _timeline.SampleRate), 0, 1) * Math.Clamp(hit.Strength, 0, 1)
@@ -46,7 +47,9 @@ internal sealed partial class PanelOverlayRenderer
                 int panX = cell.X + cell.Width / 2 + (int)Math.Round(Math.Clamp(hitWithPan.Pan, -1, 1) * Math.Max(1, cell.Width / 2 - 5));
                 DrawVerticalLine(frame, panX, cell.Y + 2, cell.Bottom - 3, BrightText.WithAlpha(180));
             }
-            DrawHitTrail(frame, cell, panel.Prepared.AggregateHits, subVoices[slot], currentSample);
+            DrawHitTrail(
+                frame, cell, panel.Prepared.AggregateHits, panel.AggregateStreamId,
+                subVoices[slot], currentSample);
         }
     }
 
@@ -54,12 +57,16 @@ internal sealed partial class PanelOverlayRenderer
         Span<byte> frame,
         OverlayRect cell,
         AggregateHitEvent[] hits,
+        int streamId,
         string subVoiceId,
         long currentSample)
     {
         long historySamples = Math.Max(1, (long)Math.Round(1.5 * _timeline.SampleRate));
         long historyStart = currentSample - historySamples;
-        int upper = UpperBound(hits, currentSample);
+        int upper;
+        if (!(_activeSequentialState?.TryGetAggregateUpper(
+                streamId, hits, currentSample, out upper) ?? false))
+            upper = UpperBound(hits, currentSample);
         int markers = 0;
         for (int index = upper - 1; index >= 0 && markers < 8; index--)
         {
@@ -77,12 +84,17 @@ internal sealed partial class PanelOverlayRenderer
         }
     }
 
-    private static AggregateHitEvent? FindRecentHit(
+    private AggregateHitEvent? FindRecentHit(
         AggregateHitEvent[] hits,
+        int streamId,
         string subVoiceId,
         long currentSample)
     {
-        int high = UpperBound(hits, currentSample) - 1;
+        int high;
+        if (!(_activeSequentialState?.TryGetAggregateUpper(
+                streamId, hits, currentSample, out high) ?? false))
+            high = UpperBound(hits, currentSample);
+        high--;
         for (int index = high; index >= 0; index--)
         {
             AggregateHitEvent hit = hits[index];

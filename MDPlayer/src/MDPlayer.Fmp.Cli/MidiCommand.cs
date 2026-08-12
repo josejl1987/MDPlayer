@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
@@ -51,8 +52,10 @@ internal static class MidiCommand
         TextWriter output = options.OutputWriter ?? Console.Out;
 
         // Capture (or reuse) the timeline.
+        Stopwatch captureWatch = Stopwatch.StartNew();
         VisualizationTimeline timeline = TimelineCaptureService.Capture(
             options.Input, options.Timeline, options, captureDependencies: null);
+        captureWatch.Stop();
         output.WriteLine($"timeline: {timeline.Notes.Count} notes, {timeline.Beats.Length} beats, " +
             $"{timeline.Timing.Length} timing events, sample rate {timeline.SampleRate}");
 
@@ -78,7 +81,9 @@ internal static class MidiCommand
             DetectTempoChanges = true,
         };
 
+        Stopwatch tempoWatch = Stopwatch.StartNew();
         MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline, mapOptions);
+        tempoWatch.Stop();
         TimingDiagnostics diagnostics = build.Diagnostics;
 
         var exportOptions = new MusicalMidiExportOptions
@@ -94,6 +99,7 @@ internal static class MidiCommand
                 "off" => PitchNormalizationMode.Off,
                 _ => throw new ArgumentException($"unknown --pitch-normalization '{options.PitchNormalization}'"),
             },
+            EnablePerformanceMetrics = !string.IsNullOrWhiteSpace(options.TimingReport),
         };
         var exporter = new MusicalMidiExporter(build.Map, options.Ppq, exportOptions)
         {
@@ -103,7 +109,16 @@ internal static class MidiCommand
 
         Directory.CreateDirectory(
             Path.GetDirectoryName(Path.GetFullPath(options.Output)) ?? ".");
+        Stopwatch fileWatch = Stopwatch.StartNew();
         File.WriteAllBytes(options.Output, result.Bytes);
+        fileWatch.Stop();
+        if (result.Performance is { } performance)
+        {
+            result.Performance = performance.WithOuterStageTimings(
+                captureSeconds: captureWatch.Elapsed.TotalSeconds,
+                tempoGridSeconds: tempoWatch.Elapsed.TotalSeconds,
+                fileWriteSeconds: fileWatch.Elapsed.TotalSeconds);
+        }
 
         output.WriteLine($"wrote {System.IO.Path.GetFullPath(options.Output)} ({result.Bytes.Length} bytes)");
         // Report the resolved timing source explicitly - for auto this is the source
@@ -206,6 +221,24 @@ internal static class MidiCommand
                 sourceTimeMaxErrorMs = pitchMetrics.SourceTimeMaxErrorMs,
                 sourceTimeRmsErrorMs = pitchMetrics.SourceTimeRmsErrorMs,
             },
+            performance = export.Performance is { } p ? new
+            {
+                stages = p.Stages,
+                p.SourceEvents,
+                p.SourceEventsProcessed,
+                p.SourceEventsSkipped,
+                p.GeneratedMidiEvents,
+                p.SuppressedMidiEvents,
+                p.PitchCalculations,
+                p.PitchCalculationsAvoided,
+                p.BendEventsEmitted,
+                p.BendEventsSuppressed,
+                p.TimelineScans,
+                p.TimelineSorts,
+                p.TemporaryCollections,
+                p.AllocatedBytes,
+                p.PeakWorkingSetBytes,
+            } : null,
             anchors = new
             {
                 input = inputAnchors,

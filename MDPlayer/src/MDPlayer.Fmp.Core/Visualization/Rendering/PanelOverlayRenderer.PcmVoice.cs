@@ -48,10 +48,12 @@ internal sealed partial class PanelOverlayRenderer
 
     private void DrawPcmVoicePanel(Span<byte> frame, PanelData panel, long currentSample)
     {
+        (double Min, double Max)? sharedRange = null;
         if (panel.Prepared.MainNotes.Length > 0 && _cameras[panel.Index] != null)
         {
-            DrawPitchGrid(frame, panel, _cameras[panel.Index], currentSample, false);
-            DrawPitchedPanel(frame, panel, currentSample, false);
+            sharedRange = GetPitchRange(panel, currentSample);
+            DrawPitchGrid(frame, panel, _cameras[panel.Index], currentSample, false, sharedRange);
+            DrawPitchedPanel(frame, panel, currentSample, false, sharedRange);
         }
 
         OverlayRect timeline = _layout.GetTimelineRect(panel.Index);
@@ -65,7 +67,10 @@ internal sealed partial class PanelOverlayRenderer
         SamplePlaybackEvent[] events = panel.Prepared.SamplePlayback;
         int rowCount = Math.Max(1, panel.SampleRowLabels.Length);
 
-        int first = LowerBoundPlayback(events, windowStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetPlaybackFirst(
+                panel.PlaybackStreamId, events, windowStart, out first) ?? false))
+            first = LowerBoundPlayback(events, windowStart);
         for (int index = first; index < events.Length; index++)
         {
             SamplePlaybackEvent value = events[index];

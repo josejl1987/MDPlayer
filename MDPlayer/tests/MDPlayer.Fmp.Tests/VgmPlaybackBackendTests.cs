@@ -627,7 +627,7 @@ public sealed class VgmPlaybackBackendTests
             0xB9, 0x00, 0x00,
             0xB9, 0x02, 0x20,
             0xB9, 0x03, 0x00,
-            0xB9, 0x04, 0x1F,
+            0xB9, 0x04, 0x9F,
             0xB9, 0x05, 0xFF,
             0x61, 0x20, 0x00,
             0xB9, 0x04, 0x00,
@@ -836,6 +836,37 @@ public sealed class VgmPlaybackBackendTests
             if (File.Exists(path)) File.Delete(path);
             if (File.Exists(wav)) File.Delete(wav);
             if (File.Exists(wav + ".tmp")) File.Delete(wav + ".tmp");
+        }
+    }
+
+    [Fact]
+    public void Capture_WithoutAudioStillEmitsEmbeddedVgmPcmAssetEvent()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-asset-no-audio-{Guid.NewGuid():N}.vgm");
+        try
+        {
+            File.WriteAllBytes(path, CreateVgmWithSampleAsset(
+                0x80,
+                0x04, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x10, 0x20, 0x30, 0x40,
+                0x66));
+
+            var sink = new AssetRecordingSink();
+            using IPlaybackCaptureSession session = new VgmPlaybackBackend().Open(
+                new FileInfo(path),
+                new PlaybackOptions(LoopCount: 1, FadeSeconds: 0, TailSeconds: 0),
+                sink);
+            session.Run();
+
+            TimedSampleAssetEvent emitted = Assert.Single(sink.Assets);
+            Assert.Equal("vgm:segapcm.0:00000000:00000004", emitted.AssetId);
+            Assert.Equal(AssetKind.Pcm, emitted.Kind);
+            Assert.Equal(4, emitted.SizeBytes);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
         }
     }
 

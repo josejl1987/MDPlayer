@@ -146,12 +146,17 @@ internal sealed partial class PanelOverlayRenderer
         OverlayRect header = _layout.GetHeaderRect(panel.Index);
         if (header.Height <= 0)
             return;
-        PreparedNote active = FindActive(panel.Prepared.MainNotes, currentSample);
+        PreparedNote active = FindActive(panel.Prepared.MainNotes, panel.MainNoteStreamId, currentSample);
         if (active == null && panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
         {
-            foreach (PreparedNote[] operatorNotes in panel.Prepared.OperatorNotes)
+            int operatorCount = Math.Min(
+                panel.Prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length);
+            for (int operatorIndex = 0; operatorIndex < operatorCount; operatorIndex++)
             {
-                active = FindActive(operatorNotes, currentSample);
+                active = FindActive(
+                    panel.Prepared.OperatorNotes[operatorIndex],
+                    panel.OperatorNoteStreamIds[operatorIndex],
+                    currentSample);
                 if (active != null)
                     break;
             }
@@ -185,7 +190,7 @@ internal sealed partial class PanelOverlayRenderer
 
         if (!showOverlay
             && ChipPanelHeaderBuilder.TryBuild(
-                panel.Prepared, currentSample, out PanelHeaderData chipHeader))
+                panel.Prepared, currentSample, _chipHeaderCursors[panel.Index], out PanelHeaderData chipHeader))
         {
             patch = chipHeader.Label;
             badges = "";
@@ -221,7 +226,14 @@ internal sealed partial class PanelOverlayRenderer
         int primaryScale = Height >= 720 ? 2 : 1;
         if (!string.IsNullOrEmpty(state))
         {
-            string primary = Ellipsize(state, primaryScale, Math.Max(0, slots.State.Width));
+            string primary = CachedHeaderText(
+                _headerStateInputs,
+                _headerStateOutputs,
+                _headerStateWidths,
+                panel.Index,
+                state,
+                primaryScale,
+                Math.Max(0, slots.State.Width));
             if (!string.IsNullOrEmpty(primary))
                 DrawText(frame, slots.State.X, TextCenterY(slots.State, primaryScale), primary, SecondaryText, primaryScale, slots.State.Right);
         }
@@ -238,7 +250,11 @@ internal sealed partial class PanelOverlayRenderer
             // an instrument-change overlay).
             int badgeWidth = badges.Length > 0 ? BitmapFont.MeasureText(badges, 1) : 0;
             const int badgeGap = 8;
-            string compactPatch = Ellipsize(
+            string compactPatch = CachedHeaderText(
+                _headerPatchInputs,
+                _headerPatchOutputs,
+                _headerPatchWidths,
+                panel.Index,
                 patch,
                 primaryScale,
                 Math.Max(0, contentRight - slots.Patch.X - (badgeWidth > 0 ? badgeWidth + badgeGap : 0)));
@@ -273,6 +289,29 @@ internal sealed partial class PanelOverlayRenderer
     /// <summary>Centres mono text of a given scale within a header rect.</summary>
     private int TextCenterY(OverlayRect rect, int scale)
         => rect.Y + Math.Max(0, (rect.Height - 7 * scale) / 2);
+
+    private static string CachedHeaderText(
+        string[] inputs,
+        string[] outputs,
+        int[] widths,
+        int panelIndex,
+        string value,
+        int scale,
+        int maxWidth)
+    {
+        if (widths[panelIndex] == maxWidth
+            && string.Equals(inputs[panelIndex], value, StringComparison.Ordinal)
+            && outputs[panelIndex] is string cached)
+        {
+            return cached;
+        }
+
+        string result = Ellipsize(value, scale, maxWidth);
+        inputs[panelIndex] = value;
+        outputs[panelIndex] = result;
+        widths[panelIndex] = maxWidth;
+        return result;
+    }
 
     private static string SsgModeToken(VisualizationNoteMode mode) => mode switch
     {

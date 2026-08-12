@@ -20,7 +20,7 @@ internal static class VgmScopeRenderer
         double tailSeconds,
         double? maxDurationSeconds)
     {
-        VgmDocument document = VgmDocument.Parse(VgmInput.Read(inputPath));
+        VgmDocument document = VgmDocumentCache.Load(inputPath);
         StemSpec[] specs = BuildSpecs(document);
         if (specs.Length == 0)
             return null;
@@ -55,6 +55,7 @@ internal static class VgmScopeRenderer
             pcmBuffers[channel] = new short[2048];
             monoBuffers[channel] = new short[1024];
         }
+        var fadeGains = new double[1024];
 
         var result = new ScopeRenderer.ScopeResult
         {
@@ -102,7 +103,8 @@ internal static class VgmScopeRenderer
                     ref rendered,
                     target,
                     fadeStart,
-                    baseEnd);
+                    baseEnd,
+                    fadeGains);
                 var normalized = new TimedChipWrite(
                     target,
                     source.Device,
@@ -113,7 +115,9 @@ internal static class VgmScopeRenderer
                     renderer.Write(normalized);
             }
 
-            RenderUntil(renderers, writers, pcmBuffers, monoBuffers, ref rendered, end, fadeStart, baseEnd);
+            RenderUntil(
+                renderers, writers, pcmBuffers, monoBuffers, ref rendered,
+                end, fadeStart, baseEnd, fadeGains);
             result.MasterSamples = rendered;
             result.Success = true;
             result.CompletionReason = "completed";
@@ -459,7 +463,9 @@ internal static class VgmScopeRenderer
             {
                 if (pass > 0 && write.SourceSample < loop.Value)
                     continue;
-                yield return write with { SourceSample = write.SourceSample + offset };
+                yield return offset == 0
+                    ? write
+                    : write with { SourceSample = write.SourceSample + offset };
             }
         }
     }
@@ -483,7 +489,8 @@ internal static class VgmScopeRenderer
         ref long rendered,
         long target,
         long fadeStart,
-        long baseEnd)
+        long baseEnd,
+        double[] fadeGains)
     {
         if (target < rendered)
             throw new InvalidOperationException("VGM stems are not monotonic after loop expansion.");
@@ -491,25 +498,46 @@ internal static class VgmScopeRenderer
         while (rendered < target)
         {
             int count = (int)Math.Min(1024, target - rendered);
-            for (int channel = 0; channel < renderers.Length; channel++)
+            long blockStart = rendered;
+            for (int sample = 0; sample < count; sample++)
             {
-                Span<short> pcm = pcmBuffers[channel].AsSpan(0, count * 2);
-                renderers[channel].Render(count, pcm);
-                Span<short> mono = monoBuffers[channel].AsSpan(0, count);
-                for (int sample = 0; sample < count; sample++)
-                {
-                    long absolute = rendered + sample;
-                    double gain = absolute >= baseEnd
-                        ? 0
-                        : absolute <= fadeStart || fadeStart >= baseEnd
-                            ? 1
-                            : (baseEnd - absolute) / (double)(baseEnd - fadeStart);
-                    int mixed = (pcm[sample * 2] + pcm[sample * 2 + 1]) / 2;
-                    mono[sample] = (short)Math.Clamp(mixed * gain, short.MinValue, short.MaxValue);
-                }
-                writers[channel].Write(mono);
+                long absolute = blockStart + sample;
+                fadeGains[sample] = absolute >= baseEnd
+                    ? 0
+                    : absolute <= fadeStart || fadeStart >= baseEnd
+                        ? 1
+                        : (baseEnd - absolute) / (double)(baseEnd - fadeStart);
+            }
+            if (renderers.Length == 1)
+            {
+                RenderChannel(0, count, fadeGains, renderers, writers, pcmBuffers, monoBuffers);
+            }
+            else
+            {
+                Parallel.For(0, renderers.Length, channel =>
+                    RenderChannel(channel, count, fadeGains, renderers, writers, pcmBuffers, monoBuffers));
             }
             rendered += count;
         }
+    }
+
+    private static void RenderChannel(
+        int channel,
+        int count,
+        double[] fadeGains,
+        VgmAudioRenderer[] renderers,
+        WavWriter[] writers,
+        short[][] pcmBuffers,
+        short[][] monoBuffers)
+    {
+        Span<short> pcm = pcmBuffers[channel].AsSpan(0, count * 2);
+        renderers[channel].Render(count, pcm);
+        Span<short> mono = monoBuffers[channel].AsSpan(0, count);
+        for (int sample = 0; sample < count; sample++)
+        {
+            int mixed = (pcm[sample * 2] + pcm[sample * 2 + 1]) / 2;
+            mono[sample] = (short)Math.Clamp(mixed * fadeGains[sample], short.MinValue, short.MaxValue);
+        }
+        writers[channel].Write(mono);
     }
 }

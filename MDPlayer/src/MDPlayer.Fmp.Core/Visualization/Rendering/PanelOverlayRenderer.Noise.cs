@@ -12,7 +12,10 @@ internal sealed partial class PanelOverlayRenderer
         NoiseStateEvent[] events = panel.Prepared.Noise;
         long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
         long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
-        int first = LowerBoundNoise(events, windowStart);
+        int first;
+        if (!(_activeSequentialState?.TryGetNoiseFirst(
+                panel.NoiseStreamId, events, windowStart, out first) ?? false))
+            first = LowerBoundNoise(events, windowStart);
         if (first > 0)
             first--;
         bool active = false;

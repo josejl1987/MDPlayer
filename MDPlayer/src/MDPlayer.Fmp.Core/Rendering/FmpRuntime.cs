@@ -34,7 +34,7 @@ internal class FmpRuntime
     // driver call and do not advance during startup waits or timer ticks).
     private ulong _opnaMasterClock;
     private ulong _clockRemainder;
-    private int _controlTickRate;
+    private int _controlTickRate = 44100;
     public bool PlaybackEnded => _playbackEnded;
     public int LoopCount => _loopCount;
     public int CurrentLoop => _loopCounter;
@@ -88,11 +88,16 @@ internal class FmpRuntime
     /// </summary>
     public uint? CpuClockFrequencyHz { get; set; }
 
-    public FmpRuntime(IFmpChipSink chipSink, FmpRuntimeAssets assets, IFmpFileSystem fileSystem = null)
+    public FmpRuntime(
+        IFmpChipSink chipSink,
+        FmpRuntimeAssets assets,
+        IFmpFileSystem fileSystem = null,
+        int controlTickRate = 44100)
     {
         _chipSink = chipSink;
         _assets = assets;
         _fileSystem = fileSystem;
+        ControlTickRate = controlTickRate;
         _fileTemp = new fileTemp();
         _nise98 = new Nise98.Nise98();
         _step = 0;
@@ -110,16 +115,13 @@ internal class FmpRuntime
     {
         try
         {
-            if (CpuClockFrequencyHz is uint cpuHz && cpuHz != 0)
-                _nise98.CpuClockFrequencyHz = cpuHz;
-            _trackFileName = Path.GetFileName(trackFileName) ?? "track";
-            // Initialize Nise98 with callbacks
             _nise98.Init(
                 msgWrite: OnMsgWrite,
                 opnaWrite: OnOpnaWrite,
                 fileTemp: _fileTemp,
                 ongen: Nise98.Nise98.enmOngenBoardType.SpeakBoard,
-                fileSystem: _fileSystem
+                fileSystem: _fileSystem,
+                sampleRate: _controlTickRate
             );
 
             // Keep the explicit assignment for callers that replace the DOS
