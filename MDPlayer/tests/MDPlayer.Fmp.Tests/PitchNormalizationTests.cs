@@ -673,4 +673,50 @@ public sealed class PitchNormalizationTests
 
         Assert.Equal(2, decoded.State.Values.Count(s => s.HasTuning));
     }
+
+    [Fact]
+    public void CoarseTuning_ExactRpnSequence_RoundTrips()
+    {
+        // The coarse RPN 0x0001 emission path (BuildTuning, D10) — unreachable from
+        // the stage (the detector's mod-100 residual fold keeps |TuningCents| ≤ 50c)
+        // but a first-class IR/writer capability. This test pins the exact byte
+        // sequence: RPN 0x0001 select (CC101=0, CC100=1), 14-bit data entry
+        // (0x2000 + 2 st → CC6 MSB 0x40, CC38 LSB 0x02), null-RPN unselect — all at
+        // tick 0 and ordered before any pitch bend (Rank 2 < Rank 3).
+        var track = new MidiTrack
+        {
+            Name = "t",
+            Endpoint = new MidiEndpoint(0, 0),
+        };
+        track.Events.Add(new MidiTuningEvent(0, 0, 0, CoarseSemitones: 2, FineCents: 0));
+        track.Events.Add(new MidiPitchBendEvent(0, 0, 0, 512));
+        track.Events.Add(new MidiNoteEvent(0, 0, 0, 60, 90, true));
+
+        var bytes = new global::Fmp.Core.Midi.MidiFileWriter(Ppq).Write(Array.Empty<MidiEventBase>(), new[] { track });
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(bytes);
+
+        var endpoint = decoded.State.Single(kv => kv.Value.HasTuning).Key;
+        Assert.Equal(2, decoded.State[endpoint].CoarseTuningSemitones);
+        Assert.Equal(0x2000, decoded.State[endpoint].FineTuningValue); // no fine RPN emitted
+
+        var events = decoded.Events[endpoint];
+        var ccs = events.Where(e => e.Event is ControlChangeEvent).ToList();
+        Assert.Equal(6, ccs.Count);
+        // Exact sequence: RPN 0x0001 select → data entry MSB/LSB → null RPN unselect.
+        Assert.Equal(new[] { 101, 100, 6, 38, 101, 100 },
+            ccs.Select(e => (int)((ControlChangeEvent)e.Event).ControlNumber));
+        Assert.Equal(new[] { 0, 1, 0x40, 0x02, 127, 127 },
+            ccs.Select(e => (int)((ControlChangeEvent)e.Event).ControlValue));
+        Assert.All(ccs, e => Assert.Equal(0, e.Tick)); // whole setup lands at tick 0
+
+        // Tuning precedes the pitch bend at the same tick (deterministic Rank order).
+        int firstBendIndex = events.FindIndex(e => e.Event is PitchBendEvent);
+        Assert.True(firstBendIndex >= 6, "the tuning setup must sort before any pitch bend");
+
+        // Oracle round-trip: note 60 + coarse 2 st + fine 0 = 62.
+        var on = events.Select(e => e.Event).OfType<NoteOnEvent>().First();
+        Assert.Equal(60, on.NoteNumber);
+        Assert.Equal(62.0, MidiSemanticDecoder.EffectivePitch(on.NoteNumber, 0,
+            decoded.State[endpoint].BendRange, 0, decoded.State[endpoint].CoarseTuningSemitones), 9);
+    }
 }
