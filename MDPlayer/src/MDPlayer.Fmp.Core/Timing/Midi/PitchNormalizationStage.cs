@@ -106,12 +106,46 @@ internal sealed record NormalizedNoteView(
     IReadOnlyList<NormalizedPitchChange>? Changes);
 
 /// <summary>
-/// The normalized pitch model: one view per source note, produced once by
-/// <see cref="PitchNormalizationStage.Normalize"/> and consumed by every pitch
-/// consumer of the exporter. Reference-identity keyed by <see cref="NoteEvent"/>.
+/// The normalized pitch model: one view per source note plus per-domain tuning
+/// statistics, produced once by <see cref="PitchNormalizationStage.Normalize"/> and
+/// consumed by every pitch consumer of the exporter. Reference-identity keyed by
+/// <see cref="NoteEvent"/>; domains keyed by <see cref="MidiTrackKey"/>.
 /// </summary>
 internal sealed record PitchNormalizationModel(
-    IReadOnlyDictionary<NoteEvent, NormalizedNoteView> Views);
+    IReadOnlyDictionary<NoteEvent, NormalizedNoteView> Views,
+    IReadOnlyDictionary<MidiTrackKey, DomainPitchStats> Domains);
+
+/// <summary>
+/// Per-domain tuning statistics for the pitch report (FR-6 / D12). Cents values are
+/// TRUE cents (1 midi unit = 1 semitone = 100c). Attacks and RetriggerAttacks are
+/// the stable-note pool fed to the detector (retriggers counted separately, D7);
+/// RawPitchSamples is the raw decoder write count; RawBendTransitions … 
+/// ExpressiveTransitions are the monotone pipeline counts.
+/// </summary>
+internal sealed record DomainPitchStats(
+    MidiTrackKey Key,
+    int Attacks,
+    int RetriggerAttacks,
+    int RawPitchSamples,
+    double? ResidualModeCents,
+    double? StableResidualMadCents,
+    double? BaselineConfidence,
+    int RawBendTransitions,
+    int AfterDedup,
+    int AfterDeadband,
+    int ExpressiveTransitions,
+    double? TuningCents,
+    bool Accepted);
+
+/// <summary>Result of the per-domain tuning-center detector (D7/D8).</summary>
+internal sealed record TuningDetection(
+    double BiasCents,
+    bool Accepted,
+    int Attacks,
+    int RetriggerAttacks,
+    double? ResidualModeCents,
+    double? StableResidualMadCents,
+    double? BaselineConfidence);
 
 /// <summary>
 /// The pitch-normalization stage (FR-1). A pure, deterministic function of the
@@ -124,8 +158,8 @@ internal sealed record PitchNormalizationModel(
 ///       never flips a same-sample final write to an earlier one)
 ///   P1  exact-event dedup on a pitch grid (FR-2, pitch units ONLY)
 ///   P2  deadband + hysteresis stable-run compression (FR-3)
-///   P3  consecutive-identical suppression                         [next unit]
-///   P4  per-domain tuning-bias subtraction (FR-4)                 [next unit]
+///   P3  consecutive-identical suppression (cheap final fold, D6)
+///   P4  per-domain tuning-bias subtraction (FR-4)
 ///
 /// The run-start anchor (the folded initial pitch) is state #0 of every pass: it is
 /// never dropped, but it participates in dedup/compression comparisons so a change
@@ -135,34 +169,99 @@ internal static class PitchNormalizationStage
 {
     public static PitchNormalizationModel Normalize(
         VisualizationTimeline timeline,
-        PitchNormalizationThresholds thresholds)
+        PitchNormalizationThresholds thresholds,
+        Func<NoteEvent, MidiTrackKey> keyFor,
+        List<string>? warnings)
     {
         var notes = timeline.Notes ?? Array.Empty<NoteEvent>();
-        var views = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
+        var notesByDomain = new Dictionary<MidiTrackKey, List<NoteEvent>>();
         foreach (NoteEvent note in notes)
         {
-            views[note] = new NormalizedNoteView(
-                note,
-                note.InitialMidiNote,
-                NormalizeChanges(note, thresholds));
+            MidiTrackKey key = keyFor(note);
+            if (!notesByDomain.TryGetValue(key, out List<NoteEvent>? list))
+            {
+                list = new List<NoteEvent>();
+                notesByDomain[key] = list;
+            }
+            list.Add(note);
         }
-        return new PitchNormalizationModel(views);
+
+        // Tuning-center detection FIRST (raw residuals, stable regions only), then
+        // the per-note pipeline subtracts the accepted domain bias (P4).
+        var detectionByDomain = new Dictionary<MidiTrackKey, TuningDetection>();
+        foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
+            detectionByDomain[key] = DetectTuningCenter(key, domainNotes, thresholds, warnings);
+
+        var views = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
+        var domains = new Dictionary<MidiTrackKey, DomainPitchStats>(notesByDomain.Count);
+        foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
+        {
+            TuningDetection detection = detectionByDomain[key];
+            double bias = detection.BiasCents / 100.0; // cents → semitones
+            var counters = new DomainCounters();
+            foreach (NoteEvent note in domainNotes)
+            {
+                counters.RawPitchSamples += note.Pitch?.Count ?? 0;
+                var (changes, counts) = NormalizeChanges(note, thresholds, bias);
+                counters.RawTransitions += counts.RawTransitions;
+                counters.AfterDedup += counts.AfterDedup;
+                counters.AfterDeadband += counts.AfterDeadband;
+                counters.Expressive += changes?.Count ?? 0;
+                views[note] = new NormalizedNoteView(
+                    note,
+                    note.InitialMidiNote - bias,
+                    changes);
+            }
+            domains[key] = new DomainPitchStats(
+                Key: key,
+                Attacks: detection.Attacks,
+                RetriggerAttacks: detection.RetriggerAttacks,
+                RawPitchSamples: counters.RawPitchSamples,
+                ResidualModeCents: detection.ResidualModeCents,
+                StableResidualMadCents: detection.StableResidualMadCents,
+                BaselineConfidence: detection.BaselineConfidence,
+                RawBendTransitions: counters.RawTransitions,
+                AfterDedup: counters.AfterDedup,
+                AfterDeadband: counters.AfterDeadband,
+                ExpressiveTransitions: counters.Expressive,
+                TuningCents: detection.Accepted ? detection.BiasCents : null,
+                Accepted: detection.Accepted);
+        }
+        return new PitchNormalizationModel(views, domains);
     }
 
-    private static IReadOnlyList<NormalizedPitchChange>? NormalizeChanges(
-        NoteEvent note, PitchNormalizationThresholds thresholds)
+    /// <summary>Per-domain pipeline counters (monotone: never grows).</summary>
+    private sealed class DomainCounters
+    {
+        public int RawPitchSamples;
+        public int RawTransitions;
+        public int AfterDedup;
+        public int AfterDeadband;
+        public int Expressive;
+    }
+
+    /// <summary>Per-note intermediate pass counts (RawTransitions is post-P0).</summary>
+    private sealed record PassCounts(int RawTransitions, int AfterDedup, int AfterDeadband);
+
+    private static (IReadOnlyList<NormalizedPitchChange>? Changes, PassCounts Counts) NormalizeChanges(
+        NoteEvent note, PitchNormalizationThresholds thresholds, double biasSemitones)
     {
         if (note.Pitch is null)
-            return null;
+            return (null, new PassCounts(0, 0, 0));
         if (note.Pitch.Count == 0)
-            return Array.Empty<NormalizedPitchChange>();
+            return (Array.Empty<NormalizedPitchChange>(), new PassCounts(0, 0, 0));
         List<PitchSample> samples = SameSampleCollapse(note.Pitch);
+        int rawTransitions = samples.Count;
         samples = Pass1ExactDedup(note.InitialMidiNote, samples, thresholds.DedupGridCents);
+        int afterDedup = samples.Count;
         samples = Pass2DeadbandHysteresis(note.InitialMidiNote, samples,
             thresholds.DeadbandEnterCents, thresholds.DeadbandExitCents);
-        // Pass 3 (consecutive-identical) and Pass 4 (per-domain bias subtraction)
-        // are added by the following work units.
-        return samples.Select(s => new NormalizedPitchChange(s.SamplePosition, s.MidiNote)).ToList();
+        int afterDeadband = samples.Count;
+        samples = Pass3ConsecutiveIdentical(samples);
+        // P4: affine bias subtraction — normalized = raw − domainBias (D9 model:
+        // sourcePitch(t) = nominalNote + bias + expressive(t)).
+        return (samples.Select(s => new NormalizedPitchChange(s.SamplePosition, s.MidiNote - biasSemitones)).ToList(),
+            new PassCounts(rawTransitions, afterDedup, afterDeadband));
     }
 
     /// <summary>Working pitch sample (decoder order is chronological, so list order
@@ -264,5 +363,160 @@ internal static class PitchNormalizationStage
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// P3 consecutive-identical suppression (D6): drop a retained state equal to the
+    /// previous retained one. Belt-and-braces final fold — the passes before it make
+    /// consecutive equal values unreachable in practice (P1 dedups equal grid cells,
+    /// P2 suppresses zero-deviation writes in Suppress mode), but the fold guarantees
+    /// the emitted change list is strictly alternating regardless of future pass
+    /// changes.
+    /// </summary>
+    internal static List<PitchSample> Pass3ConsecutiveIdentical(IReadOnlyList<PitchSample> samples)
+    {
+        var result = new List<PitchSample>(samples.Count);
+        foreach (PitchSample s in samples)
+        {
+            if (result.Count > 0 && result[^1].MidiNote == s.MidiNote)
+                continue; // equal to the previous retained state
+            result.Add(s);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Pass 3 tuning-center detector (FR-4 / D7-D8), per <see cref="MidiTrackKey"/>
+    /// domain. Estimates the domain's tuning BIAS — never a bend value — from attack
+    /// residuals (InitialMidiNote − round(InitialMidiNote), in cents) collected over
+    /// STABLE note regions only. Portamento, vibrato, attack transients and
+    /// intentional bends are excluded BY MAGNITUDE (the only signal the timeline
+    /// model carries). Acceptance is deliberately conservative so real-decoder-only
+    /// activation is structural: a 2–3 note synthetic fixture can never pass the
+    /// distinct-note and persistence criteria, keeping it a byte-identical no-op.
+    /// Rejected domains get bias 0 plus a Diagnostics warning.
+    /// </summary>
+    private static TuningDetection DetectTuningCenter(
+        MidiTrackKey key, IReadOnlyList<NoteEvent> notes,
+        PitchNormalizationThresholds t, List<string>? warnings)
+    {
+        // Float guard for boundary comparisons: residuals are |Δ midi|·100 so exact
+        // thresholds (2c persistence, 60% coverage, MAD caps) can land a hair over
+        // their bounds; the acceptance gates are inclusive by design (D8).
+        const double centsEpsilon = 1e-9;
+        var residuals = new List<(double Cents, int NoteNumber)>();
+        int attacks = 0, retriggerAttacks = 0;
+        foreach (NoteEvent note in notes)
+        {
+            if (!IsStableRegion(note, t))
+                continue;
+            if (note.IsRetrigger)
+                retriggerAttacks++;
+            else
+                attacks++;
+            residuals.Add(((note.InitialMidiNote - Math.Round(note.InitialMidiNote)) * 100.0,
+                (int)Math.Round(note.InitialMidiNote)));
+        }
+
+        TuningDetection Reject(string reason)
+        {
+            if (warnings is not null)
+                warnings.Add($"pitch tuning: domain '{key}' rejected ({reason}) — bias 0, no tuning applied");
+            return new TuningDetection(0.0, false, attacks, retriggerAttacks, null, null, null);
+        }
+
+        if (residuals.Count < t.PersistenceMinAttacks)
+            return Reject($"only {residuals.Count} stable attacks < floor {t.PersistenceMinAttacks}");
+
+        // Greedy merge over sorted residuals while the cluster span stays within
+        // ClusterSpanCents (±2c); the mode is the mean of the largest cluster.
+        var sorted = residuals.OrderBy(r => r.Cents).ToList();
+        int bestStart = 0, bestLen = 1;
+        int start = 0;
+        for (int i = 1; i <= sorted.Count; i++)
+        {
+            if (i == sorted.Count || sorted[i].Cents - sorted[start].Cents > t.ClusterSpanCents + centsEpsilon)
+            {
+                int len = i - start;
+                if (len > bestLen)
+                {
+                    bestStart = start;
+                    bestLen = len;
+                }
+                start = i;
+            }
+        }
+        var cluster = sorted.Skip(bestStart).Take(bestLen).ToList();
+        double mode = cluster.Average(r => r.Cents);
+
+        // Acceptance — ALL must hold (D8).
+        double coverage = (double)cluster.Count / residuals.Count;
+        int distinctNotes = cluster.Select(r => r.NoteNumber).Distinct().Count();
+        double mad = cluster.Average(r => Math.Abs(r.Cents - mode));
+        int persistenceWindow = Math.Min(t.PersistenceAttacks, residuals.Count);
+        bool persistent = residuals
+            .Skip(residuals.Count - persistenceWindow)
+            .All(r => Math.Abs(r.Cents - mode) <= t.ClusterSpanCents / 2.0 + centsEpsilon);
+
+        if (coverage < t.CoverageMin - centsEpsilon)
+            return Reject($"cluster coverage {coverage:0.00} < {t.CoverageMin:0.00}");
+        if (distinctNotes < t.MinDistinctNoteNumbers)
+            return Reject($"cluster spans only {distinctNotes} distinct notes < {t.MinDistinctNoteNumbers}");
+        if (mad > t.MadMaxCents + centsEpsilon)
+            return Reject($"cluster MAD {mad:0.00}c > {t.MadMaxCents:0.00}c");
+        if (!persistent)
+            return Reject("recent attacks leave the cluster (persistence)");
+        // Caps (D8/D9): SNES DSP is typically source-pitched (15c cap); other chips
+        // may reach the coarse-RPN path up to the coarse cap (600c).
+        if (key.Device.Type == ChipType.SnesDsp)
+        {
+            if (Math.Abs(mode) > t.SnesDspBiasCapCents + centsEpsilon)
+                return Reject($"SNES DSP |bias| {mode:0.0}c > {t.SnesDspBiasCapCents:0.0}c cap");
+        }
+        else if (Math.Abs(mode) > t.CoarseBiasCapCents + centsEpsilon)
+        {
+            return Reject($"|bias| {mode:0.0}c > coarse cap {t.CoarseBiasCapCents:0.0}c");
+        }
+
+        return new TuningDetection(mode, true, attacks, retriggerAttacks, mode, mad, coverage);
+    }
+
+    /// <summary>
+    /// Stable-region classification (D7): a note is a stable region iff
+    /// (a) finite initial pitch in [0, 127] (excludes the −1 unpitched sentinel),
+    /// (b) no pitch change deviates from the initial beyond StableDeviationMaxCents
+    ///     and no consecutive pair moves beyond MaxInterChangeCents — portamento,
+    ///     vibrato, attack transients and intentional bends are excluded by
+    ///     magnitude; changes inside the FoldWindowSamples attack window are not
+    ///     counted as instability (they fold into the initial pitch),
+    /// (c) duration ≥ MinStableDurationSamples. Retriggers count as attacks and are
+    ///     reported separately.
+    /// </summary>
+    private static bool IsStableRegion(NoteEvent note, PitchNormalizationThresholds t)
+    {
+        if (!double.IsFinite(note.InitialMidiNote) || note.InitialMidiNote is < 0 or > 127)
+            return false;
+        if (note.EndSample - note.StartSample < t.MinStableDurationSamples)
+            return false;
+        if (note.Pitch is null || note.Pitch.Count == 0)
+            return true;
+        double initial = note.InitialMidiNote;
+        double? previous = null;
+        foreach (PitchChange c in note.Pitch)
+        {
+            if (c.SamplePosition - note.StartSample < t.FoldWindowSamples)
+            {
+                previous = null; // attack transient: not counted, breaks the pair chain
+                continue;
+            }
+            if (!double.IsFinite(c.MidiNote))
+                return false;
+            if (Math.Abs(c.MidiNote - initial) * 100.0 > t.StableDeviationMaxCents)
+                return false;
+            if (previous is double p && Math.Abs(c.MidiNote - p) * 100.0 > t.MaxInterChangeCents)
+                return false;
+            previous = c.MidiNote;
+        }
+        return true;
     }
 }

@@ -156,9 +156,13 @@ internal sealed class MusicalMidiExporter
 
         // Pitch-normalization stage (FR-1): runs BEFORE the origin shift so the
         // shift covers the NORMALIZED event set (the set the exporter actually
-        // serializes). Every pitch consumer reads the normalized model.
+        // serializes). Every pitch consumer reads the normalized model. Detector
+        // rejections surface as Diagnostics warnings (low-confidence domains).
+        var pitchWarnings = new List<string>();
         PitchNormalizationModel pitchModel = PitchNormalizationStage.Normalize(
-            timeline, PitchNormalizationThresholds.Default);
+            timeline, PitchNormalizationThresholds.Default, TrackKeyFor, pitchWarnings);
+        if (pitchWarnings.Count > 0 && Diagnostics is not null)
+            Diagnostics.Warnings.AddRange(pitchWarnings);
         long originShiftTicks = ComputeOriginShiftTicks(timeline, pitchModel);
 
         var conductor = new List<MidiEventBase>();
