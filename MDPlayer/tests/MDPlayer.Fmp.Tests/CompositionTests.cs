@@ -116,6 +116,10 @@ public sealed class CompositionTests
                 scopeGrid[offset] = red;
                 scopeGrid[offset + 1] = green;
                 scopeGrid[offset + 2] = blue;
+                // The scope layer is an alpha mask (Change A): only opaque
+                // pixels carry RGB through the blend. Mark the whole cell
+                // opaque so the composite must show its color.
+                scopeGrid[offset + 3] = 255;
             }
         }
 
