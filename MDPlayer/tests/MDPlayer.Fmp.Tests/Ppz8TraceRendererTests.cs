@@ -14,6 +14,23 @@ public class Ppz8TraceRendererTests
 {
     private const ulong MasterHz = OpnaMasterClock.Hz;
 
+    [Theory]
+    [InlineData(44100)]
+    [InlineData(48000)]
+    [InlineData(96000)]
+    public void Ppz8_UsesRequestedOutputSampleRate(int sampleRate)
+    {
+        using var renderer = new Ppz8TraceRenderer([], [], sampleRate, 0);
+        object ppz8 = typeof(Ppz8TraceRenderer)
+            .GetField("_ppz8", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(renderer)!;
+        double configuredRate = (double)ppz8.GetType()
+            .GetField("SamplingRate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(ppz8)!;
+
+        Assert.Equal(sampleRate, configuredRate);
+    }
+
     [Fact]
     public void Ppz8_Mapping_AcrossRateGrid_DeterministicAndNoThrow()
     {

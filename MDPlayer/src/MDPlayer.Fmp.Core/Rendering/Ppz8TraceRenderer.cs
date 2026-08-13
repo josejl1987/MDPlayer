@@ -36,7 +36,15 @@ internal sealed class Ppz8TraceRenderer : IDisposable
         _latencyFrames = Math.Max(0, latencyFrames);
         _delay = new Ppz8OutputDelayBuffer(_latencyFrames);
         _ppz8 = new PPZ8();
-        _ppz8.Start(0, (uint)OpnaMasterClock.Hz);
+        // PPZ8's overload names are misleading: the first uint after ChipID is
+        // stored as the internal sampling rate. Match MDSound's normal
+        // initialization order (host rate, then chip clock); passing the OPNA
+        // clock first makes the native PPZ8 stream use the wrong timebase.
+        _ppz8.Start(
+            0,
+            checked((uint)sampleRate),
+            (uint)OpnaMasterClock.Hz,
+            Array.Empty<object>());
         _ppz8Out = new int[2][] { new int[1], new int[1] };
     }
 
