@@ -22,7 +22,10 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.20" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" Condition="'$(Configuration)' == 'Debug'" />
+    <!-- Keep this package in every restore graph: a Release restore can be
+         reused by a Debug build without restore, which still compiles the
+         #if DEBUG AttachDevTools call. The call itself remains Debug-only. -->
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
