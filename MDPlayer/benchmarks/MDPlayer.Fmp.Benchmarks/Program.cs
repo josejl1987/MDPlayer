@@ -39,6 +39,10 @@ internal static class Program
                     return args.Length > 1 && File.Exists(args[1])
                         ? RunPhase2(args.Skip(1).ToArray())
                         : 2;
+                case "--perf-scope":
+                    return args.Length > 1 && File.Exists(args[1])
+                        ? RunPerfScope(args.Skip(1).ToArray())
+                        : 2;
             }
         }
 
@@ -157,6 +161,13 @@ internal static class Program
         int width = ReadIntOption(args, "--width", 1280);
         int height = ReadIntOption(args, "--height", 720);
         int frames = ReadIntOption(args, "--frames", 300);
+        int scopeFps = ReadIntOption(args, "--scope-fps", 60);
+        double scopeOpacity = ReadDoubleOption(args, "--scope-opacity") ?? 1.0;
+        if (scopeOpacity is < 0.05 or > 1.0)
+        {
+            Console.Error.WriteLine("error: --scope-opacity must be between 0.05 and 1.0");
+            return 2;
+        }
         VisualizationTimeline timeline = BuildSyntheticTimeline();
         var renderer = new PanelOverlayRenderer(
             timeline,
@@ -165,6 +176,7 @@ internal static class Program
             {
                 FpsNumerator = 60,
                 FpsDenominator = 1,
+                ScopeOpacity = scopeOpacity,
                 EnablePerformanceMetrics = true,
             });
         byte[] destination = new byte[renderer.FrameByteCount];
@@ -174,6 +186,12 @@ internal static class Program
         // as a real export rather than spending its time normalizing zero alpha.
         for (int offset = 3; offset < scopeGrid.Length; offset += 4)
             scopeGrid[offset] = 255;
+        // Cadence emulation (plan §6): at --scope-fps N the compositor maps
+        // every Nth output frame onto the same scope frame (floor mapping at
+        // 60 fps output), so the same grid is placed N consecutive times —
+        // exactly what the frame-renderer cache does in production. This
+        // isolates the overlay-side cost of frame reuse from the pipe cost.
+        int reuseEveryN = Math.Max(1, (int)Math.Round(60.0 / Math.Min(Math.Max(scopeFps, 1), 60)));
         SequentialCompositeSession session = renderer.CreateSequentialSession(scopeFramesAreOpaque: true);
         session.Initialize(destination);
         for (int index = 0; index < 30; index++)
@@ -194,6 +212,10 @@ internal static class Program
             allocatedBytes,
             allocatedBytesPerFrame = allocatedBytes / (double)Math.Max(1, frames),
             peakRssBytes = Process.GetCurrentProcess().PeakWorkingSet64,
+            scopeFps,
+            scopeOpacity,
+            reuseEveryN,
+            blendPath = scopeOpacity < 1.0,
             renderer = renderer.Performance,
         }, new JsonSerializerOptions { WriteIndented = true }));
         return 0;
@@ -398,6 +420,168 @@ internal static class Program
         Console.WriteLine($"  Resolution:         {width}×{height} @ {fps} fps");
         Console.WriteLine($"  Frames measured:    {measuredFrames} (warmup: {warmupFrames})");
         Console.WriteLine();
+    }
+
+    private static int RunPerfScope(string[] benchmarkArgs)
+    {
+        string inputPath = benchmarkArgs[0];
+        var extra = benchmarkArgs.Skip(1).ToArray();
+
+        // Scope cadence pair on the same fixture (plan §6): 30 Hz scope vs
+        // 1:1 (explicit --scope-fps 60; auto would resolve to 30 at 60 fps
+        // output). The JSON comparison isolates the scope-side win of Change B
+        // from encode/analysis noise.
+        PerfScopeRun? at30 = RunVisualizeCapture(
+            inputPath, extra.Concat(["--scope-fps", "30"]).ToArray(), out int exit30);
+        if (at30 is null || exit30 != 0)
+        {
+            Console.Error.WriteLine($"error: --scope-fps 30 run failed (exit {exit30})");
+            return exit30 != 0 ? exit30 : 2;
+        }
+        PerfScopeRun? at60 = RunVisualizeCapture(inputPath, extra, out int exit60);
+        if (at60 is null || exit60 != 0)
+        {
+            Console.Error.WriteLine($"error: 1:1 run failed (exit {exit60})");
+            return exit60 != 0 ? exit60 : 2;
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "perf-scope",
+            input = inputPath,
+            scope30 = at30,
+            scope60 = at60,
+            comparison = new
+            {
+                scopeFrameReadRatio = at60.ScopeFrameReadSeconds > 0
+                    ? Math.Round(at30.ScopeFrameReadSeconds / at60.ScopeFrameReadSeconds, 3)
+                    : (double?)null,
+                corrscopeWaitRatio = at60.CorrscopeWaitSeconds > 0
+                    ? Math.Round(at30.CorrscopeWaitSeconds / at60.CorrscopeWaitSeconds, 3)
+                    : (double?)null,
+                overlayCpuRatio = at60.OverlayCpuSeconds > 0
+                    ? Math.Round(at30.OverlayCpuSeconds / at60.OverlayCpuSeconds, 3)
+                    : (double?)null,
+                wallTimeRatio = at60.WallSeconds > 0
+                    ? Math.Round(at30.WallSeconds / at60.WallSeconds, 3)
+                    : (double?)null,
+                starvation30 = at30.StarvationCount,
+                starvation60 = at60.StarvationCount,
+                encoderIdleDelta = Math.Round(at30.EncoderIdleSeconds - at60.EncoderIdleSeconds, 3),
+                rendererBlockedDelta = Math.Round(at30.RendererBlockedSeconds - at60.RendererBlockedSeconds, 3),
+                frameCountIdentical = at30.FrameCount == at60.FrameCount,
+            },
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    private sealed record PerfScopeRun(
+        int ExitCode,
+        double WallSeconds,
+        double CorrscopeWaitSeconds,
+        double ScopeFrameReadSeconds,
+        double OverlayCpuSeconds,
+        double EncoderIdleSeconds,
+        double RendererBlockedSeconds,
+        double QueueWaitSeconds,
+        double MuxFinalizationSeconds,
+        long StarvationCount,
+        long FrameCount,
+        long OutputSizeBytes,
+        string Bottleneck);
+
+    /// <summary>
+    /// Runs the real single-pass visualize pipeline once with the given extra
+    /// CLI arguments and returns the scope-side metrics from its JSON summary.
+    /// Returns null when the JSON summary cannot be parsed.
+    /// </summary>
+    private static PerfScopeRun? RunVisualizeCapture(
+        string inputPath, string[] extraArgs, out int exitCode)
+    {
+        string? cliProject = FindCliProject();
+        if (cliProject == null)
+        {
+            Console.Error.WriteLine("  error: MDPlayer.Fmp.Cli project was not found");
+            exitCode = 2;
+            return null;
+        }
+
+        string outputDirectory = Path.Combine(
+            Path.GetTempPath(), "mdplayer-fmp-benchmark-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            startInfo.ArgumentList.Add("run");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("Release");
+            startInfo.ArgumentList.Add("--project");
+            startInfo.ArgumentList.Add(cliProject);
+            startInfo.ArgumentList.Add("--no-restore");
+            startInfo.ArgumentList.Add("--");
+            startInfo.ArgumentList.Add("visualize");
+            startInfo.ArgumentList.Add(inputPath);
+            foreach (string argument in extraArgs)
+                startInfo.ArgumentList.Add(argument);
+            startInfo.ArgumentList.Add("--output");
+            startInfo.ArgumentList.Add(outputDirectory);
+            startInfo.ArgumentList.Add("--overwrite");
+            startInfo.ArgumentList.Add("--quiet");
+            startInfo.ArgumentList.Add("--json");
+
+            using var process = new Process { StartInfo = startInfo };
+            long start = Stopwatch.GetTimestamp();
+            process.Start();
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            double wallSeconds = (Stopwatch.GetTimestamp() - start) / (double)Stopwatch.Frequency;
+            string stdout = stdoutTask.GetAwaiter().GetResult();
+            string stderr = stderrTask.GetAwaiter().GetResult();
+            exitCode = process.ExitCode;
+
+            if (process.ExitCode != 0)
+            {
+                Console.Error.WriteLine($"  visualize exited {process.ExitCode}");
+                if (!string.IsNullOrWhiteSpace(stderr))
+                    Console.Error.WriteLine(stderr.Trim());
+                return null;
+            }
+
+            using JsonDocument document = ParseJson(stdout);
+            JsonElement root = document.RootElement;
+            JsonElement stages = root.GetProperty("stages");
+            return new PerfScopeRun(
+                ExitCode: 0,
+                WallSeconds: wallSeconds,
+                CorrscopeWaitSeconds: GetDouble(stages, "corrscopeWaitSeconds"),
+                ScopeFrameReadSeconds: GetDouble(stages, "scopeFrameReadSeconds"),
+                OverlayCpuSeconds: GetDouble(stages, "overlayCpuSeconds"),
+                EncoderIdleSeconds: GetDouble(stages, "encoderIdleSeconds"),
+                RendererBlockedSeconds: GetDouble(stages, "rendererBlockedSeconds"),
+                QueueWaitSeconds: GetDouble(stages, "queueWaitSeconds"),
+                MuxFinalizationSeconds: GetDouble(stages, "muxFinalizationSeconds"),
+                StarvationCount: GetLong(stages, "starvationCount"),
+                FrameCount: GetLong(stages, "frameCount"),
+                OutputSizeBytes: GetLong(root, "outputSizeBytes"),
+                Bottleneck: ClassifyVideoBottleneck(stages));
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  benchmark failed: {ex.Message}");
+            exitCode = 2;
+            return null;
+        }
+        finally
+        {
+            try { Directory.Delete(outputDirectory, recursive: true); } catch { }
+        }
     }
 
     /// <summary>

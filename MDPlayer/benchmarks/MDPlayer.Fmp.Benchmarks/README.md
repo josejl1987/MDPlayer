@@ -21,8 +21,15 @@ Standalone Phase 2 modes:
   process with minimal visualization work.
 * `--perf-video <input> [render options]` runs the complete capture, render,
   audio, and encode path.
+* `--perf-scope <input> [render options]` runs the full pipeline twice on the
+  same fixture — `--scope-fps 30` vs 1:1 (`--scope-fps 60`) — and emits a JSON
+  comparison of `scopeFrameReadSeconds`, `corrscopeWaitSeconds`,
+  `overlayCpuSeconds`, wall time, starvation and encoder/renderer idle deltas
+  (waveform cadence plan §6).
 
-`--perf-render` accepts `--frames`, `--width`, and `--height`; `--perf-encode`
+`--perf-render` accepts `--frames`, `--width`, `--height`, `--scope-fps`
+(scope-cadence reuse emulation; default 60 = 1:1) and `--scope-opacity`
+(alpha-blend path vs raw-copy fast path); `--perf-encode`
 accepts the same options. The full render JSON includes queue wait/backpressure,
 scope-frame read time, renderer copy counts, dirty/full redraw counts, and
 avoided-pixel estimates. Scope-frame reads are performed by the producer so
