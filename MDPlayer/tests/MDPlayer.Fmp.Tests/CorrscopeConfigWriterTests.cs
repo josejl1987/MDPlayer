@@ -115,10 +115,12 @@ public class CorrscopeConfigWriterTests
             Assert.Contains("pitch_tracking:", yaml);
             Assert.DoesNotContain("!SpectrumConfig", yaml);
 
-            // Visual defaults — dark theme, no bright grid, no midline framing
-            Assert.Contains("bg_color: \"#080a0f\"", yaml);
-            Assert.Contains("grid_color: \"#10141c\"", yaml);
-            Assert.Contains("midline_color: \"#10141c\"", yaml);
+            // Visual defaults — transparent background and grid (alpha-00
+            // mask-only frames; the compositor blends the waveform signal),
+            // no midline framing
+            Assert.Contains("bg_color: \"#080a0f00\"", yaml);
+            Assert.Contains("grid_color: \"#10141c00\"", yaml);
+            Assert.Contains("midline_color: \"#10141c00\"", yaml);
             Assert.Contains("grid_line_width: 0.5", yaml);
             Assert.Contains("v_midline: false", yaml);
             Assert.Contains("h_midline: false", yaml);
@@ -132,6 +134,36 @@ public class CorrscopeConfigWriterTests
             Assert.Contains("bold: true", yaml);
             Assert.Contains("!LabelPosition LeftTop", yaml);
             Assert.Contains("label_padding_ratio: 0.5", yaml);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Write_TransparentColorOverrides_StillWin()
+    {
+        // The transparent defaults are the Change A mask contract; an explicit
+        // override (e.g. an opaque or low-alpha grid) must still win.
+        string dir = Directory.CreateTempSubdirectory("fmp-corrscope-").FullName;
+        try
+        {
+            string yamlPath = Path.Combine(dir, "corrscope.yaml");
+            var result = MakeSampleResult();
+            CorrscopeConfigWriter.Write(
+                yamlPath, dir, result,
+                overrides: new CorrscopeOverrides
+                {
+                    BgColor = "#000000",
+                    GridColor = "#10141c22",
+                    MidlineColor = "#10141c00",
+                });
+
+            string yaml = File.ReadAllText(yamlPath);
+            Assert.Contains("bg_color: \"#000000\"", yaml);
+            Assert.Contains("grid_color: \"#10141c22\"", yaml);
+            Assert.Contains("midline_color: \"#10141c00\"", yaml);
         }
         finally
         {

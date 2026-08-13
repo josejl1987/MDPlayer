@@ -15,6 +15,12 @@ namespace Fmp.Core.Rendering.Corrscope;
 ///     responsiveness=0.8, reset_below=0.6)
 ///   - Pitch tracking disabled (can mistrack FM note transitions)
 ///   - Dark background with subtle grid, no vertical midline
+///   - Transparent background and grid (8-digit RGBA hex, alpha 00): the
+///     composite blends only the waveform signal over the panel body
+///     (PanelOverlayRenderer blends the scope alpha mask at ScopeOpacity), so
+///     Corrscope's background/grid never contribute an opaque layer. Any hex
+///     string override still wins, including a low-alpha grid like
+///     "#10141c22".
 ///   - Per-channel colors and amplification
 ///   - Rhythm gets a transient-oriented trigger (no waveform memory)
 ///
@@ -46,9 +52,9 @@ internal class CorrscopeConfigWriter
         public const int RenderWidth = 1920;
         public const int RenderHeight = 1080;
         public const double ResDivisor = 1;
-        public const string BgColor = "#080a0f";
-        public const string GridColor = "#10141c";
-        public const string MidlineColor = "#10141c";
+        public const string BgColor = "#080a0f00";
+        public const string GridColor = "#10141c00";
+        public const string MidlineColor = "#10141c00";
         public const double LineWidth = 2.2;
         public const double LineOutlineWidth = 0.6;
         public const string GlobalLineOutlineColor = "#000000";
@@ -228,7 +234,8 @@ internal class CorrscopeConfigWriter
         sb.AppendLine($"  ncols: {ncols}");
         sb.AppendLine();
 
-        // Renderer config — dark theme with subtle grid, no bright colors
+        // Renderer config — transparent background/grid (mask-only frames),
+        // no bright colors; the composite blends only the waveform signal.
         sb.AppendLine("render:");
         sb.AppendLine("  !RendererConfig");
         sb.AppendLine($"  width: {overrides.RenderWidth ?? Defaults.RenderWidth}");

@@ -13,6 +13,10 @@ namespace Fmp.Core.Visualization.Rendering;
 ///
 /// A single discard buffer is shared for skipped frames so consuming
 /// everything up to a late frame never hoards per-frame allocations.
+///
+/// Frames are a per-pixel mask since the config writer emits a transparent
+/// background/grid: alpha 0 is empty background, 255 is waveform line. The
+/// compositor blends the mask over the panel body at ScopeOpacity.
 /// </summary>
 internal sealed class CorrscopeFrameSource : IScopeFrameSource
 {
@@ -26,7 +30,7 @@ internal sealed class CorrscopeFrameSource : IScopeFrameSource
     private byte[]? _discardBuffer;
     private bool _disposed;
 
-    public bool FramesAreOpaque => true;
+    public bool FramesAreOpaque => false;
 
     public CorrscopeFrameSource(
         Func<Process> startProcess,
