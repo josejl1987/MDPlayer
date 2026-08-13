@@ -130,7 +130,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
             return fallback;
         }
 
-        byte a = 0x70;
+        byte a = 0xFF;
         if (hex.Length == 8
             && byte.TryParse(hex.AsSpan(6, 2), System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out byte parsedA))

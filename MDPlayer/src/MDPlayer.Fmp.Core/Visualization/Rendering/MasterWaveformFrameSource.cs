@@ -319,7 +319,7 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
                 int offset = (y * _gridWidth + cellX + x) * 4;
                 BinaryPrimitives.WriteUInt32LittleEndian(
                     destination.Slice(offset, sizeof(uint)),
-                    0x70FFA47Au);
+                    0xFFFFA47Au);
             }
         }
     }

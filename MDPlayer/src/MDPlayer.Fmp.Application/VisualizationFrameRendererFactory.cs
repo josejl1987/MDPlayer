@@ -53,7 +53,8 @@ internal static class VisualizationFrameRendererFactory
 
         return new VisualizationFrameRenderer(
             overlay,
-            scope);
+            scope,
+            prepared.Request.View.ScopeFps);
     }
 
     public static VisualizationFrameRenderer Create(
@@ -119,7 +120,8 @@ internal static class VisualizationFrameRendererFactory
                 }
             }
 
-            return new VisualizationFrameRenderer(overlay, scope);
+            return new VisualizationFrameRenderer(
+                overlay, scope, prepared.Request.View.ScopeFps);
         }
         catch
         {

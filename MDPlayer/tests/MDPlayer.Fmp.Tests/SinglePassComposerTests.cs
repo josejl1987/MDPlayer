@@ -218,6 +218,115 @@ public sealed class SinglePassComposerTests
     }
 
     [Fact]
+    public void Compose_LegacyCorrProcessPath_ConsumesScopeFramesAtScopeCadence()
+    {
+        // Q4 resolution: the legacy Compose(corrProcess, …) path applies the
+        // same output-frame→scope-frame mapping as the frame renderer, so a
+        // 30 Hz scope stream is consumed at scope cadence (never twice per
+        // mapped index, never backward) instead of freezing mid-video.
+        string root = Path.Combine(Path.GetTempPath(), $"single-pass-cadence-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string audioPath = Path.Combine(root, "master.wav");
+        string videoPath = Path.Combine(root, "visualization.mp4");
+        try
+        {
+            var timeline = new VisualizationTimeline
+            {
+                SampleRate = 1_000,
+                StartSample = 0,
+                EndSample = 1_000,
+            };
+            var renderer = new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline, 480, 360),
+                new PanelOverlayRenderer.Options
+                {
+                    FpsNumerator = 60,
+                    FpsDenominator = 1,
+                    Presentation = new VisualizationPresentation("CADENCE", "", ""),
+                });
+
+            using (var wav = new WavWriter(audioPath, 1_000, 2))
+            {
+                wav.Write(new short[2_000]);
+                wav.Close();
+            }
+
+            using var corr = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "/bin/bash",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                },
+            };
+            corr.StartInfo.ArgumentList.Add("-c");
+            corr.StartInfo.ArgumentList.Add("head -c 65536 /dev/zero");
+            corr.Start();
+
+            var factory = new RecordingRawFrameSourceFactory();
+            var composer = new SinglePassComposer("/usr/bin/ffmpeg", new SinglePassComposer.Options
+            {
+                TimeoutMinutes = 1,
+                VideoPreset = "ultrafast",
+                VideoCrf = "20",
+            });
+            composer.Compose(
+                corr, audioPath, videoPath, renderer,
+                sourceFactory: factory,
+                scopeFps: 30);
+
+            Assert.True(File.Exists(videoPath));
+            Assert.True(new FileInfo(videoPath).Length > 0);
+
+            List<int> reads = factory.Source.Reads;
+            Assert.True(reads.Count > 0, "the scope stream must be consumed");
+            // 60 output frames at 30 Hz scope -> exactly 30 distinct reads.
+            Assert.Equal((int)renderer.TotalFrames / 2, reads.Count);
+            Assert.True(reads.SequenceEqual(reads.OrderBy(x => x)),
+                "mapped reads must stay strictly forward");
+            Assert.Equal(reads.Distinct().Count(), reads.Count);
+            Assert.Equal(0, composer.LastMetrics.StarvationCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class RecordingRawFrameSource : SinglePassComposer.IRawFrameSource
+    {
+        private int _next;
+
+        public List<int> Reads { get; } = new();
+
+        public bool FramesAreOpaque => false;
+
+        public bool Read(byte[] buffer, int count)
+        {
+            Reads.Add(_next);
+            buffer.AsSpan(0, count).Clear();
+            buffer[0] = (byte)_next;
+            _next++;
+            return true;
+        }
+
+        public void Drain() { }
+
+        public void Dispose() { }
+    }
+
+    private sealed class RecordingRawFrameSourceFactory : SinglePassComposer.IRawFrameSourceFactory
+    {
+        public RecordingRawFrameSource Source { get; } = new();
+
+        public SinglePassComposer.IRawFrameSource Create(Process process) => Source;
+    }
+
+    [Fact]
     public void BuildArguments_EncodesSingleRawStreamAndMasterAudio()
     {
         IReadOnlyList<string> args = SinglePassComposer.BuildArguments(

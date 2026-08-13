@@ -19,19 +19,34 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     private readonly PanelOverlayRenderer _overlay;
     private readonly IScopeFrameSource? _scopeFrames;
     private readonly byte[]? _scopeBuffer;
+    private readonly byte[]? _lastScopeFrame;
+    private readonly double _scopeFps;
+    private long _lastScopeFrameIndex = -1;
     private long _scopeFrameReadTicks;
     private bool _disposed;
 
     public VisualizationFrameRenderer(
         PanelOverlayRenderer overlay,
-        IScopeFrameSource? scopeFrames)
+        IScopeFrameSource? scopeFrames,
+        double? scopeFps = null)
     {
         _overlay = overlay
             ?? throw new ArgumentNullException(nameof(overlay));
         _scopeFrames = scopeFrames;
 
         if (_scopeFrames is not null)
+        {
             _scopeBuffer = new byte[_overlay.ScopeFrameByteCount];
+            // One extra grid for the reuse cache: CorrscopeFrameSource restarts
+            // its bridge process on any backward read, so re-reading the same
+            // mapped scope frame for consecutive output frames would restart
+            // per duplicate. The cache serves repeats from memory (plan §5.2).
+            _lastScopeFrame = new byte[_overlay.ScopeFrameByteCount];
+        }
+
+        _scopeFps = ScopeFrameMapping.Resolve(
+            scopeFps,
+            _overlay.FpsNumerator / (double)_overlay.FpsDenominator);
     }
 
     public int Width => _overlay.Width;
@@ -54,8 +69,22 @@ internal sealed class VisualizationFrameRenderer : IDisposable
                 $"Destination requires at least {ScopeFrameByteCount} bytes.",
                 nameof(destination));
 
+        long mapped = ScopeFrameMapping.Map(
+            frameIndex, _scopeFps, _overlay.FpsNumerator / (double)_overlay.FpsDenominator);
         long readStart = Stopwatch.GetTimestamp();
-        _scopeFrames.ReadFrame(checked((int)frameIndex), destination);
+        if (mapped == _lastScopeFrameIndex)
+        {
+            // Cache hit: the same scope frame serves consecutive output
+            // frames. Re-reading it from the source would be a backward read
+            // (CorrscopeFrameSource restarts its bridge process).
+            _lastScopeFrame!.AsSpan().CopyTo(destination);
+        }
+        else
+        {
+            _scopeFrames.ReadFrame(checked((int)mapped), destination);
+            destination[..ScopeFrameByteCount].CopyTo(_lastScopeFrame!);
+            _lastScopeFrameIndex = mapped;
+        }
         _scopeFrameReadTicks += Stopwatch.GetTimestamp() - readStart;
     }
 
@@ -116,9 +145,7 @@ internal sealed class VisualizationFrameRenderer : IDisposable
             return;
         }
 
-        _scopeFrames.ReadFrame(
-            checked((int)frameIndex),
-            _scopeBuffer!);
+        ReadScopeFrame(frameIndex, _scopeBuffer!);
 
         _overlay.RenderCompositeFrame(
             frameIndex,

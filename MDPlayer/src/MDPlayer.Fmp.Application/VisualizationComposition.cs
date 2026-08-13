@@ -42,6 +42,7 @@ internal static class VisualizationComposition
     {
         if (!enabled || !layout.Geometry.HasScopes)
             return null;
+        double outputFps = request.Output.FpsNumerator / (double)request.Output.FpsDenominator;
         CorrscopeConfigWriter.Write(
             workspace.CorrscopeConfigPath,
             workspace.ScopeDir,
@@ -49,7 +50,11 @@ internal static class VisualizationComposition
             audioDir: "../audio",
             overrides: new CorrscopeOverrides
             {
-                Fps = request.Output.FpsNumerator / (double)request.Output.FpsDenominator,
+                // The scope renders at its own cadence (auto min(outputFps,
+                // 30) or an explicit --scope-fps); the bridge still renders
+                // every YAML frame (render_subfps = 1) and the frame renderer
+                // maps output frames onto scope frames (plan §5).
+                Fps = ScopeFrameMapping.Resolve(request.View.ScopeFps, outputFps),
                 TriggerMs = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 20,
                 RenderMs = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 12,
                 EdgeStrength = string.Equals(backendId, "fmp", StringComparison.Ordinal) ? null : 0.35,

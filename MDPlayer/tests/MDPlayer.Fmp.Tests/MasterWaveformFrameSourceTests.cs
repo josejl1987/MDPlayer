@@ -95,7 +95,7 @@ public sealed class MasterWaveformFrameSourceTests
         {
             int offset = pixel * 4;
             if (sineFrame[offset] != 0 || sineFrame[offset + 1] != 0 || sineFrame[offset + 2] != 0)
-                Assert.Equal(0x70, sineFrame[offset + 3]);
+                Assert.Equal(0xFF, sineFrame[offset + 3]);
         });
     }
 

@@ -8,7 +8,7 @@ using Fmp.Core.Rendering;
 namespace Fmp.Core.Visualization.Rendering;
 
 /// <summary>
-/// Single-pass compositor: Corrscope renders raw RGB0 frames to a pipe (via a
+/// Single-pass compositor: Corrscope renders raw RGBA frames to a pipe (via a
 /// small Python bridge — no intermediate video is encoded), the .NET overlay is
 /// composited onto each frame in memory, and one FFmpeg process encodes the
 /// final video. This eliminates the intermediate H.264 encode/decode and the
@@ -108,9 +108,16 @@ internal sealed class SinglePassComposer
 
     /// <summary>
     /// Composes the final video from raw Corrscope frames. The bridge process
-    /// streams RGB0 grid frames on stdout; each frame is composited in memory
+    /// streams RGBA grid frames on stdout; each frame is composited in memory
     /// with the overlay and written to a single FFmpeg process that encodes
     /// video + audio once.
+    ///
+    /// No production callers (the frame-renderer overload is the production
+    /// path); kept for tests. It applies the same output-frame→scope-frame
+    /// mapping as <see cref="VisualizationFrameRenderer"/> (auto
+    /// min(outputFps, 30) unless <paramref name="scopeFps"/> is given) and
+    /// reuses the last grid for repeated mapped indices, so a 30 Hz scope
+    /// stream is consumed at scope cadence instead of freezing mid-video.
     /// </summary>
     public string Compose(
         Process corrProcess,
@@ -118,7 +125,8 @@ internal sealed class SinglePassComposer
         string outputVideoPath,
         PanelOverlayRenderer overlayRenderer,
         IRawFrameSourceFactory sourceFactory = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        double? scopeFps = null)
     {
         ArgumentNullException.ThrowIfNull(corrProcess);
         ArgumentNullException.ThrowIfNull(overlayRenderer);
@@ -174,6 +182,11 @@ internal sealed class SinglePassComposer
             int gridFrameBytes = overlayRenderer.ScopeFrameByteCount;
             int outFrameBytes = overlayRenderer.FrameByteCount;
             long total = overlayRenderer.TotalFrames;
+            double outputFps = overlayRenderer.FpsNumerator / (double)overlayRenderer.FpsDenominator;
+            double resolvedScopeFps = ScopeFrameMapping.Resolve(scopeFps, outputFps);
+            byte[] lastScopeGrid = new byte[gridFrameBytes];
+            long lastMapped = -1;
+            bool haveScopeGrid = false;
 
             Stream ffmpegIn = ffmpeg.StandardInput.BaseStream;
             using IRawFrameSource source = (sourceFactory ?? new ProcessRawFrameSourceFactory()).Create(corrProcess);
@@ -188,9 +201,29 @@ internal sealed class SinglePassComposer
                     gridFrameBytes,
                     outFrameBytes,
                     total,
-                    (slot, _) =>
+                    (slot, frameIndex) =>
                     {
-                        slot.HasGrid = source.Read(slot.Grid, gridFrameBytes);
+                        // Mapped reads only: when consecutive output frames
+                        // share a scope frame, reuse the last grid instead of
+                        // consuming another raw frame (the source is strictly
+                        // sequential — a repeated read would desync the pipe).
+                        long mapped = ScopeFrameMapping.Map(
+                            frameIndex, resolvedScopeFps, outputFps);
+                        if (mapped == lastMapped && haveScopeGrid)
+                        {
+                            lastScopeGrid.AsSpan().CopyTo(slot.Grid);
+                            slot.HasGrid = true;
+                        }
+                        else
+                        {
+                            slot.HasGrid = source.Read(slot.Grid, gridFrameBytes);
+                            if (slot.HasGrid)
+                            {
+                                slot.Grid.AsSpan(0, gridFrameBytes).CopyTo(lastScopeGrid);
+                                lastMapped = mapped;
+                                haveScopeGrid = true;
+                            }
+                        }
                         return true;
                     },
                     (slot, index, metrics) =>
