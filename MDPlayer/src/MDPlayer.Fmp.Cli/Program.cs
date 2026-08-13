@@ -86,6 +86,8 @@ public class Program
         Console.WriteLine("  --effects off|subtle|cinematic  Visual effect preset (default: subtle)");
         Console.WriteLine("  --note-color instrument|channel|pitch");
         Console.WriteLine("  --palette default|accessible|monochrome");
+        Console.WriteLine("  --scope-fps FPS             Scope render cadence (default: min(output, 30))");
+        Console.WriteLine("  --scope-opacity 0.05..1.0   Waveform layer opacity over the panel body (default: 1.0)");
         Console.WriteLine("  --title TEXT --subtitle TEXT --credits TEXT --font PATH");
         Console.WriteLine("  --loops COUNT --fade SECONDS --tail SECONDS --max-duration SECONDS");
         Console.WriteLine("  --sample-rate HZ           Capture sample rate (default: 48000)");

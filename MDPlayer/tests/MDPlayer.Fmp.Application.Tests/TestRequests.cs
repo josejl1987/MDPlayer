@@ -58,12 +58,14 @@ internal static class TestRequests
                 FutureSeconds = 1.6,
                 TimeGrid = TimeGridMode.Analytical,
                 Structure = StructureOverlayMode.Off,
+                ScopeFps = 30,
             },
             Style = new StyleSettings
             {
                 Effects = VisualEffects.Cinematic,
                 NoteColor = NoteColorMode.Channel,
                 Palette = PaletteKind.Accessible,
+                ScopeOpacity = 0.5,
             },
             Presentation = new PresentationSettings
             {

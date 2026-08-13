@@ -73,12 +73,14 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         AddIf(arguments, "--future", Format(view.FutureSeconds), mode, view.FutureSeconds != 3.2);
         AddIf(arguments, "--time-grid", TimeGridName(view.TimeGrid), mode, view.TimeGrid != TimeGridMode.Automatic);
         AddIf(arguments, "--structure", StructureName(view.Structure), mode, view.Structure != StructureOverlayMode.Automatic);
+        AddIf(arguments, "--scope-fps", Format(view.ScopeFps), mode, view.ScopeFps is not null);
 
         // Style.
         StyleSettings style = request.Style;
         AddIf(arguments, "--effects", EffectsName(style.Effects), mode, style.Effects != VisualEffects.Subtle);
         AddIf(arguments, "--note-color", NoteColorName(style.NoteColor), mode, style.NoteColor != NoteColorMode.Instrument);
         AddIf(arguments, "--palette", PaletteName(style.Palette), mode, style.Palette != PaletteKind.Default);
+        AddIf(arguments, "--scope-opacity", Format(style.ScopeOpacity), mode, style.ScopeOpacity != 1.0);
 
         // Presentation.
         PresentationSettings presentation = request.Presentation;

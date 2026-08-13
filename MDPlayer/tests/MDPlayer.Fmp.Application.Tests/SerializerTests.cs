@@ -34,10 +34,12 @@ public class SerializerTests
         Assert.Equal(1.6, restored.View.FutureSeconds);
         Assert.Equal(TimeGridMode.Analytical, restored.View.TimeGrid);
         Assert.Equal(StructureOverlayMode.Off, restored.View.Structure);
+        Assert.Equal(30, restored.View.ScopeFps);
 
         Assert.Equal(VisualEffects.Cinematic, restored.Style.Effects);
         Assert.Equal(NoteColorMode.Channel, restored.Style.NoteColor);
         Assert.Equal(PaletteKind.Accessible, restored.Style.Palette);
+        Assert.Equal(0.5, restored.Style.ScopeOpacity);
 
         Assert.Equal("My Song", restored.Presentation.Title);
         Assert.Equal("Sub", restored.Presentation.Subtitle);

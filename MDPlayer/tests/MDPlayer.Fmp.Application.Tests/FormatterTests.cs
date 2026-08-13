@@ -33,6 +33,8 @@ public class FormatterTests
         Assert.DoesNotContain("--effects", command.Arguments);
         Assert.DoesNotContain("--note-color", command.Arguments);
         Assert.DoesNotContain("--palette", command.Arguments);
+        Assert.DoesNotContain("--scope-fps", command.Arguments);
+        Assert.DoesNotContain("--scope-opacity", command.Arguments);
         Assert.DoesNotContain("--ssg-gain-db", command.Arguments);
         Assert.DoesNotContain("--spc-pitch", command.Arguments);
         Assert.DoesNotContain("--encoder", command.Arguments);
@@ -88,9 +90,11 @@ public class FormatterTests
             "--future", "1.6",
             "--time-grid", "analytical",
             "--structure", "off",
+            "--scope-fps", "30",
             "--effects", "cinematic",
             "--note-color", "channel",
             "--palette", "accessible",
+            "--scope-opacity", "0.5",
             "--title", "My Song",
             "--subtitle", "Sub",
             "--credits", "Cred",
@@ -122,8 +126,8 @@ public class FormatterTests
             "--composition", "--output",
             "--quality", "--width", "--height", "--fps", "--fps-denominator",
             "--tracks", "--include-track", "--exclude-track", "--include-inactive",
-            "--past", "--future", "--time-grid", "--structure",
-            "--effects", "--note-color", "--palette",
+            "--past", "--future", "--time-grid", "--structure", "--scope-fps",
+            "--effects", "--note-color", "--palette", "--scope-opacity",
             "--title", "--subtitle", "--credits", "--font",
             "--loops", "--fade", "--tail", "--max-duration", "--sample-rate",
             "--ssg-gain-db", "--spc-pitch",

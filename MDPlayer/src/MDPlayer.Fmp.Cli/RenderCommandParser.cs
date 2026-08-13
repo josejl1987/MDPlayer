@@ -1,3 +1,4 @@
+using System.Globalization;
 using Fmp.Application.Contracts;
 using Fmp.Application.Export;
 
@@ -192,11 +193,41 @@ internal static class RenderCommandParser
                     case "--structure":
                         view = view with { Structure = ParseStructure(reader.RequireValue(name)) };
                         break;
+                    case "--scope-fps":
+                        {
+                            // Scope render cadence (plan §5.1). Bare in
+                            // FullyResolved mode when the request has no
+                            // explicit fps (auto = min(output, 30)); with a
+                            // value, a positive cadence. Values above the
+                            // output fps are clamped to 1:1 at resolve time.
+                            string? raw = reader.OptionalValue(name);
+                            if (raw is not null)
+                            {
+                                if (!double.TryParse(raw, NumberStyles.Float,
+                                        CultureInfo.InvariantCulture, out double scopeFps)
+                                    || !double.IsFinite(scopeFps))
+                                    throw new ArgumentException($"invalid numeric value for {name}: '{raw}'");
+                                if (scopeFps <= 0)
+                                    throw new ArgumentException("--scope-fps must be a positive frame rate");
+                                view = view with { ScopeFps = scopeFps };
+                            }
+                            break;
+                        }
 
                     // ---- style settings ----
                     case "--effects":
                         style = style with { Effects = ParseEffects(reader.RequireValue(name)) };
                         break;
+                    case "--scope-opacity":
+                        {
+                            // Waveform layer opacity over the painted panel
+                            // body (plan §4.5).
+                            double opacity = reader.ReadDouble(name);
+                            if (opacity is < 0.05 or > 1.0)
+                                throw new ArgumentException("--scope-opacity must be between 0.05 and 1.0");
+                            style = style with { ScopeOpacity = opacity };
+                            break;
+                        }
                     case "--note-color":
                         style = style with { NoteColor = ParseNoteColor(reader.RequireValue(name)) };
                         break;

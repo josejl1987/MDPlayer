@@ -133,6 +133,58 @@ public sealed class CanonicalRenderRequestTests
     }
 
     [Fact]
+    public void ScopeFpsAndScopeOpacity_RoundTripAndValidate()
+    {
+        // Parser accepts both options and stores them in the request.
+        var parsed = RenderCommandParser.ParseCore(
+            ["song.vgz", "--scope-fps", "30", "--scope-opacity", "0.5"]);
+        Assert.Equal(30.0, parsed.Request.View.ScopeFps);
+        Assert.Equal(0.5, parsed.Request.Style.ScopeOpacity);
+
+        // The formatter emits non-defaults and omits defaults, so the
+        // round-trip is stable in both directions.
+        CanonicalCommand command = new VisualizationCommandFormatter()
+            .Format(new VisualizationRequest
+            {
+                InputPath = "song.vgz",
+                OutputPath = "song.mp4",
+                View = new ViewSettings { ScopeFps = 29.97 },
+                Style = new StyleSettings { ScopeOpacity = 0.85 },
+            }, CommandDisplayMode.FullyResolved);
+        string[] emitted = command.Arguments.ToArray();
+        Assert.Contains("--scope-fps", emitted);
+        Assert.Contains("--scope-opacity", emitted);
+        var reparsed = RenderCommandParser.ParseCore(emitted.Skip(1).ToArray());
+        Assert.Equal(29.97, reparsed.Request.View.ScopeFps);
+        Assert.Equal(0.85, reparsed.Request.Style.ScopeOpacity);
+
+        var defaults = new VisualizationCommandFormatter().Format(
+            new VisualizationRequest { InputPath = "song.vgz", OutputPath = "song.mp4" },
+            CommandDisplayMode.Compact);
+        Assert.DoesNotContain(defaults.Arguments, a => a == "--scope-fps" || a == "--scope-opacity");
+
+        // FullyResolved mode emits the options bare (no value) when unset, and
+        // the parser must accept the bare form (the `--title` contract).
+        var bare = new VisualizationCommandFormatter().Format(
+            new VisualizationRequest { InputPath = "song.vgz", OutputPath = "song.mp4" },
+            CommandDisplayMode.FullyResolved);
+        var bareParsed = RenderCommandParser.ParseCore(bare.Arguments.Skip(1).ToArray());
+        Assert.Null(bareParsed.Request.View.ScopeFps);
+        Assert.Equal(1.0, bareParsed.Request.Style.ScopeOpacity);
+
+        // Validation: out-of-range opacity and non-positive fps are argument
+        // errors (exit 2), matching the parser contract.
+        Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--scope-opacity", "0"]));
+        Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--scope-opacity", "1.1"]));
+        Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--scope-fps", "0"]));
+        Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--scope-fps", "-5"]));
+    }
+
+    [Fact]
     public void RuntimePathsDoNotEnterRequest()
     {
         var parsed = RenderCommandParser.ParseCore([
@@ -172,12 +224,14 @@ public sealed class CanonicalRenderRequestTests
                 FutureSeconds = 1.6,
                 TimeGrid = TimeGridMode.Analytical,
                 Structure = StructureOverlayMode.Off,
+                ScopeFps = 30,
             },
             Style = new StyleSettings
             {
                 Effects = VisualEffects.Cinematic,
                 NoteColor = NoteColorMode.Channel,
                 Palette = PaletteKind.Accessible,
+                ScopeOpacity = 0.5,
             },
             Presentation = new PresentationSettings
             {
