@@ -125,7 +125,7 @@ internal class CorrscopeRunner
     }
 
     /// <summary>
-    /// Starts the raw-frame bridge: renders the YAML project to raw RGB0 frames
+    /// Starts the raw-frame bridge: renders the YAML project to raw RGBA frames
     /// on stdout with no video encoding. The caller consumes
     /// <see cref="Process.StandardOutput"/> as a binary stream and must call
     /// <see cref="Process.WaitForExit()"/> and check the exit code.

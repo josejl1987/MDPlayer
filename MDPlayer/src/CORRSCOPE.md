@@ -31,13 +31,27 @@ TRACK.visualization/
   grid of all channels, a correlation trigger tuned for Yamaha FM waveforms,
   and pre-configured layout/renderer settings.
 - **Single-pass composition (default):** a small Python bridge
-  (`corrscope-frames.py`) drives Corrscope's renderer and streams raw RGB0
+  (`corrscope-frames.py`) drives Corrscope's renderer and streams raw RGBA
   frames to stdout — no intermediate video is encoded. `mdplayer-render` composites
   the musical overlay onto each frame in memory
   (`PanelOverlayRenderer.RenderCompositeFrame`) and sends the composited frames
   to one FFmpeg process that encodes video + audio once. There is no
   intermediate H.264 encode/decode round-trip, and no crop/reassembly
   filter graph.
+- **Transparent scope layer:** the generated YAML writes an 8-digit RGBA
+  background/grid (`#080a0f00` / `#10141c00`, alpha 00) so Corrscope emits a
+  per-pixel mask: alpha 0 is empty background, 255 is waveform line.
+  `PlaceScopeRows` blends the mask over the painted panel body at
+  `--scope-opacity` (`a = (srcAlpha / 255) * ScopeOpacity`) and bakes the
+  result into RGB — the encode path (RGBA → yuv420p) drops alpha, so a real
+  per-pixel alpha channel cannot survive the encode. The playhead stays drawn
+  under the waveform (visible through it).
+- **Decoupled scope cadence:** the scope renders at `--scope-fps` (auto
+  default `min(outputFps, 30)`; e.g. 30 Hz scope into 60 Hz video) via the
+  YAML `fps:` value, while the compositor maps each output frame onto a scope
+  frame (`floor(out * scopeFps / outputFps)`, 1:1 when scope fps ≥ output fps)
+  and reuses each scope frame from a 1-frame cache — the bridge is never
+  re-read backward, so its process is never restarted mid-render.
 - **Development defaults** are 1440×720 at 30 fps with `libx264 ultrafast` and
   Corrscope antialiasing off. Use `--final-quality` for 1080p60 with
   `veryfast`/`crf 18` and Corrscope antialiasing on.
@@ -85,6 +99,8 @@ memory, and encodes the final `visualization.mp4`.
 | `--final-quality` | 1080p60, `veryfast`/`crf 18`, Corrscope antialiasing on |
 | `--encoder libx264\|nvenc` | Explicit final-encode encoder (default `libx264`) |
 | `--font <path>` | TrueType/OpenType font with CJK coverage for overlay text |
+| `--scope-fps <fps>` | Scope render cadence (default: `min(outputFps, 30)`; 1:1 above output fps) |
+| `--scope-opacity <0.05..1.0>` | Waveform layer opacity over the panel body (default 1.0) |
 | `--tool-timeout-minutes N` | Corrscope/FFmpeg timeout (default: 60) |
 | `--overwrite` | Replace existing timeline/video outputs |
 
@@ -94,7 +110,7 @@ memory, and encodes the final `visualization.mp4`.
 OVI → per-channel stem export (MaskedChipSink) → corrscope-grid.yaml
                                                       ↓
 timeline capture → PanelOverlayRenderer (chrome once) ← corrscope-frames.py
-                                                      ↓       (raw RGB0 pipe)
+                                                      ↓       (raw RGBA pipe)
                         in-memory composite (RenderCompositeFrame)
                                                       ↓
                                               one FFmpeg encode → visualization.mp4

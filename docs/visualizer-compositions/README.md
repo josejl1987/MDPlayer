@@ -49,6 +49,17 @@ panel.
 
 ## Regenerating
 
+All stills: `mdplayer-render preview --request-json <request> --time 8` at both
+resolutions.
+
+## Related plans
+
+- [Waveform layer and scope cadence](waveform-layer-and-cadence-plan.md) —
+  translucent waveform layer (transparent Corrscope background/grid, blended at
+  `--scope-opacity`) and decoupled scope cadence (`--scope-fps`, mapped frame
+  reuse). Implemented on `feature/linux-fmp-renderer`; spike + benchmark
+  evidence recorded in the plan.
+
 ```bash
 mdplayer-render plan   --request-json request-performance.json
 mdplayer-render preview --request-json request-performance.json --time 8 --output perf-720.png

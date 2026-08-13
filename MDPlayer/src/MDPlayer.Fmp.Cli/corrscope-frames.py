@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mdplayer-render single-pass Corrscope bridge.
 
-Renders a Corrscope YAML project to raw RGB0 frames on stdout (no video
+Renders a Corrscope YAML project to raw RGBA frames on stdout (no video
 encoding). mdplayer-render consumes the frame stream, composites the musical
 overlay in memory, and hands the composited frames to a single FFmpeg encode.
 
@@ -16,7 +16,7 @@ recording path (before_record), which forces every frame to be rendered
 instead of spawning FFmpeg, so no intermediate video is ever encoded.
 
 Usage:
-  corrscope-frames.py <project.yaml>   (raw RGB0 frames to stdout)
+  corrscope-frames.py <project.yaml>   (raw RGBA frames to stdout)
 """
 
 import os
