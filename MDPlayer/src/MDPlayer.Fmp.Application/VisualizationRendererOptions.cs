@@ -37,6 +37,7 @@ internal static class VisualizationRendererOptions
             Effects = MapEffects(style.Effects),
             NoteColor = MapNoteColor(style.NoteColor),
             Palette = MapPalette(style.Palette),
+            ScopeOpacity = style.ScopeOpacity,
             MotionBlurSamples = 1,
             IntroSeconds = introOutro ? 0.75 : 0,
             OutroSeconds = introOutro ? Math.Min(0.45, playback.TailSeconds) : 0,

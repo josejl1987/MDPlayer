@@ -16,9 +16,13 @@ namespace Fmp.Core.Visualization.Rendering;
 internal interface IScopeFrameSource : IDisposable
 {
     /// <summary>
-    /// True when every source pixel already has opaque alpha. The production
-    /// Corrscope bridge emits opaque RGBA; internal waveform sources retain
-    /// their own alpha and therefore return false.
+    /// True when the frame's alpha channel is a trustworthy mask: opaque
+    /// pixels carry real signal and alpha 0 pixels are empty background.
+    /// Sources that emit a true per-pixel mask (Corrscope with a transparent
+    /// background, the internal waveform sources) return false so the
+    /// compositor blends them over the panel body at <see cref="PanelOverlayRenderer.Options.ScopeOpacity"/>;
+    /// an opaque source (legacy process bridge) returns true and keeps the
+    /// raw-copy placement.
     /// </summary>
     bool FramesAreOpaque => false;
 

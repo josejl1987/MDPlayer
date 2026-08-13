@@ -27,6 +27,16 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         public bool EnablePerformanceMetrics { get; set; }
 
         /// <summary>
+        /// Opacity applied to the scope waveform layer when it is composited
+        /// over the painted panel body (0.05..1.0, default 1.0). The scope
+        /// frame's alpha channel is used as a per-pixel mask and multiplied by
+        /// this value; the result is baked into RGB because the encode path
+        /// (RGBA -> yuv420p) drops alpha. At 1.0 with an opaque source the
+        /// placement stays a raw copy (byte-identical to the pre-blend path).
+        /// </summary>
+        public double ScopeOpacity { get; set; } = 1.0;
+
+        /// <summary>
         /// Presentation fade-in for the title bars and musical grid. The CLI
         /// enables this for final video composition; direct renderer callers
         /// keep the default zero-second transition for still tests.
@@ -272,6 +282,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _options.Palette ??= VisualizationPalette.Default;
         if (_options.MotionBlurSamples is < 1 or > 8)
             throw new ArgumentOutOfRangeException(nameof(options), "Motion blur samples must be between 1 and 8.");
+        if (_options.ScopeOpacity is < 0.05 or > 1.0)
+            throw new ArgumentOutOfRangeException(nameof(options), "Scope opacity must be between 0.05 and 1.0.");
         if (_options.FpsNumerator <= 0 || _options.FpsDenominator <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Frame rate must be positive.");
 
@@ -432,8 +444,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     /// <summary>
     /// Renders the full frame into <paramref name="destination"/>: the static
-    /// chrome is copied in, the Corrscope scope grid strip (raw RGB0 frames,
-    /// width × CorrscopeGridHeight) is placed into the transparent scope holes,
+    /// chrome is copied in, the Corrscope scope grid strip (raw RGBA frames,
+    /// width × CorrscopeGridHeight) is blended into the transparent scope holes,
     /// and the dynamic content is drawn on top. Used by the single-pass
     /// compositor, which composites the scope and overlay in memory and encodes
     /// once. Pass an empty <paramref name="scopeGrid"/> to skip the scope rows.
@@ -566,7 +578,19 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
         long compositingStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        RestoreDynamicRegions(destination, scopeFramePresent: !scopeGrid.IsEmpty);
+        // An opaque scope placement at full opacity replaces the whole scope
+        // body, so only the gutter/bars/headers need restoring. The alpha
+        // blend leaves transparent pixels' RGB untouched, so the body must be
+        // restored from the static layer first — otherwise previous frames
+        // ghost through the translucent waveform.
+        bool scopeReplacesBody =
+            !scopeGrid.IsEmpty && scopeFramesAreOpaque && _options.ScopeOpacity >= 1.0;
+        RestoreDynamicRegions(destination, scopeReplacesBody);
+        // The playhead is a background time reference: draw it before the
+        // scope rows (same order as RenderCompositeFrameSingle) so the
+        // waveform covers it and the current-sample signal stays visible at
+        // the playhead column.
+        DrawPlayheads(destination);
         PlaceScopeRowsForSession(scopeGrid, destination, scopeFramesAreOpaque);
         if (_performance.Enabled)
             _performance.CompositingTicks += Stopwatch.GetTimestamp() - compositingStart;
@@ -890,10 +914,10 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     internal void ValidateFrameForSession(long frameIndex, Span<byte> destination)
         => ValidateFrame(frameIndex, destination);
 
-    internal void RestoreDynamicRegions(Span<byte> destination, bool scopeFramePresent = false)
+    internal void RestoreDynamicRegions(Span<byte> destination, bool scopeReplacesBody = false)
     {
         long restoredPixels = 0;
-        RectCopyPlan[] restorePlans = scopeFramePresent
+        RectCopyPlan[] restorePlans = scopeReplacesBody
             ? _dynamicRestorePlansWithScope
             : _dynamicRestorePlans;
         int stride = Width * 4;
@@ -1437,9 +1461,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         // must be restored every frame so a previous fade cannot persist in
         // the sequential buffer. The scope itself is also dynamic: Corrscope
         // replaces its pixels and DrawEnergyScopeBorder draws on its perimeter.
-        // When a scope frame is supplied, that body is already overwritten
-        // before dynamic drawing, so only its static gutter needs restoring.
-        // With no scope frame, restore the complete body from the static layer.
+        // When the scope placement replaces the whole body (opaque source at
+        // full opacity), that body is already overwritten before dynamic
+        // drawing, so only its static gutter needs restoring. With an alpha
+        // blend the body must be restored from the static layer, so the
+        // no-scope plan set is used instead. With no scope frame, restore the
+        // complete body from the static layer.
         // A few clipped contact/grid primitives intentionally terminate on a
         // region edge. Restore the one-pixel static seam as well so a
         // sequential session cannot retain an edge pixel that a direct frame
@@ -1611,21 +1638,30 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     }
 
     /// <summary>
-    /// Copies each scope cell from the Corrscope grid strip into its panel.
-    /// Every placed waveform pixel is opaque (alpha forced 255): the scope
-    /// region is a transparent hole in the overlay frame, and the composite is
-    /// what paints the waveform into it — semi-transparent placement would leave
-    /// the scope see-through. DiagnosticGrid reads each panel cell offset by its
-    /// pitch gutter so the waveform's playhead aligns with the shared body;
-    /// overview RGB0 frames use the plain per-column cell. Each grid row holds
-    /// one cell per column; the cell for panel <c>row*ColumnCount + column</c>
-    /// starts at <c>column * PanelWidth</c> within row <c>row</c>.
+    /// Copies each scope cell from the Corrscope grid strip into its panel and
+    /// blends it over the painted panel body. The scope frame's alpha channel
+    /// is a per-pixel mask (alpha 0 = transparent background, 255 = waveform
+    /// line); the effective pixel opacity is
+    /// <c>a = (srcAlpha / 255) * ScopeOpacity</c> and the result is baked into
+    /// RGB with destination alpha forced to 255, because the encode path
+    /// (RGBA -> yuv420p) drops alpha — a real per-pixel alpha channel cannot
+    /// survive the encode. Opaque sources at full opacity take the raw-copy
+    /// fast path, byte-identical to the pre-blend placement.
+    /// DiagnosticGrid reads each panel cell offset by its pitch gutter so the
+    /// waveform's playhead aligns with the shared body; overview frames use the
+    /// plain per-column cell. Each grid row holds one cell per column; the
+    /// cell for panel <c>row*ColumnCount + column</c> starts at
+    /// <c>column * PanelWidth</c> within row <c>row</c>.
     /// </summary>
     private void PlaceScopeRows(
         ReadOnlySpan<byte> scopeGrid, Span<byte> destination, bool scopeFramesAreOpaque = false)
     {
         int sourceStride = _layout.CorrscopeGridWidth * 4;
         int destinationStride = Width * 4;
+        // Integer 16.16 fixed-point scale of ScopeOpacity (65536 == 1.0),
+        // computed once per placement call.
+        int alphaScale = (int)Math.Round(_options.ScopeOpacity * 65536.0);
+        bool fastPath = scopeFramesAreOpaque && alphaScale >= 65536;
         foreach (ScopeCopyPlan plan in _scopeCopyPlans)
         {
             int src = plan.SourceOffset;
@@ -1637,16 +1673,57 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     _performance.ScopeCopies++;
                     _performance.CopiedBytes += plan.RowBytes;
                 }
-                scopeGrid.Slice(src, plan.RowBytes)
-                    .CopyTo(destination.Slice(dst, plan.RowBytes));
-                if (!scopeFramesAreOpaque)
+                if (fastPath)
                 {
-                    for (int x = 0; x < plan.RowBytes; x += 4)
-                        destination[dst + x + 3] = 255;
+                    scopeGrid.Slice(src, plan.RowBytes)
+                        .CopyTo(destination.Slice(dst, plan.RowBytes));
+                }
+                else
+                {
+                    BlendScopeRow(
+                        scopeGrid.Slice(src, plan.RowBytes),
+                        destination.Slice(dst, plan.RowBytes),
+                        alphaScale);
                 }
                 src += sourceStride;
                 dst += destinationStride;
             }
+        }
+    }
+
+    /// <summary>
+    /// Per-pixel alpha blend of one scope row over the panel body:
+    /// <c>dst.RGB = src.RGB * a + dst.RGB * (1 - a)</c> with
+    /// <c>a = (srcAlpha / 255) * ScopeOpacity</c>, then <c>dst.A = 255</c>.
+    /// Integer 16.16 fixed point keeps the hot path allocation-free; the
+    /// rounding matches the acceptance criteria (src * 0.5 + dst * 0.5 at
+    /// opacity 0.5 within one LSB).
+    /// </summary>
+    private static void BlendScopeRow(
+        ReadOnlySpan<byte> source, Span<byte> destination, int alphaScale)
+    {
+        for (int offset = 0; offset < source.Length; offset += 4)
+        {
+            int alpha = (source[offset + 3] * alphaScale + 127) / 255;
+            if (alpha >= 65536)
+            {
+                // Fully opaque pixel: raw copy (same bytes as the fast path).
+                destination[offset] = source[offset];
+                destination[offset + 1] = source[offset + 1];
+                destination[offset + 2] = source[offset + 2];
+                destination[offset + 3] = 255;
+                continue;
+            }
+            if (alpha > 0)
+            {
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    int diff = source[offset + channel] - destination[offset + channel];
+                    destination[offset + channel] = (byte)(
+                        destination[offset + channel] + ((diff * alpha + 32768) >> 16));
+                }
+            }
+            destination[offset + 3] = 255;
         }
     }
 

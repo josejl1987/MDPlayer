@@ -86,6 +86,17 @@ public sealed record ViewSettings
     public TimeGridMode TimeGrid { get; init; } = TimeGridMode.Automatic;
 
     public StructureOverlayMode Structure { get; init; } = StructureOverlayMode.Automatic;
+
+    /// <summary>
+    /// Scope render cadence in frames per second (plan §5.1). Null (default)
+    /// auto-resolves to <c>min(outputFps, 30)</c>; an explicit value is
+    /// clamped to the output frame rate (1:1 when scopeFps >= outputFps). The
+    /// scope YAML <c>fps:</c> and the output-frame→scope-frame mapping both
+    /// derive from this value, so the bridge emits scopeFps × duration frames
+    /// and the compositor reuses each scope frame for the matching output
+    /// frames.
+    /// </summary>
+    public double? ScopeFps { get; init; }
 }
 
 /// <summary>Visual style: effects, note coloring and palette.</summary>
@@ -94,6 +105,14 @@ public sealed record StyleSettings
     public VisualEffects Effects { get; init; } = VisualEffects.Subtle;
     public NoteColorMode NoteColor { get; init; } = NoteColorMode.Instrument;
     public PaletteKind Palette { get; init; } = PaletteKind.Default;
+
+    /// <summary>
+    /// Opacity of the scope waveform layer over the painted panel body
+    /// (0.05..1.0, default 1.0). The scope frame's alpha channel is a
+    /// per-pixel mask multiplied by this value and baked into RGB, because the
+    /// encode path (RGBA → yuv420p) drops alpha.
+    /// </summary>
+    public double ScopeOpacity { get; init; } = 1.0;
 }
 
 /// <summary>Optional publication text and font.</summary>

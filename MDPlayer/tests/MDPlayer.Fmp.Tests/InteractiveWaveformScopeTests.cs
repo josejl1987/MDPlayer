@@ -276,10 +276,30 @@ public sealed class InteractiveWaveformScopeTests
 
             OverlayRect scope = renderer.Layout.GetScopeRect(0);
             int playheadX = renderer.Layout.GetPlayheadX(0);
-            int midpointY = scope.Y + scope.Height / 2;
-            int offset = (midpointY * renderer.Width + playheadX) * 4;
+            // The impulse spike rises well above the center line; sample the
+            // playhead column above center, where only the spike (not the
+            // flat-silence center line) draws.
+            int aboveMidY = scope.Y + scope.Height / 2 - 12;
+            int offset = (aboveMidY * renderer.Width + playheadX) * 4;
+            // The waveform layer is a mask blended over the playhead: the
+            // stroke's default alpha (0x70) scales its RGB contribution and
+            // the destination alpha is baked to 255 (plan §4.3, §4.4). The
+            // playhead stays visible through the translucent waveform.
             Assert.Equal(255, frame[offset + 3]);
-            Assert.Equal(255, frame[offset]);
+            Assert.True(frame[offset] >= 0x70,
+                "the red impulse stroke must visibly lighten the playhead column");
+
+            // A frame whose window no longer contains the impulse shows no
+            // stroke above the center line: the playhead column reverts to
+            // the bare playhead (dark body), proving the current-sample
+            // signal really is drawn at the playhead column.
+            var farGrid = new byte[renderer.ScopeFrameByteCount];
+            source.ReadFrame(frameIndex + 120, farGrid);
+            var farFrame = new byte[renderer.FrameByteCount];
+            renderer.RenderCompositeFrame(frameIndex + 120, farGrid, farFrame);
+            Assert.Equal(255, farFrame[offset + 3]);
+            Assert.True(frame[offset] > farFrame[offset],
+                "the impulse frame must be brighter than an impulse-free frame at the playhead column");
         }
         finally
         {
