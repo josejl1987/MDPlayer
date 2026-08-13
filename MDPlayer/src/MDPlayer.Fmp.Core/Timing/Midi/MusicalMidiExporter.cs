@@ -1279,7 +1279,9 @@ internal sealed class MusicalMidiExporter
         // Missing values serialize as "none"; no fabricated 1.0 (request 21).
         if (diagnostics is not null && diagnostics.TempoInferred)
         {
+            parts.Add($"bpm={FormatDiagnosticDouble(diagnostics.SelectedBpm)}");
             parts.Add($"selected-bpm={FormatDiagnosticDouble(diagnostics.SelectedBpm)}");
+            parts.Add($"tempo-us-per-quarter={diagnostics.TempoMicrosecondsPerQuarter?.ToString() ?? "none"}");
             parts.Add($"selected-score={FormatDiagnosticDouble(diagnostics.SelectedScore)}");
             parts.Add($"alternative-bpm={FormatDiagnosticDouble(diagnostics.AlternativeBpm)}");
             parts.Add($"alternative-score={FormatDiagnosticDouble(diagnostics.AlternativeScore)}");
@@ -1287,6 +1289,12 @@ internal sealed class MusicalMidiExporter
             parts.Add($"tempo-confidence={FormatDiagnosticDouble(diagnostics.TempoConfidence)}");
             parts.Add($"tempo-ambiguous={diagnostics.TempoAmbiguous.ToString().ToLowerInvariant()}");
             parts.Add($"phase-sample={diagnostics.PhaseSample?.ToString() ?? "none"}");
+            parts.Add($"tatum={FormatDiagnosticDouble(diagnostics.TatumDurationSamples)}");
+            parts.Add($"tatums-per-beat={diagnostics.TatumsPerBeat?.ToString() ?? "none"}");
+            parts.Add($"beat={FormatDiagnosticDouble(diagnostics.BeatDurationSamples)}");
+            parts.Add($"beat-phase={diagnostics.BeatPhaseSample?.ToString() ?? "none"}");
+            parts.Add($"metrical-confidence={FormatDiagnosticDouble(diagnostics.MetricalConfidence)}");
+            parts.Add($"downbeat-phase={diagnostics.DownbeatPhase?.ToString() ?? "unknown"}");
         }
         return "timing " + string.Join(";", parts);
     }

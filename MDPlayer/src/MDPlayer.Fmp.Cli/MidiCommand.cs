@@ -203,6 +203,7 @@ internal static class MidiCommand
             tempoInference = diagnostics.TempoSource == TimingSource.SymbolicInference ? new
             {
                 selectedBpm = diagnostics.SelectedBpm,
+                microsecondsPerQuarter = diagnostics.TempoMicrosecondsPerQuarter,
                 alternativeBpm = diagnostics.AlternativeBpm,
                 selectedScore = diagnostics.SelectedScore,
                 alternativeScore = diagnostics.AlternativeScore,
@@ -211,6 +212,12 @@ internal static class MidiCommand
                 tempoAmbiguous = diagnostics.TempoAmbiguous,
                 phaseSample = diagnostics.PhaseSample,
                 sample0Quarter = diagnostics.SampleZeroQuarter,
+                tatum = diagnostics.TatumDurationSamples,
+                tatumsPerBeat = diagnostics.TatumsPerBeat,
+                beat = diagnostics.BeatDurationSamples,
+                beatPhase = diagnostics.BeatPhaseSample,
+                metricalConfidence = diagnostics.MetricalConfidence,
+                downbeatPhase = diagnostics.DownbeatPhase,
             } : null,
             pitch = new
             {

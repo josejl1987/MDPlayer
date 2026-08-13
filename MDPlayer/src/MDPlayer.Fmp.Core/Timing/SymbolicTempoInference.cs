@@ -36,12 +36,50 @@ internal sealed record TempoCandidate(
     TempoAmbiguity Ambiguity,
     double PhaseOffsetSamples = double.NaN);
 
+/// <summary>One source-time onset before simultaneous attacks have been folded.</summary>
+internal readonly record struct SymbolicOnset(
+    long SourceTime,
+    string VoiceId,
+    double Strength,
+    bool IsRhythm = false);
+
+/// <summary>Result of the symbolic tatum/beat hierarchy, kept in source units.</summary>
+internal readonly record struct MetricalTiming(
+    double TatumDuration,
+    long TatumPhaseSample,
+    double TatumConfidence,
+    int TatumsPerBeat,
+    double BeatDuration,
+    long BeatPhaseSample,
+    double MetricalScore,
+    double MetricalConfidence,
+    Meter? Meter,
+    int? DownbeatPhase,
+    long? DownbeatSample,
+    double? AlternativeBpm,
+    double? AlternativeScore);
+
+internal readonly record struct BeatLevelScore(
+    int TatumsPerBeat,
+    int Phase,
+    double AccentContrast,
+    double StrongRecall,
+    double Periodicity,
+    double Score);
+
+internal readonly record struct TatumLevel(
+    double Duration,
+    long PhaseSample,
+    double Score,
+    double DirectSupport,
+    double GridSupport);
+
 /// <summary>
-/// Batch 3: infers tempo and phase from symbolic onsets (note-ons, rhythm hits)
-/// when the driver provides no validated tempo or beat anchors. It searches a
-/// musical tempo range with a phase-grid comb, then probes half/double-tempo
-/// alternatives and reports ambiguity rather than silently committing to one.
-/// Audio inference is explicitly out of scope.
+/// Batch 3: infers source-time tatum, musical beat level and phase from symbolic
+/// onsets (note-ons, rhythm hits) when the driver provides no validated tempo or
+/// beat anchors. Tempo is derived only after the tatum/beat hierarchy has been
+/// scored; the established quarter-grid search remains a low-confidence fallback
+/// and alias diagnostic. Audio inference is explicitly out of scope.
 /// </summary>
 internal static class SymbolicTempoInference
 {
@@ -119,14 +157,41 @@ internal static class SymbolicTempoInference
         Onset[] onsets,
         CounterAccumulator? acc)
     {
-        if (onsets.Length == 0)
+        // Keep the established phase scorer as a bounded fallback and compatibility
+        // baseline. It no longer chooses the normal symbolic quarter-note level;
+        // the hierarchy below decides that from the source onset timeline first.
+        double fallbackBpm = 120.0;
+        long fallbackPhaseSample = timeline.StartSample;
+        double fallbackScore = 0;
+        double? fallbackAlternativeBpm = null;
+        double? fallbackAlternativeScore = null;
+        if (onsets.Length >= 2)
         {
-            throw new MusicalTimingException(
-                "no symbolic onsets or driver timing available to infer tempo");
+            (double searchedBpm, long searchedPhase, double searchedScore, List<TempoCandidate> candidates) =
+                Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
+            long[] durations = CollectDurations(timeline);
+            Onset[] accents = CollectAccents(timeline);
+            (TempoCandidate resolved, double? alternative, double resolvedScore, double? alternativeScore) =
+                ResolveHalfDouble(
+                    searchedBpm, candidates, samples, weights,
+                    timeline.SampleRate, durations, accents,
+                    searchedPhase, searchedScore, acc);
+            fallbackBpm = resolved.Bpm;
+            fallbackPhaseSample = resolved.PhaseSample;
+            fallbackScore = resolvedScore;
+            fallbackAlternativeBpm = alternative;
+            fallbackAlternativeScore = alternativeScore;
         }
 
-        (double bestBpm, long bestPhaseSample, double bestScore, List<TempoCandidate> candidates) =
-            Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
+        Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline);
+        MetricalTiming hierarchy = InferMetricalTiming(
+            timeline, hierarchyOnsets, fallbackBpm, fallbackPhaseSample, fallbackScore,
+            fallbackAlternativeBpm, fallbackAlternativeScore);
+        double bestBpm = hierarchy.BeatDuration > 0
+            ? timeline.SampleRate * 60.0 / hierarchy.BeatDuration
+            : fallbackBpm;
+        long bestPhaseSample = hierarchy.BeatPhaseSample;
+        double bestScore = hierarchy.MetricalScore > 0 ? hierarchy.MetricalScore : fallbackScore;
 
         var diagnostics = new TimingDiagnostics
         {
@@ -136,54 +201,90 @@ internal static class SymbolicTempoInference
             PhaseSample = bestPhaseSample,
             MaxResidualQuarters = 0,
             RmsResidualQuarters = 0,
+            TatumDurationSamples = hierarchy.TatumDuration,
+            TatumsPerBeat = hierarchy.TatumsPerBeat,
+            BeatDurationSamples = hierarchy.BeatDuration,
+            BeatPhaseSample = hierarchy.BeatPhaseSample,
+            MetricalScore = hierarchy.MetricalScore,
+            MetricalConfidence = hierarchy.MetricalConfidence,
+            DownbeatPhase = hierarchy.DownbeatPhase,
         };
 
-        // Half/double compare: evaluate the full power-of-two metrical family by the
-        // combined octave-fair scoring (onsets + durations + accents + tempo prior)
-        // and prefer the best, surfacing the alternative when it is close
-        // (Patch D.2/D.3/D.4).
-        if (candidates.Count > 1)
+        bool hierarchyResolved = hierarchy.MetricalConfidence >= 0.20
+            && hierarchy.TatumConfidence >= 0.20;
+        bool hierarchyAgreesWithFallback = Math.Abs(bestBpm - fallbackBpm) < 0.50;
+        double fallbackRatio = fallbackBpm > 0 ? bestBpm / fallbackBpm : double.NaN;
+        bool unresolvedPowerOfTwoAlias = hierarchy.TatumsPerBeat == 2
+            && IsMetricalFamilyRatio(fallbackRatio)
+            && Math.Abs(fallbackRatio - 1.0) > 0.01
+            && hierarchy.MetricalConfidence < 0.50;
+        if (unresolvedPowerOfTwoAlias)
+            hierarchyResolved = false;
+        if (hierarchyResolved && hierarchyAgreesWithFallback)
         {
-            long[] durations = CollectDurations(timeline);
-            Onset[] accents = CollectAccents(timeline);
-            var (resolved, alternative, resolvedByScore, altScore) = ResolveHalfDouble(
-                bestBpm, candidates, samples, weights,
-                timeline.SampleRate, durations, accents,
-                bestPhaseSample, bestScore, acc);
-            // The ResolveHalfDouble combined score is the decision metric, so it is
-            // the SelectedScore reported for BOTH the selected and (below) the
-            // alternative — the two are directly comparable.
-            bestScore = resolvedByScore;
-            if (alternative is double altBpm && altBpm > 0)
-            {
-                diagnostics.AlternativeBpm = altBpm;
-                diagnostics.AlternativeScore = altScore;
-            }
-            if (Math.Abs(resolved.Bpm - bestBpm) > 0.01)
-            {
-                bestBpm = resolved.Bpm;
-                bestPhaseSample = resolved.PhaseSample;
-            }
-            diagnostics.SelectedBpm = bestBpm;
-            diagnostics.SelectedScore = bestScore;
+            // The old symbolic scorer uses the full onset set to refine the same
+            // source lattice, which is slightly more stable under rounded sample
+            // IOIs. Keep its value only when it agrees with the hierarchical beat;
+            // the hierarchy still supplies the metrical interpretation.
+            bestBpm = fallbackBpm;
+            bestPhaseSample = fallbackPhaseSample;
+            diagnostics.BeatDurationSamples = timeline.SampleRate * 60.0 / bestBpm;
+            diagnostics.TatumDurationSamples = diagnostics.BeatDurationSamples
+                / Math.Max(1, hierarchy.TatumsPerBeat);
+            diagnostics.BeatPhaseSample = bestPhaseSample;
+            if (fallbackScore > 0)
+                bestScore = fallbackScore;
+        }
+        if (!hierarchyResolved)
+        {
+            // Sparse/metrical-free material keeps the established safe inference
+            // result. In particular, a dense but unaccented stream must not be
+            // forced to the lowest candidate beat level merely because all levels
+            // fit its raw grid equally well.
+            bestBpm = fallbackBpm;
+            bestPhaseSample = fallbackPhaseSample;
+            bestScore = fallbackScore;
+            diagnostics.TatumDurationSamples = hierarchy.TatumDuration > 0
+                ? hierarchy.TatumDuration
+                : timeline.SampleRate * 60.0 / Math.Max(1.0, bestBpm) / 4.0;
+            diagnostics.BeatDurationSamples = timeline.SampleRate * 60.0 / Math.Max(1.0, bestBpm);
+            diagnostics.BeatPhaseSample = bestPhaseSample;
+            diagnostics.TatumsPerBeat = hierarchy.TatumsPerBeat > 0
+                ? hierarchy.TatumsPerBeat
+                : 4;
+            diagnostics.MetricalScore = 0;
+        }
+
+        diagnostics.SelectedBpm = bestBpm;
+        diagnostics.SelectedScore = bestScore;
+        if (hierarchyResolved && !hierarchyAgreesWithFallback)
+        {
+            diagnostics.AlternativeBpm = hierarchy.AlternativeBpm;
+            diagnostics.AlternativeScore = hierarchy.AlternativeScore;
         }
         else
         {
-            diagnostics.SelectedBpm = bestBpm;
-            diagnostics.SelectedScore = bestScore;
+            diagnostics.AlternativeBpm = fallbackAlternativeBpm;
+            diagnostics.AlternativeScore = fallbackAlternativeScore;
         }
 
         diagnostics.TempoSource = TimingSource.SymbolicInference;
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.AnchorCount = onsets.Length;
         diagnostics.PhaseSample = bestPhaseSample;
+        diagnostics.PhaseUnknown = onsets.Length < 2;
         diagnostics.TempoConfidence = ConfidenceFromScore(bestScore,
             diagnostics.AlternativeBpm is double a && IsMetricalFamilyRatio(bestBpm / a)
                 ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0))
-                : 1.0);
+                : hierarchyResolved ? hierarchy.MetricalConfidence : 0.0);
+        diagnostics.MeterKnown = options.Meter is not null || hierarchy.Meter is not null;
+        diagnostics.DownbeatKnown = (options.FirstDownbeatSample is not null && diagnostics.MeterKnown)
+            || hierarchy.DownbeatSample is not null;
         diagnostics.Warnings.Add(
             $"symbolic inference: tempo {bestBpm:0.##} BPM, phase sample {bestPhaseSample} " +
-            $"(score {bestScore:0.###}, confidence {diagnostics.TempoConfidence:0.###}); " +
+            $"(score {bestScore:0.###}, confidence {diagnostics.TempoConfidence:0.###}, " +
+            $"tatum {diagnostics.TatumDurationSamples:0.###}, " +
+            $"{diagnostics.TatumsPerBeat} tatums/beat); " +
             "sample-derived timing generally preferred if available");
 
         if (options.StrictTiming)
@@ -212,13 +313,27 @@ internal static class SymbolicTempoInference
             TimingSource.SymbolicInference,
             ConfidenceFromScore(bestScore, diagnostics.AlternativeBpm is double amb && IsMetricalFamilyRatio(bestBpm / amb)
                 ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0)) : 1.0));
+        diagnostics.TempoMicrosecondsPerQuarter = segment.MicrosecondsPerQuarter;
+
+        Meter? meter = options.Meter ?? hierarchy.Meter;
+        double? firstDownbeatQuarter = null;
+        if (options.FirstDownbeatSample is long explicitDownbeat && meter is not null)
+        {
+            firstDownbeatQuarter = quarterAtStart
+                + (explicitDownbeat - timeline.StartSample) / spq;
+        }
+        else if (hierarchy.DownbeatSample is long inferredDownbeat && meter is not null)
+        {
+            firstDownbeatQuarter = quarterAtStart
+                + (inferredDownbeat - timeline.StartSample) / spq;
+        }
 
         var map = new MusicalTimeMap(
             timeline.SampleRate,
             timeline.StartSample,
             new[] { segment },
-            options.Meter,
-            null);
+            meter,
+            firstDownbeatQuarter);
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.SampleZeroQuarter = quarterAtStart;
         // Metrical-family ambiguity is surfaced whenever ResolveHalfDouble found a
@@ -245,6 +360,564 @@ internal static class SymbolicTempoInference
         double marginComponent = Math.Clamp(aliasMargin, 0, 1);
         return Math.Clamp(0.5 * baseFit + 0.5 * marginComponent, 0, 1);
     }
+
+    private static MetricalTiming InferMetricalTiming(
+        VisualizationTimeline timeline,
+        Onset[] onsets,
+        double fallbackBpm,
+        long fallbackPhaseSample,
+        double fallbackScore,
+        double? fallbackAlternativeBpm,
+        double? fallbackAlternativeScore)
+    {
+        double fallbackBeat = timeline.SampleRate * 60.0 / Math.Max(1.0, fallbackBpm);
+        double fallbackTatum = fallbackBeat / 4.0;
+        if (onsets.Length < 2)
+        {
+            return new MetricalTiming(
+                fallbackTatum,
+                fallbackPhaseSample,
+                0,
+                4,
+                fallbackBeat,
+                fallbackPhaseSample,
+                0,
+                0,
+                null,
+                null,
+                null,
+                fallbackAlternativeBpm,
+                fallbackAlternativeScore);
+        }
+
+        double[] intervals = CollectPositiveIntervals(onsets);
+        if (intervals.Length == 0)
+        {
+            return new MetricalTiming(
+                fallbackTatum,
+                fallbackPhaseSample,
+                0,
+                4,
+                fallbackBeat,
+                fallbackPhaseSample,
+                0,
+                0,
+                null,
+                null,
+                null,
+                fallbackAlternativeBpm,
+                fallbackAlternativeScore);
+        }
+
+        TatumLevel tatum = InferTatum(intervals, onsets);
+        List<BeatLevelScore> levels = ScoreBeatLevels(timeline, onsets, tatum);
+        BeatLevelScore rawBest = levels[0];
+        // Do not let a bar-period accent alone promote the beat to a double-level
+        // grid. When the salience evidence is effectively tied, choose the simpler
+        // metrical multiple; materially different 4-vs-6 evidence still wins on its
+        // score rather than on this tie-break.
+        BeatLevelScore best = levels
+            .Where(level => rawBest.Score - level.Score <= 0.025)
+            .OrderBy(level => level.TatumsPerBeat)
+            .ThenBy(level => level.Phase)
+            .First();
+        BeatLevelScore? alternative = levels
+            .Where(level => level.TatumsPerBeat != best.TatumsPerBeat)
+            .OrderByDescending(level => level.Score)
+            .ThenBy(level => level.TatumsPerBeat)
+            .ThenBy(level => level.Phase)
+            .FirstOrDefault();
+
+        double neutralScore = 0.5 * 0.35 + 0.5 * 0.20;
+        bool hasAccentVariation = OnsetStrengthSpread(onsets) > 0.10;
+        bool hasMetricalEvidence = hasAccentVariation
+            && best.Score > neutralScore + 0.025
+            && (best.StrongRecall > 0.62 || best.Periodicity > 0.62);
+
+        int selectedTatumsPerBeat = hasMetricalEvidence
+            ? best.TatumsPerBeat
+            : NearestBeatMultiple(fallbackBeat / Math.Max(1.0, tatum.Duration));
+        BeatLevelScore selected = hasMetricalEvidence
+            ? best
+            : levels.First(level => level.TatumsPerBeat == selectedTatumsPerBeat);
+        double beatDuration = tatum.Duration * selectedTatumsPerBeat;
+        long beatPhaseSample = CanonicalBoundary(
+            tatum.PhaseSample + selected.Phase * tatum.Duration,
+            timeline.StartSample,
+            beatDuration);
+
+        double tatumMargin = TatumMargin(intervals, tatum);
+        double tatumConfidence = Math.Clamp(
+            0.60 * tatum.Score + 0.40 * tatumMargin, 0, 1);
+        double metricalMargin = alternative is BeatLevelScore alt
+            ? Math.Max(0, selected.Score - alt.Score)
+            : 0;
+        double metricalConfidence = hasMetricalEvidence
+            ? Math.Clamp(0.60 * selected.Score + 0.40 * Math.Min(1, metricalMargin * 4), 0, 1)
+            : 0.10;
+
+        (Meter? meter, int? downbeatPhase, long? downbeatSample) =
+            InferMeter(onsets, tatum, selected, timeline.StartSample);
+        double? alternativeBpm = null;
+        double? alternativeScore = null;
+        if (hasMetricalEvidence && alternative is BeatLevelScore alternativeLevel)
+        {
+            alternativeBpm = timeline.SampleRate * 60.0 /
+                (tatum.Duration * alternativeLevel.TatumsPerBeat);
+            alternativeScore = alternativeLevel.Score;
+        }
+
+        return new MetricalTiming(
+            tatum.Duration,
+            tatum.PhaseSample,
+            tatumConfidence,
+            selectedTatumsPerBeat,
+            beatDuration,
+            beatPhaseSample,
+            selected.Score,
+            metricalConfidence,
+            meter,
+            downbeatPhase,
+            downbeatSample,
+            alternativeBpm,
+            alternativeScore);
+    }
+
+    private static TatumLevel InferTatum(double[] intervals, Onset[] onsets)
+    {
+        var seeds = new List<double>(intervals.Length * 6);
+        foreach (double interval in intervals)
+        {
+            foreach (int divisor in new[] { 1, 2, 3, 4, 6, 8 })
+                seeds.Add(interval / divisor);
+        }
+        seeds.Sort();
+
+        var candidates = new List<double>();
+        foreach (double seed in seeds)
+        {
+            if (!double.IsFinite(seed) || seed < 1)
+                continue;
+            if (candidates.Count == 0
+                || Math.Abs(seed - candidates[^1]) > Math.Max(2.0, seed * 0.02))
+            {
+                candidates.Add(seed);
+            }
+            else
+            {
+                candidates[^1] = (candidates[^1] + seed) / 2.0;
+            }
+        }
+
+        TatumLevel best = default;
+        bool found = false;
+        foreach (double candidate in candidates)
+        {
+            (double score, double direct, double grid) = ScoreTatum(candidate, intervals);
+            long phase = FindTatumPhase(candidate, onsets);
+            var level = new TatumLevel(candidate, phase, score, direct, grid);
+            if (!found
+                || level.Score > best.Score + 1e-9
+                || (Math.Abs(level.Score - best.Score) <= 1e-9
+                    && level.DirectSupport > best.DirectSupport + 1e-9)
+                || (Math.Abs(level.Score - best.Score) <= 1e-9
+                    && Math.Abs(level.DirectSupport - best.DirectSupport) <= 1e-9
+                    && level.Duration < best.Duration))
+            {
+                best = level;
+                found = true;
+            }
+        }
+
+        return found
+            ? best
+            : new TatumLevel(intervals[0], FindTatumPhase(intervals[0], onsets), 0, 0, 0);
+    }
+
+    private static (double Score, double DirectSupport, double GridSupport) ScoreTatum(
+        double candidate,
+        double[] intervals)
+    {
+        if (candidate <= 0 || intervals.Length == 0)
+            return (0, 0, 0);
+
+        double direct = 0;
+        double grid = 0;
+        foreach (double interval in intervals)
+        {
+            double multiple = Math.Max(1, Math.Round(interval / candidate));
+            if (multiple > 32)
+                continue;
+            double normalizedResidual = Math.Abs(interval - multiple * candidate) / candidate;
+            double fit = normalizedResidual <= 0.30
+                ? Math.Clamp(1.0 - normalizedResidual / 0.30, 0, 1)
+                : 0;
+            grid += fit;
+            if (multiple == 1 && normalizedResidual <= 0.18)
+                direct += 1;
+        }
+
+        double directSupport = direct / intervals.Length;
+        double gridSupport = grid / intervals.Length;
+        // Direct 1x support is deliberately stronger than explaining every IOI as
+        // 2x/4x. That prevents an unsupported half-tatum from winning simply
+        // because it divides an otherwise perfect grid.
+        return (0.60 * directSupport + 0.40 * gridSupport, directSupport, gridSupport);
+    }
+
+    private static double[] CollectPositiveIntervals(Onset[] onsets)
+    {
+        var intervals = new List<double>();
+        int limit = Math.Min(onsets.Length, 4096);
+        for (int index = 0; index < limit; index++)
+        {
+            int end = Math.Min(limit, index + 5);
+            for (int next = index + 1; next < end; next++)
+            {
+                long delta = onsets[next].Sample - onsets[index].Sample;
+                if (delta > 0)
+                    intervals.Add(delta);
+            }
+        }
+        intervals.Sort();
+        return intervals.ToArray();
+    }
+
+    private static long FindTatumPhase(double duration, Onset[] onsets)
+    {
+        double bestScore = double.NegativeInfinity;
+        double bestPhase = 0;
+        foreach (Onset onset in onsets)
+        {
+            double phase = PositiveModulo(onset.Sample, duration);
+            double score = 0;
+            foreach (Onset candidate in onsets)
+            {
+                double residual = CircularDistance(PositiveModulo(candidate.Sample, duration), phase, duration);
+                score += candidate.Weight * PhaseFit(residual / duration);
+            }
+            if (score > bestScore + 1e-9
+                || (Math.Abs(score - bestScore) <= 1e-9 && phase < bestPhase))
+            {
+                bestScore = score;
+                bestPhase = phase;
+            }
+        }
+        return (long)Math.Round(bestPhase, MidpointRounding.AwayFromZero);
+    }
+
+    private static List<BeatLevelScore> ScoreBeatLevels(
+        VisualizationTimeline timeline,
+        Onset[] onsets,
+        TatumLevel tatum)
+    {
+        int[] multiples = { 2, 3, 4, 6, 8 };
+        Dictionary<int, double> voicePeriodicity = VoicePeriodicityByMultiple(timeline, tatum);
+        var result = new List<BeatLevelScore>(multiples.Length);
+        foreach (int multiple in multiples)
+        {
+            double[] strength = BuildTatumStrengths(onsets, tatum, out long firstBin);
+            for (int phase = 0; phase < multiple; phase++)
+            {
+                (double contrast, double recall, double periodicity) = ScoreBeatPhase(
+                    strength, firstBin, multiple, phase, voicePeriodicity[multiple]);
+                // Accent contrast and direct lag periodicity carry the primary
+                // decision in dense symbolic streams. Strong-event recall stays
+                // as a guard against half/double levels, but raw attack density
+                // must not outweigh a stable beat-period autocorrelation.
+                // Dense surface attacks can make every other tatum look strong.
+                // Give the direct periodicity term enough weight to distinguish
+                // that subdivision from a recurring voice-level pulse; recall
+                // remains part of the score and still rejects half/double aliases.
+                double score = 0.45 * contrast + 0.15 * recall + 0.40 * periodicity;
+                result.Add(new BeatLevelScore(multiple, phase, contrast, recall, periodicity, score));
+            }
+        }
+
+        return result
+            .OrderByDescending(level => level.Score)
+            .ThenBy(level => level.TatumsPerBeat)
+            .ThenBy(level => level.Phase)
+            .ToList();
+    }
+
+    private static double[] BuildTatumStrengths(Onset[] onsets, TatumLevel tatum, out long firstBin)
+    {
+        long minSample = onsets.Min(onset => onset.Sample);
+        long maxSample = onsets.Max(onset => onset.Sample);
+        firstBin = (long)Math.Floor((minSample - tatum.PhaseSample) / tatum.Duration) - 1;
+        long lastBin = (long)Math.Ceiling((maxSample - tatum.PhaseSample) / tatum.Duration) + 1;
+        long span = Math.Clamp(lastBin - firstBin + 1, 1, 250_000);
+        var strengths = new double[(int)span];
+        foreach (Onset onset in onsets)
+        {
+            long bin = (long)Math.Round(
+                (onset.Sample - tatum.PhaseSample) / tatum.Duration,
+                MidpointRounding.AwayFromZero);
+            int index = (int)Math.Clamp(bin - firstBin, 0, strengths.Length - 1);
+            strengths[index] = Math.Min(4.0, strengths[index] + onset.Weight);
+        }
+        return strengths;
+    }
+
+    private static (double Contrast, double Recall, double Periodicity) ScoreBeatPhase(
+        double[] strength,
+        long firstBin,
+        int multiple,
+        int phase,
+        double voicePeriodicity)
+    {
+        double beatTotal = 0;
+        double offTotal = 0;
+        int beatCount = 0;
+        int offCount = 0;
+        for (int index = 0; index < strength.Length; index++)
+        {
+            long bin = firstBin + index;
+            int position = (int)PositiveModulo(bin - phase, multiple);
+            if (position == 0)
+            {
+                beatTotal += strength[index];
+                beatCount++;
+            }
+            else if (strength[index] > 0)
+            {
+                offTotal += strength[index];
+                offCount++;
+            }
+        }
+
+        double beatMean = beatCount > 0 ? beatTotal / beatCount : 0;
+        double offMean = offCount > 0 ? offTotal / offCount : 0;
+        double contrast = beatMean + offMean > 0
+            ? Math.Clamp((beatMean - offMean) / (beatMean + offMean), 0, 1)
+            : 0;
+
+        double min = strength.Where(value => value > 0).DefaultIfEmpty().Min();
+        double max = strength.DefaultIfEmpty().Max();
+        double spread = max - min;
+        double recall = 0.5;
+        if (spread > 0.10)
+        {
+            double[] positive = strength.Where(value => value > 0).OrderBy(value => value).ToArray();
+            double threshold = positive[(int)Math.Clamp(Math.Ceiling(positive.Length * 0.75) - 1, 0, positive.Length - 1)];
+            double totalStrong = 0;
+            double onBeatStrong = 0;
+            for (int index = 0; index < strength.Length; index++)
+            {
+                if (strength[index] + 1e-9 < threshold)
+                    continue;
+                totalStrong += strength[index];
+                long bin = firstBin + index;
+                if (PositiveModulo(bin - phase, multiple) == 0)
+                    onBeatStrong += strength[index];
+            }
+            recall = totalStrong > 0 ? onBeatStrong / totalStrong : 0.5;
+        }
+
+        double periodicity = 0.5 * PeriodicityAtLag(strength, multiple)
+            + 0.5 * voicePeriodicity;
+        return (contrast, recall, periodicity);
+    }
+
+    private static Dictionary<int, double> VoicePeriodicityByMultiple(
+        VisualizationTimeline timeline,
+        TatumLevel tatum)
+    {
+        var raw = CollectSymbolicOnsets(timeline);
+        var binsByVoice = new Dictionary<string, (HashSet<long> Bins, bool IsRhythm)>(StringComparer.Ordinal);
+        foreach (SymbolicOnset onset in raw)
+        {
+            long bin = (long)Math.Round(
+                (onset.SourceTime - tatum.PhaseSample) / tatum.Duration,
+                MidpointRounding.AwayFromZero);
+            if (!binsByVoice.TryGetValue(onset.VoiceId, out (HashSet<long> Bins, bool IsRhythm) value))
+                value = (new HashSet<long>(), false);
+            value.Bins.Add(bin);
+            binsByVoice[onset.VoiceId] = (value.Bins, value.IsRhythm || onset.IsRhythm);
+        }
+
+        var result = new Dictionary<int, double>();
+        IReadOnlyList<(HashSet<long> Bins, bool IsRhythm)> evidence =
+            binsByVoice.Values.Where(value => value.IsRhythm).ToArray();
+        if (evidence.Count == 0)
+            evidence = binsByVoice.Values.ToArray();
+        foreach (int multiple in new[] { 2, 3, 4, 6, 8 })
+        {
+            double weighted = 0;
+            double totalWeight = 0;
+            foreach ((HashSet<long> bins, bool isRhythm) in evidence)
+            {
+                if (bins.Count < 3)
+                    continue;
+                double voiceWeight = Math.Min(1.0, bins.Count / 8.0)
+                    * (isRhythm ? 3.0 : 1.0);
+                int repeated = bins.Count(bin => bins.Contains(bin - multiple));
+                double support = repeated / (double)bins.Count;
+                weighted += voiceWeight * support;
+                totalWeight += voiceWeight;
+            }
+            result[multiple] = totalWeight > 0
+                ? weighted / totalWeight
+                : 0.5;
+        }
+        return result;
+    }
+
+    private static double PeriodicityAtLag(double[] values, int lag)
+    {
+        if (lag <= 0 || values.Length <= lag)
+            return 0.5;
+        double mean = values.Average();
+        double covariance = 0;
+        double left = 0;
+        double right = 0;
+        for (int index = 0; index < values.Length - lag; index++)
+        {
+            double a = values[index] - mean;
+            double b = values[index + lag] - mean;
+            covariance += a * b;
+            left += a * a;
+            right += b * b;
+        }
+        if (left <= 1e-12 || right <= 1e-12)
+            return 0.5;
+        double correlation = covariance / Math.Sqrt(left * right);
+        return Math.Clamp((correlation + 1.0) / 2.0, 0, 1);
+    }
+
+    private static double OnsetStrengthSpread(Onset[] onsets)
+    {
+        if (onsets.Length == 0)
+            return 0;
+        double min = onsets.Min(onset => onset.Weight);
+        double max = onsets.Max(onset => onset.Weight);
+        return max - min;
+    }
+
+    private static double TatumMargin(double[] intervals, TatumLevel selected)
+    {
+        (double score, _, _) = ScoreTatum(selected.Duration, intervals);
+        // Re-evaluate only the strongest competing direct interval scale. The
+        // actual candidate list is intentionally not retained in production
+        // diagnostics, so this bounded margin is deterministic and cheap.
+        double competitorDuration = selected.Duration * 2.0;
+        (double competitor, _, _) = ScoreTatum(competitorDuration, intervals);
+        return Math.Clamp(Math.Max(0, score - competitor), 0, 1);
+    }
+
+    private static int NearestBeatMultiple(double ratio)
+    {
+        int[] multiples = { 2, 3, 4, 6, 8 };
+        return multiples
+            .OrderBy(value => Math.Abs(value - ratio))
+            .ThenBy(value => value)
+            .First();
+    }
+
+    private static (Meter? Meter, int? DownbeatPhase, long? DownbeatSample) InferMeter(
+        Onset[] onsets,
+        TatumLevel tatum,
+        BeatLevelScore beat,
+        long sourceStart)
+    {
+        double[] strength = BuildTatumStrengths(onsets, tatum, out long firstBin);
+        var beatStrength = new List<double>();
+        int firstBeat = (int)Math.Floor((firstBin - beat.Phase) / (double)beat.TatumsPerBeat);
+        int lastBeat = (int)Math.Ceiling(
+            (firstBin + strength.Length - 1 - beat.Phase) / (double)beat.TatumsPerBeat);
+        for (int index = firstBeat; index <= lastBeat; index++)
+        {
+            double total = 0;
+            for (int tatumIndex = 0; tatumIndex < beat.TatumsPerBeat; tatumIndex++)
+            {
+                long bin = (long)index * beat.TatumsPerBeat + beat.Phase + tatumIndex;
+                int sourceIndex = (int)(bin - firstBin);
+                if (sourceIndex >= 0 && sourceIndex < strength.Length)
+                    total += strength[sourceIndex];
+            }
+            beatStrength.Add(total);
+        }
+
+        if (beatStrength.Count < 6)
+            return (null, null, null);
+
+        (int Numerator, double Score, int Phase) best = (0, 0, 0);
+        foreach (int numerator in new[] { 3, 4 })
+        {
+            for (int phase = 0; phase < numerator; phase++)
+            {
+                double on = 0;
+                double off = 0;
+                int onCount = 0;
+                int offCount = 0;
+                for (int index = 0; index < beatStrength.Count; index++)
+                {
+                    if (PositiveModulo(firstBeat + index - phase, numerator) == 0)
+                    {
+                        on += beatStrength[index];
+                        onCount++;
+                    }
+                    else
+                    {
+                        off += beatStrength[index];
+                        offCount++;
+                    }
+                }
+                double contrast = onCount > 0 && offCount > 0
+                    ? Math.Clamp((on / onCount - off / offCount) /
+                        Math.Max(1e-9, on / onCount + off / offCount), 0, 1)
+                    : 0;
+                double periodicity = PeriodicityAtLag(beatStrength.ToArray(), numerator);
+                double score = 0.65 * contrast + 0.35 * periodicity;
+                if (score > best.Score + 1e-9
+                    || (Math.Abs(score - best.Score) <= 1e-9 && numerator < best.Numerator))
+                    best = (numerator, score, phase);
+            }
+        }
+
+        if (best.Numerator == 0 || best.Score < 0.60)
+            return (null, null, null);
+
+        double beatDuration = tatum.Duration * beat.TatumsPerBeat;
+        long downbeat = CanonicalBoundary(
+            tatum.PhaseSample + (beat.Phase + best.Phase * beat.TatumsPerBeat) * tatum.Duration,
+            sourceStart,
+            beatDuration);
+        return (new Meter(best.Numerator, 4), best.Phase, downbeat);
+    }
+
+    private static long CanonicalBoundary(double boundary, long sourceStart, double period)
+    {
+        if (period <= 0 || !double.IsFinite(period))
+            return sourceStart;
+        long result = (long)Math.Round(boundary, MidpointRounding.AwayFromZero);
+        long step = Math.Max(1, (long)Math.Round(period, MidpointRounding.AwayFromZero));
+        while (result > sourceStart)
+            result -= step;
+        return result;
+    }
+
+    private static double PositiveModulo(double value, double modulus)
+    {
+        double result = value % modulus;
+        return result < 0 ? result + modulus : result;
+    }
+
+    private static long PositiveModulo(long value, int modulus)
+    {
+        long result = value % modulus;
+        return result < 0 ? result + modulus : result;
+    }
+
+    private static double CircularDistance(double left, double right, double period)
+    {
+        double distance = Math.Abs(left - right);
+        return Math.Min(distance, period - distance);
+    }
+
+    private static double PhaseFit(double normalizedResidual) =>
+        Math.Exp(-normalizedResidual * normalizedResidual / (2.0 * 0.08 * 0.08));
 
     private static (double bpm, long phaseSample, double score, List<TempoCandidate>) Search(
         Onset[] onsets,
@@ -1064,30 +1737,84 @@ internal static class SymbolicTempoInference
         return totalWeight > 0 ? weightedFit / totalWeight : 0.5;
     }
 
+    private static Onset[] CollectCollapsedOnsets(VisualizationTimeline timeline)
+    {
+        SymbolicOnset[] raw = CollectSymbolicOnsets(timeline);
+        var folded = new List<Onset>();
+        foreach (IGrouping<long, SymbolicOnset> group in raw
+            .OrderBy(onset => onset.SourceTime)
+            .ThenBy(onset => onset.VoiceId, StringComparer.Ordinal)
+            .GroupBy(onset => onset.SourceTime))
+        {
+            // A chord contributes accent evidence, but repeated records for one
+            // source voice do not multiply it. The final strength is capped so a
+            // large chord cannot dominate the entire timing analysis.
+            double strength = group
+                .GroupBy(onset => onset.VoiceId, StringComparer.Ordinal)
+                .Select(voice => voice.Max(onset => onset.Strength))
+                .Sum();
+            folded.Add(new Onset(group.Key, Math.Clamp(strength, 0.1, 4.0)));
+        }
+        return folded.ToArray();
+    }
+
+    private static SymbolicOnset[] CollectSymbolicOnsets(VisualizationTimeline timeline)
+    {
+        var raw = new List<SymbolicOnset>();
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null)
+                continue;
+            raw.Add(new SymbolicOnset(
+                rhythm.SamplePosition,
+                rhythm.ChannelId ?? rhythm.Voice ?? "rhythm",
+                MetricalRhythmWeight(rhythm.Strength),
+                IsRhythm: true));
+        }
+        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
+        {
+            if (hit is null)
+                continue;
+            raw.Add(new SymbolicOnset(hit.SamplePosition, hit.VoiceId ?? "aggregate", 1.0, IsRhythm: true));
+        }
+
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note is null)
+                continue;
+            if (note.IsRetrigger)
+                continue;
+            double weight = 0.6; // normal note attack
+            raw.Add(new SymbolicOnset(note.StartSample, note.ChannelId ?? "note", weight));
+        }
+        return raw.ToArray();
+    }
+
     internal static Onset[] CollectOnsets(VisualizationTimeline timeline)
     {
         var seen = new HashSet<long>();
         var list = new List<Onset>();
         foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
         {
-            if (rhythm is null) continue;
+            if (rhythm is null)
+                continue;
             if (seen.Add(rhythm.SamplePosition))
                 list.Add(new Onset(rhythm.SamplePosition, WeightFor(rhythm.Strength, high: true)));
         }
         foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
         {
-            if (hit is null) continue;
+            if (hit is null)
+                continue;
             if (seen.Add(hit.SamplePosition))
                 list.Add(new Onset(hit.SamplePosition, 1.0));
         }
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
-            if (note is null || seen.Contains(note.StartSample))
+            if (note is null || seen.Contains(note.StartSample) || note.IsRetrigger)
                 continue;
-            if (note.IsRetrigger)
-                continue;
-            double weight = 0.6; // normal note attack
-            list.Add(new Onset(note.StartSample, weight));
+            // Preserve the existing separate-entry polyphony contract. Search's
+            // sample folding and the hierarchy's capped folding are distinct steps.
+            list.Add(new Onset(note.StartSample, 0.6));
         }
         Onset[] ordered = list.ToArray();
         Array.Sort(ordered, static (left, right) =>
@@ -1096,6 +1823,21 @@ internal static class SymbolicTempoInference
             return sample != 0 ? sample : left.Weight.CompareTo(right.Weight);
         });
         return ordered;
+    }
+
+    private static double TypicalNoteDuration(VisualizationTimeline timeline)
+    {
+        long[] durations = (timeline.Notes ?? Array.Empty<NoteEvent>())
+            .Where(note => note is not null && note.EndSample > note.StartSample)
+            .Select(note => note.EndSample - note.StartSample)
+            .OrderBy(value => value)
+            .ToArray();
+        if (durations.Length == 0)
+            return 0;
+        int middle = durations.Length / 2;
+        return durations.Length % 2 == 1
+            ? durations[middle]
+            : (durations[middle - 1] + durations[middle]) / 2.0;
     }
 
     private static long[] CollectDurations(VisualizationTimeline timeline)
@@ -1130,6 +1872,13 @@ internal static class SymbolicTempoInference
 
     private static double WeightFor(float strength, bool high) =>
         high ? Math.Clamp(0.7 + strength * 0.6, 0.1, 1.3) : 0.6;
+
+    // A rhythm attack is an explicit accent signal in the symbolic timeline,
+    // whereas a note attack primarily describes surface activity. Keep the
+    // distinction local to metrical scoring: the established quarter-grid
+    // scorer and the public onset collector retain their existing weights.
+    private static double MetricalRhythmWeight(float strength) =>
+        Math.Clamp(1.6 + strength * 0.8, 1.2, 2.4);
 
     internal readonly record struct Onset(long Sample, double Weight);
 

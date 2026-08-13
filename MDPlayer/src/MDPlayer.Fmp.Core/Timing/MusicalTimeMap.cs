@@ -94,21 +94,24 @@ internal sealed class MusicalTimeMap
         if (ppq <= 0)
             throw new ArgumentOutOfRangeException(nameof(ppq));
 
-        double ticks = SampleToQuarterPosition(FirstSample) * ppq;
+        // Map each source timestamp independently from the same absolute anchor.
+        // Decimal keeps the final source-time/rational conversion stable over long
+        // songs and avoids introducing a rounded delta that a later event would
+        // inherit.
+        decimal ticks = (decimal)SampleToQuarterPosition(FirstSample) * ppq;
         long clamped = Math.Clamp(sample, FirstSample, EndSample);
         foreach (TempoSegment segment in _segments)
         {
             if (clamped <= segment.StartSample)
                 break;
             long segmentEnd = Math.Min(clamped, segment.EndSample);
-            double seconds = segmentEnd > segment.StartSample
-                ? SampleToSeconds(segmentEnd) - SampleToSeconds(segment.StartSample)
-                : 0;
-            ticks += seconds * 1_000_000.0 / segment.MicrosecondsPerQuarter * ppq;
+            long sourceDelta = Math.Max(0, segmentEnd - segment.StartSample);
+            ticks += (decimal)sourceDelta * 1_000_000m * ppq
+                / ((decimal)SampleRate * segment.MicrosecondsPerQuarter);
             if (clamped <= segment.EndSample)
                 break;
         }
-        return (long)Math.Round(ticks, MidpointRounding.AwayFromZero);
+        return decimal.ToInt64(decimal.Round(ticks, 0, MidpointRounding.AwayFromZero));
     }
 
     /// <summary>

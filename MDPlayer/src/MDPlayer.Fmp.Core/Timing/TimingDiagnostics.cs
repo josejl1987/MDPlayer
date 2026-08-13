@@ -49,6 +49,9 @@ internal sealed class TimingDiagnostics
     /// <summary>Estimated BPM for the single dominant tempo, when determinable.</summary>
     public double? EstimatedBpm { get; set; }
 
+    /// <summary>Encoded MIDI Set Tempo value for the selected quarter duration.</summary>
+    public int? TempoMicrosecondsPerQuarter { get; set; }
+
     /// <summary>Meter status: known vs unknown.</summary>
     public bool MeterKnown { get; set; }
 
@@ -113,6 +116,36 @@ internal sealed class TimingDiagnostics
 
     /// <summary>Sample where quarter 0 occurs (negative => pickup).</summary>
     public long? PhaseSample { get; set; }
+
+    /// <summary>Smallest recurring symbolic timing quantum, in source samples.</summary>
+    public double? TatumDurationSamples { get; set; }
+
+    /// <summary>Alias used by timing reports and tests for the source tatum duration.</summary>
+    public double? TatumDuration => TatumDurationSamples;
+
+    /// <summary>Number of inferred tatums in one musical beat.</summary>
+    public int? TatumsPerBeat { get; set; }
+
+    /// <summary>Inferred musical beat duration, in source samples.</summary>
+    public double? BeatDurationSamples { get; set; }
+
+    /// <summary>Alias used by timing reports and tests for the source beat duration.</summary>
+    public double? BeatDuration => BeatDurationSamples;
+
+    /// <summary>Source sample of the selected beat boundary phase.</summary>
+    public long? BeatPhaseSample { get; set; }
+
+    /// <summary>Alias used by timing reports and tests for beat phase.</summary>
+    public long? BeatPhase => BeatPhaseSample;
+
+    /// <summary>Normalized confidence of the tatum/beat hierarchy decision.</summary>
+    public double? MetricalConfidence { get; set; }
+
+    /// <summary>Combined metrical salience score of the selected beat level.</summary>
+    public double? MetricalScore { get; set; }
+
+    /// <summary>Beat number within the inferred meter, when a downbeat is known.</summary>
+    public int? DownbeatPhase { get; set; }
 
     /// <summary>True when tempo had to be estimated (not driver-validated and not user override).</summary>
     public bool TempoInferred => TempoSource is TimingSource.SymbolicInference or TimingSource.AudioInference;
