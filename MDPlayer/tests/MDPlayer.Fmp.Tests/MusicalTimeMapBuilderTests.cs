@@ -739,4 +739,39 @@ public sealed class MusicalTimeMapBuilderTests
         // split at the boundary rather than assuming one tempo for both halves.
         Assert.Equal(2, map.Segments.Count);
     }
+
+    // ---- Patch 3: MusicalTimeMap confidence/ambiguity surface ----
+
+    [Fact]
+    public void SymbolicInference_MapExposesConfidenceAndAmbiguity()
+    {
+        double spq = Sr * 60.0 / 120.0;
+        NoteEvent[] notes = Enumerable.Range(0, 32)
+            .Select(i => NewNote("v", (long)Math.Round(i * spq), (long)Math.Round(i * spq + 0.5 * spq), 60))
+            .ToArray();
+        var timeline = Timeline(Array.Empty<BeatEvent>(), notes: notes,
+            endSample: (long)Math.Round(32 * spq));
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+
+        Assert.NotNull(build.Diagnostics.TempoConfidence);
+        Assert.Equal(build.Diagnostics.TempoConfidence!.Value, build.Map.Confidence, precision: 12);
+        Assert.Equal(build.Diagnostics.AlternativeBpm, build.Map.AlternateBpm);
+        Assert.Equal(build.Diagnostics.TempoAmbiguous, build.Map.IsTempoAmbiguous);
+    }
+
+    [Fact]
+    public void FixedTempo_MapConfidenceIsOne_WithoutAmbiguity()
+    {
+        var timeline = Timeline(Array.Empty<BeatEvent>(),
+            endSample: (long)Math.Round(Sr * 60.0 / 120.0 * 8));
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { FixedBpm = 120 });
+
+        Assert.Equal(1.0, build.Map.Confidence, precision: 12);
+        Assert.Null(build.Map.AlternateBpm);
+        Assert.False(build.Map.IsTempoAmbiguous);
+    }
 }

@@ -2,8 +2,11 @@ namespace Fmp.Core.Visualization;
 
 /// <summary>
 /// Decodes the three tone generators and the shared noise activity of an
-/// AY-3-8910-compatible PSG. Noise-only writes become activity markers; only
-/// tone-enabled voices create conventional pitched notes.
+/// AY-3-8910-compatible PSG. Noise activity becomes percussion triggers,
+/// emitted EDGE-driven (one trigger per inactive → active transition — INV1),
+/// never per register write. Only tone-enabled voices with a representable
+/// musical pitch create conventional pitched notes (INV5: tone-disabled or
+/// ultrasonic periods are silent, never notes).
 /// </summary>
 internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
 {
@@ -11,6 +14,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
     private readonly MutableNote?[] _notes = new MutableNote?[3];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
+    private bool _noiseActive;
     private bool _completed;
 
     public ChipType ChipType => ChipType.Ay8910;
@@ -72,6 +76,17 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
         }
 
         Pitch pitch = DecodePitch(channel);
+        // INV5 source classifier: a tone-disabled / ultrasonic / initialization
+        // period (<= 0, or decoding above the audible ceiling) is not a
+        // representable musical pitch — it must never become a MIDI note, so the
+        // channel is treated as silent (period <= 0 is exactly the tone-disabled
+        // oscillator state, aligned with the K051649 decoder's active gate).
+        if (!ChipPitchDomain.IsRepresentable(pitch.FrequencyHz, pitch.MidiNote))
+        {
+            Close(channel, sample);
+            return;
+        }
+
         if (_notes[channel] == null)
         {
             string id = $"ay8910:{_device.Id.Instance}:tone:{channel}";
@@ -89,12 +104,30 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
         }
     }
 
+    /// <summary>
+    /// Emits the shared noise channel as a percussion trigger, EDGE-driven (INV1):
+    /// a trigger is emitted only on an inactive → active transition of the audible
+    /// noise state, never on every register write while the state stays active.
+    /// PSG drivers rewrite the mixer/volume registers every frame; per-write
+    /// emission turned that update stream into a machine-gun of identical kicks
+    /// (≈ 60 Hz), while the actual rhythm part is the set of volume onsets. The
+    /// AY-3-8910 exposes no separate envelope-restart signal for the noise channel
+    /// in this decode path (reg 13 envelope writes are not tracked), and the
+    /// register trace of the Gradius II fixture shows the volume genuinely returns
+    /// to 0 between hits, so the volume edge is the complete trigger model.
+    /// </summary>
     private void ReconcileNoise(long sample)
     {
         bool noiseEnabled = (_registers[7] & 0x38) != 0x38;
         bool audible = noiseEnabled && _registers[8..11].Any(value => (value & 0x0F) > 0);
         if (!audible)
+        {
+            _noiseActive = false;
             return;
+        }
+        if (_noiseActive)
+            return;
+        _noiseActive = true;
 
         int volume = _registers[8..11]
             .Select(value => value & 0x0F)
@@ -163,7 +196,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
 
         public void AddPitch(long sample, Pitch pitch)
         {
-            if (pitch.MidiNote < 0)
+            if (!ChipPitchDomain.IsRepresentable(pitch.FrequencyHz, pitch.MidiNote))
                 return;
             double previous = Pitch.Count == 0 ? InitialMidiNote : Pitch[^1].MidiNote;
             if (Math.Abs(previous - pitch.MidiNote) >= 0.0001)

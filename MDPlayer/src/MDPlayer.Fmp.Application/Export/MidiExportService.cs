@@ -23,6 +23,7 @@ public sealed class MidiExportService
     {
         ArgumentNullException.ThrowIfNull(timeline);
         ArgumentNullException.ThrowIfNull(request);
+        timeline = VoiceStateNormalizationStage.Normalize(timeline);
 
         // GUI parity: the Application path enforces the same option semantics the
         // CLI does, so the two entry points cannot drift (§11, plan IC-07).
@@ -53,6 +54,9 @@ public sealed class MidiExportService
         {
             return Failed($"Invalid timing input: {ex.Message}");
         }
+        MusicalStructure? structure = request.EmitMarkers
+            ? MusicalStructureAnalyzer.Analyze(build.Map, timeline)
+            : null;
 
         try
         {
@@ -71,6 +75,7 @@ public sealed class MidiExportService
             })
             {
                 Diagnostics = build.Diagnostics,
+                Structure = structure,
             };
             byte[] bytes;
             MusicalMidiExportResult? coreResult = null;

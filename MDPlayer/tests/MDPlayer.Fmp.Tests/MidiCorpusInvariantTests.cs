@@ -12,8 +12,10 @@ namespace MDPlayer.Fmp.Tests;
 /// Patch 4 corpus regression (FR-14 / request 41): GENERIC structural invariants
 /// over the available regression files — never per-song event counts. Each file is
 /// captured (VGM/SPC backend), exported and semantically decoded, then checked:
-/// unique MidiEndpoint per musical track; fixed ±24 RPN on every bend-using
-/// endpoint; no Program Change 0; valid note numbers; no zero-tick notes; no
+/// unique MidiEndpoint per musical track; every bend-using endpoint carries an
+/// RPN bend range >= the configured floor (24) — the corpus has no out-of-range
+/// pitches, so the range is exactly 24, but the contract is the FLOOR; no
+/// Program Change 0; valid note numbers; no zero-tick notes; no
 /// synthetic one-tick notes; first Set Tempo at tick 0; no duplicate
 /// endpoint/tick PitchBend; SMF parses.
 ///
@@ -75,13 +77,15 @@ public sealed class MidiCorpusInvariantTests
         Assert.Equal(decoded.Tracks.Count - 1, decoded.Events.Count); // one endpoint per musical track
         Assert.Equal(decoded.Events.Count, decoded.Events.Keys.Distinct().Count());
 
-        // Every bend-using melodic endpoint carries the fixed ±24 RPN.
+        // Every bend-using melodic endpoint carries an RPN range >= the configured
+        // floor (24). The corpus has no out-of-range pitches, so the auto-expanded
+        // range stays at the floor — but the contract is the floor, not an exact 24.
         foreach (var ep in decoded.Events)
         {
             bool hasBend = ep.Value.Any(e => e.Event is PitchBendEvent);
             if (hasBend)
-                Assert.True(decoded.State[ep.Key].BendRange == 24,
-                    $"{songName}: endpoint {ep.Key} bend-using track must carry ±24 RPN");
+                Assert.True(decoded.State[ep.Key].BendRange >= 24,
+                    $"{songName}: endpoint {ep.Key} bend-using track must carry an RPN range >= 24");
         }
 
         // No default Program Change 0.

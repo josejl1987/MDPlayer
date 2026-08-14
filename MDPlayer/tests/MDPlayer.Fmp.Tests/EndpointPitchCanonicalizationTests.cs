@@ -520,15 +520,17 @@ public sealed class EndpointPitchCanonicalizationTests
 
         // Structural invariants on the canonicalized output.
         // Zero/one-tick note audit: the pre-existing baseline contains EXACTLY ONE
-        // re-anchor artifact — endpoint (0,7), note 33, on@49746 off@49747 — a
+        // re-anchor artifact — endpoint (0,7), note 33, on@49769 off@49770 — a
         // re-anchor landing one tick before the note's end (no source note is
         // shorter than two ticks; the artifact is NOT introduced by canonicalization,
         // which never touches note events — verified by the identical violation set
         // on the pre-canonicalization output below). Fixing the re-anchor itself is
         // explicitly out of scope (spec 36), so the assertion pins the current
         // single occurrence: zero-tick notes are forbidden outright, and one-tick
-        // notes may not exceed the documented baseline artifact.
-        string[] knownOneTickArtifact = { "one-tick note 33 on@49746 off@49747" };
+        // notes may not exceed the documented baseline artifact. (The position was
+        // 49746 under the flat fixed-24 bend range; per-domain auto-expansion of the
+        // range legitimately shifted the re-anchor pattern — the count stays one.)
+        string[] knownOneTickArtifact = { "one-tick note 33 on@49769 off@49770" };
         string[] beforeViolations = NoteDurationViolations(before);
         string[] afterViolations = NoteDurationViolations(after);
         Assert.Equal(beforeViolations, afterViolations); // canonicalization is note-neutral
@@ -593,8 +595,8 @@ public sealed class EndpointPitchCanonicalizationTests
         {
             bool hasBend = d.Events[ep.Key].Any(e => e.Event is Melanchall.DryWetMidi.Core.PitchBendEvent);
             if (hasBend)
-                Assert.True(d.State[ep.Key].BendRange == 24,
-                    $"endpoint {ep.Key} bend-using track must carry the fixed ±24 RPN");
+                Assert.True(d.State[ep.Key].BendRange >= 24,
+                    $"endpoint {ep.Key} bend-using track must carry an RPN range >= 24");
         }
     }
 

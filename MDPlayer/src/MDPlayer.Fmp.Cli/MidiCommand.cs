@@ -80,11 +80,13 @@ internal static class MidiCommand
             StrictTiming = options.StrictTiming,
             DetectTempoChanges = true,
         };
+        timeline = VoiceStateNormalizationStage.Normalize(timeline);
 
         Stopwatch tempoWatch = Stopwatch.StartNew();
         MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline, mapOptions);
         tempoWatch.Stop();
         TimingDiagnostics diagnostics = build.Diagnostics;
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline);
 
         var exportOptions = new MusicalMidiExportOptions
         {
@@ -104,6 +106,7 @@ internal static class MidiCommand
         var exporter = new MusicalMidiExporter(build.Map, options.Ppq, exportOptions)
         {
             Diagnostics = diagnostics,
+            Structure = structure,
         };
         MusicalMidiExportResult result = exporter.Export(timeline);
 

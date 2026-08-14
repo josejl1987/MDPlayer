@@ -374,4 +374,17 @@ public sealed class Ym2608TimelineDecoderTests
         decoder.ApplyYm2608(0, 0, highAddress,
             ((block & 0x07) << 3) | ((fNumber >> 8) & 0x07), sample);
     }
+    [Fact]
+    public void RegistryDispatchesYm2608WithoutCreatingHuc6280()
+    {
+        var sink = new TimelineDecoderEventSink(44_100);
+        sink.OnDevice(VisualizationDeviceCatalog.Ym2608(0));
+
+        VisualizationTimeline timeline = sink.Timeline.Build(1_000);
+        Assert.Contains(timeline.Devices, device => device.Id.Type == ChipType.Ym2608);
+        Assert.DoesNotContain(timeline.Devices, device => device.Id.Type == ChipType.Huc6280);
+        Assert.IsType<Ym2608TimelineDecoderAdapter>(
+            sink.Decoders[new DeviceId(ChipType.Ym2608, 0)]);
+    }
 }
+

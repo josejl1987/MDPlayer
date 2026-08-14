@@ -75,6 +75,59 @@ public sealed class MidiFidelityIntegrationTests
     }
 
     [Fact]
+    public void OutOfRangeSourcePitch_AboveMidi_EncodesBoundaryBaseWithExpandedBendRange()
+    {
+        // An AY8910 PSG note whose TRUE (continuous) pitch sits above the MIDI
+        // range (0..127). The exporter must keep the source pitch — NO clamping to
+        // 127 — by pinning the encoded base note at the boundary (127, never the
+        // unrepresentable 165) and auto-expanding the domain's bend range to cover
+        // the boundary excursion (164.8798... - 127 = 37.8798... ST → emitted 38).
+        const double sourcePitch = 164.87982570466468;
+        long start = (long)Math.Round(Sr * 60.0 / 120.0);
+        var note = new NoteEvent(
+            ChannelId: "ay8910.0.psg.1",
+            StartSample: start,
+            EndSample: start + 50_000,
+            InitialFrequencyHz: 440 * Math.Pow(2, (sourcePitch - 69) / 12.0),
+            InitialMidiNote: sourcePitch,
+            InstrumentId: "ay8910:0:tone:0",
+            Mode: VisualizationNoteMode.SsgTone,
+            IsRetrigger: false,
+            Pitch: Array.Empty<PitchChange>())
+        { Domain = new SourceDomainKey(new DeviceId(ChipType.Ay8910, 0), VoiceKind.Psg, 0) };
+        MidiSemanticDecoder.Result d = MidiSemanticDecoder.Decode(ExportResult(Timeline(note), 120).Bytes);
+
+        var ep = d.State.Keys.Single();
+        var state = d.State[ep];
+        var noteOn = d.Events[ep].Single(e => e.Event is Melanchall.DryWetMidi.Core.NoteOnEvent);
+        int baseNote = ((Melanchall.DryWetMidi.Core.NoteOnEvent)noteOn.Event).NoteNumber;
+
+        // The encoded key is legal: pinned at 127, never 165 (outside MIDI).
+        Assert.Equal(127, baseNote);
+        // The emitted domain bend range auto-expanded to cover the excursion.
+        Assert.True(state.BendRange >= 38,
+            $"expected domain bend range >= 38 (excursion {sourcePitch - 127:0.####} ST), got {state.BendRange}");
+
+        // No source-pitch clamping: decoded pitch (incl. any Fidelity tuning
+        // restoration) ≈ the true source pitch, within the 14-bit quantization
+        // error over the 38-ST range (≈ 0.46 cents resolution).
+        double effective = MidiSemanticDecoder.EffectivePitch(baseNote, state.ActiveBend, state.BendRange,
+            (int)Math.Round(state.FineTuningCents), state.CoarseTuningSemitones);
+        Assert.True(double.IsFinite(effective), "decoded pitch must be finite");
+        Assert.InRange(effective, sourcePitch - 0.01, sourcePitch + 0.01);
+
+        // Every decoded pitch-bend value in the stream decodes to a finite pitch.
+        foreach (var timed in d.Events[ep])
+        {
+            if (timed.Event is Melanchall.DryWetMidi.Core.PitchBendEvent bend)
+            {
+                double decoded = MidiSemanticDecoder.DecodeBend(bend.PitchValue - 8192, state.BendRange);
+                Assert.True(double.IsFinite(decoded), "bend decode must be finite");
+            }
+        }
+    }
+
+    [Fact]
     public void WideSlide_ReanchorsMinimally_NoGapOverlap()
     {
         // 84, 82, 80, 77, 74, 70 across one note; range 24 so no re-anchor needed

@@ -70,6 +70,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\corpus\28-smoking-head.vgz</Link>
     </Content>
+    <!-- INV1/INV4/INV5 fixture (Gradius II - 53 Triumphal Arch): AY8910 noise
+         rhythm edge/retrigger, SCC multi-byte frequency settle, and ultrasonic
+         period suppression on both chips. -->
+    <Content Include="..\..\..\53 Triumphal Arch.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\53-triumphal-arch.vgz</Link>
+    </Content>
     <!-- Real YM2612-DAC-heavy VGZ used by the DAC sample integration tests. -->
     <Content Include="..\..\..\26 - Robotnik.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

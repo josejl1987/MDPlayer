@@ -48,7 +48,11 @@ internal static class CorpusMidiValidator
             ep.Value.Any(e => e.Event is PitchBendEvent));
         int rpnCoveredBendTracks = decoded.Events.Count(ep =>
             ep.Value.Any(e => e.Event is PitchBendEvent)
-            && decoded.State[ep.Key].BendRange == 24);
+            // "covered" = the emitted RPN range is at least the configured floor
+            // (24, the default). Per-domain auto-expansion legitimately emits wider
+            // ranges (boundary excursions beyond MIDI 0..127); measuring == 24 would
+            // flag valid boundary-covering exports.
+            && decoded.State[ep.Key].BendRange >= 24);
 
         int pitchBendCount = decoded.Events.Values
             .SelectMany(e => e).Count(e => e.Event is PitchBendEvent);

@@ -33,6 +33,31 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
+    public void Export_Markers_RestartBoundary_EmitsPairAndRenderEnd()
+    {
+        // A Restart loop boundary is the end of the previous pass AND the start of
+        // the next: the conductor carries LOOP_END + LOOP_START at the same tick.
+        // RENDER_END marks the true render end (the last captured sample) and is
+        // the final marker in the file.
+        TimelineState tt = BuildTimeline(120, noteTiming: "on");
+
+        ParsedMidi parsed = Parser.Parse(Export(tt));
+
+        // The Start marker emits one LOOP_START; the Restart boundary emits
+        // LOOP_END + LOOP_START at the same tick (the previous pass's end is the
+        // next pass's start).
+        var restartEnds = parsed.ConductorMarkers.Where(m => m.Name == "LOOP_END").ToList();
+        Assert.Single(restartEnds);
+        var restartStarts = parsed.ConductorMarkers.Where(m => m.Name == "LOOP_START").ToList();
+        Assert.Equal(2, restartStarts.Count); // Start marker + Restart boundary
+        Assert.Contains(restartStarts, m => m.Tick == restartEnds[0].Tick);
+        Marker? renderEnd = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "RENDER_END");
+        Assert.NotNull(renderEnd);
+        Assert.All(parsed.ConductorMarkers, m =>
+            Assert.True(m.Tick <= renderEnd!.Tick, $"{m.Name} must not outlast RENDER_END"));
+    }
+
+    [Fact]
     public void Export_SourceSamplesKeepWallClockTimeAcrossMusicalBpms()
     {
         long start = Sr / 2;
@@ -273,8 +298,13 @@ public sealed class MusicalMidiExporterTests
     [Theory]
     [InlineData(-1.0)]
     [InlineData(128.0)]
-    public void Export_OutOfRangeInitialPitch_RejectsWithDiagnosticAndNoArtifact(double pitch)
+    [InlineData(double.NaN)]
+    public void Export_OutOfRangeInitialPitch_Suppressed_NoNoteOn(double pitch)
     {
+        // INV5: a source pitch outside [0, 127] is meaningless MIDI garbage (the
+        // AY period-2 ultrasonic init states the user classified as "audible MIDI
+        // garbage"). The note is SUPPRESSED — never clamped, never wrapped — so no
+        // melodic NoteOn may decode at all.
         var timeline = new VisualizationTimeline
         {
             StartSample = 0,
@@ -283,19 +313,47 @@ public sealed class MusicalMidiExporterTests
             Notes = new[] { NewNote("invalid", 1_000, 10_000, 60) with { InitialMidiNote = pitch } },
         };
 
-        byte[]? artifact = null;
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            artifact = Export(new TimelineState { Timeline = timeline }));
+        byte[] bytes = Export(new TimelineState { Timeline = timeline });
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.Empty(parsed.NoteOns);
+    }
 
-        Assert.Contains("invalid initial MIDI pitch", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Null(artifact);
+    [Fact]
+    public void Export_BoundaryPitch_InRange_EncodesBoundaryBaseWithResidualBend()
+    {
+        // Encoder capability kept (INV5 boundary net): a REPRESENTABLE pitch near
+        // the top of the domain (126.9) is encoded with the base pinned at the
+        // nearest legal note (127) and the residual carried by the bend — the
+        // decoded pitch still equals the source pitch and nothing clamps.
+        const double pitch = 126.9;
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 100_000,
+            SampleRate = Sr,
+            Notes = new[] { NewNote("invalid", 1_000, 10_000, 60) with { InitialMidiNote = pitch } },
+        };
+
+        byte[] bytes = Export(new TimelineState { Timeline = timeline });
+        ParsedMidi parsed = Parser.Parse(bytes);
+        int on = Assert.Single(parsed.NoteOns).Note;
+        Assert.Equal(127, on);
+        // The residual is carried as a bend (boundary base + excursion), never
+        // dropped: without it the decoded pitch would clamp to the boundary key.
+        ParsedBend initialBend = Assert.Single(parsed.Bends);
+        Assert.InRange(initialBend.Bend, -8192, 8191);
+        Assert.NotEqual(0, initialBend.Bend);
+        Assert.All(parsed.Notes, n => Assert.True(n.Off > n.On, "no zero/negative-length artifacts"));
     }
 
     [Theory]
     [InlineData(-1.0)]
     [InlineData(128.0)]
-    public void Export_OutOfRangeSourcePitchChange_RejectsWithoutWrapping(double pitch)
+    public void Export_SustainedOutOfRangePitchChange_Suppressed_NoNoteOn(double pitch)
     {
+        // INV5: a pitch change to an out-of-domain pitch (60 -> -1 / 60 -> 128)
+        // sustained for half the note would decode outside [0, 127]. The whole
+        // note is suppressed — no clamping, no wrapping, nothing emitted.
         var note = NewNote("invalid", 1_000, 10_000, 60) with
         {
             Pitch = new[] { new PitchChange(5_000, 440, pitch) },
@@ -308,11 +366,34 @@ public sealed class MusicalMidiExporterTests
             Notes = new[] { note },
         };
 
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Export(
-            new TimelineState { Timeline = timeline }));
+        byte[] bytes = Export(new TimelineState { Timeline = timeline });
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.Empty(parsed.NoteOns);
+    }
 
-        Assert.Contains("invalid pitch", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("wrapped", error.Message, StringComparison.OrdinalIgnoreCase);
+    [Fact]
+    public void Export_BoundarySlide_InRange_EncodesWithoutWrapping()
+    {
+        // The re-anchor machinery still works for LEGAL boundary-adjacent pitches:
+        // a slide 60 -> 126.9 must not throw, must not wrap, and must land on a
+        // boundary base (127) carrying the residual as an in-range bend.
+        var note = NewNote("invalid", 1_000, 10_000, 60) with
+        {
+            Pitch = new[] { new PitchChange(5_000, 440, 126.9) },
+        };
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = 100_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+        };
+
+        byte[] bytes = Export(new TimelineState { Timeline = timeline });
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.All(parsed.Bends, b => Assert.InRange(b.Bend, -8192, 8191));
+        Assert.All(parsed.NoteOns, n => Assert.InRange(n.Note, 0, 127));
+        Assert.Contains(parsed.NoteOns, n => n.Note == 127);
     }
 
     [Fact]
@@ -586,7 +667,7 @@ public sealed class MusicalMidiExporterTests
         var notes = new[]
         {
             NewNote("v", 0, (long)Math.Round(spq), 60), // quarter 0→1, off at 960
-            NewNote("v", (long)Math.Round(spq), (long)Math.Round(2 * spq), 60), // on at 960
+            NewNote("v", (long)Math.Round(spq), (long)Math.Round(2 * spq), 60) with { IsRetrigger = true }, // on at 960 (real retrigger: INV3 boundary)
         };
         var timeline = new VisualizationTimeline
         {
@@ -1168,7 +1249,8 @@ public sealed class MusicalMidiExporterTests
 
     private static byte[] Export(TimelineState state)
     {
-        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        VisualizationTimeline timeline = VoiceStateNormalizationStage.Normalize(state.Timeline);
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
         {
             FixedBpm = state.FixedBpm,
             Meter = new Meter(4, 4),
@@ -1183,12 +1265,13 @@ public sealed class MusicalMidiExporterTests
         {
             Diagnostics = build.Diagnostics,
         };
-        return exporter.Export(state.Timeline).Bytes;
+        return exporter.Export(timeline).Bytes;
     }
 
     private static byte[] ExportWithOptions(TimelineState state, MusicalMidiExportOptions options)
     {
-        var build = MusicalTimeMapBuilder.Build(state.Timeline, new MusicalTimeMapOptions
+        VisualizationTimeline timeline = VoiceStateNormalizationStage.Normalize(state.Timeline);
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
         {
             FixedBpm = state.FixedBpm,
             Meter = new Meter(4, 4),
@@ -1198,7 +1281,7 @@ public sealed class MusicalMidiExporterTests
         {
             Diagnostics = build.Diagnostics,
         };
-        return exporter.Export(state.Timeline).Bytes;
+        return exporter.Export(timeline).Bytes;
     }
 
     /// <summary>Exports with NO meter so the unknown-meter (§64) path is exercised.</summary>

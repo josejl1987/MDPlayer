@@ -350,9 +350,24 @@ internal static class MusicalTimeMapBuilder
             startSample: timeline.StartSample,
             segments,
             meter,
-            firstDownbeatQuarter);
+            firstDownbeatQuarter,
+            confidence: AggregateConfidence(fit.Diagnostics, segments),
+            alternateBpm: fit.Diagnostics.AlternativeBpm,
+            isTempoAmbiguous: fit.Diagnostics.TempoAmbiguous);
     }
 
+
+    private static double AggregateConfidence(TimingDiagnostics diagnostics, IReadOnlyList<TempoSegment> segments)
+    {
+        if (diagnostics.TempoConfidence is double confidence)
+            return confidence;
+        // Authoritative/validated paths carry no inference-level confidence: a map is
+        // only as trustworthy as its weakest segment fit.
+        double min = 1.0;
+        foreach (TempoSegment segment in segments)
+            min = Math.Min(min, segment.Confidence);
+        return min;
+    }
     private static double ComputeSampleToQuarter(IReadOnlyList<TempoSegment> segments, long sample)
     {
         if (segments.Count == 0)

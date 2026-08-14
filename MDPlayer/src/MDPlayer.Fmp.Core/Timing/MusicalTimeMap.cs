@@ -22,7 +22,10 @@ internal sealed class MusicalTimeMap
         long startSample,
         IReadOnlyList<TempoSegment> segments,
         Meter? meter = null,
-        double? firstDownbeatQuarter = null)
+        double? firstDownbeatQuarter = null,
+        double confidence = 1.0,
+        double? alternateBpm = null,
+        bool isTempoAmbiguous = false)
     {
         if (sampleRate <= 0)
             throw new ArgumentOutOfRangeException(nameof(sampleRate));
@@ -34,6 +37,9 @@ internal sealed class MusicalTimeMap
         StartSample = startSample;
         Meter = meter;
         FirstDownbeatQuarter = firstDownbeatQuarter;
+        Confidence = confidence;
+        AlternateBpm = alternateBpm;
+        IsTempoAmbiguous = isTempoAmbiguous;
         _segments = ValidateSegments(segments);
     }
 
@@ -52,6 +58,18 @@ internal sealed class MusicalTimeMap
     /// inference). Null when unknown — the exporter must NOT invent a downbeat.
     /// </summary>
     public double? FirstDownbeatQuarter { get; }
+
+    /// <summary>
+    /// Overall confidence in the tempo (0..1): the symbolic-inference fit score and
+    /// half/double alias margin when inferred, else the weakest segment fit.
+    /// </summary>
+    public double Confidence { get; }
+
+    /// <summary>Nearest metrically-equivalent alternative BPM, when ambiguous.</summary>
+    public double? AlternateBpm { get; }
+
+    /// <summary>True when two metrically-equivalent tempos (half/double/etc.) compete.</summary>
+    public bool IsTempoAmbiguous { get; }
 
     /// <summary>First sample covered by any segment (inclusive).</summary>
     public long FirstSample => _segments[0].StartSample;

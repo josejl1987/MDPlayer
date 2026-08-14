@@ -333,7 +333,10 @@ internal static class SymbolicTempoInference
             timeline.StartSample,
             new[] { segment },
             meter,
-            firstDownbeatQuarter);
+            firstDownbeatQuarter,
+            confidence: diagnostics.TempoConfidence ?? segment.Confidence,
+            alternateBpm: diagnostics.AlternativeBpm,
+            isTempoAmbiguous: diagnostics.AlternativeBpm is double);
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.SampleZeroQuarter = quarterAtStart;
         // Metrical-family ambiguity is surfaced whenever ResolveHalfDouble found a

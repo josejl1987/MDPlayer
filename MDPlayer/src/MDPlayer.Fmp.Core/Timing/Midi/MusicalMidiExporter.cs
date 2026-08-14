@@ -24,8 +24,11 @@ internal sealed class MusicalMidiExportOptions
     /// <summary>Emit pitch-bend for microtonal / intra-note pitch movement (Batch 4).</summary>
     public bool EmitPitchBend { get; init; } = true;
 
-    /// <summary>Semitones of the configured fixed pitch-bend range (RPN), default 24.
-    /// No auto-expansion: an offset outside this range triggers a tick-domain
+    /// <summary>Floor semitones of the pitch-bend range (RPN), default 24, CLI
+    /// --bend-range. The configured value is a FLOOR: each melodic domain
+    /// auto-expands its emitted range to cover the pitch excursions its notes
+    /// actually need (boundary excursions beyond MIDI 0..127 included), capped
+    /// at 127. An offset beyond the effective range triggers a tick-domain
     /// re-anchor, and an offset that cannot be represented fails loudly.</summary>
     public int BendRangeSemitones { get; init; } = 24;
 
@@ -189,6 +192,15 @@ internal sealed class MusicalMidiExporter
     /// <summary>Optional diagnostics (from the map's builder) surfaced on the result.</summary>
     public TimingDiagnostics? Diagnostics { get; set; }
 
+    /// <summary>
+    /// Optional structural analysis (bar labels / sections / fundamental loop)
+    /// from <see cref="MusicalStructureAnalyzer.Analyze"/>. When set and
+    /// <see cref="MusicalMidiExportOptions.EmitMarkers"/> is enabled, the conductor
+    /// carries SECTION_* markers at section boundaries and STRUCT_LOOP_* markers at
+    /// the fundamental loop bounds. Computed upstream so the exporter only encodes.
+    /// </summary>
+    public MusicalStructure? Structure { get; set; }
+
     public MusicalMidiExportResult Export(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
@@ -199,6 +211,7 @@ internal sealed class MusicalMidiExporter
     {
         ArgumentNullException.ThrowIfNull(sourceTimeline);
         VisualizationTimeline timeline = sourceTimeline.Timeline;
+
         _noteTrackKeyCache = new Dictionary<NoteEvent, MidiTrackKey>(
             timeline.Notes?.Count ?? 0, ReferenceEqualityComparer.Instance);
         _rhythmTrackKeyCache = new Dictionary<RhythmEvent, MidiTrackKey>(
@@ -238,6 +251,10 @@ internal sealed class MusicalMidiExporter
 
         PreparePitchScratch(sourceIndex);
         TrackAllocator allocator = BuildTracks(sourceIndex);
+        // Per-domain bend-range resolution runs BEFORE note planning: EmitNote
+        // encodes every bend against the slot's effective range, and the RPN setup
+        // emits the same value (Patch B + per-domain auto-expansion).
+        ComputeEffectiveBendRanges(sourceIndex, pitchModel, allocator);
         _performance?.StopStage(MidiPerformanceStage.DomainAnalysis, stageStart);
 
         // Unpitched noise is excluded from the melodic export (no pitch exists);
@@ -769,10 +786,13 @@ internal sealed class MusicalMidiExporter
     /// ComputeOriginShiftTicks (to decide whether the note's pitch changes may
     /// contribute to the origin), so the two can never diverge. A note emits bends
     /// only when EmitPitchBend is set AND it has pitch changes OR a fractional /
-    /// non-finite initial note; any other note produces a single round-pitch note
-    /// with no bend infrastructure. Operates on the NORMALIZED view (FR-1) — a note
-    /// whose normalized pitch is exactly integer and whose changes were compressed
-    /// away needs no bend infrastructure.</summary>
+    /// non-finite initial note OR an exactly-integer pitch outside [0, 127]
+    /// (a boundary base note plus a bend residual is the only lossless encoding —
+    /// a bare key would silently clamp the source pitch, violating the decoded
+    /// pitch = source pitch invariant); any other note produces a single round-pitch
+    /// note with no bend infrastructure. Operates on the NORMALIZED view (FR-1) — a
+    /// note whose normalized pitch is exactly integer and whose changes were
+    /// compressed away needs no bend infrastructure.</summary>
     private bool ShouldFoldPitch(NormalizedNoteView view)
     {
         if (!_options.EmitPitchBend)
@@ -780,7 +800,8 @@ internal sealed class MusicalMidiExporter
         if (view.Changes is { Count: > 0 })
             return true;
         return !double.IsFinite(view.InitialMidiNote)
-            || Math.Abs(view.InitialMidiNote - Math.Round(view.InitialMidiNote)) > 1e-6;
+            || Math.Abs(view.InitialMidiNote - Math.Round(view.InitialMidiNote)) > 1e-6
+            || Math.Round(view.InitialMidiNote) is < 0 or > 127;
     }
 
     private void EmitNote(TrackSlot slot, NoteEvent note, PitchNormalizationModel model, long originShift,
@@ -791,10 +812,12 @@ internal sealed class MusicalMidiExporter
         int transpose = voiceOverride.TransposeSemitones;
         NormalizedNoteView view = model.Views[note];
         bool needsBend = ShouldFoldPitch(view);
-        int bendRange = _options.BendRangeSemitones;
+        int bendRange = slot.EffectiveBendRange;
         // Validate the source pitch domain regardless of bend emission (§ B.3 /
-        // cross-cutting fail-loudly): a note whose true pitch is outside MIDI 0..127
-        // is rejected even when it needs no bend infrastructure.
+        // cross-cutting fail-loudly): the source pitch must be FINITE and never an
+        // unpitched-noise sentinel. Continuous source pitch may legitimately sit
+        // outside MIDI 0..127 — the [0, 127] bound applies to the ENCODED key,
+        // which ValidateNotePitch enforces at the point of emission.
         ValidateSourcePitch(note);
 
         if (!needsBend)
@@ -807,7 +830,17 @@ internal sealed class MusicalMidiExporter
             long off = TimeTick(note.EndSample) + originShift;
             if (off <= on)
                 off = on + 1;
-            int pitch = Math.Clamp((int)Math.Round(view.InitialMidiNote) + transpose, 0, 127);
+            // The non-fold contract is "the note-on sounds at its TRUE (integer)
+            // pitch". With bends disabled an out-of-range pitch (source or after
+            // transpose) has no legal key to sound at — clamping would silently
+            // lose pitch, so fail loudly instead (§ B.3 / cross-cutting fail-loudly).
+            int roundedPitch = (int)Math.Round(view.InitialMidiNote) + transpose;
+            if (roundedPitch is < 0 or > 127)
+                throw new InvalidOperationException(
+                    $"Source note '{note.ChannelId}' at sample {note.StartSample} needs MIDI pitch " +
+                    $"{roundedPitch}, which no legal key in [0, 127] represents without pitch-bend " +
+                    "infrastructure; enable pitch-bend emission (EmitPitchBend) to encode boundary excursions.");
+            int pitch = roundedPitch;
             ValidateNotePitch(note, pitch);
             var noBendEndpoint = slot.Track.Endpoint;
             if (lastBendByEndpoint.TryGetValue(noBendEndpoint, out int lastBend) && lastBend != 0)
@@ -1067,9 +1100,9 @@ internal sealed class MusicalMidiExporter
         }
     }
 
-    /// <summary>Sign-symmetric 14-bit bend for a semitone offset within the fixed range:
-    /// negative offsets map to [0,-8192), positive to [0,+8191]. Non-finite or
-    /// out-of-range offsets fail loudly — no Math.Clamp to hide a planner bug.</summary>
+    /// <summary>Sign-symmetric 14-bit bend for a semitone offset within the effective
+    /// range: negative offsets map to [0,-8192), positive to [0,+8191]. Non-finite
+    /// or out-of-range offsets fail loudly — no Math.Clamp to hide a planner bug.</summary>
     private static int EncodeBend(double offset, int range, NoteEvent note)
     {
         if (!double.IsFinite(offset))
@@ -1077,7 +1110,7 @@ internal sealed class MusicalMidiExporter
                 $"Non-finite pitch-bend offset for source note '{note.ChannelId}': {offset}.");
         if (offset < -range || offset > range)
             throw new InvalidOperationException(
-                $"Pitch offset {offset:0.###} exceeds the fixed bend range of {range} semitones for source note " +
+                $"Pitch offset {offset:0.###} exceeds the effective bend range of {range} semitones for source note " +
                 $"'{note.ChannelId}'; expected a tick-domain re-anchor to resolve this.");
         double scaled = offset < 0 ? offset / range * 8192.0 : offset / range * 8191.0;
         int bend = (int)Math.Round(scaled, MidpointRounding.AwayFromZero);
@@ -1101,18 +1134,31 @@ internal sealed class MusicalMidiExporter
 
     private static void ValidateSourcePitch(NoteEvent note)
     {
-        if (!double.IsFinite(note.InitialMidiNote) || note.InitialMidiNote is < 0 or > 127)
+        // Defensive gate: the intentional unpitched-noise sentinel never reaches the
+        // melodic planner (IsNoteEmitted excludes it), but if one ever slips through
+        // it must fail loudly — the -1 sentinel is finite and would otherwise pass
+        // the finite-only check below with no pitch to serialize.
+        if (IsUnpitchedNoise(note))
+            throw new InvalidOperationException(
+                $"Source note '{note.ChannelId}' at sample {note.StartSample} is unpitched noise " +
+                "and has no MIDI pitch to serialize.");
+        // Continuous source pitch may legitimately sit outside [0, 127] (e.g. an
+        // AY8910 PSG note near the top of the range encodes its true pitch as a
+        // boundary base note plus a pitch-bend excursion). Only FINITENESS is
+        // required here; the [0, 127] bound applies to the ENCODED MIDI key, which
+        // ValidateNotePitch enforces at the point of emission.
+        if (!double.IsFinite(note.InitialMidiNote))
             throw new InvalidOperationException(
                 $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid initial MIDI pitch " +
-                $"'{note.InitialMidiNote}'. Expected a finite value in [0, 127].");
+                $"'{note.InitialMidiNote}'. Expected a finite value.");
         if (note.Pitch is { Count: > 0 })
         {
             foreach (PitchChange change in note.Pitch)
             {
-                if (!double.IsFinite(change.MidiNote) || change.MidiNote is < 0 or > 127)
+                if (!double.IsFinite(change.MidiNote))
                     throw new InvalidOperationException(
                         $"Source note '{note.ChannelId}' at sample {note.StartSample} has invalid pitch " +
-                        $"'{change.MidiNote}' at sample {change.SamplePosition}. Expected a finite value in [0, 127].");
+                        $"'{change.MidiNote}' at sample {change.SamplePosition}. Expected a finite value.");
             }
         }
     }
@@ -1181,6 +1227,16 @@ internal sealed class MusicalMidiExporter
             Consider(TimeTick(timeline.StartSample)); // SOURCE_START
             if (_map.FirstDownbeatQuarter is double downbeat)
                 Consider(_map.QuarterPositionToTick(downbeat, _ppq));
+            if (Structure is MusicalStructure structure)
+            {
+                foreach (MusicalSection section in structure.Sections)
+                    Consider(StructureBarTick(structure, section.StartBar));
+                if (structure.PrimaryLoop is RepeatedBlock loop)
+                {
+                    Consider(StructureBarTick(structure, loop.StartBar));
+                    Consider(StructureBarTick(structure, loop.StartBar + loop.LengthBars));
+                }
+            }
         }
         // Later tempo events at shifted segment start ticks (the first tempo is the
         // setup event at logical tick 0 so its segment start is not covered here).
@@ -1191,6 +1247,11 @@ internal sealed class MusicalMidiExporter
         }
         return Math.Max(0, -minTick);
     }
+
+    /// <summary>Maps a structure bar index to an absolute pre-shift tick via the
+    /// bar's quarter-start position. Section and loop markers share this mapping.</summary>
+    private long StructureBarTick(MusicalStructure structure, int barIndex)
+        => _map.QuarterPositionToTick(structure.Bars[barIndex].QuarterStart, _ppq);
 
     private void BuildConductor(VisualizationTimeline timeline, long originShift, List<MidiEventBase> conductor)
     {
@@ -1241,16 +1302,63 @@ internal sealed class MusicalMidiExporter
                 long downbeatTick = _map.QuarterPositionToTick(downbeat, _ppq) + originShift;
                 conductor.Add(WithSourceOrder(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT")));
             }
+            // Structural markers (sections + fundamental loop) from the upstream
+            // MusicalStructureAnalyzer — distinct from the driver-parsed loop state
+            // below. SECTION_* marks labeled section boundaries; STRUCT_LOOP_* marks
+            // the fundamental repeated block detected from note content.
+            if (Structure is MusicalStructure structure)
+            {
+                foreach (MusicalSection section in structure.Sections)
+                {
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                        StructureBarTick(structure, section.StartBar) + originShift,
+                        "SECTION_" + section.Label)));
+                }
+                if (structure.PrimaryLoop is RepeatedBlock loop)
+                {
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                        StructureBarTick(structure, loop.StartBar) + originShift,
+                        "STRUCT_LOOP_START")));
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                        StructureBarTick(structure, loop.StartBar + loop.LengthBars) + originShift,
+                        "STRUCT_LOOP_END")));
+                }
+            }
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
             {
+                long tick = TimeTick(loop.SamplePosition) + originShift;
+                // A Restart boundary is simultaneously the end of the previous pass
+                // and the start of the next: emit LOOP_END then LOOP_START at the
+                // same tick, describing the structure actually in the MIDI.
+                if (loop.Kind == LoopMarkerKind.Restart)
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(tick, "LOOP_START")));
                 string name = loop.Kind switch
                 {
                     LoopMarkerKind.Start => "LOOP_START",
                     LoopMarkerKind.Restart => "LOOP_END",
                     _ => "LOOP_MARK",
                 };
-                conductor.Add(WithSourceOrder(new MidiMarkerEvent(TimeTick(loop.SamplePosition) + originShift, name)));
+                conductor.Add(WithSourceOrder(new MidiMarkerEvent(tick, name)));
             }
+            // RENDER_END marks the true render end (the last sample of the captured
+            // audio, loops + fade/tail included) — the final marker in the file.
+            conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                TimeTick(timeline.EndSample) + originShift, "RENDER_END")));
+        }
+
+        // Timing-confidence text so the DAW/user sees what was inferred.
+        // Conductor metadata exposes the decoded physical topology. This is
+        // intentionally derived from the timeline, never inferred from tracks.
+        if (_options.EmitConductorMetadata)
+        {
+            string chips = string.Join(",",
+                timeline.Devices
+                    .Select(device => $"{device.Id.Type}:{device.Id.Instance}")
+                    .OrderBy(value => value, StringComparer.Ordinal));
+            conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
+                TimeTick(_map.FirstSample) + originShift,
+                0x01,
+                $"source-chips={chips}")));
         }
 
         // Timing-confidence text so the DAW/user sees what was inferred.
@@ -1451,21 +1559,22 @@ internal sealed class MusicalMidiExporter
     }
 
     /// <summary>
-    /// Emits the fixed pitch-bend-range RPN setup (Patch B) once per melodic track
-    /// that actually emits bends, at logical tick 0. A track that emits no bends
-    /// gets no RPN setup. The range is the configured fixed value (default 24) —
-    /// never auto-expanded. Fidelity mode (FR-5) additionally emits one channel
-    /// tuning RPN per TUNED melodic domain (accepted bias), before the bend-range
-    /// setup (smaller SourceOrder; both setups are null-RPN-terminated so their
-    /// order is semantics-independent). Tuning is emitted even when the domain's
-    /// normalized notes are all integer (no bends): without it those notes would
-    /// play at equal temperament instead of source pitch, violating FR-5's
-    /// played-pitch = source-pitch contract (D9).
+    /// Emits the pitch-bend-range RPN setup (Patch B) once per melodic track that
+    /// actually emits bends, at logical tick 0. A track that emits no bends gets
+    /// no RPN setup. The range is the slot's EFFECTIVE range: max(configured
+    /// floor, per-domain required excursion), widened to the channel-wide maximum
+    /// when melodic domains share a MIDI channel (RPN is per-channel), capped at
+    /// 127 — see <see cref="ComputeEffectiveBendRanges"/>. Fidelity mode (FR-5)
+    /// additionally emits one channel tuning RPN per TUNED melodic domain
+    /// (accepted bias), before the bend-range setup (smaller SourceOrder; both
+    /// setups are null-RPN-terminated so their order is semantics-independent).
+    /// Tuning is emitted even when the domain's normalized notes are all integer
+    /// (no bends): without it those notes would play at equal temperament instead
+    /// of source pitch, violating FR-5's played-pitch = source-pitch contract (D9).
     /// </summary>
     private void EmitBendRangeSetup(TrackAllocator allocator, PitchNormalizationModel model)
     {
-        int range = _options.BendRangeSemitones;
-        if (range is < 1 or > 127)
+        if (_options.BendRangeSemitones is < 1 or > 127)
             throw new ArgumentOutOfRangeException(nameof(_options), "Bend range must be in [1, 127].");
         var orderedSlots = new List<KeyValuePair<MidiTrackKey, TrackSlot>>(allocator.Slots.Count);
         foreach (KeyValuePair<MidiTrackKey, TrackSlot> pair in allocator.Slots)
@@ -1491,7 +1600,7 @@ internal sealed class MusicalMidiExporter
             }
             if (!hasBend)
                 continue;
-            AddTrackEvent(slot.Track, PackedMidiEvent.BendRange(0, slot.Index, slot.Channel, range));
+            AddTrackEvent(slot.Track, PackedMidiEvent.BendRange(0, slot.Index, slot.Channel, slot.EffectiveBendRange));
         }
 
         if (_options.PitchNormalizationMode != PitchNormalizationMode.Fidelity)
@@ -1518,6 +1627,87 @@ internal sealed class MusicalMidiExporter
             AddTrackEvent(slot.Track, PackedMidiEvent.Tuning(0, slot.Index, slot.Channel, coarse, fine));
         }
     }
+
+    /// <summary>
+    /// Resolves the effective pitch-bend range (RPN) every melodic slot encodes
+    /// against, run once before note planning. Per source domain the REQUIRED range
+    /// is the minimal whole-semitone range that keeps every effective pitch point of
+    /// every note in the domain representable as (legal base note + bend); the
+    /// emitted range is max(configured floor, ceil(required)), capped at 127. MIDI
+    /// pitch-bend range is per-CHANNEL (RPN), so when two melodic domains share a
+    /// channel number (forced voice-override channels, or port rollover beyond 16
+    /// tracks) the channel-wide maximum is applied to every slot on the channel —
+    /// the encoding in <see cref="EmitNote"/> and the RPN setup must agree or the
+    /// decoded pitch drifts.
+    /// </summary>
+    private void ComputeEffectiveBendRanges(SourceEventIndex sourceIndex, PitchNormalizationModel model,
+        TrackAllocator allocator)
+    {
+        int floor = _options.BendRangeSemitones;
+        var requiredByDomain = new Dictionary<SourceDomainKey, double>();
+        foreach (IndexedNote indexed in sourceIndex.Notes)
+        {
+            TrackSlot? slot = allocator.SlotFor(indexed.Key);
+            if (slot is null || slot.Percussive)
+                continue;
+            double required = RequiredExcursion(indexed.Note, model, slot.Override.TransposeSemitones);
+            SourceDomainKey domain = slot.Domain.Source;
+            requiredByDomain[domain] = Math.Max(requiredByDomain.GetValueOrDefault(domain), required);
+        }
+
+        var effectiveByDomain = new Dictionary<SourceDomainKey, int>();
+        foreach ((SourceDomainKey domain, double required) in requiredByDomain)
+            effectiveByDomain[domain] = Math.Min(127, Math.Max(floor, (int)Math.Ceiling(required)));
+
+        var channelMax = new Dictionary<int, int>();
+        foreach (KeyValuePair<MidiTrackKey, TrackSlot> pair in allocator.Slots)
+        {
+            TrackSlot slot = pair.Value;
+            if (slot.Percussive)
+                continue;
+            int effective = effectiveByDomain.GetValueOrDefault(slot.Domain.Source, floor);
+            channelMax[slot.Channel] = Math.Max(channelMax.GetValueOrDefault(slot.Channel), effective);
+        }
+        foreach (KeyValuePair<MidiTrackKey, TrackSlot> pair in allocator.Slots)
+        {
+            TrackSlot slot = pair.Value;
+            if (!slot.Percussive)
+                slot.EffectiveBendRange = channelMax.GetValueOrDefault(slot.Channel, floor);
+        }
+    }
+
+    /// <summary>Minimal bend-range excursion (semitones) ONE note needs to represent
+    /// every point of its effective pitch trajectory. The trajectory mirrors
+    /// <see cref="BuildPitchAnchors"/> exactly: folded initial pitch (non-finite
+    /// falls back to 60) + every finite normalized change in [StartSample,
+    /// EndSample), transpose applied once per point. The per-point excursion is
+    /// abs(pitch - clamp(round(pitch), 0, 127)) — the distance to the legal base
+    /// note the encoder actually picks: boundary-pinned at 0/127, exact-rounded
+    /// inside. That base is range-independent (for any range that can represent the
+    /// point, <see cref="SelectBaseNote"/> returns exactly it), which resolves the
+    /// "base depends on range, range depends on base" circularity without
+    /// iteration.</summary>
+    private double RequiredExcursion(NoteEvent note, PitchNormalizationModel model, int transpose)
+    {
+        NormalizedNoteView view = model.Views[note];
+        double initial = double.IsFinite(view.InitialMidiNote) ? view.InitialMidiNote : 60;
+        double required = Excursion(initial + transpose);
+        if (view.Changes is { Count: > 0 })
+        {
+            foreach (NormalizedPitchChange change in view.Changes)
+            {
+                if (!double.IsFinite(change.MidiNote))
+                    continue;
+                if (change.SamplePosition < note.StartSample || change.SamplePosition >= note.EndSample)
+                    continue;
+                required = Math.Max(required, Excursion(change.MidiNote + transpose));
+            }
+        }
+        return required;
+    }
+
+    private static double Excursion(double pitch) =>
+        Math.Abs(pitch - Math.Clamp((int)Math.Round(pitch, MidpointRounding.AwayFromZero), 0, 127));
 
     private void ValidateChannelState(IReadOnlyList<MidiTrackKey> keys,
         IReadOnlyDictionary<MidiTrackKey, string> representatives)
@@ -1914,6 +2104,13 @@ internal sealed class MusicalMidiExporter
         public int Channel { get; }
         public MidiVoiceDomain Domain { get; }
         public bool Percussive { get; }
+
+        /// <summary>Effective pitch-bend range (RPN) this slot encodes against:
+        /// max(configured floor, per-domain required excursion), widened to the
+        /// channel-wide maximum when melodic domains share the channel. Resolved by
+        /// <see cref="MusicalMidiExporter.ComputeEffectiveBendRanges"/> before note
+        /// planning; 0 until then.</summary>
+        public int EffectiveBendRange { get; set; }
 
         /// <summary>Per-voice override applied to this slot (default: include + program 0).</summary>
         public VoiceExportOverride Override { get; set; } = null!;
