@@ -81,7 +81,7 @@ public sealed class MusicalStructureAnalyzerTests
     }
 
     [Fact]
-    public void Analyze_AbabForm_ProducesPrimeLabelsAndLoop()
+    public void Analyze_AbabForm_ProducesPrimePhraseLabelsAndLoop()
     {
         // A A A A | B B B B | A A A A | B B B B  (4-bar phrases, 16 bars total).
         // A bars use pitch class 0 (MIDI 60); B bars use pitch class 5 (MIDI 65).
@@ -92,10 +92,10 @@ public sealed class MusicalStructureAnalyzerTests
         MusicalStructure structure = MusicalStructureAnalyzer.Analyze(Map(64, new Meter(4, 4)), Timeline(notes));
 
         Assert.Equal(4, structure.Sections.Count);
-        Assert.Equal(new MusicalSection(0, 4, "A"), structure.Sections[0]);
-        Assert.Equal(new MusicalSection(4, 8, "B"), structure.Sections[1]);
-        Assert.Equal(new MusicalSection(8, 12, "A"), structure.Sections[2]);
-        Assert.Equal(new MusicalSection(12, 16, "B"), structure.Sections[3]);
+        Assert.Equal(new MusicalSection(0, 4, "PHRASE_A"), structure.Sections[0]);
+        Assert.Equal(new MusicalSection(4, 8, "PHRASE_B"), structure.Sections[1]);
+        Assert.Equal(new MusicalSection(8, 12, "PHRASE_A"), structure.Sections[2]);
+        Assert.Equal(new MusicalSection(12, 16, "PHRASE_B"), structure.Sections[3]);
 
         // A+B repeats, so the fundamental loop is the 8-bar A-B span.
         Assert.True(structure.HasLoop);
@@ -114,7 +114,7 @@ public sealed class MusicalStructureAnalyzerTests
         Assert.Empty(structure.Loops);
         Assert.Null(structure.PrimaryLoop);
         Assert.Single(structure.Sections); // one homogeneous rest section
-        Assert.Equal("A", structure.Sections[0].Label);
+        Assert.Equal("PHRASE_A", structure.Sections[0].Label);
     }
     [Fact]
     public void Analyze_ArbitraryThirtyThreeBarLoop_UsesRepeatedContentAndPhraseOrder()
@@ -146,6 +146,37 @@ public sealed class MusicalStructureAnalyzerTests
         Assert.All(structure.Sections, section =>
             Assert.True(section.EndBar - section.StartBar >= 4
                 || section.Label == "TURNAROUND"));
+    }
+
+    [Fact]
+    public void GridCandidate_PhaseVariantsProduceDifferentDownbeatSamplePositions()
+    {
+        const double bpm = 120;
+        double samplesPerQuarter = Sr * 60.0 / bpm;
+        MusicalGridCandidate[] candidates =
+        {
+            new(bpm, new Meter(4, 4), 0.0, 0.0, 1.0),
+            new(bpm, new Meter(4, 4), 0.0, 1.0, 1.0),
+            new(bpm, new Meter(4, 4), 0.0, 2.0, 1.0),
+            new(bpm, new Meter(4, 4), 0.0, 3.0, 1.0),
+        };
+
+        long[] downbeatSamples = candidates
+            .Select(candidate => (long)Math.Round(
+                (candidate.FirstDownbeatQuarter!.Value - candidate.QuarterAtSourceStart)
+                * samplesPerQuarter))
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                0L,
+                (long)Math.Round(samplesPerQuarter),
+                (long)Math.Round(2 * samplesPerQuarter),
+                (long)Math.Round(3 * samplesPerQuarter),
+            },
+            downbeatSamples);
+        Assert.Equal(4, downbeatSamples.Distinct().Count());
     }
 
     [Fact]

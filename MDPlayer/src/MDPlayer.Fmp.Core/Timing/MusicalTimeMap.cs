@@ -6,8 +6,18 @@ namespace Fmp.Core.Timing;
 internal sealed record MusicalGridCandidate(
     double Bpm,
     Meter Meter,
-    double BeatPhase,
-    double Score);
+    /// <summary>Absolute quarter position at the source timeline start.</summary>
+    double QuarterAtSourceStart,
+    /// <summary>Absolute quarter position of the first downbeat, when this candidate establishes one.</summary>
+    double? FirstDownbeatQuarter,
+    double Score)
+{
+    /// <summary>Compatibility constructor for analyzers that supplied one phase for both dimensions.</summary>
+    public MusicalGridCandidate(double bpm, Meter meter, double quarterAtSourceStart, double score)
+        : this(bpm, meter, quarterAtSourceStart, quarterAtSourceStart, score)
+    {
+    }
+}
 
 /// <summary>
 /// Canonical conversion from playback sample positions (the timeline clock, in

@@ -54,9 +54,7 @@ public sealed class MidiExportService
         {
             return Failed($"Invalid timing input: {ex.Message}");
         }
-        MusicalStructure? structure = request.EmitMarkers
-            ? MusicalStructureAnalyzer.Analyze(build.Map, timeline)
-            : null;
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline);
 
         try
         {
@@ -67,6 +65,7 @@ public sealed class MidiExportService
                 BendRangeSemitones = request.BendRangeSemitones,
                 UsePercussionChannel = request.UsePercussionChannel,
                 Velocity = request.Velocity,
+                TrackLayout = request.TrackLayout,
                 EmitMarkers = request.EmitMarkers,
                 EmitConductorMetadata = request.EmitConductorMetadata,
                 VoiceOverrides = ToVoiceOverrides(request.VoiceOptions),

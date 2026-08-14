@@ -66,8 +66,10 @@ public sealed class MidiExportRequest
     /// <summary>Default note velocity (1–127) for voices without a per-voice override.</summary>
     public int Velocity { get; init; } = 90;
 
-    /// <summary>Emit loop/section markers on the conductor track.</summary>
+    /// <summary>Emit loop/phrase markers on the conductor track.</summary>
     public bool EmitMarkers { get; init; } = true;
+    /// <summary>Track grouping policy; PhysicalVoice is the stable default.</summary>
+    public MidiTrackLayout TrackLayout { get; init; } = MidiTrackLayout.PhysicalVoice;
 
     /// <summary>Emit conductor track name / source metadata / timing-confidence text.</summary>
     public bool EmitConductorMetadata { get; init; } = true;

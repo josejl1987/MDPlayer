@@ -36,7 +36,11 @@ public sealed class MidiTrackNamingTests
             SampleRate = 44100,
             Notes = notes,
         };
-        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions { EmitPitchBend = false });
+        var exporter = new MusicalMidiExporter(map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = false,
+            TrackLayout = MidiTrackLayout.InstrumentSplit,
+        });
         return exporter.Export(timeline);
     }
 
@@ -368,6 +372,24 @@ public sealed class MidiTrackNamingTests
             44100, 0,
             new[] { new TempoSegment(0, 5_000_000, 0, 22050, 120, TimingSource.UserOverride, 1.0) },
             meter: null);
+        options = new MusicalMidiExportOptions
+        {
+            Quantize = options.Quantize,
+            UsePercussionChannel = options.UsePercussionChannel,
+            PercussionNoteBase = options.PercussionNoteBase,
+            EmitPitchBend = options.EmitPitchBend,
+            BendRangeSemitones = options.BendRangeSemitones,
+            PitchNormalizationMode = options.PitchNormalizationMode,
+            PitchNormalizationThresholds = options.PitchNormalizationThresholds,
+            EmitInstrumentMetadata = options.EmitInstrumentMetadata,
+            TrackLayout = MidiTrackLayout.InstrumentSplit,
+            EmitMarkers = options.EmitMarkers,
+            EmitConductorMetadata = options.EmitConductorMetadata,
+            Velocity = options.Velocity,
+            VoiceOverrides = options.VoiceOverrides,
+            EnablePerformanceMetrics = options.EnablePerformanceMetrics,
+            TempoInferenceCounters = options.TempoInferenceCounters,
+        };
         return new MusicalMidiExporter(map, Ppq, options).Export(timeline);
     }
 }

@@ -1,5 +1,7 @@
 using Fmp.Application.Export;
 using Fmp.Core.Visualization;
+using Melanchall.DryWetMidi.Core;
+using NoteEvent = Fmp.Core.Visualization.NoteEvent;
 using System.Text.Json;
 using Xunit;
 
@@ -251,6 +253,85 @@ public sealed class MidiExportServiceTests
             timelinePath, new MidiExportRequest { TempoSource = MidiTempoSource.Symbolic });
         Assert.True(result.Succeeded, result.Error);
         Assert.Equal("SymbolicInference", result.TempoSource);
+    }
+
+    [Fact]
+    public void Export_SymbolicStructureSelection_UsesProductionApplicationPath()
+    {
+        const double bpm = 149.4;
+        double samplesPerQuarter = Sr * 60.0 / bpm;
+        const int bars = 66;
+        long endSample = (long)Math.Round(bars * 4 * samplesPerQuarter);
+        NoteEvent[] notes = Enumerable.Range(0, bars * 4)
+            .Select(index =>
+            {
+                long start = (long)Math.Round(index * samplesPerQuarter);
+                return new NoteEvent(
+                    ChannelId: "lead",
+                    StartSample: start,
+                    EndSample: start + Math.Max(1, (long)Math.Round(0.5 * samplesPerQuarter)),
+                    InitialFrequencyHz: 440,
+                    InitialMidiNote: 48 + ((index / 4 % 33) * 2 + index % 4) % 12,
+                    InstrumentId: "inst",
+                    Mode: VisualizationNoteMode.Fm,
+                    IsRetrigger: false,
+                    Pitch: Array.Empty<PitchChange>());
+            })
+            .ToArray();
+        VisualizationTimeline timeline = new()
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = endSample,
+            Notes = notes,
+            Rhythm = Enumerable.Range(0, 33 * 4)
+                .Select(index => new RhythmEvent(
+                    index % 4 is 0 or 2 ? "bd" : "sd",
+                    index % 4 is 0 or 2 ? "bd" : "sd",
+                    (long)Math.Round(index * samplesPerQuarter),
+                    1.0f,
+                    0.0f))
+                .ToArray(),
+            LoopMarkers = new[]
+            {
+                new LoopMarker(0, LoopMarkerKind.Start, 0),
+                new LoopMarker(
+                    (long)Math.Round(33 * 4 * samplesPerQuarter),
+                    LoopMarkerKind.Restart,
+                    1),
+            },
+        };
+        string timelinePath = WriteTimeline(timeline);
+
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(
+            timelinePath,
+            new MidiExportRequest
+            {
+                TempoSource = MidiTempoSource.Symbolic,
+                Meter = "4/4",
+                EmitMarkers = true,
+            });
+
+        Assert.True(result.Succeeded, result.Error);
+        var conductor = MidiRoundTrip.TimedEvents(result.Bytes!, 0);
+        string[] markers = conductor
+            .Where(pair => pair.Event is MarkerEvent)
+            .Select(pair => ((MarkerEvent)pair.Event).Text)
+            .ToArray();
+        Assert.True(markers.Contains("FIRST_DOWNBEAT"), string.Join(" | ", result.Report));
+        Assert.True(markers.Contains("STRUCT_LOOP_START"), string.Join(" | ", result.Report));
+        Assert.Contains("STRUCT_LOOP_END", markers);
+        Assert.Contains(markers, marker => marker.StartsWith("PHRASE_"));
+
+        SetTempoEvent tempo = Assert.Single(conductor.Select(pair => pair.Event).OfType<SetTempoEvent>());
+        Assert.InRange(
+            tempo.MicrosecondsPerQuarterNote,
+            (uint)Math.Round(60_000_000.0 / bpm) - 10,
+            (uint)Math.Round(60_000_000.0 / bpm) + 10);
+        TimeSignatureEvent meter = Assert.Single(
+            conductor.Select(pair => pair.Event).OfType<TimeSignatureEvent>());
+        Assert.Equal((byte)4, meter.Numerator);
+        Assert.Equal((byte)4, meter.Denominator);
     }
 
     [Fact]

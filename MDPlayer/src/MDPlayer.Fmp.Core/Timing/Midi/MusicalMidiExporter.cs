@@ -6,6 +6,15 @@ using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Midi;
 
+/// <summary>Controls whether MIDI tracks follow physical voices or split instruments.</summary>
+public enum MidiTrackLayout
+{
+    /// <summary>One musical track per physical source voice (the default).</summary>
+    PhysicalVoice,
+    /// <summary>Split a physical source voice into separate instrument tracks.</summary>
+    InstrumentSplit,
+}
+
 /// <summary>Optional export transforms. Timing accuracy is the default; quantization
 /// and drum mapping are opt-in, applied only after the musical-time conversion.</summary>
 internal sealed class MusicalMidiExportOptions
@@ -45,8 +54,10 @@ internal sealed class MusicalMidiExportOptions
     public PitchNormalizationThresholds? PitchNormalizationThresholds { get; init; }
 
     public bool EmitInstrumentMetadata { get; init; } = true;
+    /// <summary>Track grouping policy. PhysicalVoice is stable regardless of markers.</summary>
+    public MidiTrackLayout TrackLayout { get; init; } = MidiTrackLayout.PhysicalVoice;
 
-    /// <summary>Emit loop/section markers on the conductor track.</summary>
+    /// <summary>Emit loop/phrase markers on the conductor track.</summary>
     public bool EmitMarkers { get; init; } = true;
 
     /// <summary>Emit conductor track name / source metadata / timing-confidence text.</summary>
@@ -170,8 +181,8 @@ internal sealed class MusicalMidiExporter
     private int _placeholderCount;
 
     private readonly HashSet<string> _placeholderChannels = new();
-    // Structural/arranged exports collapse patch changes back to their physical
-    // source voice. Marker-only/fidelity exports retain the historical patch split.
+    // PhysicalVoice is the explicit default; InstrumentSplit retains patch-level
+    // separation without coupling track count to structure or marker emission.
     private bool _groupPhysicalVoices;
 
     private Dictionary<NoteEvent, MidiTrackKey> _noteTrackKeyCache =
@@ -197,11 +208,10 @@ internal sealed class MusicalMidiExporter
     public TimingDiagnostics? Diagnostics { get; set; }
 
     /// <summary>
-    /// Optional structural analysis (bar labels / sections / fundamental loop)
+    /// Optional structural analysis (phrase labels / fundamental loop)
     /// from <see cref="MusicalStructureAnalyzer.Analyze"/>. When set and
     /// <see cref="MusicalMidiExportOptions.EmitMarkers"/> is enabled, the conductor
-    /// carries SECTION_* markers at section boundaries and STRUCT_LOOP_* markers at
-    /// the fundamental loop bounds. Computed upstream so the exporter only encodes.
+    /// carries phrase and loop markers. Computed upstream so the exporter only encodes.
     /// </summary>
     public MusicalStructure? Structure { get; set; }
 
@@ -215,7 +225,7 @@ internal sealed class MusicalMidiExporter
     {
         ArgumentNullException.ThrowIfNull(sourceTimeline);
         VisualizationTimeline timeline = sourceTimeline.Timeline;
-        _groupPhysicalVoices = Structure is not null;
+        _groupPhysicalVoices = _options.TrackLayout == MidiTrackLayout.PhysicalVoice;
         _sourceOrder = 0;
         _placeholderCount = 0;
         _placeholderChannels.Clear();
@@ -339,33 +349,36 @@ internal sealed class MusicalMidiExporter
         // whenever the value changes; ordering within a tick is resolved by
         // MidiEventOrder.Rank (CC = rank 2 precedes note-on = rank 4).
         var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
+        var usedDrumNotes = new HashSet<int>();
         var lastPanByKey = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
-        int nextDrum = _options.PercussionNoteBase;
         foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
             RhythmEvent rhythm = indexedRhythm.Rhythm;
             MidiTrackKey rhythmKey = indexedRhythm.Key;
-            TrackSlot slot = allocator.SlotFor(rhythmKey);
+            TrackSlot? slot = allocator.SlotFor(rhythmKey);
             if (slot is null)
                 continue;
+
             int note;
-            if (!GeneralMidiDrumMapper.TryMap(rhythm, out int mapped))
+            if (GeneralMidiDrumMapper.TryMap(rhythm, out int mapped))
             {
-                if (!drumNoteByIdentity.TryGetValue(rhythmKey, out note))
-                {
-                    note = nextDrum++;
-                    if (note is < 0 or > 127)
-                        throw new InvalidOperationException(
-                            $"Percussion note exhaustion: rhythm domain '{rhythmKey}' cannot be assigned a MIDI note.");
-                    drumNoteByIdentity[rhythmKey] = note;
-                }
+                note = mapped;
+                usedDrumNotes.Add(note);
             }
             else
             {
-                note = mapped;
+                // Unknown sample/noise identities must not masquerade as a GM
+                // role and must remain distinct even when physical track layout
+                // collapses several source identities onto one track.
+                MidiTrackKey identityKey = indexedRhythm.IdentityKey;
+                if (!drumNoteByIdentity.TryGetValue(identityKey, out note))
+                {
+                    note = AllocateUnknownPercussionNote(usedDrumNotes, identityKey);
+                    drumNoteByIdentity[identityKey] = note;
+                }
             }
 
-            int velocity = ToMidiVelocity(rhythm.Strength);
+            int velocity = ToMidiDrumVelocity(rhythm.Strength);
             int pan = ToMidiPan(rhythm.Pan);
             long on = TimeTick(rhythm.SamplePosition) + originShiftTicks;
             if (!lastPanByKey.TryGetValue(rhythmKey, out int lastPan) || lastPan != pan)
@@ -794,9 +807,27 @@ internal sealed class MusicalMidiExporter
     private static int ToMidiPan(float pan) =>
         Math.Clamp((int)Math.Round((Math.Clamp(pan, -1f, 1f) + 1f) * 63.5f), 0, 127);
 
-    /// <summary>YM2608 rhythm level (0..1) → MIDI velocity (1..127).</summary>
-    private static int ToMidiVelocity(float gain) =>
-        Math.Clamp((int)Math.Round(Math.Clamp(gain, 0f, 1f) * 126f) + 1, 1, 127);
+    /// <summary>Maps rhythm strength through a perceptual curve so quiet
+    /// non-zero hits remain audible while preserving monotonic ordering.</summary>
+    private static int ToMidiDrumVelocity(float strength)
+    {
+        double normalized = Math.Clamp(strength, 0f, 1f);
+        if (normalized <= 0)
+            return 1;
+        return Math.Clamp((int)Math.Ceiling(24.0 + 103.0 * Math.Pow(normalized, 0.45)), 1, 127);
+    }
+
+    private static int AllocateUnknownPercussionNote(
+        HashSet<int> usedNotes, MidiTrackKey identityKey)
+    {
+        for (int note = 60; note <= 81; note++)
+        {
+            if (usedNotes.Add(note))
+                return note;
+        }
+        throw new InvalidOperationException(
+            $"Percussion note exhaustion: unknown rhythm identity '{identityKey}' exceeds reserved range 60-81.");
+    }
 
     /// <summary>Single source of truth for whether a note is actually emitted (§21).
     /// Unpitched noise (SSG noise-only, the intentional -1 sentinel) is excluded:
@@ -1373,15 +1404,19 @@ internal sealed class MusicalMidiExporter
                 {
                     if (section.StartBar < 0 || section.StartBar >= structure.Bars.Count)
                         continue;
+                    string marker = section.Label.StartsWith("PHRASE_", StringComparison.Ordinal)
+                        || string.Equals(section.Label, "TURNAROUND", StringComparison.Ordinal)
+                        ? section.Label
+                        : "SECTION_" + section.Label;
                     conductor.Add(WithSourceOrder(new MidiMarkerEvent(
                         StructureBarTick(structure, section.StartBar) + originShift,
-                        "SECTION_" + section.Label)));
+                        marker)));
                 }
 
                 if (structure.PrimaryLoop is RepeatedBlock loop
                     && loop.LengthBars > 0
                     && loop.StartBar >= 0
-                    && loop.StartBar + loop.LengthBars < structure.Bars.Count)
+                    && loop.StartBar + loop.LengthBars <= structure.Bars.Count)
                 {
                     long startTick = StructureBarTick(structure, loop.StartBar) + originShift;
                     long endTick = StructureBarTick(
@@ -1518,8 +1553,8 @@ internal sealed class MusicalMidiExporter
                 maximumPitchChanges = Math.Max(maximumPitchChanges, pitchChangeCount);
                 // A pitch change can remain a bend or become a three-event
                 // re-anchor (NoteOff, bend, NoteOn). This is an upper bound,
-                // computed before emission, so the packed track never grows in
-                // the source-event loop.
+                // computed before emission, so the packed track never grows
+                // in the source-event loop.
                 eventCapacity = 5 + 3 * pitchChangeCount;
             }
             notes.Add(new IndexedNote(note, ExportTrackKeyFor(note), eventCapacity));
@@ -1545,7 +1580,8 @@ internal sealed class MusicalMidiExporter
                     _performance.SourceEventsSkipped++;
                 continue;
             }
-            rhythms.Add(new IndexedRhythm(rhythm, ExportTrackKeyFor(rhythm)));
+            MidiTrackKey identityKey = RhythmKeyFor(rhythm);
+            rhythms.Add(new IndexedRhythm(rhythm, CollapsePhysicalTrack(identityKey), identityKey));
             minimumTick = Math.Min(minimumTick, TimeTick(rhythm.SamplePosition));
         }
         return new SourceEventIndex(notes, rhythms, minimumTick, maximumPitchChanges);
@@ -2158,7 +2194,8 @@ internal sealed class MusicalMidiExporter
         int MaximumPitchChanges);
 
     private readonly record struct IndexedNote(NoteEvent Note, MidiTrackKey Key, int EventCapacity);
-    private readonly record struct IndexedRhythm(RhythmEvent Rhythm, MidiTrackKey Key);
+    private readonly record struct IndexedRhythm(
+        RhythmEvent Rhythm, MidiTrackKey Key, MidiTrackKey IdentityKey);
 
     /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
     private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note, MidiTrackKey Key);

@@ -5,50 +5,89 @@ using Fmp.Core.Visualization;
 namespace Fmp.Core.Midi;
 
 /// <summary>
-/// Semantic YM2608 rhythm → General MIDI drum-kit note selection. The YM2608
-/// exposes six rhythm voices as stable <c>rhythm:&lt;voice&gt;</c> instrument
-/// identities; each maps to a GM percussion note. Tom and top-cymbal selection is
-/// pan-aware so a naturally positioned kit matches the source stereo spread
-/// (descending left-to-right tom spread in a typical GM kit).
+/// Maps explicitly identified YM2608 rhythm voices to semantic General MIDI
+/// percussion notes. Physical domain/index is authoritative; the legacy
+/// <c>rhythm:&lt;name&gt;</c> identity is accepted only when no physical domain
+/// is available.
 /// </summary>
-/// <remarks>
-/// Only the six YM2608 identities are treated semantically. Other sample
-/// identities (OPL percussion, SSG noise, …) carry no YM2608 rhythm meaning and
-/// are left for the exporter's per-identity unique-note allocator, so
-/// <see cref="Map"/>'s fallback is never reached in production for those voices.
-/// </remarks>
 internal static class GeneralMidiDrumMapper
 {
-    /// <summary>Semantic GM percussion note for a known YM2608 rhythm identity,
-    /// with the side-stick (37) as the defensive fallback for unknown identities.</summary>
     public static int Map(RhythmEvent rhythm) =>
         TryMap(rhythm, out int note) ? note : 37;
 
-    /// <summary>True when <paramref name="rhythm"/> is a known YM2608 rhythm voice
-    /// and <paramref name="note"/> is its semantic GM note; false for any other
-    /// sample identity (which should use the exporter's unique-note allocator).</summary>
     public static bool TryMap(RhythmEvent rhythm, out int note)
     {
-        switch (rhythm.InstrumentId)
+        ArgumentNullException.ThrowIfNull(rhythm);
+
+        if (rhythm.Domain is SourceDomainKey domain
+            && domain.Device.Type == ChipType.Ym2608
+            && domain.VoiceFamily == VoiceKind.Rhythm)
         {
-            case "rhythm:bd":  note = 36; return true; // Bass Drum 1
-            case "rhythm:sd":  note = 38; return true; // Acoustic Snare
-            case "rhythm:rim": note = 37; return true; // Side Stick
-            case "rhythm:hh":  note = 42; return true; // Closed Hi-Hat
-            case "rhythm:tom": note = MapTom(rhythm.Pan); return true;
-            case "rhythm:top": note = MapTopCymbal(rhythm.Pan); return true;
-            default:
-                note = 37;
-                return false;
+            note = MapYm2608Voice(domain.Index, rhythm.Pan);
+            return true;
         }
+
+        // Compatibility for older timelines that used either rhythm:<voice> or
+        // ...rhythm.<voice> instrument identities without a physical domain.
+        if (rhythm.Domain is null)
+        {
+            string? voice = LegacyRhythmVoice(rhythm.InstrumentId);
+            voice ??= LegacyRhythmVoice(rhythm.ChannelId);
+            if (voice is not null)
+            {
+                note = voice switch
+                {
+                    "bd" => 36,
+                    "sd" => 38,
+                    "rim" => 37,
+                    "hh" => 42,
+                    "tom" => MapTom(rhythm.Pan),
+                    "top" => MapTopCymbal(rhythm.Pan),
+                    _ => 0,
+                };
+                if (note != 0)
+                    return true;
+            }
+        }
+
+        note = 37;
+        return false;
     }
+
+    private static string? LegacyRhythmVoice(string identity)
+    {
+        const StringComparison comparison = StringComparison.OrdinalIgnoreCase;
+        int colon = identity.LastIndexOf("rhythm:", comparison);
+        if (colon >= 0 && (colon == 0 || identity[colon - 1] == '.'))
+            return identity[(colon + "rhythm:".Length)..].ToLowerInvariant();
+
+        int dot = identity.LastIndexOf("rhythm.", comparison);
+        if (dot >= 0 && (dot == 0 || identity[dot - 1] == '.'))
+            return identity[(dot + "rhythm.".Length)..].ToLowerInvariant();
+
+        return null;
+    }
+
+
+    private static int MapYm2608Voice(int voiceIndex, float pan) =>
+        voiceIndex switch
+        {
+            0 => 36, // Bass Drum 1
+            1 => 38, // Acoustic Snare
+            2 => MapTopCymbal(pan),
+            3 => 42, // Closed Hi-Hat
+            4 => MapTom(pan),
+            5 => 37, // Side Stick / rim
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(voiceIndex), voiceIndex, "YM2608 rhythm index must be in [0, 5]."),
+        };
 
     private static int MapTom(float pan) =>
         pan switch
         {
             < -0.25f => 50, // High Tom
-            >  0.25f => 45, // Low Tom
-            _        => 47, // Low-Mid Tom
+            > 0.25f => 45,  // Low Tom
+            _ => 48,        // Hi-Mid Tom
         };
 
     private static int MapTopCymbal(float pan) =>

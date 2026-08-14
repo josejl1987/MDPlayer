@@ -6,7 +6,7 @@ using Fmp.Core.Visualization;
 namespace Fmp.Core.Timing;
 
 /// <summary>
-/// Per-bar feature signature used for section similarity and repeated-block (loop)
+/// Per-bar feature signature used for phrase similarity and repeated-block (loop)
 /// detection. Contributions are duration-weighted over every note/pitch segment that
 /// overlaps the bar; attacks, rhythm onsets, and physical source domains remain
 /// separate from instrument/display identity.
@@ -32,7 +32,12 @@ internal sealed class BarFeature
     public int RhythmOnsetCount { get; private set; }
     public double ActiveDuration { get; private set; }
     public double Norm { get; private set; }
-    public bool IsRest => NoteOnCount == 0 && RhythmOnsetCount == 0;
+    /// <summary>True only when the bar has no attacks, sustained pitch activity, or rhythm activity.</summary>
+    public bool IsRest =>
+        NoteOnCount == 0
+        && RhythmOnsetCount == 0
+        && PitchSegmentCount == 0
+        && ActiveVoiceMask == 0;
 
     internal void AddNoteOn(int pitchClass) =>
         AddNoteOn(pitchClass, 1.0, 0, null, null);
@@ -161,7 +166,12 @@ internal sealed class BarFeature
             : 1.0;
         int onsetBits = System.Numerics.BitOperations.PopCount((uint)(OnsetMask ^ other.OnsetMask));
         double rhythm = 1.0 - onsetBits / 16.0;
-        double voices = ActiveVoiceMask == other.ActiveVoiceMask ? 1.0 : 0.0;
+        ulong union = ActiveVoiceMask | other.ActiveVoiceMask;
+        ulong intersection = ActiveVoiceMask & other.ActiveVoiceMask;
+        double voices = union == 0
+            ? 1.0
+            : (double)System.Numerics.BitOperations.PopCount(intersection)
+                / System.Numerics.BitOperations.PopCount(union);
         double firstSpan = Math.Max(0.001, QuarterEnd - QuarterStart);
         double secondSpan = Math.Max(0.001, other.QuarterEnd - other.QuarterStart);
         double firstDuration = Math.Clamp(ActiveDuration / firstSpan, 0.0, 1.0);
@@ -202,8 +212,15 @@ internal sealed record MusicalSection(int StartBar, int EndBar, string Label);
 /// <summary>
 /// A repeated block: bars [StartBar, StartBar+LengthBars) are (near-)identical to the
 /// immediately following equal-length span, i.e. a loop of <see cref="LengthBars"/> bars.
+/// Similarity and coverage are retained so source-supported loops can outrank a
+/// content-only coincidence.
 /// </summary>
-internal sealed record RepeatedBlock(int StartBar, int LengthBars);
+internal sealed record RepeatedBlock(
+    int StartBar,
+    int LengthBars,
+    double Similarity = 0,
+    double Coverage = 0,
+    bool SourceSupported = false);
 /// <summary>
 /// Raw source-loop evidence. An entry is optional because many drivers expose only
 /// restart positions; restart samples are preserved independently from inferred

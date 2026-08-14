@@ -11,9 +11,9 @@ namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
 /// Exporter integration for <see cref="MusicalStructure"/> markers: the conductor
-/// must carry SECTION_* markers at labeled section boundaries and STRUCT_LOOP_* markers
-/// at the fundamental loop bounds, derived from the structure passed in — the exporter
-/// only encodes, it never re-derives structure.
+/// must carry PHRASE_* markers for analyzer phrase boundaries and STRUCT_LOOP_*
+/// markers at the fundamental loop bounds, derived from the structure passed in —
+/// the exporter only encodes, it never re-derives structure.
 /// </summary>
 public sealed class MusicalStructureMidiExportTests
 {
@@ -62,7 +62,7 @@ public sealed class MusicalStructureMidiExportTests
             .ToArray();
 
     [Fact]
-    public void Export_AbabForm_EmitsSectionAndLoopMarkers()
+    public void Export_AbabForm_EmitsPhraseAndLoopMarkers()
     {
         // A A A A | B B B B | A A A A | B B B B  (4-bar phrases, 16 bars).
         NoteEvent[] notes = Enumerable.Range(0, 16)
@@ -78,17 +78,16 @@ public sealed class MusicalStructureMidiExportTests
         };
         (long Tick, string Text)[] markers = Markers(exporter.Export(timeline).Bytes);
 
-        // Every labeled section is represented, in analyzer order.
-        string[] sectionMarkers = markers.Where(m => m.Text.StartsWith("SECTION_")).Select(m => m.Text).ToArray();
-        Assert.Equal(structure.Sections.Select(s => "SECTION_" + s.Label), sectionMarkers);
+        // Every labeled phrase is represented, in analyzer order.
+        string[] phraseMarkers = markers.Where(m => m.Text.StartsWith("PHRASE_")).Select(m => m.Text).ToArray();
+        Assert.Equal(structure.Sections.Select(s => s.Label), phraseMarkers);
 
         Assert.True(structure.HasLoop);
         (long Tick, string Text) loopStart = markers.Single(m => m.Text == "STRUCT_LOOP_START");
         (long Tick, string Text) loopEnd = markers.Single(m => m.Text == "STRUCT_LOOP_END");
 
-        // Loop bounds map to the repeated-block span: bar 0 and the bar where the
-        long sectionA = markers.First(m => m.Text == "SECTION_" + structure.Sections[0].Label).Tick;
-        long sectionARepeat = markers.Where(m => m.Text == "SECTION_" + structure.Sections[2].Label)
+        long sectionA = markers.First(m => m.Text == structure.Sections[0].Label).Tick;
+        long sectionARepeat = markers.Where(m => m.Text == structure.Sections[2].Label)
             .ElementAt(1).Tick;
         Assert.Equal(0, loopStart.Tick);
         Assert.Equal(sectionA, loopStart.Tick);
@@ -99,7 +98,7 @@ public sealed class MusicalStructureMidiExportTests
     }
 
     [Fact]
-    public void Export_AllRest_EmitsSectionMarkerButNoLoopMarkers()
+    public void Export_AllRest_EmitsPhraseMarkerButNoLoopMarkers()
     {
         var map = Map(64, new Meter(4, 4));
         var timeline = Timeline(64);
@@ -114,7 +113,7 @@ public sealed class MusicalStructureMidiExportTests
         };
         (long Tick, string Text)[] markers = Markers(exporter.Export(timeline).Bytes);
 
-        Assert.Contains(markers, m => m.Text == "SECTION_A");
+        Assert.Contains(markers, m => m.Text == "PHRASE_A");
         Assert.DoesNotContain(markers, m => m.Text.StartsWith("STRUCT_LOOP_"));
     }
 
@@ -128,7 +127,7 @@ public sealed class MusicalStructureMidiExportTests
 
         Assert.Contains("SOURCE_START", markerTexts);
         Assert.Contains("RENDER_END", markerTexts);
-        Assert.DoesNotContain(markerTexts, m => m.StartsWith("SECTION_"));
+        Assert.DoesNotContain(markerTexts, m => m.StartsWith("PHRASE_"));
         Assert.DoesNotContain(markerTexts, m => m.StartsWith("STRUCT_LOOP_"));
     }
 }

@@ -17,6 +17,8 @@ public sealed class GeneralMidiDrumMapperTests
 
     [Theory]
     [InlineData("rhythm:bd", 36)]  // Bass Drum 1
+    [InlineData("rhythm.bd", 36)]  // legacy dot identity
+    [InlineData("ym2608.0.rhythm.bd", 36)] // legacy qualified identity
     [InlineData("rhythm:sd", 38)]  // Acoustic Snare
     [InlineData("rhythm:rim", 37)] // Side Stick
     [InlineData("rhythm:hh", 42)]  // Closed Hi-Hat
@@ -27,8 +29,28 @@ public sealed class GeneralMidiDrumMapperTests
     }
 
     [Theory]
+    [InlineData(0, 0f, 36)]
+    [InlineData(1, 0f, 38)]
+    [InlineData(2, -1f, 49)]
+    [InlineData(3, 0f, 42)]
+    [InlineData(4, 0f, 48)]
+    [InlineData(5, 0f, 37)]
+    public void PhysicalYm2608DomainIndex_OverridesIdentity(
+        int voiceIndex, float pan, int expected)
+    {
+        RhythmEvent rhythm = Rhythm("wrong", "rhythm:unknown", pan) with
+        {
+            Domain = new SourceDomainKey(
+                new DeviceId(ChipType.Ym2608, 0), VoiceKind.Rhythm, voiceIndex),
+        };
+
+        Assert.True(GeneralMidiDrumMapper.TryMap(rhythm, out int note));
+        Assert.Equal(expected, note);
+    }
+
+    [Theory]
     [InlineData(-0.5f, 50)] // High Tom   (pan left)
-    [InlineData(0.0f, 47)]  // Low-Mid Tom (centered)
+    [InlineData(0.0f, 48)]  // Hi-Mid Tom (centered)
     [InlineData(0.5f, 45)]  // Low Tom    (pan right)
     public void Tom_PanAware_DescendingLeftToRight(float pan, int expected)
     {

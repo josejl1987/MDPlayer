@@ -367,7 +367,15 @@ internal static class SymbolicTempoInference
 
         IReadOnlyList<MusicalGridCandidate> gridCandidates =
             BuildGridCandidates(
-                searchedCandidates, fallbackBpm, timeline.SampleRate, timeline.StartSample, meter);
+                searchedCandidates,
+                fallbackBpm,
+                bestBpm,
+                bestPhaseSample,
+                bestScore,
+                timeline.SampleRate,
+                timeline.StartSample,
+                meter,
+                firstDownbeatQuarter);
         var map = new MusicalTimeMap(
             timeline.SampleRate,
             timeline.StartSample,
@@ -378,19 +386,6 @@ internal static class SymbolicTempoInference
             alternateBpm: diagnostics.AlternativeBpm,
             isTempoAmbiguous: diagnostics.AlternativeBpm is double,
             gridCandidates: gridCandidates);
-        if (Math.Abs(map.Segments[0].BeatsPerMinute - bestBpm) > 1e-9)
-        {
-            diagnostics.SelectedBpm = map.Segments[0].BeatsPerMinute;
-            diagnostics.SelectedScore = null;
-            diagnostics.AlternativeBpm = bestBpm;
-            diagnostics.AlternativeScore = null;
-            diagnostics.TempoMicrosecondsPerQuarter = map.Segments[0].MicrosecondsPerQuarter;
-            diagnostics.TempoConfidence = map.Confidence;
-            diagnostics.TempoAmbiguous = true;
-            diagnostics.Warnings.Add(
-                $"joint structural timing selected {map.Segments[0].BeatsPerMinute:0.###} BPM " +
-                $"over onset-only candidate {bestBpm:0.###} BPM");
-        }
         diagnostics.MeterKnown = map.Meter is not null;
         diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
@@ -2008,27 +2003,39 @@ internal static class SymbolicTempoInference
     private static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
         IReadOnlyList<TempoCandidate> searched,
         double fallbackBpm,
+        double requiredBpm,
+        long requiredPhaseSample,
+        double requiredScore,
         int sampleRate,
         long startSample,
-        Meter? preferredMeter)
+        Meter? preferredMeter,
+        double? firstDownbeatQuarter)
     {
+        TempoCandidate fallback = new(
+            fallbackBpm,
+            searched.Count > 0 ? searched[0].PhaseSample : startSample,
+            searched.Count > 0 ? searched[0].Score : 0,
+            TempoAmbiguity.None);
+        TempoCandidate required = new(
+            requiredBpm,
+            requiredPhaseSample,
+            requiredScore,
+            TempoAmbiguity.None);
         var bases = searched
-            .Concat(new[]
-            {
-                new TempoCandidate(
-                    fallbackBpm,
-                    searched.Count > 0 ? searched[0].PhaseSample : 0,
-                    searched.Count > 0 ? searched[0].Score : 0,
-                    TempoAmbiguity.None),
-            })
+            .Concat(new[] { fallback, required })
             .Where(candidate => candidate.Bpm > 0 && double.IsFinite(candidate.Bpm))
             .GroupBy(candidate => Math.Round(candidate.Bpm, 6))
             .Select(group => group.OrderByDescending(candidate => candidate.Score).First())
             .OrderByDescending(candidate => candidate.Score)
-            .Take(3)
-            .ToArray();
+            .Take(8)
+            .ToList();
+        if (!bases.Any(candidate => Math.Abs(candidate.Bpm - fallbackBpm) < 1e-6))
+            bases.Add(fallback);
+        if (!bases.Any(candidate => Math.Abs(candidate.Bpm - requiredBpm) < 1e-6))
+            bases.Add(required);
 
-        var expanded = new List<(double Bpm, double Phase, double Score)>(bases.Length * 5);
+        var expanded = new List<(double Bpm, double QuarterAtSourceStart, double Score)>(
+            bases.Count * 5);
         foreach (TempoCandidate source in bases)
         {
             foreach (double ratio in new[] { 0.25, 0.5, 1.0, 2.0, 4.0 })
@@ -2037,40 +2044,48 @@ internal static class SymbolicTempoInference
                 if (bpm is < 20 or > 480)
                     continue;
                 double samplesPerQuarter = sampleRate * 60.0 / bpm;
-                // BeatPhase is the absolute quarter position at timeline start,
-                // matching TempoSegment.QuarterPositionAtStart and
-                // FirstDownbeatQuarter.
-                double phase = (startSample - source.PhaseSample) / samplesPerQuarter;
+                double quarterAtSourceStart = (startSample - source.PhaseSample)
+                    / samplesPerQuarter;
                 double score = source.Score
                     * (Math.Abs(ratio - 1.0) < 1e-9 ? 1.0 : 0.92);
-                expanded.Add((bpm, phase, score));
+                expanded.Add((bpm, quarterAtSourceStart, score));
             }
         }
 
-        // Keep the strongest three BPM families and four phase hypotheses per
-        // family. This is the bounded 3 × 3 × 4 second-pass search.
         var families = expanded
             .GroupBy(candidate => Math.Round(candidate.Bpm, 6))
             .Select(group => group
                 .OrderByDescending(candidate => candidate.Score)
-                .ThenBy(candidate => candidate.Phase)
+                .ThenBy(candidate => candidate.QuarterAtSourceStart)
                 .First())
             .OrderByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.Bpm)
-            .Take(3)
             .ToArray();
-        Meter[] meters = new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
+        Meter[] meters = preferredMeter is Meter fixedMeter
+            ? new[] { fixedMeter }
+            : new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
         var result = new List<MusicalGridCandidate>(families.Length * meters.Length * 4);
-        foreach ((double bpm, double phase, double score) family in families)
+        foreach ((double bpm, double quarterAtSourceStart, double score) family in families)
         {
+            double downbeatBase = firstDownbeatQuarter ?? family.quarterAtSourceStart;
             foreach (Meter meter in meters)
             {
-                for (int phaseOffset = 0; phaseOffset < 4; phaseOffset++)
+                double[] offsets = meter switch
+                {
+                    { Numerator: 4, Denominator: 4 } => new[] { 0.0, 1.0, 2.0, 3.0 },
+                    { Numerator: 3, Denominator: 4 } => new[] { 0.0, 1.0, 2.0 },
+                    { Numerator: 6, Denominator: 8 } => new[] { 0.0, 1.5 },
+                    _ => new[] { 0.0 },
+                };
+                foreach (double offset in offsets)
+                {
                     result.Add(new MusicalGridCandidate(
                         family.bpm,
                         meter,
-                        family.phase + phaseOffset,
+                        family.quarterAtSourceStart,
+                        downbeatBase + offset,
                         family.score));
+                }
             }
         }
 
@@ -2079,7 +2094,8 @@ internal static class SymbolicTempoInference
             .ThenBy(candidate => preferredMeter is Meter preferred
                 && candidate.Meter == preferred ? 0 : 1)
             .ThenBy(candidate => candidate.Bpm)
-            .ThenBy(candidate => candidate.BeatPhase)
+            .ThenBy(candidate => candidate.QuarterAtSourceStart)
+            .ThenBy(candidate => candidate.FirstDownbeatQuarter)
             .ToArray();
     }
 

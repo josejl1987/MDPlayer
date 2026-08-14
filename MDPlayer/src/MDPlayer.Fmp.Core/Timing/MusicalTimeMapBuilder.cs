@@ -82,11 +82,12 @@ internal static class MusicalTimeMapBuilder
 
         if (source == TimingSource.SymbolicInference)
         {
-            // Batch 3: fall back to onset-driven inference when no symbolic timing
-            // evidence exists.
-            return instrumentTempoSearch
+            // Build the initial symbolic result first. Structural evidence is a
+            // second pass over every build path, not a marker-emission side effect.
+            MusicalTimeMapBuildResult initial = instrumentTempoSearch
                 ? SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, out tempoCounters)
                 : SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter);
+            return MusicalStructureAnalyzer.SelectGrid(initial, timeline);
         }
 
         // Deterministic source application:
@@ -171,7 +172,9 @@ internal static class MusicalTimeMapBuilder
         fit.Diagnostics.MeterKnown = options.Meter is not null;
         fit.Diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
 
-        return new MusicalTimeMapBuildResult { Map = map, Diagnostics = fit.Diagnostics };
+        MusicalTimeMapBuildResult initialResult =
+            new() { Map = map, Diagnostics = fit.Diagnostics };
+        return MusicalStructureAnalyzer.SelectGrid(initialResult, timeline);
     }
 
     private static string NotTrustworthyMessage(TimingDiagnostics diagnostics)
@@ -364,11 +367,14 @@ internal static class MusicalTimeMapBuilder
         double? firstDownbeatQuarter,
         Meter? preferredMeter)
     {
-        Meter[] meters = new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
-        double phase = firstDownbeatQuarter ?? segments[0].QuarterPositionAtStart;
+        Meter[] meters = preferredMeter is Meter fixedMeter
+            ? new[] { fixedMeter }
+            : new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
         var result = new List<MusicalGridCandidate>(segments.Count * 15);
         foreach (TempoSegment segment in segments)
         {
+            double quarterAtSourceStart = segment.QuarterPositionAtStart;
+            double downbeatBase = firstDownbeatQuarter ?? quarterAtSourceStart;
             foreach (double ratio in new[] { 0.25, 0.5, 1.0, 2.0, 4.0 })
             {
                 double bpm = segment.BeatsPerMinute * ratio;
@@ -376,7 +382,24 @@ internal static class MusicalTimeMapBuilder
                     continue;
                 double score = 1.0 / (1.0 + Math.Abs(Math.Log(ratio)));
                 foreach (Meter meter in meters)
-                    result.Add(new MusicalGridCandidate(bpm, meter, phase, score));
+                {
+                    double[] offsets = meter switch
+                    {
+                        { Numerator: 4, Denominator: 4 } => new[] { 0.0, 1.0, 2.0, 3.0 },
+                        { Numerator: 3, Denominator: 4 } => new[] { 0.0, 1.0, 2.0 },
+                        { Numerator: 6, Denominator: 8 } => new[] { 0.0, 1.5 },
+                        _ => new[] { 0.0 },
+                    };
+                    foreach (double offset in offsets)
+                    {
+                        result.Add(new MusicalGridCandidate(
+                            bpm,
+                            meter,
+                            quarterAtSourceStart,
+                            downbeatBase + offset,
+                            score));
+                    }
+                }
             }
         }
 
@@ -385,7 +408,9 @@ internal static class MusicalTimeMapBuilder
             .ThenBy(candidate => preferredMeter is Meter preferred
                 && candidate.Meter == preferred ? 0 : 1)
             .ThenBy(candidate => candidate.Bpm)
-            .Take(36)
+            .ThenBy(candidate => candidate.QuarterAtSourceStart)
+            .ThenBy(candidate => candidate.FirstDownbeatQuarter)
+            .Take(72)
             .ToArray();
     }
 
