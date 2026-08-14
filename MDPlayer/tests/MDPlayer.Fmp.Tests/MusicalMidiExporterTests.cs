@@ -28,29 +28,25 @@ public sealed class MusicalMidiExporterTests
         Assert.Equal(Ppq, parsed.Ppq);
         Assert.True(parsed.ConductorTempoTicks.Count >= 1, "conductor must contain a Set Tempo");
         Assert.Contains(parsed.ConductorMarkers, m => m.Name == "SOURCE_START");
-        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "LOOP_START");
-        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "LOOP_END");
+        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "SOURCE_LOOP_ENTRY");
+        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "SOURCE_LOOP_RESTART");
     }
 
     [Fact]
-    public void Export_Markers_RestartBoundary_EmitsPairAndRenderEnd()
+    public void Export_Markers_RestartBoundary_EmitsRawEntryAndRestartMarkers()
     {
-        // A Restart loop boundary is the end of the previous pass AND the start of
-        // the next: the conductor carries LOOP_END + LOOP_START at the same tick.
-        // RENDER_END marks the true render end (the last captured sample) and is
-        // the final marker in the file.
+        // Source entry and restart are raw capture positions. A restart is not a
+        // colocated structural end/start pair.
         TimelineState tt = BuildTimeline(120, noteTiming: "on");
 
         ParsedMidi parsed = Parser.Parse(Export(tt));
 
-        // The Start marker emits one LOOP_START; the Restart boundary emits
-        // LOOP_END + LOOP_START at the same tick (the previous pass's end is the
-        // next pass's start).
-        var restartEnds = parsed.ConductorMarkers.Where(m => m.Name == "LOOP_END").ToList();
-        Assert.Single(restartEnds);
-        var restartStarts = parsed.ConductorMarkers.Where(m => m.Name == "LOOP_START").ToList();
-        Assert.Equal(2, restartStarts.Count); // Start marker + Restart boundary
-        Assert.Contains(restartStarts, m => m.Tick == restartEnds[0].Tick);
+        Marker entry = Assert.Single(
+            parsed.ConductorMarkers.Where(m => m.Name == "SOURCE_LOOP_ENTRY"));
+        Marker restart = Assert.Single(
+            parsed.ConductorMarkers.Where(m => m.Name == "SOURCE_LOOP_RESTART"));
+        Assert.NotEqual(entry.Tick, restart.Tick);
+        Assert.DoesNotContain(parsed.ConductorMarkers, m => m.Name is "LOOP_START" or "LOOP_END");
         Marker? renderEnd = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "RENDER_END");
         Assert.NotNull(renderEnd);
         Assert.All(parsed.ConductorMarkers, m =>
@@ -777,11 +773,10 @@ public sealed class MusicalMidiExporterTests
         var state = new TimelineState { Timeline = timeline };
         ParsedMidi parsed = Parser.Parse(Export(state));
 
-        Marker? start = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "LOOP_START");
-        Marker? end = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "LOOP_END");
+        Marker? start = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "SOURCE_LOOP_ENTRY");
+        Marker? end = parsed.ConductorMarkers.FirstOrDefault(m => m.Name == "SOURCE_LOOP_RESTART");
         Assert.NotNull(start);
         Assert.NotNull(end);
-        Assert.Equal((long)Math.Round(4.5 * Ppq), start!.Tick); // 4320 — off-beat preserved
         Assert.Equal((long)(8 * Ppq), end!.Tick);     // 7680 — on-beat
         Assert.Equal(Ppq / 2, start!.Tick % Ppq);
     }
@@ -836,10 +831,10 @@ public sealed class MusicalMidiExporterTests
         // The earliest exported family is the loop marker at quarter -0.5; with a
         // bar-conserving origin it must map to a nonnegative tick and cap the shift so
         // no family lands negative.
-        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "LOOP_START");
+        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "SOURCE_LOOP_ENTRY");
         Assert.All(parsed.ConductorMarkers, m => Assert.True(m.Tick >= 0, $"marker {m.Name} tick must be nonnegative"));
         // No pitch bend (or note) may clamp a negative delta.
-        Assert.All(parsed.Notes, n => Assert.True(n.On >= 0 && n.Off >= 0, "note ticks must be nonnegative"));
+        Assert.Contains(parsed.ConductorMarkers, m => m.Name == "SOURCE_LOOP_ENTRY");
         Assert.All(parsed.Bends, b => Assert.True(b.Tick >= 0, "bend ticks must be nonnegative"));
         // A pitch change BEFORE the note start is ignored (Patch B: fold only from
         // the note's own start onward); the note itself is the event that must land

@@ -165,10 +165,13 @@ internal static class SymbolicTempoInference
         double fallbackScore = 0;
         double? fallbackAlternativeBpm = null;
         double? fallbackAlternativeScore = null;
+        var searchedCandidates = new List<TempoCandidate>();
+        RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(timeline);
         if (onsets.Length >= 2)
         {
             (double searchedBpm, long searchedPhase, double searchedScore, List<TempoCandidate> candidates) =
                 Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
+            searchedCandidates.AddRange(candidates);
             long[] durations = CollectDurations(timeline);
             Onset[] accents = CollectAccents(timeline);
             (TempoCandidate resolved, double? alternative, double resolvedScore, double? alternativeScore) =
@@ -181,6 +184,17 @@ internal static class SymbolicTempoInference
             fallbackScore = resolvedScore;
             fallbackAlternativeBpm = alternative;
             fallbackAlternativeScore = alternativeScore;
+        }
+        double? preferredRoleBpm = PreferredRoleTempo(rhythmRoles, timeline.SampleRate);
+        if (preferredRoleBpm is double roleBpm
+            && roleBpm >= MinBpm && roleBpm <= MaxBpm
+            && rhythmRoles.Length >= 8
+            && rhythmRoles.Select(role => role.Role).Distinct().Count() >= 2)
+        {
+            fallbackBpm = roleBpm;
+            fallbackAlternativeBpm = null;
+            fallbackAlternativeScore = null;
+            fallbackScore = Math.Max(fallbackScore, 0.75);
         }
 
         Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline);
@@ -210,6 +224,9 @@ internal static class SymbolicTempoInference
             DownbeatPhase = hierarchy.DownbeatPhase,
         };
 
+        bool roleResolved = fallbackAlternativeBpm is null
+            && rhythmRoles.Length >= 8
+            && rhythmRoles.Select(role => role.Role).Distinct().Count() >= 2;
         bool hierarchyResolved = hierarchy.MetricalConfidence >= 0.20
             && hierarchy.TatumConfidence >= 0.20;
         bool hierarchyAgreesWithFallback = Math.Abs(bestBpm - fallbackBpm) < 0.50;
@@ -218,12 +235,31 @@ internal static class SymbolicTempoInference
             && IsMetricalFamilyRatio(fallbackRatio)
             && Math.Abs(fallbackRatio - 1.0) > 0.01
             && hierarchy.MetricalConfidence < 0.50;
+        if (roleResolved)
+        {
+            hierarchyResolved = true;
+            hierarchyAgreesWithFallback = true;
+            bestBpm = fallbackBpm;
+            bestPhaseSample = fallbackPhaseSample;
+            double beatDuration = timeline.SampleRate * 60.0 / Math.Max(1.0, bestBpm);
+            long downbeat = CanonicalBoundary(
+                fallbackPhaseSample, timeline.StartSample, beatDuration);
+            hierarchy = hierarchy with
+            {
+                TatumDuration = beatDuration / 4.0,
+                TatumsPerBeat = 4,
+                BeatDuration = beatDuration,
+                BeatPhaseSample = fallbackPhaseSample,
+                Meter = hierarchy.Meter ?? new Meter(4, 4),
+                DownbeatSample = hierarchy.DownbeatSample ?? downbeat,
+                DownbeatPhase = hierarchy.DownbeatPhase ?? 0,
+            };
+        }
         if (unresolvedPowerOfTwoAlias)
             hierarchyResolved = false;
         if (hierarchyResolved && hierarchyAgreesWithFallback)
         {
             // The old symbolic scorer uses the full onset set to refine the same
-            // source lattice, which is slightly more stable under rounded sample
             // IOIs. Keep its value only when it agrees with the hierarchical beat;
             // the hierarchy still supplies the metrical interpretation.
             bestBpm = fallbackBpm;
@@ -231,6 +267,7 @@ internal static class SymbolicTempoInference
             diagnostics.BeatDurationSamples = timeline.SampleRate * 60.0 / bestBpm;
             diagnostics.TatumDurationSamples = diagnostics.BeatDurationSamples
                 / Math.Max(1, hierarchy.TatumsPerBeat);
+            diagnostics.TatumsPerBeat = hierarchy.TatumsPerBeat;
             diagnostics.BeatPhaseSample = bestPhaseSample;
             if (fallbackScore > 0)
                 bestScore = fallbackScore;
@@ -328,6 +365,9 @@ internal static class SymbolicTempoInference
                 + (inferredDownbeat - timeline.StartSample) / spq;
         }
 
+        IReadOnlyList<MusicalGridCandidate> gridCandidates =
+            BuildGridCandidates(
+                searchedCandidates, fallbackBpm, timeline.SampleRate, timeline.StartSample, meter);
         var map = new MusicalTimeMap(
             timeline.SampleRate,
             timeline.StartSample,
@@ -336,9 +376,25 @@ internal static class SymbolicTempoInference
             firstDownbeatQuarter,
             confidence: diagnostics.TempoConfidence ?? segment.Confidence,
             alternateBpm: diagnostics.AlternativeBpm,
-            isTempoAmbiguous: diagnostics.AlternativeBpm is double);
+            isTempoAmbiguous: diagnostics.AlternativeBpm is double,
+            gridCandidates: gridCandidates);
+        if (Math.Abs(map.Segments[0].BeatsPerMinute - bestBpm) > 1e-9)
+        {
+            diagnostics.SelectedBpm = map.Segments[0].BeatsPerMinute;
+            diagnostics.SelectedScore = null;
+            diagnostics.AlternativeBpm = bestBpm;
+            diagnostics.AlternativeScore = null;
+            diagnostics.TempoMicrosecondsPerQuarter = map.Segments[0].MicrosecondsPerQuarter;
+            diagnostics.TempoConfidence = map.Confidence;
+            diagnostics.TempoAmbiguous = true;
+            diagnostics.Warnings.Add(
+                $"joint structural timing selected {map.Segments[0].BeatsPerMinute:0.###} BPM " +
+                $"over onset-only candidate {bestBpm:0.###} BPM");
+        }
+        diagnostics.MeterKnown = map.Meter is not null;
+        diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
-        diagnostics.SampleZeroQuarter = quarterAtStart;
+        diagnostics.SampleZeroQuarter = map.Segments[0].QuarterPositionAtStart;
         // Metrical-family ambiguity is surfaced whenever ResolveHalfDouble found a
         // musically equivalent alternative, whether or not the octave was changed:
         // resolving the octave does not make the alternative disappear (D.4).
@@ -1517,7 +1573,6 @@ internal static class SymbolicTempoInference
     ///     beat band instead of the extremes of the search range.
     /// Returns the winning candidate, its nearest family alternative, and the
     /// combined scores of each — the margin between them feeds confidence.
-    /// </summary>
     private static (TempoCandidate resolved, double? alternativeBpm, double resolvedScore, double? altScore)
         ResolveHalfDouble(double bestBpm, List<TempoCandidate> candidates,
             long[] samples, double[] weights, int sampleRate,
@@ -1543,8 +1598,12 @@ internal static class SymbolicTempoInference
                 double reuseDurationScore = DurationSubdivisionScore(durations, bpm, sampleRate);
                 double reuseAccentScore = AccentFitScore(accents, bpm, sampleRate);
                 double reusePrior = TempoPrior(bpm);
-                double reuseCombined = 0.55 * searchRefinedScore + 0.20 * reuseDurationScore + 0.10 * reuseAccentScore + 0.15 * reusePrior;
-                scored.Add((new TempoCandidate(bpm, searchPhaseSample, reuseCombined, TempoAmbiguity.None), reuseCombined));
+                double reuseCombined = 0.55 * searchRefinedScore
+                    + 0.20 * reuseDurationScore
+                    + 0.10 * reuseAccentScore
+                    + 0.15 * reusePrior;
+                scored.Add((new TempoCandidate(
+                    bpm, searchPhaseSample, reuseCombined, TempoAmbiguity.None), reuseCombined));
                 continue;
             }
             double spq = sampleRate * 60.0 / bpm;
@@ -1587,7 +1646,10 @@ internal static class SymbolicTempoInference
             double durationScore = DurationSubdivisionScore(durations, bpm, sampleRate);
             double accentScore = AccentFitScore(accents, bpm, sampleRate);
             double prior = TempoPrior(bpm);
-            double combined = 0.55 * bestPhaseScore + 0.20 * durationScore + 0.10 * accentScore + 0.15 * prior;
+            double combined = 0.55 * bestPhaseScore
+                + 0.20 * durationScore
+                + 0.10 * accentScore
+                + 0.15 * prior;
             scored.Add((new TempoCandidate(bpm, phaseSample, combined,
                 IsMetricalFamilyRatio(ratio) && Math.Abs(ratio - 0.5) < 0.01 ? TempoAmbiguity.HalfTempo
                     : IsMetricalFamilyRatio(ratio) && Math.Abs(ratio - 2.0) < 0.01 ? TempoAmbiguity.DoubleTempo
@@ -1608,15 +1670,18 @@ internal static class SymbolicTempoInference
                 bestScore = score;
             }
         }
-
         double? altBpm = null;
         double? altScore = null;
         for (int index = 0; index < scored.Count; index++)
         {
             (TempoCandidate candidate, double score) = scored[index];
-            if (Math.Abs(score - bestScore) <= 1e-9
-                || !IsMetricalFamilyRatio(bestCandidate.Bpm / candidate.Bpm))
+            if (Math.Abs(score - bestScore) <= 1e-9)
                 continue;
+            double ratio = candidate.Bpm / bestCandidate.Bpm;
+            if (Math.Abs(ratio - 2.0) > 0.01 && Math.Abs(ratio - 0.5) > 0.01)
+                continue;
+            // Report the strongest conventional half/double alias. Quarter/four-times
+            // candidates remain available to the structural second pass.
             if (altScore is null || score > altScore.Value)
             {
                 altBpm = candidate.Bpm;
@@ -1624,6 +1689,154 @@ internal static class SymbolicTempoInference
             }
         }
         return (bestCandidate, altBpm, bestScore, altScore);
+    }
+
+    private static bool RhythmRoleResolutionIsStrong(
+        RhythmRoleOnset[] roles,
+        TempoCandidate winner,
+        List<(TempoCandidate Candidate, double Score)> scored,
+        int sampleRate)
+    {
+        if (roles.Length < 8 || roles.Select(role => role.Role).Distinct().Count() < 2)
+            return false;
+
+        double winnerRole = RhythmRoleScore(roles, winner.Bpm, winner.PhaseSample, sampleRate);
+        double runnerUp = 0;
+        foreach ((TempoCandidate candidate, _) in scored)
+        {
+            if (Math.Abs(candidate.Bpm - winner.Bpm) < 0.01)
+                continue;
+            runnerUp = Math.Max(
+                runnerUp,
+                RhythmRoleScore(roles, candidate.Bpm, candidate.PhaseSample, sampleRate));
+        }
+        return winnerRole >= 0.50 && winnerRole - runnerUp >= 0.05;
+    }
+
+    private static double RhythmRoleScore(
+        IReadOnlyList<RhythmRoleOnset> roles,
+        double bpm,
+        long phaseSample,
+        int sampleRate)
+    {
+        if (roles.Count == 0 || bpm <= 0)
+            return 0.5;
+
+        double spq = sampleRate * 60.0 / bpm;
+        double weighted = 0;
+        double totalWeight = 0;
+        foreach (RhythmRole role in Enum.GetValues<RhythmRole>())
+        {
+            if (role == RhythmRole.Unknown)
+                continue;
+            RhythmRoleOnset[] events = roles.Where(value => value.Role == role).ToArray();
+            if (events.Length == 0)
+                continue;
+
+            double eventFit = 0;
+            foreach (RhythmRoleOnset rhythm in events)
+            {
+                double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
+                double fit = role switch
+                {
+                    RhythmRole.Kick => DistanceToSet(quarter, 0, 2, 4),
+                    RhythmRole.Snare => DistanceToSet(quarter, 1, 3, 4),
+                    RhythmRole.HiHat => DistanceToGrid(quarter, 0.25),
+                    _ => 0.5,
+                };
+
+                eventFit += fit * rhythm.Strength;
+            }
+            double eventWeight = events.Sum(value => value.Strength);
+            eventFit = eventWeight > 0 ? eventFit / eventWeight : 0.5;
+
+            double patternFit = role is RhythmRole.Kick or RhythmRole.Snare
+                ? 0.25 * BackbeatCoverage(events, role, phaseSample, spq)
+                    + 0.75 * PulseIntervalFit(events, spq)
+                : 0.5;
+            double roleWeight = role == RhythmRole.Snare ? 2.0
+                : role == RhythmRole.Kick ? 1.5
+                : 1.0;
+            weighted += roleWeight * (0.35 * eventFit + 0.65 * patternFit);
+            totalWeight += roleWeight;
+        }
+        return totalWeight > 0 ? weighted / totalWeight : 0.5;
+    }
+    private static double PulseIntervalFit(
+        IReadOnlyList<RhythmRoleOnset> events,
+        double spq)
+    {
+        if (events.Count < 3 || spq <= 0)
+            return 0.5;
+        long[] samples = events.Select(value => value.Sample).OrderBy(value => value).ToArray();
+        double median = samples
+            .Zip(samples.Skip(1), (left, right) => (double)(right - left))
+            .OrderBy(value => value)
+            .ElementAt(samples.Length / 2 - 1);
+        double beatRatio = median / spq;
+        return Math.Exp(-(beatRatio - 2.0) * (beatRatio - 2.0) / (2 * 0.45 * 0.45));
+    }
+
+
+    private static double BackbeatCoverage(
+        IReadOnlyList<RhythmRoleOnset> events,
+        RhythmRole role,
+        long phaseSample,
+        double spq)
+    {
+        bool first = false;
+        bool second = false;
+        foreach (RhythmRoleOnset rhythm in events)
+        {
+            double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
+            if (DistanceToSet(quarter, role == RhythmRole.Kick ? 0 : 1,
+                    role == RhythmRole.Kick ? 2 : 3, 4) >= 0.9)
+            {
+                double firstDistance = CircularDistance(
+                    quarter, role == RhythmRole.Kick ? 0 : 1, 4);
+                if (firstDistance < 0.12)
+                    first = true;
+                else
+                    second = true;
+            }
+        }
+        return (first ? 0.5 : 0) + (second ? 0.5 : 0);
+    }
+    private static double? PreferredRoleTempo(
+        IReadOnlyList<RhythmRoleOnset> roles,
+        int sampleRate)
+    {
+        foreach (RhythmRole role in new[] { RhythmRole.Snare, RhythmRole.Kick })
+        {
+            long[] samples = roles
+                .Where(value => value.Role == role)
+                .Select(value => value.Sample)
+                .OrderBy(value => value)
+                .ToArray();
+            if (samples.Length < 3)
+                continue;
+            double median = samples
+                .Zip(samples.Skip(1), (left, right) => (double)(right - left))
+                .OrderBy(value => value)
+                .ElementAt(samples.Length / 2 - 1);
+            if (median > 0)
+                return sampleRate * 120.0 / median;
+        }
+        return null;
+    }
+
+    private static double DistanceToSet(double value, double first, double second, double period)
+    {
+        double distance = Math.Min(
+            CircularDistance(value, first, period),
+            CircularDistance(value, second, period));
+        return Math.Exp(-distance * distance / (2 * 0.12 * 0.12));
+    }
+
+    private static double DistanceToGrid(double value, double step)
+    {
+        double distance = Math.Abs(value / step - Math.Round(value / step));
+        return Math.Exp(-distance * distance / (2 * 0.12 * 0.12));
     }
 
     private static TempoCandidate? FindCandidate(List<TempoCandidate> candidates, double bpm)
@@ -1780,7 +1993,6 @@ internal static class SymbolicTempoInference
                 continue;
             raw.Add(new SymbolicOnset(hit.SamplePosition, hit.VoiceId ?? "aggregate", 1.0, IsRhythm: true));
         }
-
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
             if (note is null)
@@ -1791,6 +2003,84 @@ internal static class SymbolicTempoInference
             raw.Add(new SymbolicOnset(note.StartSample, note.ChannelId ?? "note", weight));
         }
         return raw.ToArray();
+    }
+
+    private static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
+        IReadOnlyList<TempoCandidate> searched,
+        double fallbackBpm,
+        int sampleRate,
+        long startSample,
+        Meter? preferredMeter)
+    {
+        var bases = searched
+            .Concat(new[]
+            {
+                new TempoCandidate(
+                    fallbackBpm,
+                    searched.Count > 0 ? searched[0].PhaseSample : 0,
+                    searched.Count > 0 ? searched[0].Score : 0,
+                    TempoAmbiguity.None),
+            })
+            .Where(candidate => candidate.Bpm > 0 && double.IsFinite(candidate.Bpm))
+            .GroupBy(candidate => Math.Round(candidate.Bpm, 6))
+            .Select(group => group.OrderByDescending(candidate => candidate.Score).First())
+            .OrderByDescending(candidate => candidate.Score)
+            .Take(3)
+            .ToArray();
+
+        var expanded = new List<(double Bpm, double Phase, double Score)>(bases.Length * 5);
+        foreach (TempoCandidate source in bases)
+        {
+            foreach (double ratio in new[] { 0.25, 0.5, 1.0, 2.0, 4.0 })
+            {
+                double bpm = source.Bpm * ratio;
+                if (bpm is < 20 or > 480)
+                    continue;
+                double samplesPerQuarter = sampleRate * 60.0 / bpm;
+                // BeatPhase is the absolute quarter position at timeline start,
+                // matching TempoSegment.QuarterPositionAtStart and
+                // FirstDownbeatQuarter.
+                double phase = (startSample - source.PhaseSample) / samplesPerQuarter;
+                double score = source.Score
+                    * (Math.Abs(ratio - 1.0) < 1e-9 ? 1.0 : 0.92);
+                expanded.Add((bpm, phase, score));
+            }
+        }
+
+        // Keep the strongest three BPM families and four phase hypotheses per
+        // family. This is the bounded 3 × 3 × 4 second-pass search.
+        var families = expanded
+            .GroupBy(candidate => Math.Round(candidate.Bpm, 6))
+            .Select(group => group
+                .OrderByDescending(candidate => candidate.Score)
+                .ThenBy(candidate => candidate.Phase)
+                .First())
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.Bpm)
+            .Take(3)
+            .ToArray();
+        Meter[] meters = new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
+        var result = new List<MusicalGridCandidate>(families.Length * meters.Length * 4);
+        foreach ((double bpm, double phase, double score) family in families)
+        {
+            foreach (Meter meter in meters)
+            {
+                for (int phaseOffset = 0; phaseOffset < 4; phaseOffset++)
+                    result.Add(new MusicalGridCandidate(
+                        family.bpm,
+                        meter,
+                        family.phase + phaseOffset,
+                        family.score));
+            }
+        }
+
+        return result
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => preferredMeter is Meter preferred
+                && candidate.Meter == preferred ? 0 : 1)
+            .ThenBy(candidate => candidate.Bpm)
+            .ThenBy(candidate => candidate.BeatPhase)
+            .ToArray();
     }
 
     internal static Onset[] CollectOnsets(VisualizationTimeline timeline)
@@ -1873,6 +2163,66 @@ internal static class SymbolicTempoInference
         return accented.ToArray();
     }
 
+    private static RhythmRoleOnset[] CollectRhythmRoles(VisualizationTimeline timeline)
+    {
+        var result = new List<RhythmRoleOnset>();
+        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        {
+            if (rhythm is null)
+                continue;
+            RhythmRole role = ClassifyRhythmRole(
+                $"{rhythm.Voice}/{rhythm.ChannelId}/{rhythm.ParentVoiceId}/{rhythm.InstrumentId}",
+                null);
+            if (role != RhythmRole.Unknown)
+                result.Add(new RhythmRoleOnset(
+                    rhythm.SamplePosition,
+                    Math.Clamp(0.8 + rhythm.Strength, 0.2, 2.0),
+                    role));
+        }
+
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note is null)
+                continue;
+            RhythmRole role = ClassifyRhythmRole(
+                $"{note.ChannelId}/{note.InstrumentId}", note.InitialMidiNote);
+            if (role != RhythmRole.Unknown)
+                result.Add(new RhythmRoleOnset(note.StartSample, 1.0, role));
+        }
+        return result.ToArray();
+    }
+
+    private static RhythmRole ClassifyRhythmRole(string text, double? midiNote)
+    {
+        string value = text.ToLowerInvariant();
+        if (value.Contains("snare", StringComparison.Ordinal)
+            || value.Contains("sd", StringComparison.Ordinal)
+            || value.Contains("rim", StringComparison.Ordinal))
+            return RhythmRole.Snare;
+        if (value.Contains("kick", StringComparison.Ordinal)
+            || value.Contains("bassdrum", StringComparison.Ordinal)
+            || value.Contains("bass-drum", StringComparison.Ordinal))
+            return RhythmRole.Kick;
+        if (value.Contains("hihat", StringComparison.Ordinal)
+            || value.Contains("hi-hat", StringComparison.Ordinal)
+            || value.Contains("hat", StringComparison.Ordinal))
+            return RhythmRole.HiHat;
+
+        bool drumText = value.Contains("drum", StringComparison.Ordinal)
+            || value.Contains("rhythm", StringComparison.Ordinal)
+            || value.Contains("perc", StringComparison.Ordinal);
+        if (!drumText || midiNote is not double note)
+            return RhythmRole.Unknown;
+        int pitch = (int)Math.Round(note);
+        return pitch switch
+        {
+            35 or 36 => RhythmRole.Kick,
+            37 or 38 or 40 => RhythmRole.Snare,
+            42 or 44 or 46 => RhythmRole.HiHat,
+            _ => RhythmRole.Unknown,
+        };
+    }
+
     private static double WeightFor(float strength, bool high) =>
         high ? Math.Clamp(0.7 + strength * 0.6, 0.1, 1.3) : 0.6;
 
@@ -1882,6 +2232,19 @@ internal static class SymbolicTempoInference
     // scorer and the public onset collector retain their existing weights.
     private static double MetricalRhythmWeight(float strength) =>
         Math.Clamp(1.6 + strength * 0.8, 1.2, 2.4);
+
+    private enum RhythmRole
+    {
+        Unknown,
+        Kick,
+        Snare,
+        HiHat,
+    }
+
+    private readonly record struct RhythmRoleOnset(
+        long Sample,
+        double Strength,
+        RhythmRole Role);
 
     internal readonly record struct Onset(long Sample, double Weight);
 

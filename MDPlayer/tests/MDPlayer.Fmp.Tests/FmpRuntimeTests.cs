@@ -50,6 +50,9 @@ public class FmpRuntimeTests
     [SkippableFact]
     public void InitWithFmpCom_Succeeds()
     {
+        Skip.If(
+            Environment.GetEnvironmentVariable("MDPLAYER_HEAVY_TESTS") != "1",
+            "Set MDPLAYER_HEAVY_TESTS=1 to run native FMP integration tests.");
         string fmpComPath = Path.GetFullPath("testfixtures/FMP.COM");
         Skip.IfNot(File.Exists(fmpComPath),
             $"FMP.COM not at expected path: {fmpComPath}.");

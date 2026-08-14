@@ -7,20 +7,16 @@ namespace Fmp.Core.Visualization;
 /// state (period &lt;= 0, decoded as the Unpitched sentinel), or when it decodes to
 /// an ultrasonic frequency — the "meaningless source state" class that must never
 /// become an audible MIDI note (e.g. AY8910 period 1..11 or K051649 period 1..2
-/// decode to 20 kHz+, far beyond the top of the MIDI pitch domain).
+/// decode above MIDI note 127, beyond the MIDI pitch domain).
 /// </summary>
 internal static class ChipPitchDomain
 {
     /// <summary>
-    /// Frequency ceiling of a representable musical pitch: ~20 kHz (≈ MIDI 135.1),
-    /// the top of the audible range. Periods that decode above it are ultrasonic
-    /// initialization / tone-disabled states (e.g. AY8910 period 1-11 at 3.58 MHz),
-    /// never stable musical pitches. The exporter's own [0, 127] guard
-    /// (<see cref="Fmp.Core.Midi.VoiceStateNormalizationStage"/>) remains the
-    /// authoritative MIDI-domain bound; this ceiling is the source-side classifier
-    /// that keeps such states out of the note timeline entirely.
+    /// Frequency ceiling of a representable MIDI pitch: MIDI 127 (≈13.29 kHz).
+    /// Higher decoded pitches cannot be represented by the MIDI note domain and
+    /// are initialization/ultrasonic states for this export pipeline.
     /// </summary>
-    public const double MaxFrequencyHz = 20_000.0;
+    public const double MaxFrequencyHz = 13_289.754117744523;
 
     /// <summary>
     /// True when the decoded pitch is a stable, enabled, representable musical

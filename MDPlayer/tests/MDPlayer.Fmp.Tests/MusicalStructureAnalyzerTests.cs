@@ -116,4 +116,97 @@ public sealed class MusicalStructureAnalyzerTests
         Assert.Single(structure.Sections); // one homogeneous rest section
         Assert.Equal("A", structure.Sections[0].Label);
     }
+    [Fact]
+    public void Analyze_ArbitraryThirtyThreeBarLoop_UsesRepeatedContentAndPhraseOrder()
+    {
+        const int bars = 66;
+        NoteEvent[] notes = Enumerable.Range(0, bars)
+            .Select(bar => Note(48 + (bar % 33) % 12, 4 * bar))
+            .ToArray();
+        double spq = Spq;
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = (long)Math.Round(bars * 4 * spq),
+            Notes = notes,
+            LoopMarkers = new[]
+            {
+                new LoopMarker((long)Math.Round(3 * spq), LoopMarkerKind.Restart, 1),
+                new LoopMarker((long)Math.Round(3 * spq + 33 * 4 * spq), LoopMarkerKind.Restart, 2),
+            },
+        };
+
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(
+            Map(bars * 4, new Meter(4, 4)), timeline);
+
+        Assert.Equal(33, structure.PrimaryLoop?.LengthBars);
+        Assert.Equal(0, structure.PrimaryLoop?.StartBar);
+        Assert.Contains(structure.Sections, section => section.Label == "TURNAROUND");
+        Assert.All(structure.Sections, section =>
+            Assert.True(section.EndBar - section.StartBar >= 4
+                || section.Label == "TURNAROUND"));
+    }
+
+    [Fact]
+    public void SelectGrid_UsesOnsetAndRestartEvidenceToResolveHalfTempo()
+    {
+        const double bpm = 149.4;
+        double spq = Sr * 60.0 / bpm;
+        const int bars = 66;
+        long end = (long)Math.Round(bars * 4 * spq);
+        var notes = Enumerable.Range(0, bars * 16)
+            .Select(index =>
+            {
+                long start = (long)Math.Round(index * 0.25 * spq);
+                return new NoteEvent(
+                    ChannelId: "v",
+                    StartSample: start,
+                    EndSample: start + Math.Max(1, (long)Math.Round(0.125 * spq)),
+                    InitialFrequencyHz: 440,
+                    InitialMidiNote: 48 + (index / 16 % 33) % 12,
+                    InstrumentId: "inst",
+                    Mode: VisualizationNoteMode.Fm,
+                    IsRetrigger: false,
+                    Pitch: Array.Empty<PitchChange>());
+            })
+            .ToArray();
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = end,
+            Notes = notes,
+            LoopMarkers = new[]
+            {
+                new LoopMarker(0, LoopMarkerKind.Restart, 1),
+                new LoopMarker((long)Math.Round(33 * 4 * spq), LoopMarkerKind.Restart, 2),
+            },
+        };
+        var map = new MusicalTimeMap(
+            Sr,
+            0,
+            new[]
+            {
+                new TempoSegment(0, end, 0, Sr * 60.0 / (bpm * 2), bpm * 2,
+                    TimingSource.SymbolicInference, 0.2),
+            },
+            meter: new Meter(4, 4),
+            firstDownbeatQuarter: 0,
+            confidence: 0.2,
+            alternateBpm: bpm,
+            isTempoAmbiguous: true,
+            gridCandidates: new[]
+            {
+                new MusicalGridCandidate(bpm * 2, new Meter(4, 4), 0, 1),
+                new MusicalGridCandidate(bpm, new Meter(4, 4), 0, 1),
+            });
+
+        MusicalTimeMap selected = MusicalStructureAnalyzer.SelectGrid(map, timeline);
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(selected, timeline);
+
+        Assert.Equal(bpm, selected.Segments[0].BeatsPerMinute, precision: 6);
+        Assert.Equal(33, structure.PrimaryLoop?.LengthBars);
+        Assert.Equal(0, structure.PrimaryLoop?.StartBar);
+    }
 }

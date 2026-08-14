@@ -11,6 +11,9 @@ public sealed class AnalysisIntegrationTests
     [SkippableFact]
     public void AnalysisRunner_InvokesRealWorkerAndReusesValidCacheWithoutPython()
     {
+        Skip.If(
+            Environment.GetEnvironmentVariable("MDPLAYER_HEAVY_TESTS") != "1",
+            "Set MDPLAYER_HEAVY_TESTS=1 to run external analysis integration tests.");
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
         Skip.IfNot(File.Exists(python), $"analysis integration environment is unavailable: {python}");
@@ -86,6 +89,9 @@ public sealed class AnalysisIntegrationTests
     [SkippableFact]
     public void AnalysisRunner_DoesNotOverwriteExistingResultWhenWorkerFails()
     {
+        Skip.If(
+            Environment.GetEnvironmentVariable("MDPLAYER_HEAVY_TESTS") != "1",
+            "Set MDPLAYER_HEAVY_TESTS=1 to run external analysis integration tests.");
         string python = Environment.GetEnvironmentVariable("MDPLAYER_ANALYSIS_PYTHON")
             ?? "/tmp/mdplayer-analysis-venv/bin/python";
         Skip.IfNot(File.Exists(python), $"analysis integration environment is unavailable: {python}");

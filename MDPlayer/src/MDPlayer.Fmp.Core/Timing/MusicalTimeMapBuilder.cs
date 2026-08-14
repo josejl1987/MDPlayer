@@ -345,6 +345,9 @@ internal static class MusicalTimeMapBuilder
             firstDownbeatQuarter = ComputeSampleToQuarter(segments, downbeatSample);
         }
 
+        IReadOnlyList<MusicalGridCandidate> gridCandidates =
+            BuildGridCandidates(segments, firstDownbeatQuarter, options.Meter);
+
         return new MusicalTimeMap(
             timeline.SampleRate,
             startSample: timeline.StartSample,
@@ -353,8 +356,39 @@ internal static class MusicalTimeMapBuilder
             firstDownbeatQuarter,
             confidence: AggregateConfidence(fit.Diagnostics, segments),
             alternateBpm: fit.Diagnostics.AlternativeBpm,
-            isTempoAmbiguous: fit.Diagnostics.TempoAmbiguous);
+            isTempoAmbiguous: fit.Diagnostics.TempoAmbiguous,
+            gridCandidates: gridCandidates);
     }
+    private static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
+        IReadOnlyList<TempoSegment> segments,
+        double? firstDownbeatQuarter,
+        Meter? preferredMeter)
+    {
+        Meter[] meters = new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
+        double phase = firstDownbeatQuarter ?? segments[0].QuarterPositionAtStart;
+        var result = new List<MusicalGridCandidate>(segments.Count * 15);
+        foreach (TempoSegment segment in segments)
+        {
+            foreach (double ratio in new[] { 0.25, 0.5, 1.0, 2.0, 4.0 })
+            {
+                double bpm = segment.BeatsPerMinute * ratio;
+                if (bpm is < 20 or > 480)
+                    continue;
+                double score = 1.0 / (1.0 + Math.Abs(Math.Log(ratio)));
+                foreach (Meter meter in meters)
+                    result.Add(new MusicalGridCandidate(bpm, meter, phase, score));
+            }
+        }
+
+        return result
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => preferredMeter is Meter preferred
+                && candidate.Meter == preferred ? 0 : 1)
+            .ThenBy(candidate => candidate.Bpm)
+            .Take(36)
+            .ToArray();
+    }
+
 
 
     private static double AggregateConfidence(TimingDiagnostics diagnostics, IReadOnlyList<TempoSegment> segments)

@@ -1018,9 +1018,12 @@ public sealed class VgmPlaybackBackendTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void CanonicalRender_UsesUnifiedRunnerForGeneratedVgm()
     {
+        Skip.If(
+            Environment.GetEnvironmentVariable("MDPLAYER_HEAVY_TESTS") != "1",
+            "Set MDPLAYER_HEAVY_TESTS=1 to run external canonical render tests.");
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-unified-{Guid.NewGuid():N}.vgm");
         string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-unified-{Guid.NewGuid():N}.mp4");
         try
@@ -1068,9 +1071,12 @@ public sealed class VgmPlaybackBackendTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void CanonicalRender_InvalidExplicitCorrscope_FailsWithHardRequirement()
     {
+        Skip.If(
+            Environment.GetEnvironmentVariable("MDPLAYER_HEAVY_TESTS") != "1",
+            "Set MDPLAYER_HEAVY_TESTS=1 to run external canonical render tests.");
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-corrscope-{Guid.NewGuid():N}.vgm");
         string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-corrscope-{Guid.NewGuid():N}.mp4");
         try

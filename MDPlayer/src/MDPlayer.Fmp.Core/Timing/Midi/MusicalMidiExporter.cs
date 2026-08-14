@@ -170,6 +170,10 @@ internal sealed class MusicalMidiExporter
     private int _placeholderCount;
 
     private readonly HashSet<string> _placeholderChannels = new();
+    // Structural/arranged exports collapse patch changes back to their physical
+    // source voice. Marker-only/fidelity exports retain the historical patch split.
+    private bool _groupPhysicalVoices;
+
     private Dictionary<NoteEvent, MidiTrackKey> _noteTrackKeyCache =
         new(ReferenceEqualityComparer.Instance);
     private Dictionary<RhythmEvent, MidiTrackKey> _rhythmTrackKeyCache =
@@ -211,6 +215,10 @@ internal sealed class MusicalMidiExporter
     {
         ArgumentNullException.ThrowIfNull(sourceTimeline);
         VisualizationTimeline timeline = sourceTimeline.Timeline;
+        _groupPhysicalVoices = Structure is not null;
+        _sourceOrder = 0;
+        _placeholderCount = 0;
+        _placeholderChannels.Clear();
 
         _noteTrackKeyCache = new Dictionary<NoteEvent, MidiTrackKey>(
             timeline.Notes?.Count ?? 0, ReferenceEqualityComparer.Instance);
@@ -322,10 +330,16 @@ internal sealed class MusicalMidiExporter
         }
         _performance?.StopStage(MidiPerformanceStage.EventGeneration, stageStart);
 
-        // Rhythm voices → percussion pitches (Batch 4 drum allocation). Each rhythm
-        // track is keyed by its instrument identity (R9), and the percussion pitch is
-        // allocated per identity so distinct instruments get distinct drum notes.
+        // Rhythm voices → percussion pitches (Batch 4 drum allocation). Known
+        // YM2608 rhythm identities map semantically to GM percussion notes; any
+        // unknown/non-semantic sample identity falls back to the per-identity
+        // unique-note allocator so distinct instruments still get distinct notes.
+        // Each voice is its own Rhythm-tagged track (RhythmKeyFor), so per-key pan
+        // state is per-track. CC10 pan is emitted before the first hit and again
+        // whenever the value changes; ordering within a tick is resolved by
+        // MidiEventOrder.Rank (CC = rank 2 precedes note-on = rank 4).
         var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
+        var lastPanByKey = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
         int nextDrum = _options.PercussionNoteBase;
         foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
@@ -334,18 +348,34 @@ internal sealed class MusicalMidiExporter
             TrackSlot slot = allocator.SlotFor(rhythmKey);
             if (slot is null)
                 continue;
-            if (!drumNoteByIdentity.TryGetValue(rhythmKey, out int note))
+            int note;
+            if (!GeneralMidiDrumMapper.TryMap(rhythm, out int mapped))
             {
-                note = nextDrum++;
-                if (note is < 0 or > 127)
-                    throw new InvalidOperationException(
-                        $"Percussion note exhaustion: rhythm domain '{rhythmKey}' cannot be assigned a MIDI note.");
-                drumNoteByIdentity[rhythmKey] = note;
+                if (!drumNoteByIdentity.TryGetValue(rhythmKey, out note))
+                {
+                    note = nextDrum++;
+                    if (note is < 0 or > 127)
+                        throw new InvalidOperationException(
+                            $"Percussion note exhaustion: rhythm domain '{rhythmKey}' cannot be assigned a MIDI note.");
+                    drumNoteByIdentity[rhythmKey] = note;
+                }
             }
+            else
+            {
+                note = mapped;
+            }
+
+            int velocity = ToMidiVelocity(rhythm.Strength);
+            int pan = ToMidiPan(rhythm.Pan);
             long on = TimeTick(rhythm.SamplePosition) + originShiftTicks;
-            AddTrackEvent(slot.Track, PackedMidiEvent.Note(on, slot.Index, slot.Channel, note, 100, noteOn: true));
+            if (!lastPanByKey.TryGetValue(rhythmKey, out int lastPan) || lastPan != pan)
+            {
+                AddTrackEvent(slot.Track, PackedMidiEvent.ControlChange(on, slot.Index, slot.Channel, 10, pan));
+                lastPanByKey[rhythmKey] = pan;
+            }
+            AddTrackEvent(slot.Track, PackedMidiEvent.Note(on, slot.Index, slot.Channel, note, velocity, noteOn: true));
             AddTrackEvent(slot.Track, PackedMidiEvent.Note(
-                on + ShortHitTicks, slot.Index, slot.Channel, note, 100, noteOn: false));
+                on + ShortHitTicks, slot.Index, slot.Channel, note, velocity, noteOn: false));
         }
 
         // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
@@ -760,15 +790,36 @@ internal sealed class MusicalMidiExporter
 
     private int ShortHitTicks => Math.Max(1, _ppq / 32);
 
+    /// <summary>YM2608 rhythm pan (−1..1) → CC10. Maps −1→0, 0→64, +1→127.</summary>
+    private static int ToMidiPan(float pan) =>
+        Math.Clamp((int)Math.Round((Math.Clamp(pan, -1f, 1f) + 1f) * 63.5f), 0, 127);
+
+    /// <summary>YM2608 rhythm level (0..1) → MIDI velocity (1..127).</summary>
+    private static int ToMidiVelocity(float gain) =>
+        Math.Clamp((int)Math.Round(Math.Clamp(gain, 0f, 1f) * 126f) + 1, 1, 127);
+
     /// <summary>Single source of truth for whether a note is actually emitted (§21).
     /// Unpitched noise (SSG noise-only, the intentional -1 sentinel) is excluded:
     /// it has no pitch to serialize as a melodic MIDI note, and fabricating one
     /// would corrupt fidelity. Such notes are counted and surfaced as a diagnostic.
     /// </summary>
-    private bool IsNoteEmitted(NoteEvent note) =>
-        note is not null && note.EndSample > note.StartSample
-        && !IsUnpitchedNoise(note)
-        && _options.OverrideFor(note.ChannelId).Include;
+    private bool IsNoteEmitted(NoteEvent note)
+    {
+        if (note is null || note.EndSample <= note.StartSample
+            || IsUnpitchedNoise(note)
+            || !_options.OverrideFor(note.ChannelId).Include)
+            return false;
+
+        // SCC frequency settling can leave a source note that is musically
+        // meaningful in sample time but collapses to a one-tick MIDI fragment
+        // after the authoritative map conversion. Do not serialize that
+        // intermediate wavetable artifact as a glitch note.
+        if (note.InstrumentId.StartsWith("k051649:", StringComparison.OrdinalIgnoreCase)
+            && TimeTick(note.EndSample) - TimeTick(note.StartSample) <= 1)
+            return false;
+
+        return true;
+    }
 
     /// <summary>True for the decoder's intentional unpitched-noise notes (SSG
     /// noise-only modes). These carry the <c>-1</c> "Unpitched" sentinel and are
@@ -776,6 +827,8 @@ internal sealed class MusicalMidiExporter
     /// express them, so they are excluded from the melodic export.</summary>
     private static bool IsUnpitchedNoise(NoteEvent note) =>
         note.Mode is VisualizationNoteMode.SsgNoise or VisualizationNoteMode.SsgEnvelopeNoise;
+    private static bool IsSccWavetable(NoteEvent note) =>
+        note.InstrumentId.StartsWith("k051649:", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Single source of truth for whether a rhythm trigger is emitted (§21).</summary>
     private bool IsRhythmEmitted(RhythmEvent rhythm) =>
@@ -866,17 +919,13 @@ internal sealed class MusicalMidiExporter
             endTick = startTick + 1; // real collapsed note: minimum 1 tick (§29).
 
         int baseNote = SelectBaseNote(anchors[0].Target, bendRange, note);
-        List<PlannedPitchState> pitchStates = _pitchStateScratch;
-        pitchStates.Clear();
-        MidiEndpoint endpoint = slot.Track.Endpoint;
-
-        // Re-anchor loop over the pitch states in tick order. Between the current
-        // base and the next re-anchor, every state is encoded against the current
-        // base. When a state exits baseNote +- range, re-anchor at that tick.
         long currentBaseFrom = startTick;
         int currentBase = baseNote;
         List<(long Tick, int OldBase, int NewBase, int InitialBend)> reanchors = _reanchorScratch;
         reanchors.Clear();
+        MidiEndpoint endpoint = slot.Track.Endpoint;
+        List<PlannedPitchState> pitchStates = _pitchStateScratch;
+        pitchStates.Clear();
         for (int i = 1; i < anchors.Count; i++)
         {
             (long tick, double target, _) = anchors[i];
@@ -885,6 +934,13 @@ internal sealed class MusicalMidiExporter
             double offset = target - currentBase;
             if (offset > bendRange || offset < -bendRange)
             {
+                // A terminal SCC frequency settle can produce a final
+                // re-anchor one MIDI tick before NoteOff. Emitting that
+                // boundary creates a synthetic one-tick glitch note; the
+                // source note's final bend state is not useful after release.
+                if (IsSccWavetable(note) && tick >= endTick - 1)
+                    break;
+
                 int newBase = SelectBaseNote(target, bendRange, note);
                 int rebend = EncodeBend(target - newBase, bendRange, note);
                 reanchors.Add((tick, currentBase, newBase, rebend));
@@ -1227,11 +1283,18 @@ internal sealed class MusicalMidiExporter
             Consider(TimeTick(timeline.StartSample)); // SOURCE_START
             if (_map.FirstDownbeatQuarter is double downbeat)
                 Consider(_map.QuarterPositionToTick(downbeat, _ppq));
-            if (Structure is MusicalStructure structure)
+            if (Structure is MusicalStructure structure && structure.Bars.Count > 0)
             {
                 foreach (MusicalSection section in structure.Sections)
-                    Consider(StructureBarTick(structure, section.StartBar));
-                if (structure.PrimaryLoop is RepeatedBlock loop)
+                {
+                    if (section.StartBar >= 0 && section.StartBar < structure.Bars.Count)
+                        Consider(StructureBarTick(structure, section.StartBar));
+                }
+
+                if (structure.PrimaryLoop is RepeatedBlock loop
+                    && loop.LengthBars > 0
+                    && loop.StartBar >= 0
+                    && loop.StartBar + loop.LengthBars < structure.Bars.Count)
                 {
                     Consider(StructureBarTick(structure, loop.StartBar));
                     Consider(StructureBarTick(structure, loop.StartBar + loop.LengthBars));
@@ -1302,43 +1365,49 @@ internal sealed class MusicalMidiExporter
                 long downbeatTick = _map.QuarterPositionToTick(downbeat, _ppq) + originShift;
                 conductor.Add(WithSourceOrder(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT")));
             }
-            // Structural markers (sections + fundamental loop) from the upstream
-            // MusicalStructureAnalyzer — distinct from the driver-parsed loop state
-            // below. SECTION_* marks labeled section boundaries; STRUCT_LOOP_* marks
-            // the fundamental repeated block detected from note content.
-            if (Structure is MusicalStructure structure)
+            // Structural markers (sections + validated positive fundamental loop)
+            // are independent from raw source restart markers below.
+            if (Structure is MusicalStructure structure && structure.Bars.Count > 0)
             {
                 foreach (MusicalSection section in structure.Sections)
                 {
+                    if (section.StartBar < 0 || section.StartBar >= structure.Bars.Count)
+                        continue;
                     conductor.Add(WithSourceOrder(new MidiMarkerEvent(
                         StructureBarTick(structure, section.StartBar) + originShift,
                         "SECTION_" + section.Label)));
                 }
-                if (structure.PrimaryLoop is RepeatedBlock loop)
+
+                if (structure.PrimaryLoop is RepeatedBlock loop
+                    && loop.LengthBars > 0
+                    && loop.StartBar >= 0
+                    && loop.StartBar + loop.LengthBars < structure.Bars.Count)
                 {
-                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
-                        StructureBarTick(structure, loop.StartBar) + originShift,
-                        "STRUCT_LOOP_START")));
-                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
-                        StructureBarTick(structure, loop.StartBar + loop.LengthBars) + originShift,
-                        "STRUCT_LOOP_END")));
+                    long startTick = StructureBarTick(structure, loop.StartBar) + originShift;
+                    long endTick = StructureBarTick(
+                        structure, loop.StartBar + loop.LengthBars) + originShift;
+                    if (endTick > startTick)
+                    {
+                        conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                            startTick, "STRUCT_LOOP_START")));
+                        conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                            endTick, "STRUCT_LOOP_END")));
+                    }
                 }
             }
             foreach (LoopMarker loop in timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
             {
+                if (loop is null)
+                    continue;
                 long tick = TimeTick(loop.SamplePosition) + originShift;
-                // A Restart boundary is simultaneously the end of the previous pass
-                // and the start of the next: emit LOOP_END then LOOP_START at the
-                // same tick, describing the structure actually in the MIDI.
-                if (loop.Kind == LoopMarkerKind.Restart)
-                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(tick, "LOOP_START")));
-                string name = loop.Kind switch
+                string? name = loop.Kind switch
                 {
-                    LoopMarkerKind.Start => "LOOP_START",
-                    LoopMarkerKind.Restart => "LOOP_END",
-                    _ => "LOOP_MARK",
+                    LoopMarkerKind.Start => "SOURCE_LOOP_ENTRY",
+                    LoopMarkerKind.Restart => "SOURCE_LOOP_RESTART",
+                    _ => null,
                 };
-                conductor.Add(WithSourceOrder(new MidiMarkerEvent(tick, name)));
+                if (name is not null)
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(tick, name)));
             }
             // RENDER_END marks the true render end (the last sample of the captured
             // audio, loops + fade/tail included) — the final marker in the file.
@@ -1453,7 +1522,7 @@ internal sealed class MusicalMidiExporter
                 // the source-event loop.
                 eventCapacity = 5 + 3 * pitchChangeCount;
             }
-            notes.Add(new IndexedNote(note, TrackKeyFor(note), eventCapacity));
+            notes.Add(new IndexedNote(note, ExportTrackKeyFor(note), eventCapacity));
             minimumTick = Math.Min(minimumTick, TimeTick(note.StartSample));
             if (pitchChangeCount > 0)
             {
@@ -1476,7 +1545,7 @@ internal sealed class MusicalMidiExporter
                     _performance.SourceEventsSkipped++;
                 continue;
             }
-            rhythms.Add(new IndexedRhythm(rhythm, RhythmKeyFor(rhythm)));
+            rhythms.Add(new IndexedRhythm(rhythm, ExportTrackKeyFor(rhythm)));
             minimumTick = Math.Min(minimumTick, TimeTick(rhythm.SamplePosition));
         }
         return new SourceEventIndex(notes, rhythms, minimumTick, maximumPitchChanges);
@@ -1809,6 +1878,20 @@ internal sealed class MusicalMidiExporter
         _rhythmTrackKeyCache[rhythm] = result;
         return result;
     }
+    private MidiTrackKey ExportTrackKeyFor(NoteEvent note) =>
+        CollapsePhysicalTrack(TrackKeyFor(note));
+
+    private MidiTrackKey ExportTrackKeyFor(RhythmEvent rhythm) =>
+        CollapsePhysicalTrack(RhythmKeyFor(rhythm));
+
+    private MidiTrackKey CollapsePhysicalTrack(MidiTrackKey key) =>
+        !_groupPhysicalVoices || key.Instrument.Canonical.Length == 0
+            ? key
+            : key with
+            {
+                Instrument = new InstrumentIdentity(key.Instrument.Family, 0, "")
+            };
+
 
     private static bool TryParseSourceDomain(string channelId, out DeviceId device,
         out VoiceKind voice, out int sourceChannel)

@@ -59,6 +59,8 @@ internal sealed class MidiTrack
                     evt.Tick, evt.Track, evt.Channel, evt.A, evt.B, NoteOn: true),
                 PackedMidiEventKind.Bank => new MidiBankEvent(
                     evt.Tick, evt.Track, evt.Channel, evt.A),
+                PackedMidiEventKind.ControlChange => new MidiControlChangeEvent(
+                    evt.Tick, evt.Track, evt.Channel, evt.A, evt.B),
                 PackedMidiEventKind.Program => new MidiProgramEvent(
                     evt.Tick, evt.Track, evt.Channel, evt.A),
                 PackedMidiEventKind.PitchBend => new MidiPitchBendEvent(
@@ -324,6 +326,9 @@ internal sealed class MidiFileWriter
             case PackedMidiEventKind.Bank:
                 WriteControlChange(stream, delta, evt.Channel, 0, evt.A);
                 return;
+            case PackedMidiEventKind.ControlChange:
+                WriteControlChange(stream, delta, evt.Channel, evt.A, evt.B);
+                return;
             case PackedMidiEventKind.PitchBend:
                 int bendValue = evt.A + 8192;
                 if (bendValue is < 0 or > 16383)
@@ -585,6 +590,7 @@ internal sealed class MidiFileWriter
         MidiNoteEvent note => BuildNote(note),
         MidiProgramEvent program => BuildProgram(program),
         MidiBankEvent bank => BuildBank(bank),
+        MidiControlChangeEvent controlChange => BuildControlChange(controlChange),
         MidiPitchBendEvent bend => BuildPitchBend(bend),
         MidiTempoEvent tempo => BuildTempo(tempo),
         MidiTimeSignatureEvent timeSignature => BuildTimeSignature(timeSignature),
@@ -602,6 +608,9 @@ internal sealed class MidiFileWriter
             new SevenBitNumber((byte)(evt.A & 0x7F))) { Channel = Channel(evt.Channel) },
         PackedMidiEventKind.Bank => new ControlChangeEvent(
             new SevenBitNumber(0), new SevenBitNumber((byte)(evt.A & 0x7F)))
+            { Channel = Channel(evt.Channel) },
+        PackedMidiEventKind.ControlChange => new ControlChangeEvent(
+            new SevenBitNumber((byte)(evt.A & 0x7F)), new SevenBitNumber((byte)(evt.B & 0x7F)))
             { Channel = Channel(evt.Channel) },
         PackedMidiEventKind.PitchBend => BuildPackedPitchBend(evt),
         PackedMidiEventKind.Tempo => BuildPackedTempo(evt),
@@ -661,6 +670,17 @@ internal sealed class MidiFileWriter
         var evt = new ControlChangeEvent(new SevenBitNumber(0), new SevenBitNumber((byte)(bank.Bank & 0x7F)))
         {
             Channel = Channel(bank.Channel),
+        };
+        return evt;
+    }
+
+    private static MidiEvent BuildControlChange(MidiControlChangeEvent controlChange)
+    {
+        var evt = new ControlChangeEvent(
+            new SevenBitNumber((byte)(controlChange.Control & 0x7F)),
+            new SevenBitNumber((byte)(controlChange.Value & 0x7F)))
+        {
+            Channel = Channel(controlChange.Channel),
         };
         return evt;
     }

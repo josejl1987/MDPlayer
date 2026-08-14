@@ -2,16 +2,22 @@
 
 namespace Fmp.Core.Timing;
 
+/// <summary>A bounded timing candidate retained for structural second-pass scoring.</summary>
+internal sealed record MusicalGridCandidate(
+    double Bpm,
+    Meter Meter,
+    double BeatPhase,
+    double Score);
+
 /// <summary>
 /// Canonical conversion from playback sample positions (the timeline clock, in
-/// source samples) to quarter-note musical positions and MIDI ticks. Every MIDI
-/// event — notes, pitch bends, rhythm/drums, loops, markers — MUST be converted
-/// through this single map so that tempo, beat phase and downbeats are aligned
-/// to the same grid.
+/// source samples) to quarter-note musical positions and MIDI ticks. Every MIDI event —
+/// notes, pitch bends, rhythm/drums, loops, markers — MUST be converted through this
+/// single map so that tempo, beat phase and downbeats are aligned to the same grid.
 ///
 /// Segments are ordered, non-overlapping and contiguous: the quarter position
-/// carried by a following segment equals the value produced by the previous
-/// segment at the same sample, so there is no discontinuity at boundaries.
+/// carried by a following segment equals the value produced by the previous segment at
+/// the same sample, so there is no discontinuity at boundaries.
 /// </summary>
 internal sealed class MusicalTimeMap
 {
@@ -25,7 +31,8 @@ internal sealed class MusicalTimeMap
         double? firstDownbeatQuarter = null,
         double confidence = 1.0,
         double? alternateBpm = null,
-        bool isTempoAmbiguous = false)
+        bool isTempoAmbiguous = false,
+        IReadOnlyList<MusicalGridCandidate>? gridCandidates = null)
     {
         if (sampleRate <= 0)
             throw new ArgumentOutOfRangeException(nameof(sampleRate));
@@ -40,8 +47,10 @@ internal sealed class MusicalTimeMap
         Confidence = confidence;
         AlternateBpm = alternateBpm;
         IsTempoAmbiguous = isTempoAmbiguous;
+        GridCandidates = gridCandidates ?? Array.Empty<MusicalGridCandidate>();
         _segments = ValidateSegments(segments);
     }
+    public IReadOnlyList<MusicalGridCandidate> GridCandidates { get; }
 
     public int SampleRate { get; }
 

@@ -53,6 +53,14 @@ internal sealed record MidiProgramEvent(long TickIn, int Track, int Channel, int
 /// <summary>Bank select (control change 0 / 32) plus optional program.</summary>
 internal sealed record MidiBankEvent(long TickIn, int Track, int Channel, int Bank) : MidiEventBase(TickIn);
 
+/// <summary>Generic control change (Bn): controller number and 7-bit value.</summary>
+internal sealed record MidiControlChangeEvent(
+    long TickIn,
+    int Track,
+    int Channel,
+    int Control,
+    int Value) : MidiEventBase(TickIn);
+
 /// <summary>Pitch bend (E0), 14-bit signed value in [-8192, 8191].</summary>
 internal sealed record MidiPitchBendEvent(long TickIn, int Track, int Channel, int Bend) : MidiEventBase(TickIn);
 
@@ -89,6 +97,7 @@ internal enum PackedMidiEventKind : byte
     BendRange,
     PitchBend,
     Tuning,
+    ControlChange,
 }
 
 internal struct PackedMidiEvent
@@ -121,6 +130,17 @@ internal struct PackedMidiEvent
             Channel = channel,
             A = bank,
             Kind = PackedMidiEventKind.Bank,
+        };
+
+    public static PackedMidiEvent ControlChange(long tick, int track, int channel, int control, int value)
+        => new()
+        {
+            Tick = tick,
+            Track = track,
+            Channel = channel,
+            A = control,
+            B = value,
+            Kind = PackedMidiEventKind.ControlChange,
         };
 
     public static PackedMidiEvent Program(long tick, int track, int channel, int program)
@@ -199,6 +219,7 @@ internal static class MidiEventOrder
             MidiMetaTextEvent => 1,
             MidiBankEvent => 2,
             MidiProgramEvent => 2,
+            MidiControlChangeEvent => 2,
             MidiBendRangeEvent => 2,
             MidiTuningEvent => 2,
             MidiPitchBendEvent => 3,
@@ -216,6 +237,7 @@ internal static class MidiEventOrder
         PackedMidiEventKind.Tuning => 2,
         PackedMidiEventKind.Bank => 2,
         PackedMidiEventKind.Program => 2,
+        PackedMidiEventKind.ControlChange => 2,
         PackedMidiEventKind.PitchBend => 3,
         PackedMidiEventKind.NoteOn => 4,
         _ => 5,

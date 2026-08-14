@@ -202,4 +202,42 @@ public sealed class MetricalHierarchyInferenceTests
     private static NoteEvent Note(string voice, long start, long end) =>
         new(voice, start, end, 440, 60, "inst", VisualizationNoteMode.Fm, false,
             Array.Empty<PitchChange>());
+    [Fact]
+    public void RhythmRoles_SelectMiddleTempoAliasAndEstablishDownbeat()
+    {
+        const int sampleRate = 44_100;
+        const double expectedBpm = 149.408;
+        long tatum = (long)Math.Round(sampleRate * 60.0 / expectedBpm / 4.0);
+        var rhythm = new List<RhythmEvent>();
+        int count = 264;
+        for (int index = 0; index < count; index++)
+        {
+            long sample = index * tatum;
+            rhythm.Add(new RhythmEvent("hi-hat", "hi-hat", sample, 1.0f, 0));
+            if (index % 8 == 4)
+                rhythm.Add(new RhythmEvent("snare", "snare", sample, 1.0f, 0));
+            if (index % 8 == 0)
+                rhythm.Add(new RhythmEvent("kick", "kick", sample, 1.0f, 0));
+        }
+
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = sampleRate,
+            StartSample = 0,
+            EndSample = count * tatum,
+            Rhythm = rhythm,
+            Timing = Array.Empty<DriverTimingEvent>(),
+        };
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(
+            timeline,
+            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+
+        Assert.InRange(build.Diagnostics.SelectedBpm!.Value, 148.5, 150.5);
+        Assert.False(build.Diagnostics.TempoAmbiguous);
+        Assert.Equal(4, build.Diagnostics.TatumsPerBeat);
+        Assert.True(build.Diagnostics.DownbeatKnown);
+        Assert.Equal(new Meter(4, 4), build.Map.Meter);
+        Assert.NotNull(build.Map.FirstDownbeatQuarter);
+    }
+
 }
