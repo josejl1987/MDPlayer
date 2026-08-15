@@ -451,7 +451,7 @@ internal static class CorpusReporter
                 {
                     gitSha = GitSha(root),
                     branch = GitBranch(root),
-                    regeneratedFromAtLeast = "1874d55c",
+                    regeneratedFromAtLeast = "1c02e0df",
                 },
                 capture = new
                 {
