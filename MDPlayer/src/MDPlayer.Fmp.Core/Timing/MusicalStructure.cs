@@ -236,6 +236,8 @@ internal sealed record MusicalSection(int StartBar, int EndBar, string Label, do
 /// second pass lies outside the capture (those carry Similarity 0 and never fabricate
 /// coverage). <see cref="BoundaryErrorBars"/> carries the worst source-boundary error
 /// for source-supported blocks (0 for content-only detection).
+/// <see cref="ContentOnlyFallback"/> marks a loop promoted by the content-only
+/// fallback when the grid failed to resolve (Hypothesis 4 calibration).
 /// </summary>
 internal sealed record RepeatedBlock(
     int StartBar,
@@ -246,7 +248,8 @@ internal sealed record RepeatedBlock(
     double MaterialCoverage = 0,
     bool SourceSupported = false,
     bool ContentValidated = true,
-    double BoundaryErrorBars = 0);
+    double BoundaryErrorBars = 0,
+    bool ContentOnlyFallback = false);
 /// <summary>
 /// Raw source-loop evidence. An entry is optional because many drivers expose only
 /// restart positions; restart samples are preserved independently from inferred

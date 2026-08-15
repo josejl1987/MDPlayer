@@ -28,6 +28,38 @@ internal static class MusicalStructureAnalyzer
     private const double RepeatedMaterialCoverageThreshold = 0.40;
     private const double RepeatedSpanCoverageThreshold = 0.25;
     private const double FundamentalPeriodTolerance = 0.02;
+    // Hypothesis 4 (calibration): content-only loop fallback thresholds. When
+    // the grid fails to resolve, only NEAR-PERFECT repeated content earns a
+    // promoted loop (similarity >= 0.99, span coverage >= 0.50) — anything
+    // weaker stays invisible rather than fabricating a loop.
+    private const double ContentFallbackSimilarity = 0.99;
+    private const double ContentFallbackSpanCoverage = 0.50;
+    // Patch 8C: accent-aware downbeat discriminator. Sustained note starts are
+    // counted per beat class relative to the candidate downbeat; the beat-0
+    // share through r/(1+r) is the accent fit. The signal is a PHASE-ONLY
+    // discriminator: it never enters the combined score, so tempo/meter margins
+    // (and every other song's resolution state) are untouched.
+    private const double AccentDownbeatWeight = 0.30;
+    private const double AccentDownbeatMarginMin = 0.03;
+    private const double AccentSustainedQuarterSpan = 0.5;
+    private const int AccentMinimumSustainedStarts = 8;
+    // Patch 8D (calibration Exp 7): bass-downbeat focus discriminator.
+    // Low-register (MIDI <= 55) onsets are counted per beat class relative to
+    // the candidate's OWN downbeat; the beat-0 share through r/(1+r) is the
+    // bass fit. Like the accent fit it is a PHASE-ONLY signal: it never enters
+    // the stored combined score. Gate-side it (a) re-ranks phases within the
+    // winner family to gate the downbeat, and (b) re-ranks the family list to
+    // CONFIRM the tempo margin — the winner's bass-adjusted score minus the
+    // best bass-adjusted rival family. The adjusted score blends the bass fit
+    // with the combined score in proportion to each candidate's own total
+    // signal weight, so a thin-evidence score (e.g. percussion-free, restart-
+    // free tracks whose total weight is 0.55) lets bass carry more weight.
+    // max() semantics mean bass can only strengthen resolution, never weaken
+    // or re-decide it.
+    private const double BassDownbeatWeight = 0.12;
+    private const double BassDownbeatMarginMin = 0.03;
+    private const int BassMaximumMidiNote = 55;
+    private const int BassMinimumOnsets = 6;
 
     private readonly record struct RhythmRoleEvidence(
         double Fit,
@@ -53,7 +85,8 @@ internal static class MusicalStructureAnalyzer
         double? SpanCoverage,
         double? MaterialCoverage,
         RepeatedBlock? BestBlock = null,
-        RestartBoundaryEvidence? RestartEvidence = null);
+        RestartBoundaryEvidence? RestartEvidence = null,
+        double TotalSignalWeight = 0);
 
     private readonly record struct ScoredGrid(
         MusicalGridCandidate Candidate,
@@ -89,7 +122,12 @@ internal static class MusicalStructureAnalyzer
         // fit - baseline, so candidates aligned equally to the same restart
         // boundary add exactly 0 to their score — shared restart evidence never
         // compresses the tempo/meter margin (Patch 2 behavior restored).
-        double restartBaseline = ComputeRestartBaseline(map, timeline, sourceEvidence);
+        // Hypothesis 8: both the baseline and the signal require >= 2 phase
+        // candidates of the same (bpm, meter) family to carry restart evidence —
+        // a single coincidental phase alignment is phase luck, not tempo
+        // evidence, and must not dominate the ranking.
+        (double restartBaseline, Dictionary<(double Bpm, Meter Meter), int> restartFamilySupport) =
+            ComputeRestartSignalPlan(map, timeline, sourceEvidence);
 
         ScoredGrid[] ranked = map.GridCandidates
             .Select(candidate =>
@@ -97,7 +135,7 @@ internal static class MusicalStructureAnalyzer
                 MusicalTimeMap variant = VariantMap(map, candidate);
                 return new ScoredGrid(
                     candidate,
-                    GridStructuralScore(candidate, variant, timeline, sourceEvidence, restartBaseline));
+                    GridStructuralScore(candidate, variant, timeline, sourceEvidence, restartBaseline, restartFamilySupport));
             })
             .Where(value => double.IsFinite(value.Score.Score))
             .OrderByDescending(value => value.Score.Score)
@@ -130,6 +168,145 @@ internal static class MusicalStructureAnalyzer
             && other.Candidate.FirstDownbeatQuarter != winner.Candidate.FirstDownbeatQuarter)
             ?? double.PositiveInfinity;
 
+        // Patch 8C: accent-aware phase discrimination, family-internal and
+        // phase-only. Within the winner family (same bpm + meter) the combined
+        // score is re-ranked with the sustained-start accent fit
+        // (DownbeatAccentFit); the accent margin gates the downbeat ONLY.
+        // The combined score — and with it every tempo/meter/downbeat margin —
+        // is untouched. A family with no accent evidence (null fit, e.g. fast
+        // percussion-only tracks) keeps its combined-score phase behavior
+        // exactly; the accent margin requires at least two family phases with
+        // accent evidence, so a lone candidate never self-resolves.
+        double? accentDownbeatMargin = null;
+        double? accentResolvedDownbeat = null;
+        {
+            double accentBest = double.NegativeInfinity;
+            double accentSecond = double.NegativeInfinity;
+            double? accentPhase = null;
+            foreach (ScoredGrid familyMember in ranked)
+            {
+                if (Math.Round(familyMember.Candidate.Bpm, 6) != Math.Round(winner.Candidate.Bpm, 6)
+                    || familyMember.Candidate.Meter != winner.Candidate.Meter)
+                {
+                    continue;
+                }
+                MusicalTimeMap variant = VariantMap(map, familyMember.Candidate);
+                if (variant.Meter is not { } meter
+                    || variant.FirstDownbeatQuarter is not double downbeatQ)
+                {
+                    continue;
+                }
+                double? fit = DownbeatAccentFit(
+                    variant, timeline, downbeatQ, meter.QuartersPerBar);
+                if (fit is not double f)
+                    continue;
+                double adjusted =
+                    (familyMember.Score.Score + AccentDownbeatWeight * f) / (1.0 + AccentDownbeatWeight);
+                if (adjusted > accentBest)
+                {
+                    accentSecond = accentBest;
+                    accentBest = adjusted;
+                    accentPhase = familyMember.Candidate.FirstDownbeatQuarter;
+                }
+                else if (adjusted > accentSecond)
+                {
+                    accentSecond = adjusted;
+                }
+            }
+            if (accentPhase is not null
+                && double.IsFinite(accentSecond)
+                && accentBest - accentSecond >= AccentDownbeatMarginMin)
+            {
+                accentDownbeatMargin = accentBest - accentSecond;
+                accentResolvedDownbeat = accentPhase;
+            }
+        }
+
+        // Patch 8D: bass-downbeat focus, phase-only and gate-side like the
+        // accent fit. Within the winner family, phases are re-ranked by the
+        // bass-adjusted score and the phase margin gates the downbeat (same
+        // 0.03 gate as the accent). Across families the same bass-adjusted
+        // score re-ranks the family list; the winner's adjusted margin over
+        // the best rival family CONFIRMS the tempo margin. The combined score
+        // is never written — bass can only strengthen an existing resolution,
+        // never change the winner or shrink a margin. Both the downbeat gate
+        // and the tempo confirmation require at least two competing candidates
+        // with bass evidence, so a lone candidate never self-resolves.
+        double? bassDownbeatMargin = null;
+        double? bassResolvedDownbeat = null;
+        double? bassTempoMargin = null;
+        {
+            var familyAdjusted = new Dictionary<(double Bpm, Meter Meter), double>();
+            double bassBest = double.NegativeInfinity;
+            double bassSecond = double.NegativeInfinity;
+            double? bassPhase = null;
+            foreach (ScoredGrid familyMember in ranked)
+            {
+                MusicalTimeMap variant = VariantMap(map, familyMember.Candidate);
+                if (variant.Meter is not { } meter
+                    || variant.FirstDownbeatQuarter is not double downbeatQ)
+                {
+                    continue;
+                }
+                double? fit = BassDownbeatFocusFit(
+                    variant, timeline, downbeatQ, meter.QuartersPerBar);
+                if (fit is not double f)
+                    continue;
+                double totalWeight = Math.Max(0.0, familyMember.Score.TotalSignalWeight);
+                double adjusted = (totalWeight * familyMember.Score.Score
+                    + BassDownbeatWeight * f) / (totalWeight + BassDownbeatWeight);
+                var familyKey = (Bpm: Math.Round(familyMember.Candidate.Bpm, 6), Meter: meter);
+                if (!familyAdjusted.TryGetValue(familyKey, out double priorBest)
+                    || adjusted > priorBest)
+                {
+                    familyAdjusted[familyKey] = adjusted;
+                }
+                if (familyKey.Bpm != Math.Round(winner.Candidate.Bpm, 6)
+                    || familyKey.Meter != winner.Candidate.Meter)
+                {
+                    continue;
+                }
+                if (adjusted > bassBest)
+                {
+                    bassSecond = bassBest;
+                    bassBest = adjusted;
+                    bassPhase = familyMember.Candidate.FirstDownbeatQuarter;
+                }
+                else if (adjusted > bassSecond)
+                {
+                    bassSecond = adjusted;
+                }
+            }
+            if (bassPhase is not null
+                && double.IsFinite(bassSecond)
+                && bassBest - bassSecond >= BassDownbeatMarginMin)
+            {
+                bassDownbeatMargin = bassBest - bassSecond;
+                bassResolvedDownbeat = bassPhase;
+            }
+            var winnerKey = (Bpm: Math.Round(winner.Candidate.Bpm, 6), Meter: winner.Candidate.Meter);
+            double winnerAdjusted = 0;
+            if (familyAdjusted.TryGetValue(winnerKey, out double winnerAdjustedValue))
+            {
+                winnerAdjusted = winnerAdjustedValue;
+                // The rival is the family the COMBINED score found closest (the
+                // tempoMargin rival): the best-ranked candidate with a different
+                // bpm. Bass re-scores that SAME contested pair — it never goes
+                // fishing across every alias family, where a coarse alias grid
+                // (e.g. 25 BPM on a 100 BPM song) trivially concentrates onsets
+                // on its own beat-0 and would swamp the signal. No bass evidence
+                // on the contested rival → no tempo confirmation.
+                ScoredGrid? topRival = ranked.FirstOrDefault(value =>
+                    Math.Round(value.Candidate.Bpm, 6) != Math.Round(winner.Candidate.Bpm, 6));
+                if (topRival is { } rival)
+                {
+                    var rivalKey = (Bpm: Math.Round(rival.Candidate.Bpm, 6), Meter: rival.Candidate.Meter);
+                    if (familyAdjusted.TryGetValue(rivalKey, out double rivalAdjusted))
+                        bassTempoMargin = winnerAdjusted - rivalAdjusted;
+                }
+            }
+        }
+
         // Strong-evidence gates: source fit, repeated content (spec strong gate
         // 0.90 loop-score composite / 0.40 material / 0.50 span), or rhythm.
         // Each path carries its own score/margin thresholds (Patch 8B harness
@@ -141,15 +318,21 @@ internal static class MusicalStructureAnalyzer
             && winner.Score.SpanCoverage is >= 0.50;
         bool roleGate = winner.Score.RhythmRole.Strong;
         double combined = winner.Score.Score;
+        // Patch 8D: the effective tempo margin is the stronger of the combined
+        // margin and the bass-confirmed margin. max() is deliberate: bass can
+        // only confirm an existing winner, never overturn one.
+        double effectiveTempoMargin = tempoMargin;
+        if (bassTempoMargin is double confirmed && confirmed > effectiveTempoMargin)
+            effectiveTempoMargin = confirmed;
         bool tempoResolved;
         if (sourceGate)
-            tempoResolved = combined >= 0.64 && tempoMargin >= 0.02;
+            tempoResolved = combined >= 0.64 && effectiveTempoMargin >= 0.02;
         else if (repeatedGate)
-            tempoResolved = combined >= 0.68 && tempoMargin >= 0.03;
+            tempoResolved = combined >= 0.68 && effectiveTempoMargin >= 0.03;
         else if (roleGate)
-            tempoResolved = combined >= 0.70 && tempoMargin >= 0.04;
+            tempoResolved = combined >= 0.70 && effectiveTempoMargin >= 0.04;
         else
-            tempoResolved = combined >= 0.70 && tempoMargin >= 0.05;
+            tempoResolved = combined >= 0.70 && effectiveTempoMargin >= 0.05;
 
         // Meter resolution follows the evidence path: a bare tempo never
         // resolves meter, and the meter margin only needs to be positive —
@@ -176,8 +359,13 @@ internal static class MusicalStructureAnalyzer
             && evidence.Similarity >= DownbeatRestartSimilarity;
         bool sourceAlignedDownbeat = winner.Candidate.FirstDownbeatQuarter is double winnerDb
             && Math.Abs(winnerDb - map.Segments[0].QuarterPositionAtStart) <= 1e-9;
-        bool downbeatResolved = winner.Candidate.FirstDownbeatQuarter is not null
-            && (downbeatMargin >= 0.03 || restartDownbeatGate || sourceAlignedDownbeat);
+        bool downbeatResolved = (winner.Candidate.FirstDownbeatQuarter is not null
+                && (downbeatMargin >= 0.03 || restartDownbeatGate || sourceAlignedDownbeat))
+            || (accentResolvedDownbeat is not null && accentDownbeatMargin >= AccentDownbeatMarginMin)
+            || (bassResolvedDownbeat is not null && bassDownbeatMargin >= BassDownbeatMarginMin);
+        double? resolvedDownbeat = accentResolvedDownbeat
+            ?? bassResolvedDownbeat
+            ?? (downbeatResolved ? winner.Candidate.FirstDownbeatQuarter : null);
 
         var resolution = new GridResolution(
             winner.Candidate,
@@ -211,7 +399,7 @@ internal static class MusicalStructureAnalyzer
         // unresolved the selected map keeps FirstDownbeatQuarter = null so no
         // FIRST_DOWNBEAT is emitted and no bar-anchored analysis runs.
         MusicalGridCandidate winnerCandidate = resolution.DownbeatResolved
-            ? winner.Candidate
+            ? winner.Candidate with { FirstDownbeatQuarter = resolvedDownbeat }
             : winner.Candidate with { FirstDownbeatQuarter = null };
         ScoredGrid? alternative = rankedFamilies.Length > 1 ? rankedFamilies[1] : null;
         double? alternativeBpm = alternative is ScoredGrid other
@@ -253,7 +441,7 @@ internal static class MusicalStructureAnalyzer
             SelectedBpm = winner.Candidate.Bpm,
             SelectedMeter = winner.Candidate.Meter,
             SelectedDownbeatQuarter = resolution.DownbeatResolved
-                ? winner.Candidate.FirstDownbeatQuarter
+                ? resolvedDownbeat
                 : null,
             WinnerScore = resolution.WinnerScore,
             TempoMargin = resolution.TempoMargin,
@@ -462,7 +650,7 @@ internal static class MusicalStructureAnalyzer
         if (map.Meter is not Meter meter || meter.QuartersPerBar <= 0
             || map.FirstDownbeatQuarter is null
             || map.Confidence < 0.60)
-            return MusicalStructure.Empty;
+            return BuildContentOnlyFallback(map, timeline);
 
         double quartersPerBar = meter.QuartersPerBar;
         double barOrigin = map.FirstDownbeatQuarter.Value;
@@ -489,6 +677,104 @@ internal static class MusicalStructureAnalyzer
             PrimaryLoop = loops.Length > 0 ? loops[0] : null,
             Pickup = pickup.IsRest ? null : pickup,
         };
+    }
+
+    /// <summary>
+    /// Hypothesis 4 (calibration): content-only loop fallback. When the grid
+    /// fails to resolve — tempo/meter rejection, or a resolved tempo/meter with
+    /// an unresolved downbeat — the normal path bails and per-candidate
+    /// repetition evidence measured before resolution would be discarded. This
+    /// re-derives the ranked candidates and promotes a NEAR-PERFECT content
+    /// loop (<see cref="ContentFallbackSimilarity"/> / <see cref="ContentFallbackSpanCoverage"/>)
+    /// into the structure so loopBars is reported and STRUCT_LOOP can be
+    /// derived. Pure fallback: never overrides a resolved grid's loops, never
+    /// touches tempo/meter/downbeat resolution gates, never fabricates
+    /// phrases/sections. Returns <see cref="MusicalStructure.Empty"/> when no
+    /// candidate's content clears the threshold.
+    /// </summary>
+    private static MusicalStructure BuildContentOnlyFallback(
+        MusicalTimeMap map,
+        VisualizationTimeline timeline)
+    {
+        MusicalTimeMapBuildResult reselect = SelectGrid(
+            new MusicalTimeMapBuildResult { Map = map, Diagnostics = new TimingDiagnostics() },
+            timeline);
+        GridSelectionDiagnostics? selection = reselect.Diagnostics.GridSelection;
+        if (selection is not { TopCandidates.Count: > 0 })
+            return MusicalStructure.Empty;
+
+        RepeatedBlock? best = null;
+        MusicalGridCandidate? bestCandidate = null;
+        // Hypothesis 5 (calibration): the fallback must not let an alias-tempo
+        // grid's repeated block displace the accepted grid's loop. On Smoking
+        // Head the bpm-360 double-tempo alias grid carries a 64-bar cross-pass
+        // block (sim 0.9961) that edges out the bpm-180 accepted grid's 32-bar
+        // within-pass fundamental (sim 0.9958) — the 64-bar loop is an artifact
+        // of the half-resolution alias, not of the music. Pass 1 restricts the
+        // search to candidates at the accepted tempo (same-tempo idiom as
+        // ToReceipt); pass 2 preserves the prior behavior only when no
+        // accepted-tempo candidate clears the near-perfect thresholds.
+        double? acceptedBpm = selection.SelectedBpm;
+        for (int pass = 0; pass < 2; pass++)
+        {
+            bool tempoConstrained = pass == 0 && acceptedBpm is not null;
+            foreach (GridCandidateReceipt receipt in selection.TopCandidates)
+            {
+                if (tempoConstrained
+                    && Math.Round(receipt.Bpm, 6) != Math.Round(acceptedBpm!.Value, 6))
+                {
+                    continue;
+                }
+                var candidate = new MusicalGridCandidate(
+                    receipt.Bpm, receipt.Meter, receipt.QuarterAtSourceStart,
+                    receipt.FirstDownbeatQuarter, receipt.CandidatePrior);
+                RepeatedBlock? block = AnalyzeCandidateEvidence(map, candidate, timeline)
+                    .BestRepeatedBlock;
+                if (block is null
+                    || block.Similarity < ContentFallbackSimilarity
+                    || block.SpanCoverage < ContentFallbackSpanCoverage)
+                {
+                    continue;
+                }
+                if (best is null || FallbackBlockOutranks(block, best))
+                {
+                    best = block;
+                    bestCandidate = candidate;
+                }
+            }
+            if (best is not null || !tempoConstrained)
+                break;
+        }
+        if (best is null || bestCandidate is null)
+            return MusicalStructure.Empty;
+
+        MusicalTimeMap grid = VariantMap(map, bestCandidate);
+        BarFeature[]? bars = BuildBarsForMap(grid, timeline);
+        if (bars is null || bars.Length == 0)
+            return MusicalStructure.Empty;
+
+        RepeatedBlock promoted = best with { ContentOnlyFallback = true };
+        return new MusicalStructure
+        {
+            Bars = bars,
+            Phrases = Array.Empty<MusicalPhrase>(),
+            Sections = Array.Empty<MusicalSection>(),
+            Loops = new[] { promoted },
+            PrimaryLoop = promoted,
+            Pickup = null,
+        };
+    }
+
+    /// <summary>Best near-perfect fallback loop: highest similarity, then longest
+    /// period, then widest span coverage.</summary>
+    private static bool FallbackBlockOutranks(RepeatedBlock candidate, RepeatedBlock current)
+    {
+        int bySimilarity = candidate.Similarity.CompareTo(current.Similarity);
+        if (bySimilarity != 0)
+            return bySimilarity > 0;
+        if (candidate.LengthBars != current.LengthBars)
+            return candidate.LengthBars > current.LengthBars;
+        return candidate.SpanCoverage > current.SpanCoverage;
     }
 
     /// <summary>
@@ -628,30 +914,51 @@ internal static class MusicalStructureAnalyzer
     }
 
     /// <summary>
-    /// Weakest restart-boundary fit among candidates that share the evidence.
-    /// Candidates whose grid cannot validate any restart boundary contribute no
-    /// fit and no weight; the baseline is the floor the discriminating signal is
-    /// measured against. Zero when no candidate has restart evidence.
+    /// Restart-boundary signal plan (Hypothesis 8 calibration). The restart
+    /// signal is a phase-only alignment — where the restart marker falls relative
+    /// to each candidate's downbeat. A single coincidental phase can land the
+    /// marker within <see cref="RestartBoundaryErrorLimit"/> of a bar boundary
+    /// for almost ANY grid (on Robotnik the marker aligns with every tempo
+    /// family at some phase), so one lucky phase is not tempo evidence. Following
+    /// the Exp 6 doctrine (accent/bass phase signals require at least two family
+    /// phases with evidence), the restart signal contributes only when >= 2 phase
+    /// candidates of the same (bpm, meter) family carry restart-boundary
+    /// evidence. The baseline is the weakest fit among SUPPORTED candidates only,
+    /// so an unsupported near-threshold candidate can no longer amplify every
+    /// other candidate's restart advantage (the Robotnik 0.123 knife-edge).
     /// </summary>
-    private static double ComputeRestartBaseline(
-        MusicalTimeMap source,
-        VisualizationTimeline timeline,
-        SourceLoopEvidence sourceEvidence)
+    private static (double Baseline, Dictionary<(double Bpm, Meter Meter), int> FamilySupport)
+        ComputeRestartSignalPlan(
+            MusicalTimeMap source,
+            VisualizationTimeline timeline,
+            SourceLoopEvidence sourceEvidence)
     {
-        double lowest = double.PositiveInfinity;
+        var support = new Dictionary<(double Bpm, Meter Meter), int>();
+        var familyMinFit = new Dictionary<(double Bpm, Meter Meter), double>();
         foreach (MusicalGridCandidate candidate in source.GridCandidates)
         {
             MusicalTimeMap variant = VariantMap(source, candidate);
-            if (variant.Meter is not Meter || variant.FirstDownbeatQuarter is not double)
+            if (variant.Meter is not Meter meter || variant.FirstDownbeatQuarter is not double)
                 continue;
             BarFeature[]? bars = BuildBarsForMap(variant, timeline);
             if (bars is null)
                 continue;
             double? fit = CaptureRestartBoundaryEvidence(variant, sourceEvidence, bars)?.BoundaryFit;
-            if (fit is double finite)
-                lowest = Math.Min(lowest, finite);
+            if (fit is not double finite)
+                continue;
+            var key = (Bpm: Math.Round(candidate.Bpm, 6), Meter: meter);
+            support[key] = support.TryGetValue(key, out int count) ? count + 1 : 1;
+            familyMinFit[key] = Math.Min(
+                familyMinFit.TryGetValue(key, out double prior) ? prior : double.PositiveInfinity,
+                finite);
         }
-        return double.IsFinite(lowest) ? lowest : 0.0;
+        double lowest = double.PositiveInfinity;
+        foreach (((double Bpm, Meter Meter) key, int count) in support)
+        {
+            if (count >= 2 && familyMinFit[key] < lowest)
+                lowest = familyMinFit[key];
+        }
+        return (double.IsFinite(lowest) ? lowest : 0.0, support);
     }
 
     private static GridScore GridStructuralScore(
@@ -659,7 +966,8 @@ internal static class MusicalStructureAnalyzer
         MusicalTimeMap map,
         VisualizationTimeline timeline,
         SourceLoopEvidence sourceEvidence,
-        double restartBaseline)
+        double restartBaseline,
+        IReadOnlyDictionary<(double Bpm, Meter Meter), int> restartFamilySupport)
     {
         // No meter means no bar grid to score at all — the candidate cannot be
         // ranked, only this hard rejection is possible.
@@ -699,11 +1007,31 @@ internal static class MusicalStructureAnalyzer
             BarFeature[] bars = BuildBarsForMap(map, timeline)!;
             restartEvidence = CaptureRestartBoundaryEvidence(map, sourceEvidence, bars);
             restartBoundaryFit = restartEvidence?.BoundaryFit;
+            // Hypothesis 8: the discriminating restart signal contributes only
+            // for families whose restart alignment is corroborated by >= 2 phase
+            // candidates (Exp 6 doctrine: phase-only evidence needs more than one
+            // coincidental phase). A lone phase landing the marker within the
+            // boundary limit is phase luck — it must not carry a family to
+            // victory, and it must not set the baseline others are measured
+            // against. The raw fit stays observable in the breakdown.
+            bool restartSupported = restartEvidence is not null
+                && restartFamilySupport.TryGetValue(
+                    (Bpm: Math.Round(candidate.Bpm, 6), Meter: map.Meter), out int phaseCount)
+                && phaseCount >= 2;
             // Discriminating restart signal: only the candidate's advantage
             // over the shared-evidence baseline contributes, so a restart
             // boundary every candidate aligns to adds exactly 0 (it cannot
-            // compress the tempo/meter margin).
-            Add(restartBoundaryFit - restartBaseline, 0.25);
+            // compress the tempo/meter margin). An unsupported family (single
+            // coincidental phase) must not be REWARDED for phase luck — but
+            // dropping the weight outright renormalizes the remaining signals
+            // and silently squeezes every tempo margin on single-phase
+            // fixtures (HalfTempo 149.4 margin 0.083 -> 0.036). Neutralize:
+            // keep the weight, contribute exactly 0, so the margin scale of
+            // the base scoring is preserved while the signal never votes.
+            if (restartSupported)
+                Add(restartBoundaryFit - restartBaseline, 0.25);
+            else if (restartBoundaryFit is not null)
+                Add(0.0, 0.25);
             repeated = RepeatedContentFit(bars);
             spanCoverage = repeated.SpanCoverage > 0 ? repeated.SpanCoverage : null;
             materialCoverage = repeated.MaterialCoverage > 0 ? repeated.MaterialCoverage : null;
@@ -742,7 +1070,8 @@ internal static class MusicalStructureAnalyzer
             spanCoverage,
             materialCoverage,
             repeated.Block,
-            restartEvidence);
+            restartEvidence,
+            totalWeight);
     }
 
     private static double? OnsetGridFit(
@@ -772,6 +1101,107 @@ internal static class MusicalStructureAnalyzer
             total += 1.0 - Math.Min(0.5, residual) / 0.5;
         }
         return total / positions.Count;
+    }
+
+    /// <summary>
+    /// Sustained-start accent fit: the share of sustained note starts (onset-to-
+    /// offset span &gt;= <see cref="AccentSustainedQuarterSpan"/> quarter) whose onset
+    /// rounds to beat class 0, relative to the mean of the other beat classes,
+    /// through r/(1+r). A downbeat is acoustically accented when sustained
+    /// material begins on it far more often than on the other beats. Null when
+    /// fewer than <see cref="AccentMinimumSustainedStarts"/> sustained starts exist —
+    /// the signal is absent, never a weak 0 (a percussion-only track must not
+    /// pretend to phase evidence).
+    /// </summary>
+    private static double? DownbeatAccentFit(
+        MusicalTimeMap map,
+        VisualizationTimeline timeline,
+        double downbeat,
+        double quartersPerBar)
+    {
+        IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
+        int beatClasses = Math.Max(1, (int)Math.Ceiling(quartersPerBar));
+        int[] counts = new int[beatClasses];
+        int sustained = 0;
+        double samplesPerQuarter = map.Segments[0].MicrosecondsPerQuarter
+            / 1_000_000.0 * map.SampleRate;
+        foreach (NoteEvent note in notes)
+        {
+            if (note is null)
+                continue;
+            if ((note.EndSample - note.StartSample) / samplesPerQuarter < AccentSustainedQuarterSpan)
+                continue;
+            sustained++;
+            double beat = PositiveModulo(
+                map.SampleToQuarterPosition(note.StartSample) - downbeat,
+                quartersPerBar);
+            for (int k = 0; k < beatClasses; k++)
+            {
+                if (Math.Abs(beat - k) <= 0.5)
+                {
+                    counts[k]++;
+                    break;
+                }
+            }
+        }
+        if (sustained < AccentMinimumSustainedStarts)
+            return null;
+        int beatZero = counts[0];
+        double otherMean = beatClasses > 1
+            ? counts.Skip(1).Sum() / (double)(beatClasses - 1)
+            : 0;
+        double ratio = beatZero / Math.Max(1.0, otherMean);
+        return ratio / (1.0 + ratio);
+    }
+
+    /// <summary>
+    /// Bass-downbeat focus fit: the share of low-register (MIDI &lt;=
+    /// <see cref="BassMaximumMidiNote"/>) onsets that round to beat class 0,
+    /// relative to the mean of the other beat classes, through r/(1+r). Bass
+    /// lines anchor the downbeat: when low-register material begins on beat 0
+    /// far more often than on the other beats, the candidate's own downbeat is
+    /// acoustically grounded. Null when fewer than
+    /// <see cref="BassMinimumOnsets"/> bass onsets exist — the signal is
+    /// absent, never a weak 0. The 6-onset floor mirrors the accent fit's
+    /// "evidence or nothing" rule; it is lower than the accent's 8 because
+    /// bass material is sparser than sustained starts, and 6 still guarantees
+    /// more than one full bar's worth of bass attack material for any meter.
+    /// </summary>
+    private static double? BassDownbeatFocusFit(
+        MusicalTimeMap map,
+        VisualizationTimeline timeline,
+        double downbeat,
+        double quartersPerBar)
+    {
+        IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
+        int beatClasses = Math.Max(1, (int)Math.Ceiling(quartersPerBar));
+        int[] counts = new int[beatClasses];
+        int bassOnsets = 0;
+        foreach (NoteEvent note in notes)
+        {
+            if (note is null || note.InitialMidiNote > BassMaximumMidiNote)
+                continue;
+            bassOnsets++;
+            double beat = PositiveModulo(
+                map.SampleToQuarterPosition(note.StartSample) - downbeat,
+                quartersPerBar);
+            for (int k = 0; k < beatClasses; k++)
+            {
+                if (Math.Abs(beat - k) <= 0.5)
+                {
+                    counts[k]++;
+                    break;
+                }
+            }
+        }
+        if (bassOnsets < BassMinimumOnsets)
+            return null;
+        int beatZero = counts[0];
+        double otherMean = beatClasses > 1
+            ? counts.Skip(1).Sum() / (double)(beatClasses - 1)
+            : 0;
+        double ratio = beatZero / Math.Max(1.0, otherMean);
+        return ratio / (1.0 + ratio);
     }
 
     private static RhythmRoleEvidence RhythmRoleFit(
