@@ -1,4 +1,5 @@
 using System.Globalization;
+using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 
 namespace Fmp.Cli;
@@ -56,6 +57,10 @@ internal sealed class MidiOptions : BatchRenderSettings
     public int BendRange { get; set; } = 24;
     public bool UsePercussionChannel { get; set; } = true;
 
+    /// <summary>Track grouping policy: physical (one track per source voice) or
+    /// instrument (split a physical voice into separate instrument tracks).</summary>
+    public MidiTrackLayout TrackLayout { get; set; } = MidiTrackLayout.PhysicalVoice;
+
     /// <summary>Pitch-normalization mode: fidelity | daw | off (validated at parse).</summary>
     public string PitchNormalization { get; set; } = "fidelity";
 
@@ -103,6 +108,7 @@ internal static class MidiOptionsParser
                     case "--no-pitch-bend" when value == null: result.EmitPitchBend = false; break;
                     case "--bend-range": result.BendRange = reader.ReadInt(name); break;
                     case "--no-percussion-channel" when value == null: result.UsePercussionChannel = false; break;
+                    case "--track-layout": result.TrackLayout = ParseTrackLayout(reader.RequireValue(name)); break;
                     case "--pitch-normalization": result.PitchNormalization = ParsePitchNormalization(reader.RequireValue(name)); break;
                     case "--pitch-report": result.PitchReport = reader.RequireValue(name); break;
                     default: throw new ArgumentException($"unknown option '{name}'");
@@ -153,5 +159,12 @@ internal static class MidiOptionsParser
     {
         "fidelity" or "daw" or "off" => value.ToLowerInvariant(),
         _ => throw new ArgumentException($"unknown --pitch-normalization '{value}' (expected fidelity|daw|off)"),
+    };
+
+    private static MidiTrackLayout ParseTrackLayout(string value) => value.ToLowerInvariant() switch
+    {
+        "physical" => MidiTrackLayout.PhysicalVoice,
+        "instrument" => MidiTrackLayout.InstrumentSplit,
+        _ => throw new ArgumentException($"unknown --track-layout '{value}' (expected physical|instrument)"),
     };
 }

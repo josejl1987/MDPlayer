@@ -206,21 +206,47 @@ internal sealed class PhraseFeature
     }
 }
 
-/// <summary>A labeled structural span: bars [StartBar, EndBar).</summary>
-internal sealed record MusicalSection(int StartBar, int EndBar, string Label);
+/// <summary>
+/// A labeled phrase span: bars [StartBar, EndBar). <see cref="Confidence"/> is the
+/// corresponding-bar similarity that earned the label (1.0 for the first
+/// occurrence of a label, the match similarity for repeats, 1.0 for TURNAROUND
+/// which is deterministic by construction).
+/// </summary>
+internal sealed record MusicalPhrase(int StartBar, int EndBar, string Label, double Confidence);
 
 /// <summary>
-/// A repeated block: bars [StartBar, StartBar+LengthBars) are (near-)identical to the
-/// immediately following equal-length span, i.e. a loop of <see cref="LengthBars"/> bars.
-/// Similarity and coverage are retained so source-supported loops can outrank a
-/// content-only coincidence.
+/// A labeled structural span: bars [StartBar, EndBar). Sections are formed by
+/// merging adjacent phrases that share a label (target 8 bars); <see cref="Label"/>
+/// carries the bare section name (e.g. "A"), <see cref="Confidence"/> the average
+/// confidence of the merged phrases. Turnarounds are phrase-level only and never
+/// form sections.
+/// </summary>
+internal sealed record MusicalSection(int StartBar, int EndBar, string Label, double Confidence);
+
+/// <summary>
+/// A repeated block: bars [StartBar, StartBar+LengthBars) repeat, starting with the
+/// immediately following equal-length span, with <see cref="RepeatCount"/> total
+/// occurrences validated in order (block1-block2, then block1-block3, ... until the
+/// first failing pair). <see cref="SpanCoverage"/> is RepeatCount*LengthBars over the
+/// total bar count; <see cref="MaterialCoverage"/> is the share of bars carrying
+/// material across the compared span. Loops rejected by the spec gates
+/// (RepeatCount&lt;2, Similarity&lt;0.85, MaterialCoverage&lt;0.40,
+/// SpanCoverage&lt;0.25) are never emitted. <see cref="ContentValidated"/> distinguishes
+/// blocks verified against actual bar content from source boundary-only blocks whose
+/// second pass lies outside the capture (those carry Similarity 0 and never fabricate
+/// coverage). <see cref="BoundaryErrorBars"/> carries the worst source-boundary error
+/// for source-supported blocks (0 for content-only detection).
 /// </summary>
 internal sealed record RepeatedBlock(
     int StartBar,
     int LengthBars,
+    int RepeatCount = 0,
     double Similarity = 0,
-    double Coverage = 0,
-    bool SourceSupported = false);
+    double SpanCoverage = 0,
+    double MaterialCoverage = 0,
+    bool SourceSupported = false,
+    bool ContentValidated = true,
+    double BoundaryErrorBars = 0);
 /// <summary>
 /// Raw source-loop evidence. An entry is optional because many drivers expose only
 /// restart positions; restart samples are preserved independently from inferred
@@ -230,18 +256,104 @@ internal sealed record SourceLoopEvidence(
     long? EntrySample,
     IReadOnlyList<long> RestartSamples);
 
+/// <summary>
+/// Best single-restart loop inference for one grid: a restart marker whose
+/// surrounding content validates an inferred loop period on both sides. Only
+/// produced when the restart lands within <c>0.125</c> bars of a bar boundary and
+/// content similarity/material gates pass — a raw restart alone never establishes
+/// a loop. <see cref="SpanCoverage"/> is 1.0 because periods whose spans are not
+/// fully inside the capture are rejected (never fabricated).
+/// <see cref="BoundaryErrorBars"/> is |restartBarExact - chosenBar| for the marker
+/// that produced this evidence (Patch 8A audit visibility).
+/// </summary>
+internal sealed record RestartBoundaryEvidence(
+    long RestartSample,
+    int RestartBarBoundary,
+    int PeriodBars,
+    int InferredStartBar,
+    double BoundaryFit,
+    double Similarity,
+    double SpanCoverage,
+    double MaterialCoverage,
+    double BoundaryErrorBars = 0);
+
+/// <summary>
+/// One restart marker's bar-grid snapping record (Patch 8A audit): the exact bar
+/// position of the restart under the candidate's downbeat,
+/// <c>(quarter(restart) - firstDownbeatQuarter) / quartersPerBar</c>, the integer bar
+/// chosen (AwayFromZero rounding), the |exact - chosen| error, and whether the marker
+/// was dropped from restart-boundary evidence (error &gt; 0.125 bars, or no
+/// downbeat/meter grid). Every restart is recorded — none are silently discarded.
+/// </summary>
+internal sealed record RestartSnapRecord(
+    long RestartSample,
+    double RestartBarExact,
+    int ChosenBar,
+    double ErrorBars,
+    bool Dropped);
+
+/// <summary>
+/// Structural-evidence audit for one grid candidate (Patch 8A): how the candidate's
+/// bar grid was built (bar origin = candidate downbeat, barCount =
+/// Ceil((lastQuarter - downbeat) / quartersPerBar)), every restart's bar snapping,
+/// and the repeated-block search outcome over those bars. Reported per candidate by
+/// the corpus harness so the extraction chain (candidate grid → bar construction →
+/// restart snapping → repeated-block search) is visible end to end.
+/// </summary>
+internal sealed record CandidateStructuralEvidence(
+    bool HasMeter,
+    bool HasDownbeat,
+    double BarOrigin,
+    int BarCount,
+    double QuartersPerBar,
+    double LastQuarter,
+    bool RangeCovered,
+    IReadOnlyList<RestartSnapRecord> RestartSnaps,
+    int EvaluatedMaxPeriod,
+    bool Period33Evaluated,
+    bool Start0Evaluated,
+    int CompleteSpansForPeriod33,
+    RepeatedBlock? BestRepeatedBlock,
+    RestartBoundaryEvidence? RestartEvidence);
+
+/// <summary>
+/// Outcome of structural grid selection (Patch 8B): tempo, meter, and downbeat
+/// carry separate margins and separate resolution flags. Tempo may resolve on
+/// its own evidence path while the meter stays unresolved (and vice versa);
+/// <see cref="DownbeatResolved"/> is decided independently from the phase margin
+/// and restart-boundary evidence — a map may carry a resolved tempo and meter
+/// with an unresolved downbeat.
+/// </summary>
+internal sealed record GridResolution(
+    MusicalGridCandidate Winner,
+    double WinnerScore,
+    double TempoMargin,
+    double MeterMargin,
+    double DownbeatMargin,
+    bool TempoResolved,
+    bool MeterResolved,
+    bool DownbeatResolved,
+    GridScoreBreakdown Breakdown);
+
 /// <summary>Coarse structural analysis of a decoded timeline against a time map.</summary>
 internal sealed class MusicalStructure
 {
     public static MusicalStructure Empty { get; } = new()
     {
         Bars = Array.Empty<BarFeature>(),
+        Phrases = Array.Empty<MusicalPhrase>(),
         Sections = Array.Empty<MusicalSection>(),
         Loops = Array.Empty<RepeatedBlock>(),
         PrimaryLoop = null,
+        Pickup = null,
     };
 
     public required IReadOnlyList<BarFeature> Bars { get; init; }
+
+    /// <summary>Detected phrases: 4-bar units that never cross a validated loop
+    /// boundary; a 1-bar remainder becomes TURNAROUND, a 2-3 bar remainder is
+    /// attached to the preceding phrase. Empty for rest-only material.</summary>
+    public required IReadOnlyList<MusicalPhrase> Phrases { get; init; }
 
     public required IReadOnlyList<MusicalSection> Sections { get; init; }
 
@@ -250,6 +362,12 @@ internal sealed class MusicalStructure
 
     /// <summary>The primary (largest validated) repeated cycle, or null when none detected.</summary>
     public RepeatedBlock? PrimaryLoop { get; init; }
+
+    /// <summary>The partial leading bar before the first downbeat, when the downbeat
+    /// lands after the source start (spec P0-8). Its span is [FirstDownbeatQuarter -
+    /// QuartersPerBar, FirstDownbeatQuarter); pre-downbeat events live here and never
+    /// in the bar grid or loop counting. Null when no pre-downbeat material exists.</summary>
+    public BarFeature? Pickup { get; init; }
 
     public bool HasSections => Sections.Count > 1;
 

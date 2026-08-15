@@ -607,7 +607,11 @@ public sealed class MidiFidelityIntegrationTests
     public void Symbolic_ContinuousGrid_QuarterPositionIsContinuous()
     {
         // The map never snaps note positions to inferred beats: SampleToQuarterPosition
-        // is the raw continuous conversion.
+        // is the raw continuous conversion. Probe BETWEEN the notes: the grid may
+        // resolve on any octave of the family (Patch 8B splits tempo/meter
+        // resolution, so a 400 BPM reading can place each note onset almost
+        // exactly on a quarter), and a note onset is therefore not guaranteed to
+        // stay off-grid. A between-notes sample is off-grid at every octave.
         double spq = Sr * 60.0 / 100.0;
         long step = (long)Math.Round(spq / 2.0);
         var notes = Enumerable.Range(0, 20)
@@ -619,7 +623,8 @@ public sealed class MidiFidelityIntegrationTests
         }, new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
         MusicalTimeMap map = build.Map;
         // A non-grid sample maps to a fractional, non-integer quarter — never snapped.
-        double q = map.SampleToQuarterPosition((long)Math.Round(0.37 * step) + 3 * step);
+        long probe = (long)Math.Round(0.37 * step) + 3 * step + (long)Math.Round(step / 3.0);
+        double q = map.SampleToQuarterPosition(probe);
         Assert.True(Math.Abs(q - Math.Round(q)) > 0.01, $"quarter {q} must be continuous, not snapped");
     }
 

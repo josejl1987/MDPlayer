@@ -349,7 +349,11 @@ internal static class MusicalTimeMapBuilder
         }
 
         IReadOnlyList<MusicalGridCandidate> gridCandidates =
-            BuildGridCandidates(segments, firstDownbeatQuarter, options.Meter);
+            BuildGridCandidates(
+                segments,
+                options.FirstDownbeatSample,
+                timeline.StartSample,
+                options.Meter);
 
         return new MusicalTimeMap(
             timeline.SampleRate,
@@ -364,25 +368,46 @@ internal static class MusicalTimeMapBuilder
     }
     private static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
         IReadOnlyList<TempoSegment> segments,
-        double? firstDownbeatQuarter,
-        Meter? preferredMeter)
+        long? explicitDownbeatSample,
+        long startSample,
+        Meter? explicitMeter)
     {
-        Meter[] meters = preferredMeter is Meter fixedMeter
+        // Only an explicit user meter override hard-restricts the evaluated
+        // meters; this (non-symbolic) path has no provisional hierarchy meter.
+        Meter[] meters = explicitMeter is Meter fixedMeter
             ? new[] { fixedMeter }
             : new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
         var result = new List<MusicalGridCandidate>(segments.Count * 15);
         foreach (TempoSegment segment in segments)
         {
             double quarterAtSourceStart = segment.QuarterPositionAtStart;
-            double downbeatBase = firstDownbeatQuarter ?? quarterAtSourceStart;
             foreach (double ratio in new[] { 0.25, 0.5, 1.0, 2.0, 4.0 })
             {
                 double bpm = segment.BeatsPerMinute * ratio;
                 if (bpm is < 20 or > 480)
                     continue;
                 double score = 1.0 / (1.0 + Math.Abs(Math.Log(ratio)));
+                double samplesPerQuarter = segment.SamplesPerQuarter / ratio;
                 foreach (Meter meter in meters)
                 {
+                    if (explicitDownbeatSample is long explicitSample)
+                    {
+                        // Explicit downbeat: convert that exact sample under this
+                        // candidate's tempo; generate ONLY that phase — never
+                        // shifted or snapped to the meter grid.
+                        double downbeat = quarterAtSourceStart
+                            + (explicitSample - startSample) / samplesPerQuarter;
+                        result.Add(new MusicalGridCandidate(
+                            bpm,
+                            meter,
+                            quarterAtSourceStart,
+                            downbeat,
+                            score));
+                        continue;
+                    }
+
+                    // Inferred phase: downbeats AT OR BEFORE source start, one per
+                    // plausible beat phase within the bar.
                     double[] offsets = meter switch
                     {
                         { Numerator: 4, Denominator: 4 } => new[] { 0.0, 1.0, 2.0, 3.0 },
@@ -392,11 +417,15 @@ internal static class MusicalTimeMapBuilder
                     };
                     foreach (double offset in offsets)
                     {
+                        double downbeat = NormalizeDownbeat(
+                            quarterAtSourceStart - offset,
+                            quarterAtSourceStart,
+                            meter.QuartersPerBar);
                         result.Add(new MusicalGridCandidate(
                             bpm,
                             meter,
                             quarterAtSourceStart,
-                            downbeatBase + offset,
+                            downbeat,
                             score));
                     }
                 }
@@ -405,13 +434,30 @@ internal static class MusicalTimeMapBuilder
 
         return result
             .OrderByDescending(candidate => candidate.Score)
-            .ThenBy(candidate => preferredMeter is Meter preferred
-                && candidate.Meter == preferred ? 0 : 1)
+            .ThenBy(candidate => explicitMeter is Meter fixedMeter
+                && candidate.Meter == fixedMeter ? 0 : 1)
             .ThenBy(candidate => candidate.Bpm)
             .ThenBy(candidate => candidate.QuarterAtSourceStart)
             .ThenBy(candidate => candidate.FirstDownbeatQuarter)
             .Take(72)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Brings a candidate downbeat into (quarterAtStart - QuartersPerBar,
+    /// quarterAtStart]: the downbeat is at or before source start but never more
+    /// than one bar earlier.
+    /// </summary>
+    private static double NormalizeDownbeat(
+        double downbeat,
+        double quarterAtStart,
+        double quartersPerBar)
+    {
+        while (downbeat > quarterAtStart)
+            downbeat -= quartersPerBar;
+        while (downbeat <= quarterAtStart - quartersPerBar)
+            downbeat += quartersPerBar;
+        return downbeat;
     }
 
 

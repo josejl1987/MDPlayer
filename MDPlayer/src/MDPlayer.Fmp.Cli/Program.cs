@@ -166,6 +166,7 @@ public class Program
         Console.WriteLine("  --no-pitch-bend          Disable pitch-bend export");
         Console.WriteLine("  --bend-range SEMITONES   Pitch-bend depth via RPN (default: 2)");
         Console.WriteLine("  --no-percussion-channel  Do not force channel 9 for drums");
+        Console.WriteLine("  --track-layout physical|instrument  Track grouping (default: physical)");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  mdplayer-render analyze track.ovi --fmp-com /path/FMP.COM");

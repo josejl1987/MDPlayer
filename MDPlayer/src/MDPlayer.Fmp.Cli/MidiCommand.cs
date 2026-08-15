@@ -94,6 +94,7 @@ internal static class MidiCommand
             EmitPitchBend = options.EmitPitchBend,
             BendRangeSemitones = options.BendRange,
             UsePercussionChannel = options.UsePercussionChannel,
+            TrackLayout = options.TrackLayout,
             PitchNormalizationMode = options.PitchNormalization switch
             {
                 "fidelity" => PitchNormalizationMode.Fidelity,

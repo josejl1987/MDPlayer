@@ -374,8 +374,9 @@ internal static class SymbolicTempoInference
                 bestScore,
                 timeline.SampleRate,
                 timeline.StartSample,
-                meter,
-                firstDownbeatQuarter);
+                options.Meter,
+                hierarchy.Meter,
+                options.FirstDownbeatSample);
         var map = new MusicalTimeMap(
             timeline.SampleRate,
             timeline.StartSample,
@@ -1734,9 +1735,11 @@ internal static class SymbolicTempoInference
                 double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
                 double fit = role switch
                 {
-                    RhythmRole.Kick => DistanceToSet(quarter, 0, 2, 4),
-                    RhythmRole.Snare => DistanceToSet(quarter, 1, 3, 4),
-                    RhythmRole.HiHat => DistanceToGrid(quarter, 0.25),
+                    // 4/4 backbeat template. Half/double aliases stay on-grid, so
+                    // this is a phase preference, not a tempo discriminator.
+                    RhythmRole.Bd => DistanceToSet(quarter, 0, 2, 4),
+                    RhythmRole.Sd => DistanceToSet(quarter, 1, 3, 4),
+                    RhythmRole.Hh => DistanceToGrid(quarter, 0.25),
                     _ => 0.5,
                 };
 
@@ -1745,13 +1748,13 @@ internal static class SymbolicTempoInference
             double eventWeight = events.Sum(value => value.Strength);
             eventFit = eventWeight > 0 ? eventFit / eventWeight : 0.5;
 
-            double patternFit = role is RhythmRole.Kick or RhythmRole.Snare
+            double patternFit = role is RhythmRole.Bd or RhythmRole.Sd
                 ? 0.25 * BackbeatCoverage(events, role, phaseSample, spq)
                     + 0.75 * PulseIntervalFit(events, spq)
                 : 0.5;
-            double roleWeight = role == RhythmRole.Snare ? 2.0
-                : role == RhythmRole.Kick ? 1.5
-                : 1.0;
+            double roleWeight = role == RhythmRole.Sd ? 2.0
+                : role == RhythmRole.Bd ? 1.5
+                : 0.35;
             weighted += roleWeight * (0.35 * eventFit + 0.65 * patternFit);
             totalWeight += roleWeight;
         }
@@ -1784,11 +1787,11 @@ internal static class SymbolicTempoInference
         foreach (RhythmRoleOnset rhythm in events)
         {
             double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
-            if (DistanceToSet(quarter, role == RhythmRole.Kick ? 0 : 1,
-                    role == RhythmRole.Kick ? 2 : 3, 4) >= 0.9)
+            if (DistanceToSet(quarter, role == RhythmRole.Bd ? 0 : 1,
+                    role == RhythmRole.Bd ? 2 : 3, 4) >= 0.9)
             {
                 double firstDistance = CircularDistance(
-                    quarter, role == RhythmRole.Kick ? 0 : 1, 4);
+                    quarter, role == RhythmRole.Bd ? 0 : 1, 4);
                 if (firstDistance < 0.12)
                     first = true;
                 else
@@ -1801,7 +1804,7 @@ internal static class SymbolicTempoInference
         IReadOnlyList<RhythmRoleOnset> roles,
         int sampleRate)
     {
-        foreach (RhythmRole role in new[] { RhythmRole.Snare, RhythmRole.Kick })
+        foreach (RhythmRole role in new[] { RhythmRole.Sd, RhythmRole.Bd })
         {
             long[] samples = roles
                 .Where(value => value.Role == role)
@@ -2000,7 +2003,19 @@ internal static class SymbolicTempoInference
         return raw.ToArray();
     }
 
-    private static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
+    /// <summary>
+    /// Small score prior for grid candidates whose meter matches the hierarchy's
+    /// PROVISIONAL meter. The provisional meter is onset-hierarchy evidence, not a
+    /// user override: it biases ranking but must never prevent evaluating 4/4,
+    /// 3/4, or 6/8 candidates. 0.02 is large enough to break near-ties toward the
+    /// hierarchy's reading, yet far below any structural-evidence signal.
+    /// </summary>
+    private const double ProvisionalMeterBonus = 0.02;
+
+    /// <summary>Builds the retained grid-candidate set for the symbolic map.
+    /// Internal so tests can verify the provisional-meter and source-aligned
+    /// downbeat contracts directly (same pattern as <see cref="ScoreForPhase"/>).</summary>
+    internal static IReadOnlyList<MusicalGridCandidate> BuildGridCandidates(
         IReadOnlyList<TempoCandidate> searched,
         double fallbackBpm,
         double requiredBpm,
@@ -2008,8 +2023,9 @@ internal static class SymbolicTempoInference
         double requiredScore,
         int sampleRate,
         long startSample,
-        Meter? preferredMeter,
-        double? firstDownbeatQuarter)
+        Meter? explicitMeter,
+        Meter? provisionalMeter,
+        long? explicitDownbeatSample)
     {
         TempoCandidate fallback = new(
             fallbackBpm,
@@ -2061,15 +2077,39 @@ internal static class SymbolicTempoInference
             .OrderByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.Bpm)
             .ToArray();
-        Meter[] meters = preferredMeter is Meter fixedMeter
+        // Only an explicit user meter override hard-restricts the evaluated
+        // meters. A provisional hierarchy meter never restricts — it only adds
+        // the small prior bonus below.
+        Meter[] meters = explicitMeter is Meter fixedMeter
             ? new[] { fixedMeter }
             : new[] { new Meter(4, 4), new Meter(3, 4), new Meter(6, 8) };
         var result = new List<MusicalGridCandidate>(families.Length * meters.Length * 4);
         foreach ((double bpm, double quarterAtSourceStart, double score) family in families)
         {
-            double downbeatBase = firstDownbeatQuarter ?? family.quarterAtSourceStart;
             foreach (Meter meter in meters)
             {
+                double meterBonus = provisionalMeter is Meter provisional && meter == provisional
+                    ? ProvisionalMeterBonus
+                    : 0.0;
+                if (explicitDownbeatSample is long explicitSample)
+                {
+                    // Explicit downbeat: convert that exact sample under this
+                    // candidate's tempo; generate ONLY that phase — never shifted
+                    // or snapped to the meter grid.
+                    double samplesPerQuarter = sampleRate * 60.0 / family.bpm;
+                    double downbeat = family.quarterAtSourceStart
+                        + (explicitSample - startSample) / samplesPerQuarter;
+                    result.Add(new MusicalGridCandidate(
+                        family.bpm,
+                        meter,
+                        family.quarterAtSourceStart,
+                        downbeat,
+                        family.score + meterBonus));
+                    continue;
+                }
+
+                // Inferred phase: downbeats AT OR BEFORE source start, one per
+                // plausible beat phase within the bar.
                 double[] offsets = meter switch
                 {
                     { Numerator: 4, Denominator: 4 } => new[] { 0.0, 1.0, 2.0, 3.0 },
@@ -2079,24 +2119,45 @@ internal static class SymbolicTempoInference
                 };
                 foreach (double offset in offsets)
                 {
+                    double downbeat = NormalizeDownbeat(
+                        family.quarterAtSourceStart - offset,
+                        family.quarterAtSourceStart,
+                        meter.QuartersPerBar);
                     result.Add(new MusicalGridCandidate(
                         family.bpm,
                         meter,
                         family.quarterAtSourceStart,
-                        downbeatBase + offset,
-                        family.score));
+                        downbeat,
+                        family.score + meterBonus));
                 }
             }
         }
 
         return result
             .OrderByDescending(candidate => candidate.Score)
-            .ThenBy(candidate => preferredMeter is Meter preferred
-                && candidate.Meter == preferred ? 0 : 1)
+            .ThenBy(candidate => explicitMeter is Meter fixedMeter
+                && candidate.Meter == fixedMeter ? 0 : 1)
             .ThenBy(candidate => candidate.Bpm)
             .ThenBy(candidate => candidate.QuarterAtSourceStart)
             .ThenBy(candidate => candidate.FirstDownbeatQuarter)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Brings a candidate downbeat into (quarterAtStart - QuartersPerBar,
+    /// quarterAtStart]: the downbeat is at or before source start but never more
+    /// than one bar earlier.
+    /// </summary>
+    private static double NormalizeDownbeat(
+        double downbeat,
+        double quarterAtStart,
+        double quartersPerBar)
+    {
+        while (downbeat > quarterAtStart)
+            downbeat -= quartersPerBar;
+        while (downbeat <= quarterAtStart - quartersPerBar)
+            downbeat += quartersPerBar;
+        return downbeat;
     }
 
     internal static Onset[] CollectOnsets(VisualizationTimeline timeline)
@@ -2186,9 +2247,7 @@ internal static class SymbolicTempoInference
         {
             if (rhythm is null)
                 continue;
-            RhythmRole role = ClassifyRhythmRole(
-                $"{rhythm.Voice}/{rhythm.ChannelId}/{rhythm.ParentVoiceId}/{rhythm.InstrumentId}",
-                null);
+            RhythmRole role = RhythmRoleClassifier.Classify(rhythm);
             if (role != RhythmRole.Unknown)
                 result.Add(new RhythmRoleOnset(
                     rhythm.SamplePosition,
@@ -2200,43 +2259,11 @@ internal static class SymbolicTempoInference
         {
             if (note is null)
                 continue;
-            RhythmRole role = ClassifyRhythmRole(
-                $"{note.ChannelId}/{note.InstrumentId}", note.InitialMidiNote);
+            RhythmRole role = RhythmRoleClassifier.Classify(note);
             if (role != RhythmRole.Unknown)
                 result.Add(new RhythmRoleOnset(note.StartSample, 1.0, role));
         }
         return result.ToArray();
-    }
-
-    private static RhythmRole ClassifyRhythmRole(string text, double? midiNote)
-    {
-        string value = text.ToLowerInvariant();
-        if (value.Contains("snare", StringComparison.Ordinal)
-            || value.Contains("sd", StringComparison.Ordinal)
-            || value.Contains("rim", StringComparison.Ordinal))
-            return RhythmRole.Snare;
-        if (value.Contains("kick", StringComparison.Ordinal)
-            || value.Contains("bassdrum", StringComparison.Ordinal)
-            || value.Contains("bass-drum", StringComparison.Ordinal))
-            return RhythmRole.Kick;
-        if (value.Contains("hihat", StringComparison.Ordinal)
-            || value.Contains("hi-hat", StringComparison.Ordinal)
-            || value.Contains("hat", StringComparison.Ordinal))
-            return RhythmRole.HiHat;
-
-        bool drumText = value.Contains("drum", StringComparison.Ordinal)
-            || value.Contains("rhythm", StringComparison.Ordinal)
-            || value.Contains("perc", StringComparison.Ordinal);
-        if (!drumText || midiNote is not double note)
-            return RhythmRole.Unknown;
-        int pitch = (int)Math.Round(note);
-        return pitch switch
-        {
-            35 or 36 => RhythmRole.Kick,
-            37 or 38 or 40 => RhythmRole.Snare,
-            42 or 44 or 46 => RhythmRole.HiHat,
-            _ => RhythmRole.Unknown,
-        };
     }
 
     private static double WeightFor(float strength, bool high) =>
@@ -2248,14 +2275,6 @@ internal static class SymbolicTempoInference
     // scorer and the public onset collector retain their existing weights.
     private static double MetricalRhythmWeight(float strength) =>
         Math.Clamp(1.6 + strength * 0.8, 1.2, 2.4);
-
-    private enum RhythmRole
-    {
-        Unknown,
-        Kick,
-        Snare,
-        HiHat,
-    }
 
     private readonly record struct RhythmRoleOnset(
         long Sample,

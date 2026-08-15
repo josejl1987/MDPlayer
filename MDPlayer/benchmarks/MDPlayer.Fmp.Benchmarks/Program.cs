@@ -43,6 +43,8 @@ internal static class Program
                     return args.Length > 1 && File.Exists(args[1])
                         ? RunPerfScope(args.Skip(1).ToArray())
                         : 2;
+                case "--corpus-receipts":
+                    return CorpusReporter.Run(args);
             }
         }
 

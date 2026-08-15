@@ -8,13 +8,13 @@ namespace Fmp.Core.Midi;
 /// Maps explicitly identified YM2608 rhythm voices to semantic General MIDI
 /// percussion notes. Physical domain/index is authoritative; the legacy
 /// <c>rhythm:&lt;name&gt;</c> identity is accepted only when no physical domain
-/// is available.
+/// is available. There is intentionally NO fallback <c>Map()</c> — unknown
+/// identities return false and route through the exporter's deterministic
+/// unknown-note preallocation; an unknown identity must never masquerade as
+/// a semantic GM role (side stick or otherwise).
 /// </summary>
 internal static class GeneralMidiDrumMapper
 {
-    public static int Map(RhythmEvent rhythm) =>
-        TryMap(rhythm, out int note) ? note : 37;
-
     public static bool TryMap(RhythmEvent rhythm, out int note)
     {
         ArgumentNullException.ThrowIfNull(rhythm);
@@ -50,7 +50,7 @@ internal static class GeneralMidiDrumMapper
             }
         }
 
-        note = 37;
+        note = 0;
         return false;
     }
 

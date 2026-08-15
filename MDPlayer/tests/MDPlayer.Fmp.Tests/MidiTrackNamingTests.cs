@@ -376,7 +376,6 @@ public sealed class MidiTrackNamingTests
         {
             Quantize = options.Quantize,
             UsePercussionChannel = options.UsePercussionChannel,
-            PercussionNoteBase = options.PercussionNoteBase,
             EmitPitchBend = options.EmitPitchBend,
             BendRangeSemitones = options.BendRangeSemitones,
             PitchNormalizationMode = options.PitchNormalizationMode,

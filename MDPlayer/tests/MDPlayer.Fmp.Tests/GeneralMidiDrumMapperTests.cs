@@ -71,12 +71,14 @@ public sealed class GeneralMidiDrumMapperTests
     [Fact]
     public void UnknownIdentity_ReturnsFalse_NotFallback()
     {
-        // The defensive Map() fallback (37) must never be what TryMap reports for
-        // a non-semantic identity: unknown samples (OPL percussion, SSG noise,
-        // user samples) go through the exporter's unique-note allocator instead.
+        // There is NO defensive Map() fallback: a non-semantic identity (OPL
+        // percussion, SSG noise, user samples) returns false with an unset note
+        // (0) so it routes to the exporter's deterministic unknown-note
+        // preallocation. It must never resolve to side stick (37) or any other
+        // semantic GM role.
         var unknown = new RhythmEvent("drums", "drums", 0, 1.0f, 0f);
         Assert.False(GeneralMidiDrumMapper.TryMap(unknown, out int note));
-        Assert.Equal(37, note); // out value is still the documented fallback
+        Assert.Equal(0, note); // unset sentinel — never a semantic GM note
         Assert.False(GeneralMidiDrumMapper.TryMap(
             new RhythmEvent("noise", "ay8910:0:noise:0", 0, 0.8f, 0f), out _),
             "non-YM2608 sample identities must not map semantically");

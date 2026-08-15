@@ -1,4 +1,5 @@
 using Fmp.Cli;
+using Fmp.Core.Midi;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -216,5 +217,32 @@ public sealed class MidiCliOptionTests
     {
         MidiOptions o = Parse("--pitch-report", "pitch.json", "--output", "out.mid", Input);
         Assert.Equal("pitch.json", o.PitchReport);
+    }
+
+    [Fact]
+    public void TrackLayout_DefaultsToPhysical()
+    {
+        MidiOptions o = Parse("--output", "out.mid", Input);
+        Assert.Equal(MidiTrackLayout.PhysicalVoice, o.TrackLayout);
+    }
+
+    [Theory]
+    [InlineData("physical", MidiTrackLayout.PhysicalVoice)]
+    [InlineData("instrument", MidiTrackLayout.InstrumentSplit)]
+    public void TrackLayout_AcceptedValues(string value, MidiTrackLayout expected)
+    {
+        MidiOptions o = Parse("--track-layout", value, "--output", "out.mid", Input);
+        Assert.Equal(expected, o.TrackLayout);
+    }
+
+    [Theory]
+    [InlineData("split")]
+    [InlineData("InstrumentSplit")]
+    [InlineData("")]
+    public void TrackLayout_UnknownValue_Rejected(string value)
+    {
+        ArgumentException ex = Assert.Throws<ArgumentException>(() =>
+            Parse("--track-layout", value, "--output", "out.mid", Input));
+        Assert.Contains("--track-layout", ex.Message);
     }
 }

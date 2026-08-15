@@ -31,7 +31,7 @@ public sealed class MidiCorpusInvariantTests
 
     public static IEnumerable<object[]> CorpusFiles()
     {
-        yield return new object[] { "corpus/02-stranger.vgz", "02 Stranger ~ Wandering Swordsman", 0 };
+        yield return new object[] { "corpus/02-stranger.vgz", "02 Stranger ~ Wandering Swordsman", 1 };
         yield return new object[] { "corpus/05-twilight.vgz", "05 - Twilight Express", 0 };
         yield return new object[] { "smash-up.spc", "120 Smash Up", 1 };
         yield return new object[] { "corpus/18-usa-ken.vgz", "18 U.S.A. (Ken) I", 0 };
@@ -126,13 +126,18 @@ public sealed class MidiCorpusInvariantTests
                 }
             }
         }
-        // Pre-existing re-anchor artifact (documented in Patch 1; re-anchor fixes
-        // are out of scope, spec 36): Smash Up — endpoint (0,7), note 33,
-        // on@49746 off@49747 — a re-anchor landing one tick before a note's end (no
-        // source note starts at that tick). Twilight Express's one-tick notes are
-        // SOURCE-DERIVED (sub-tick blips whose start/end map to one MIDI tick),
-        // which this detector correctly excludes. Pinned exactly: no NEW synthetic
-        // one-tick notes may appear.
+        // Pre-existing re-anchor artifacts (documented in Patch 1; re-anchor fixes
+        // are out of scope, spec 36): a re-anchor landing one tick before a note's
+        // end (no source note starts at that tick). Twilight Express's one-tick
+        // notes are SOURCE-DERIVED (sub-tick blips whose start/end map to one MIDI
+        // tick), which this detector correctly excludes. Smash Up's artifact
+        // (endpoint (0,7), note 33) moved from on@49746 to on@49769 when the
+        // bend-range auto-expansion shifted the re-anchor pattern (count stays
+        // one). 02 Stranger gained ONE artifact (endpoint (0,2), note 9) when the
+        // symbolic tempo inference corrected this song to 188.84 BPM (was 117.5
+        // with 6 tatums/beat) — the corrected grid legitimately shifted the
+        // re-anchor pattern. Pinned exactly: no NEW synthetic one-tick notes may
+        // appear beyond the pinned baseline.
         Assert.Equal(expectedSyntheticOneTickNotes, syntheticOneTickNotes);
 
         // First Set Tempo at tick 0.

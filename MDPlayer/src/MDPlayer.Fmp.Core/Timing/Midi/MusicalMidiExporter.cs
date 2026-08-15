@@ -27,9 +27,6 @@ internal sealed class MusicalMidiExportOptions
     /// <summary>Assign percussive voices to MIDI channel 9 (GM percussion).</summary>
     public bool UsePercussionChannel { get; init; } = true;
 
-    /// <summary>Base MIDI note assigned to the first distinct rhythm voice.</summary>
-    public int PercussionNoteBase { get; init; } = 36;
-
     /// <summary>Emit pitch-bend for microtonal / intra-note pitch movement (Batch 4).</summary>
     public bool EmitPitchBend { get; init; } = true;
 
@@ -266,6 +263,19 @@ internal sealed class MusicalMidiExporter
         long originShiftTicks = ComputeOriginShiftTicks(sourceIndex, timeline);
         var conductor = new List<MidiEventBase>();
         BuildConductor(timeline, originShiftTicks, conductor);
+        // Deterministic percussion preallocation (spec P1-13): unknown rhythm
+        // identities receive MIDI notes BEFORE event generation, in canonical
+        // identity order, so note assignment is stable across runs regardless of
+        // timeline event ordering. Preferred pool 60-81; overflow walks every
+        // other note 27-127 skipping the GM notes the semantic mapper emits
+        // ({36,37,38,42,45,48,49,50,57}). Each assignment is surfaced as
+        // UNMAPPED_PERCUSSION conductor text so the mapping is traceable.
+        List<UnknownDrumAssignment> unknownDrumAssignments =
+            PreallocateUnknownPercussionNotes(sourceIndex);
+        var unknownDrumNotes = new Dictionary<MidiTrackKey, int>(unknownDrumAssignments.Count);
+        foreach (UnknownDrumAssignment assignment in unknownDrumAssignments)
+            unknownDrumNotes[assignment.IdentityKey] = assignment.Note;
+        EmitUnmappedPercussionMetadata(conductor, unknownDrumAssignments);
 
         PreparePitchScratch(sourceIndex);
         TrackAllocator allocator = BuildTracks(sourceIndex);
@@ -340,16 +350,16 @@ internal sealed class MusicalMidiExporter
         }
         _performance?.StopStage(MidiPerformanceStage.EventGeneration, stageStart);
 
-        // Rhythm voices → percussion pitches (Batch 4 drum allocation). Known
-        // YM2608 rhythm identities map semantically to GM percussion notes; any
-        // unknown/non-semantic sample identity falls back to the per-identity
-        // unique-note allocator so distinct instruments still get distinct notes.
-        // Each voice is its own Rhythm-tagged track (RhythmKeyFor), so per-key pan
-        // state is per-track. CC10 pan is emitted before the first hit and again
-        // whenever the value changes; ordering within a tick is resolved by
-        // MidiEventOrder.Rank (CC = rank 2 precedes note-on = rank 4).
-        var drumNoteByIdentity = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
-        var usedDrumNotes = new HashSet<int>();
+        // Rhythm voices → percussion pitches (Batch 4 drum allocation + Patch 6).
+        // Known YM2608 rhythm identities map semantically to GM percussion notes;
+        // unknown/non-semantic sample identities use the deterministic
+        // preallocated unknown-note table (preferred 60-81, then overflow
+        // 27-127 step 2 minus reserved) so distinct instruments stay distinct
+        // AND stable across runs. Each voice is its own Rhythm-tagged track
+        // (RhythmKeyFor), so per-key pan state is per-track. CC10 pan is emitted
+        // before the first hit and again whenever the value changes; ordering
+        // within a tick is resolved by MidiEventOrder.Rank (CC = rank 2 precedes
+        // note-on = rank 4).
         var lastPanByKey = new Dictionary<MidiTrackKey, int>(sourceIndex.Rhythms.Count);
         foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
@@ -359,24 +369,11 @@ internal sealed class MusicalMidiExporter
             if (slot is null)
                 continue;
 
-            int note;
-            if (GeneralMidiDrumMapper.TryMap(rhythm, out int mapped))
-            {
-                note = mapped;
-                usedDrumNotes.Add(note);
-            }
-            else
-            {
-                // Unknown sample/noise identities must not masquerade as a GM
-                // role and must remain distinct even when physical track layout
-                // collapses several source identities onto one track.
-                MidiTrackKey identityKey = indexedRhythm.IdentityKey;
-                if (!drumNoteByIdentity.TryGetValue(identityKey, out note))
-                {
-                    note = AllocateUnknownPercussionNote(usedDrumNotes, identityKey);
-                    drumNoteByIdentity[identityKey] = note;
-                }
-            }
+            // Semantic mapping wins; unknown identities resolve to their
+            // preallocated note (never a silent fallback role).
+            int note = GeneralMidiDrumMapper.TryMap(rhythm, out int mapped)
+                ? mapped
+                : unknownDrumNotes[indexedRhythm.IdentityKey];
 
             int velocity = ToMidiDrumVelocity(rhythm.Strength);
             int pan = ToMidiPan(rhythm.Pan);
@@ -817,16 +814,103 @@ internal sealed class MusicalMidiExporter
         return Math.Clamp((int)Math.Ceiling(24.0 + 103.0 * Math.Pow(normalized, 0.45)), 1, 127);
     }
 
-    private static int AllocateUnknownPercussionNote(
-        HashSet<int> usedNotes, MidiTrackKey identityKey)
+    /// <summary>
+    /// Deterministically assigns a MIDI note to every UNKNOWN rhythm identity in
+    /// the source index, BEFORE event generation (spec P1-13). Unknown identities
+    /// are collected per event (mirroring the semantic TryMap decision), deduped
+    /// by canonical identity key, and assigned notes in canonical identity order
+    /// from the preferred pool 60-81 then the overflow pool (every other note
+    /// 27-127, excluding the GM notes the semantic mapper emits:
+    /// {36,37,38,42,45,48,49,50,57}). Identical input therefore yields identical
+    /// note allocation on every run, independent of timeline event ordering.
+    /// Throws only when BOTH pools are exhausted (69 distinct identities).
+    /// </summary>
+    private List<UnknownDrumAssignment> PreallocateUnknownPercussionNotes(
+        SourceEventIndex sourceIndex)
     {
-        for (int note = 60; note <= 81; note++)
+        var unknown = new List<(MidiTrackKey IdentityKey, RhythmEvent Representative)>();
+        var seen = new HashSet<MidiTrackKey>();
+        foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
-            if (usedNotes.Add(note))
-                return note;
+            if (GeneralMidiDrumMapper.TryMap(indexedRhythm.Rhythm, out _))
+                continue;
+            MidiTrackKey identityKey = indexedRhythm.IdentityKey;
+            if (seen.Add(identityKey))
+                unknown.Add((identityKey, indexedRhythm.Rhythm));
         }
-        throw new InvalidOperationException(
-            $"Percussion note exhaustion: unknown rhythm identity '{identityKey}' exceeds reserved range 60-81.");
+        if (unknown.Count == 0)
+            return new List<UnknownDrumAssignment>();
+
+        // Stable canonical-identity ordering: LINQ OrderBy is stable, so ties
+        // (e.g. placeholder identities sharing a source string) keep their
+        // timeline order — deterministic for a given input.
+        List<int> pool = UnknownPercussionNotePool();
+        var assignments = new List<UnknownDrumAssignment>(unknown.Count);
+        foreach ((MidiTrackKey identityKey, RhythmEvent representative) in unknown
+                     .OrderBy(item => UnknownIdentitySortKey(item.IdentityKey, item.Representative),
+                         StringComparer.Ordinal))
+        {
+            int note = assignments.Count < pool.Count
+                ? pool[assignments.Count]
+                : throw new InvalidOperationException(
+                    $"Percussion note exhaustion: {unknown.Count} unknown rhythm identities exceed the " +
+                    "deterministic allocation pool (preferred 60-81 + overflow 27-127 step 2 minus reserved).");
+            assignments.Add(new UnknownDrumAssignment(
+                identityKey, note, UnknownIdentitySource(representative)));
+        }
+        return assignments;
+    }
+
+    /// <summary>Sort key for deterministic unknown-identity preallocation: the
+    /// canonical normalized identity when present, else the raw source string
+    /// (placeholder identities carry no canonical).</summary>
+    private static string UnknownIdentitySortKey(MidiTrackKey identityKey, RhythmEvent representative)
+    {
+        if (!string.IsNullOrEmpty(identityKey.Instrument.Canonical))
+            return identityKey.Instrument.Canonical;
+        return UnknownIdentitySource(representative);
+    }
+
+    /// <summary>Traceable source string of an unknown rhythm identity: the
+    /// instrument identity when present, else the voice channel id.</summary>
+    private static string UnknownIdentitySource(RhythmEvent representative) =>
+        !string.IsNullOrEmpty(representative.InstrumentId)
+            ? representative.InstrumentId
+            : representative.ChannelId;
+
+    /// <summary>The deterministic unknown-percussion note pool (spec P1-13):
+    /// preferred 60-81, then every other note 27-127 excluding the GM notes the
+    /// semantic mapper emits ({36,37,38,42,45,48,49,50,57}). 69 notes total.</summary>
+    private static List<int> UnknownPercussionNotePool()
+    {
+        var pool = new List<int>(69);
+        for (int note = 60; note <= 81; note++)
+            pool.Add(note);
+        for (int note = 27; note <= 127; note += 2)
+        {
+            if (note is 36 or 37 or 38 or 42 or 45 or 48 or 49 or 50 or 57)
+                continue;
+            pool.Add(note);
+        }
+        return pool;
+    }
+
+    /// <summary>Surfaces the deterministic unknown-percussion mapping as
+    /// UNMAPPED_PERCUSSION conductor text (spec P1-13 DoD: deterministic,
+    /// traceable, collision-free). Gated like the other conductor metadata;
+    /// emitted in note order (== canonical identity order) so the serialized
+    /// event order is stable.</summary>
+    private void EmitUnmappedPercussionMetadata(
+        List<MidiEventBase> conductor, IReadOnlyList<UnknownDrumAssignment> assignments)
+    {
+        if (!_options.EmitConductorMetadata || assignments.Count == 0)
+            return;
+        foreach (UnknownDrumAssignment assignment in assignments)
+        {
+            conductor.Add(WithSourceOrder(new MidiMetaTextEvent(
+                0, 0x01,
+                $"UNMAPPED_PERCUSSION note={assignment.Note} source={assignment.Source}")));
+        }
     }
 
     /// <summary>Single source of truth for whether a note is actually emitted (§21).
@@ -1316,19 +1400,28 @@ internal sealed class MusicalMidiExporter
                 Consider(_map.QuarterPositionToTick(downbeat, _ppq));
             if (Structure is MusicalStructure structure && structure.Bars.Count > 0)
             {
+                foreach (MusicalPhrase phrase in structure.Phrases)
+                {
+                    if (phrase.StartBar >= 0 && phrase.StartBar < structure.Bars.Count)
+                        Consider(StructureBoundaryTick(structure, phrase.StartBar));
+                }
+
                 foreach (MusicalSection section in structure.Sections)
                 {
                     if (section.StartBar >= 0 && section.StartBar < structure.Bars.Count)
-                        Consider(StructureBarTick(structure, section.StartBar));
+                        Consider(StructureBoundaryTick(structure, section.StartBar));
                 }
+
+                if (structure.Pickup is BarFeature pickup)
+                    Consider(_map.QuarterPositionToTick(pickup.QuarterStart, _ppq));
 
                 if (structure.PrimaryLoop is RepeatedBlock loop
                     && loop.LengthBars > 0
                     && loop.StartBar >= 0
-                    && loop.StartBar + loop.LengthBars < structure.Bars.Count)
+                    && loop.StartBar + loop.LengthBars <= structure.Bars.Count)
                 {
-                    Consider(StructureBarTick(structure, loop.StartBar));
-                    Consider(StructureBarTick(structure, loop.StartBar + loop.LengthBars));
+                    Consider(StructureBoundaryTick(structure, loop.StartBar));
+                    Consider(StructureBoundaryTick(structure, loop.StartBar + loop.LengthBars));
                 }
             }
         }
@@ -1342,10 +1435,21 @@ internal sealed class MusicalMidiExporter
         return Math.Max(0, -minTick);
     }
 
-    /// <summary>Maps a structure bar index to an absolute pre-shift tick via the
-    /// bar's quarter-start position. Section and loop markers share this mapping.</summary>
-    private long StructureBarTick(MusicalStructure structure, int barIndex)
-        => _map.QuarterPositionToTick(structure.Bars[barIndex].QuarterStart, _ppq);
+    /// <summary>Maps a structure bar boundary to an absolute pre-shift tick via the
+    /// boundary's quarter position. Section and loop markers share this mapping.
+    /// Valid boundaries are 0..Bars.Count: <paramref name="boundary"/> == Bars.Count
+    /// denotes the end of the final bar and resolves to the last bar's QuarterEnd —
+    /// a loop or section whose end lands on the final bar must never index past the
+    /// array (spec P0-9 final-bar semantics). Throws for any boundary outside
+    /// [0, Bars.Count].</summary>
+    internal long StructureBoundaryTick(MusicalStructure structure, int boundary)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(boundary);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(boundary, structure.Bars.Count);
+        if (boundary == structure.Bars.Count)
+            return _map.QuarterPositionToTick(structure.Bars[^1].QuarterEnd, _ppq);
+        return _map.QuarterPositionToTick(structure.Bars[boundary].QuarterStart, _ppq);
+    }
 
     private void BuildConductor(VisualizationTimeline timeline, long originShift, List<MidiEventBase> conductor)
     {
@@ -1396,21 +1500,39 @@ internal sealed class MusicalMidiExporter
                 long downbeatTick = _map.QuarterPositionToTick(downbeat, _ppq) + originShift;
                 conductor.Add(WithSourceOrder(new MidiMarkerEvent(downbeatTick, "FIRST_DOWNBEAT")));
             }
-            // Structural markers (sections + validated positive fundamental loop)
-            // are independent from raw source restart markers below.
+            // Structural markers (phrases + sections + validated loop) are
+            // independent from raw source restart markers below. Phrases and
+            // sections are separate form levels: PHRASE_*/TURNAROUND at each
+            // phrase start, SECTION_* at each section start.
             if (Structure is MusicalStructure structure && structure.Bars.Count > 0)
             {
+                foreach (MusicalPhrase phrase in structure.Phrases)
+                {
+                    if (phrase.StartBar < 0 || phrase.StartBar >= structure.Bars.Count)
+                        continue;
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                        StructureBoundaryTick(structure, phrase.StartBar) + originShift,
+                        phrase.Label)));
+                }
+
+                // Optional PICKUP: the partial leading bar before the first
+                // downbeat (spec P0-8), emitted only when pre-downbeat material
+                // exists. Its tick may be negative pre-shift; the origin shift
+                // keeps it (and every other marker) nonnegative.
+                if (structure.Pickup is BarFeature pickup)
+                {
+                    conductor.Add(WithSourceOrder(new MidiMarkerEvent(
+                        _map.QuarterPositionToTick(pickup.QuarterStart, _ppq) + originShift,
+                        "PICKUP")));
+                }
+
                 foreach (MusicalSection section in structure.Sections)
                 {
                     if (section.StartBar < 0 || section.StartBar >= structure.Bars.Count)
                         continue;
-                    string marker = section.Label.StartsWith("PHRASE_", StringComparison.Ordinal)
-                        || string.Equals(section.Label, "TURNAROUND", StringComparison.Ordinal)
-                        ? section.Label
-                        : "SECTION_" + section.Label;
                     conductor.Add(WithSourceOrder(new MidiMarkerEvent(
-                        StructureBarTick(structure, section.StartBar) + originShift,
-                        marker)));
+                        StructureBoundaryTick(structure, section.StartBar) + originShift,
+                        "SECTION_" + section.Label)));
                 }
 
                 if (structure.PrimaryLoop is RepeatedBlock loop
@@ -1418,8 +1540,8 @@ internal sealed class MusicalMidiExporter
                     && loop.StartBar >= 0
                     && loop.StartBar + loop.LengthBars <= structure.Bars.Count)
                 {
-                    long startTick = StructureBarTick(structure, loop.StartBar) + originShift;
-                    long endTick = StructureBarTick(
+                    long startTick = StructureBoundaryTick(structure, loop.StartBar) + originShift;
+                    long endTick = StructureBoundaryTick(
                         structure, loop.StartBar + loop.LengthBars) + originShift;
                     if (endTick > startTick)
                     {
@@ -2196,6 +2318,12 @@ internal sealed class MusicalMidiExporter
     private readonly record struct IndexedNote(NoteEvent Note, MidiTrackKey Key, int EventCapacity);
     private readonly record struct IndexedRhythm(
         RhythmEvent Rhythm, MidiTrackKey Key, MidiTrackKey IdentityKey);
+
+    /// <summary>One deterministic unknown-percussion assignment: the canonical
+    /// identity key, its preallocated MIDI note, and the traceable source string
+    /// reported in the UNMAPPED_PERCUSSION conductor text.</summary>
+    private sealed record UnknownDrumAssignment(
+        MidiTrackKey IdentityKey, int Note, string Source);
 
     /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
     private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note, MidiTrackKey Key);

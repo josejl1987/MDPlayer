@@ -10,6 +10,77 @@ internal sealed record RejectedAnchorInfo(
     string Reason);
 
 /// <summary>
+/// Per-signal breakdown of one grid candidate's structural score. Patch 1
+/// observability: fields the current <c>GridScore</c> does not carry yet default
+/// to 0/null until Patch 3 restructures scoring — never fabricating values.
+/// Patch 8A adds the concrete evidence fields the gate needs to be explainable:
+/// the restart boundary error/period and the repeated-block search outcome
+/// (start/length/count) behind <see cref="RepeatedContentFit"/>.
+/// </summary>
+internal sealed record GridScoreBreakdown(
+    double CandidatePrior,
+    double OnsetFit,
+    double? RhythmRoleFit,
+    double? RestartBoundaryFit,
+    double? RepeatedContentFit,
+    double? PhraseRegularityFit,
+    double CombinedScore,
+    int KnownRhythmRoleHits,
+    int DistinctRhythmRoles,
+    double SpanCoverage,
+    double MaterialCoverage,
+    double? RestartBoundaryErrorBars = null,
+    int? RestartPeriodBars = null,
+    int? RepeatStartBar = null,
+    int? RepeatLengthBars = null,
+    int? RepeatCount = null);
+
+/// <summary>
+/// Observable snapshot of one grid candidate at selection time. Patch 8A expands
+/// the receipt with the separate margins (tempo / meter / downbeat are never
+/// merged), the per-candidate gate flags, and explicit rejection reasons — a
+/// candidate is never dismissed with a bare "no-gate-evidence".
+/// </summary>
+internal sealed record GridCandidateReceipt(
+    double Bpm,
+    Meter Meter,
+    double QuarterAtSourceStart,
+    double? FirstDownbeatQuarter,
+    double CandidatePrior,
+    double CombinedScore,
+    GridScoreBreakdown? Breakdown,
+    double? TempoMargin = null,
+    double? MeterMargin = null,
+    double? DownbeatMargin = null,
+    bool GateByRestart = false,
+    bool GateByRepetition = false,
+    bool GateByRhythm = false,
+    IReadOnlyList<string>? RejectionReasons = null);
+
+/// <summary>
+/// Outcome of the structural grid-selection pass: what was attempted, what
+/// resolved, why it was rejected, and the winning breakdown. Observability only —
+/// recording this must never alter selection behavior or thresholds.
+/// </summary>
+internal sealed record GridSelectionDiagnostics
+{
+    public bool Attempted { get; init; }
+    public bool TempoResolved { get; init; }
+    public bool MeterResolved { get; init; }
+    public bool DownbeatResolved { get; init; }
+    public double? SelectedBpm { get; init; }
+    public Meter? SelectedMeter { get; init; }
+    public double? SelectedDownbeatQuarter { get; init; }
+    public double WinnerScore { get; init; }
+    public double TempoMargin { get; init; }
+    public double MeterMargin { get; init; }
+    public double DownbeatMargin { get; init; }
+    public GridScoreBreakdown? Breakdown { get; init; }
+    public string? RejectionReason { get; init; }
+    public IReadOnlyList<GridCandidateReceipt> TopCandidates { get; init; }
+}
+
+/// <summary>
 /// The outcome of a beat-grid fit, exposed so the exporter can report — never
 /// hide — how confident it is and what it had to infer. Phase and tempo carry
 /// separate confidence because "BPM known" does not imply "grid known".
@@ -171,6 +242,13 @@ internal sealed class TimingDiagnostics
             : null;
 
     public List<string> Warnings { get; }
+
+    /// <summary>
+    /// Outcome of the structural grid-selection pass (Patch 1 observability).
+    /// Null when grid selection was never attempted (no symbolic candidates,
+    /// no material, or no finite-score candidate).
+    /// </summary>
+    public GridSelectionDiagnostics? GridSelection { get; set; }
 
     /// <summary>
     /// True when the fit should be relied on for grid alignment: phase resolved and

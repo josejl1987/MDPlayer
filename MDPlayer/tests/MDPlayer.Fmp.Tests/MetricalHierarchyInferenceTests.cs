@@ -233,7 +233,13 @@ public sealed class MetricalHierarchyInferenceTests
             new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
 
         Assert.InRange(build.Diagnostics.SelectedBpm!.Value, 148.5, 150.5);
-        Assert.False(build.Diagnostics.TempoAmbiguous);
+        // The 16th-note hi-hat stream is physically identical at the double
+        // tempo (32nds at ~298.8), so the octave family stays within the
+        // ambiguity band (tempo margin ~0.031 < 0.04): the rhythm roles pick
+        // the middle alias and the family ambiguity is surfaced honestly —
+        // consistent with Symbolic_BeatLockedRhythm_SurfacesAccentEvidence_
+        // ResolvesCentralOctave.
+        Assert.True(build.Diagnostics.TempoAmbiguous);
         Assert.Equal(4, build.Diagnostics.TatumsPerBeat);
         Assert.True(build.Diagnostics.DownbeatKnown);
         Assert.Equal(new Meter(4, 4), build.Map.Meter);
