@@ -18,8 +18,8 @@ public sealed class PitchNormalizationTests
     private const int Sr = 44_100;
     private const int Ppq = 960;
 
-    private static readonly MidiTrackKey DefaultKey = new(
-        new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0, InstrumentIdentity.Empty);
+    private static readonly SourceDomainKey DefaultKey = new(
+        new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0);
 
     private static NoteEvent Note(long start, long end, double initial, params PitchChange[] pitch)
         => new("ym2608.0.fm.1", start, end, 440, initial,
@@ -226,15 +226,20 @@ public sealed class PitchNormalizationTests
     // ---- Pass 3: tuning-center detection + bias subtraction (FR-4 / SC-4/SC-5) --
 
     /// <summary>Ten stable notes in one domain, residuals clustered around
-    /// <paramref name="biasCents"/> on ≥ 4 distinct MIDI note numbers.</summary>
-    private static NoteEvent[] StableTunedNotes(double biasCents, int count = 10)
+    /// <paramref name="biasCents"/> on ≥ 4 distinct MIDI note numbers. All notes
+    /// share the physical voice channel; <paramref name="instrumentId"/> selects
+    /// the (parseable or placeholder) instrument identity and
+    /// <paramref name="startOffset"/> shifts the whole segment in sample time.</summary>
+    private static NoteEvent[] StableTunedNotes(double biasCents, int count = 10,
+        string instrumentId = "ym2608:aaaaaaaa11111111", long startOffset = 0)
     {
         double[] bases = { 60, 62, 64, 65, 67, 69, 71, 72, 74, 76 };
         var notes = new NoteEvent[count];
         for (int i = 0; i < count; i++)
         {
             double midi = bases[i % bases.Length] + biasCents / 100.0;
-            notes[i] = Note(i * 100_000L, i * 100_000L + 50_000, midi);
+            notes[i] = Note(instrumentId, startOffset + i * 100_000L,
+                startOffset + i * 100_000L + 50_000, midi);
         }
         return notes;
     }
@@ -353,7 +358,7 @@ public sealed class PitchNormalizationTests
     [Fact]
     public void Detector_SnesDspCap_RejectsLargeBias_AcceptsSmall()
     {
-        var snesKey = new MidiTrackKey(new DeviceId(ChipType.SnesDsp, 0), VoiceKind.Pcm, 0, InstrumentIdentity.Empty);
+        var snesKey = new SourceDomainKey(new DeviceId(ChipType.SnesDsp, 0), VoiceKind.Pcm, 0);
         var large = PitchNormalizationStage.Normalize(Timeline(StableTunedNotes(30.0)),
             PitchNormalizationMode.Fidelity, PitchNormalizationThresholds.Default, _ => snesKey, null);
         Assert.False(large.Domains[snesKey].Accepted);
@@ -672,6 +677,228 @@ public sealed class PitchNormalizationTests
         MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
 
         Assert.Equal(2, decoded.State.Values.Count(s => s.HasTuning));
+    }
+
+    // ---- Phase 4 (D1): physical-voice pitch domains + endpoint consensus -------
+
+    /// <summary>Two parseable FM instrument identities on the SAME physical voice —
+    /// distinct canonicals, one IdentityFamily.Fm — so the PhysicalVoice track
+    /// layout collapses them onto one track/endpoint while the pitch domain stays
+    /// ONE SourceDomainKey (device + voice family + source channel; instrument id
+    /// is never part of the key, D1).</summary>
+    private static readonly (string A, string B) PhysicalVoiceInstruments =
+        ("ym2608:0:fm:1", "ym2608:0:fm:2");
+
+    /// <summary>The same physical voice playing a SECOND instrument afterwards:
+    /// identical channel id, distinct parseable instrument id, shifted sample
+    /// window so the two segments never overlap in time.</summary>
+    private static NoteEvent[] ShiftToInstrumentB(NoteEvent[] notes, string instrumentB) =>
+        notes.Select(n => n with
+        {
+            InstrumentId = instrumentB,
+            StartSample = n.StartSample + 5_000_000,
+            EndSample = n.EndSample + 5_000_000,
+        }).ToArray();
+
+    /// <summary>Note on the shared physical voice channel with a specific
+    /// (parseable or placeholder) instrument identity.</summary>
+    private static NoteEvent Note(string instrumentId, long start, long end, double initial,
+        params PitchChange[] pitch)
+        => new("ym2608.0.fm.1", start, end, 440, initial, instrumentId,
+            VisualizationNoteMode.Fm, false, pitch);
+
+    [Fact]
+    public void PhysicalVoice_TuningBias_IsRestored()
+    {
+        // Spec §1 physical-voice round-trip: a voice carrying ONE instrument with
+        // a +21c source bias exports its tuning RESTORED on the endpoint — the
+        // played pitch equals the source pitch (FR-5), never equal temperament.
+        var result = ExportResult(Timeline(StableTunedNotes(21.0, instrumentId: PhysicalVoiceInstruments.A)));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        Assert.Equal(21.0, decoded.State[tuned.Key].FineTuningCents, 1);
+        var on = decoded.Events[tuned.Key].Select(e => e.Event).OfType<NoteOnEvent>().First();
+        Assert.Equal(60, on.NoteNumber);
+        Assert.Equal(60.21, MidiSemanticDecoder.EffectivePitch(on.NoteNumber, 0,
+            decoded.State[tuned.Key].BendRange, (int)Math.Round(decoded.State[tuned.Key].FineTuningCents)), 2);
+    }
+
+    [Fact]
+    public void PhysicalVoice_MultipleInstrumentIds_OnePitchDomain()
+    {
+        // Two sequential instruments on ONE physical voice share ONE SourceDomainKey
+        // (device + voice family + source channel): exactly one detected pitch
+        // domain and one tuning state on the endpoint, never per-instrument
+        // domains (spec §1 / D1).
+        var notes = StableTunedNotes(21.0, instrumentId: PhysicalVoiceInstruments.A)
+            .Concat(ShiftToInstrumentB(StableTunedNotes(21.0), PhysicalVoiceInstruments.B))
+            .ToArray();
+        var result = ExportResult(Timeline(notes));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        DomainPitchStats domain = Assert.Single(result.PitchDiagnostics.Domains);
+        Assert.True(domain.Accepted);
+        Assert.Equal(21.0, domain.TuningCents!.Value, 6);
+        Assert.Equal(1, decoded.State.Values.Count(s => s.HasTuning));
+    }
+
+    [Fact]
+    public void PhysicalVoice_InstrumentChange_DoesNotLoseTuning()
+    {
+        // The instrument change mid-song must NOT lose the physical voice's
+        // tuning: notes AFTER the change still play at source pitch — the one
+        // endpoint tuning state survives the second instrument's segment.
+        var notes = StableTunedNotes(21.0, instrumentId: PhysicalVoiceInstruments.A)
+            .Concat(ShiftToInstrumentB(StableTunedNotes(21.0), PhysicalVoiceInstruments.B))
+            .ToArray();
+        var result = ExportResult(Timeline(notes));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        // The second segment starts at sample 5_000_000 → tick ~217_687; its
+        // first attack (base note 60, +21c) must decode at exactly the source
+        // pitch with the tuning still in force.
+        var postChangeOns = decoded.Events[tuned.Key]
+            .Where(e => e.Tick >= 200_000 && e.Event is NoteOnEvent on && on.Velocity != 0)
+            .Select(e => (NoteOnEvent)e.Event)
+            .ToList();
+        Assert.NotEmpty(postChangeOns);
+        Assert.Equal(60.21, MidiSemanticDecoder.EffectivePitch(postChangeOns[0].NoteNumber, 0,
+            decoded.State[tuned.Key].BendRange, (int)Math.Round(decoded.State[tuned.Key].FineTuningCents)), 2);
+    }
+
+    [Fact]
+    public void Fidelity_TuningRoundTrip_UsesExportDomainKey()
+    {
+        // End-to-end (spec §1): the export pitch key IS the SourceDomainKey — the
+        // device/voice-family/source-channel triple parsed from the real channel
+        // identity (never a hash, never an instrument). Tuning, bends and the RPN
+        // range round-trip through the exported bytes and the independent oracle
+        // reproduces the source pitch within 0.01 st at EVERY NoteOn AND NoteOff
+        // (endpoint pitch consensus), with the bend-range cap [1, 127] honored.
+        var expressive = Note(PhysicalVoiceInstruments.A, 0, 50_000, 60.21,
+            new PitchChange(25_000, 0, 60.71));
+        // The expressive note REPLACES the first plain note (same sample window)
+        // — the physical voice stays monophonic, so the endpoint walk pairs one
+        // NoteOn/NoteOff per source note in export order.
+        var notes = new[] { expressive }
+            .Concat(StableTunedNotes(21.0, instrumentId: PhysicalVoiceInstruments.A).Skip(1))
+            .ToArray();
+        var result = ExportResult(Timeline(notes));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        // The pitch model is keyed by the SOURCE domain — the exact key that
+        // drives detection, bend-range calculation, tuning emission and the
+        // diagnostics (D1 "exported pitch key = SourceDomainKey").
+        DomainPitchStats domain = Assert.Single(result.PitchDiagnostics.Domains);
+        Assert.Equal(new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0), domain.Key);
+
+        // One tuning state for the one domain, within the [1, 127] range cap.
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        Assert.Equal(21.0, tuned.Value.FineTuningCents, 1);
+        Assert.InRange(tuned.Value.BendRange, 1, 127);
+
+        AssertEndpointPitchConsensus(tuned.Key, decoded, notes, fineTuningCents: 21.0);
+    }
+
+    [Fact]
+    public void ConflictingTuningCenters_RejectsNormalization()
+    {
+        // Spec §1 "Conflicting tuning centers": two sequential instruments on one
+        // physical voice with conflicting bias centers (+21c then −35c) and NO
+        // single valid domain center — the largest residual cluster covers only
+        // 50% (< 60% floor), so tuning-center normalization is REJECTED. Bias 0 →
+        // nothing subtracted → nothing to restore → pitch preserved through bends;
+        // NO track-local tuning is emitted.
+        var notes = StableTunedNotes(21.0, instrumentId: PhysicalVoiceInstruments.A)
+            .Concat(ShiftToInstrumentB(StableTunedNotes(-35.0), PhysicalVoiceInstruments.B))
+            .ToArray();
+        var result = ExportResult(Timeline(notes));
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(result.Bytes);
+
+        DomainPitchStats domain = Assert.Single(result.PitchDiagnostics.Domains);
+        Assert.False(domain.Accepted);
+        Assert.Null(domain.TuningCents);
+        Assert.Empty(decoded.State.Values.Where(s => s.HasTuning));
+        // The rejection is the DETECTOR's (no single valid center), not the
+        // endpoint-consensus guard's — one domain, one voice.
+        Assert.DoesNotContain(result.Diagnostics.Warnings,
+            w => w.Contains("conflicting tuning centers on one MIDI endpoint"));
+        Assert.Contains(result.Diagnostics.Warnings, w => w.Contains("rejected"));
+
+        // Pitch preserved through bends: every NoteOn and NoteOff of both
+        // instruments decodes within the oracle bound with NO tuning.
+        AssertEndpointPitchConsensus(decoded.State.Keys.Single(), decoded, notes, fineTuningCents: 0.0);
+    }
+
+    /// <summary>Walks one endpoint's decoded events in exported order maintaining
+    /// the live bend state, and asserts ENDPOINT PITCH CONSENSUS (spec §1): at
+    /// every NoteOn the decoded effective pitch equals the source note's initial
+    /// pitch, and at every NoteOff it equals the source note's end pitch (the
+    /// last mid-note pitch change, else the initial) — within the oracle bound of
+    /// 0.01 semitone. The bend range and fine tuning are resolved once (both are
+    /// set at tick 0 and never change on the endpoint).</summary>
+    private static void AssertEndpointPitchConsensus(
+        (int Port, int Channel) endpoint,
+        MidiSemanticDecoder.Result decoded,
+        IReadOnlyList<NoteEvent> sourceNotes,
+        double fineTuningCents)
+    {
+        IReadOnlyList<MidiSemanticDecoder.TimedEvent> events = decoded.Events[endpoint];
+        int bendRange = decoded.State[endpoint].BendRange;
+        int activeBend = 0;
+        var byStart = sourceNotes.OrderBy(n => n.StartSample).ToArray();
+        int current = -1;
+        foreach (MidiSemanticDecoder.TimedEvent timed in events)
+        {
+            switch (timed.Event)
+            {
+                case PitchBendEvent bend:
+                    activeBend = bend.PitchValue - 8192;
+                    break;
+                case NoteOnEvent on when on.Velocity != 0:
+                    current++;
+                    AssertEffectiveAtBoundary(on.NoteNumber, activeBend, bendRange, fineTuningCents,
+                        byStart[current].InitialMidiNote, "NoteOn");
+                    break;
+                case NoteOnEvent off when off.Velocity == 0:
+                    AssertEffectiveAtBoundary(off.NoteNumber, activeBend, bendRange, fineTuningCents,
+                        EndPitch(byStart[current]), "NoteOff");
+                    break;
+                case NoteOffEvent off:
+                    AssertEffectiveAtBoundary(off.NoteNumber, activeBend, bendRange, fineTuningCents,
+                        EndPitch(byStart[current]), "NoteOff");
+                    break;
+            }
+        }
+        Assert.Equal(sourceNotes.Count, current + 1);
+    }
+
+    /// <summary>The source pitch in effect at a note's end: the last pitch change
+    /// inside [StartSample, EndSample), else the initial pitch.</summary>
+    private static double EndPitch(NoteEvent note)
+    {
+        if (note.Pitch is { Count: > 0 })
+        {
+            for (int i = note.Pitch.Count - 1; i >= 0; i--)
+            {
+                PitchChange change = note.Pitch[i];
+                if (change.SamplePosition >= note.StartSample && change.SamplePosition < note.EndSample)
+                    return change.MidiNote;
+            }
+        }
+        return note.InitialMidiNote;
+    }
+
+    private static void AssertEffectiveAtBoundary(int noteNumber, int activeBend, int bendRange,
+        double fineTuningCents, double expected, string boundary)
+    {
+        double actual = MidiSemanticDecoder.EffectivePitch(noteNumber, activeBend, bendRange,
+            (int)Math.Round(fineTuningCents));
+        Assert.True(Math.Abs(actual - expected) <= 0.01,
+            $"{boundary}: decoded effective pitch {actual:0.###} != source pitch {expected:0.###} " +
+            $"(note {noteNumber}, bend {activeBend}, range {bendRange})");
     }
 
     [Fact]

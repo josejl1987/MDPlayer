@@ -133,11 +133,17 @@ internal readonly record struct NormalizedNoteView(
 /// The normalized pitch model: one view per source note plus per-domain tuning
 /// statistics, produced once by <see cref="PitchNormalizationStage.Normalize"/> and
 /// consumed by every pitch consumer of the exporter. Reference-identity keyed by
-/// <see cref="NoteEvent"/>; domains keyed by <see cref="MidiTrackKey"/>.
+/// <see cref="NoteEvent"/>; domains keyed by <see cref="SourceDomainKey"/> (D1: the
+/// source musical pitch domain — never the MIDI export voice domain).
+/// <see cref="NotesByDomain"/> and <see cref="Thresholds"/> carry exactly what
+/// <see cref="RebuildWithoutBias"/> needs to re-run a rejected domain's per-note
+/// pipeline without re-deriving the domain keys.
 /// </summary>
 internal sealed record PitchNormalizationModel(
     IReadOnlyDictionary<NoteEvent, NormalizedNoteView> Views,
-    IReadOnlyDictionary<MidiTrackKey, DomainPitchStats> Domains);
+    IReadOnlyDictionary<SourceDomainKey, DomainPitchStats> Domains,
+    IReadOnlyDictionary<SourceDomainKey, IReadOnlyList<NoteEvent>> NotesByDomain,
+    PitchNormalizationThresholds Thresholds);
 
 /// <summary>
 /// Per-domain tuning statistics for the pitch report (FR-6 / D12). Cents values are
@@ -147,7 +153,7 @@ internal sealed record PitchNormalizationModel(
 /// ExpressiveTransitions are the monotone pipeline counts.
 /// </summary>
 internal sealed record DomainPitchStats(
-    MidiTrackKey Key,
+    SourceDomainKey Key,
     int Attacks,
     int RetriggerAttacks,
     int RawPitchSamples,
@@ -195,7 +201,7 @@ internal static class PitchNormalizationStage
         VisualizationTimeline timeline,
         PitchNormalizationMode mode,
         PitchNormalizationThresholds thresholds,
-        Func<NoteEvent, MidiTrackKey> keyFor,
+        Func<NoteEvent, SourceDomainKey> keyFor,
         List<string>? warnings)
     {
         var notes = timeline.Notes ?? Array.Empty<NoteEvent>();
@@ -207,13 +213,17 @@ internal static class PitchNormalizationStage
             var identity = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
             foreach (NoteEvent note in notes)
                 identity[note] = new NormalizedNoteView(note, note.InitialMidiNote, RawChanges(note.Pitch));
-            return new PitchNormalizationModel(identity, new Dictionary<MidiTrackKey, DomainPitchStats>());
+            return new PitchNormalizationModel(
+                identity,
+                new Dictionary<SourceDomainKey, DomainPitchStats>(),
+                new Dictionary<SourceDomainKey, IReadOnlyList<NoteEvent>>(),
+                thresholds);
         }
 
-        var notesByDomain = new Dictionary<MidiTrackKey, List<NoteEvent>>();
+        var notesByDomain = new Dictionary<SourceDomainKey, List<NoteEvent>>();
         foreach (NoteEvent note in notes)
         {
-            MidiTrackKey key = keyFor(note);
+            SourceDomainKey key = keyFor(note);
             if (!notesByDomain.TryGetValue(key, out List<NoteEvent>? list))
             {
                 list = new List<NoteEvent>();
@@ -224,17 +234,17 @@ internal static class PitchNormalizationStage
 
         // Tuning-center detection FIRST (raw residuals, stable regions only), then
         // the per-note pipeline subtracts the accepted domain bias (P4).
-        var detectionByDomain = new Dictionary<MidiTrackKey, TuningDetection>();
-        foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
+        var detectionByDomain = new Dictionary<SourceDomainKey, TuningDetection>();
+        foreach ((SourceDomainKey key, List<NoteEvent> domainNotes) in notesByDomain)
             detectionByDomain[key] = DetectTuningCenter(key, domainNotes, thresholds, warnings);
 
         var views = new Dictionary<NoteEvent, NormalizedNoteView>(notes.Count);
-        var domains = new Dictionary<MidiTrackKey, DomainPitchStats>(notesByDomain.Count);
+        var domains = new Dictionary<SourceDomainKey, DomainPitchStats>(notesByDomain.Count);
         // Every normalization pass is remove-only and runs serially. Reuse one
         // working buffer across notes instead of allocating a temporary list
         // for each note; the final normalized list is still owned by the view.
         var samplesScratch = new List<PitchSample>();
-        foreach ((MidiTrackKey key, List<NoteEvent> domainNotes) in notesByDomain)
+        foreach ((SourceDomainKey key, List<NoteEvent> domainNotes) in notesByDomain)
         {
             TuningDetection detection = detectionByDomain[key];
             // DAW-friendly snaps only small accepted biases (D9); a larger one is
@@ -283,7 +293,56 @@ internal static class PitchNormalizationStage
                 TuningCents: detection.Accepted ? detection.BiasCents : null,
                 Accepted: detection.Accepted);
         }
-        return new PitchNormalizationModel(views, domains);
+        // The per-domain note pool is part of the model so the endpoint-consensus
+        // rebuild (RebuildWithoutBias) can re-run the pipeline without re-deriving
+        // the domain keys (D1).
+        var notesByDomainReadOnly = new Dictionary<SourceDomainKey, IReadOnlyList<NoteEvent>>(notesByDomain.Count);
+        foreach ((SourceDomainKey key, List<NoteEvent> list) in notesByDomain)
+            notesByDomainReadOnly[key] = list;
+        return new PitchNormalizationModel(views, domains, notesByDomainReadOnly, thresholds);
+    }
+
+    /// <summary>
+    /// Endpoint tuning consensus rebuild (Phase 4 task 4.3 / D1): re-normalizes the
+    /// notes of every REJECTED domain with bias 0 — nothing subtracted, so nothing
+    /// needs restoring and pitch is preserved through bends — and marks those
+    /// domains non-accepted so <c>EmitBendRangeSetup</c> emits no tuning for them.
+    /// All remove-only passes run unchanged and the accepted domains' views are
+    /// untouched, so the result is byte-deterministic for identical inputs. The
+    /// <paramref name="timeline"/> parameter is retained for the task-contract
+    /// signature; the model already carries the per-domain notes and thresholds.
+    /// </summary>
+    public static PitchNormalizationModel RebuildWithoutBias(
+        VisualizationTimeline timeline,
+        PitchNormalizationModel model,
+        IReadOnlySet<SourceDomainKey> rejectedDomains)
+    {
+        if (rejectedDomains.Count == 0)
+            return model;
+
+        var views = new Dictionary<NoteEvent, NormalizedNoteView>(model.Views);
+        var samplesScratch = new List<PitchSample>();
+        foreach (SourceDomainKey rejected in rejectedDomains)
+        {
+            if (!model.NotesByDomain.TryGetValue(rejected, out IReadOnlyList<NoteEvent>? domainNotes))
+                continue;
+            foreach (NoteEvent note in domainNotes)
+            {
+                // P4 skipped: bias is forced to 0; every remove-only pass (P0-P3)
+                // still runs with the exact same thresholds as the original pass.
+                var (changes, _) = NormalizeChanges(note, model.Thresholds, 0.0, samplesScratch);
+                views[note] = new NormalizedNoteView(note, note.InitialMidiNote, changes);
+            }
+        }
+
+        var domains = new Dictionary<SourceDomainKey, DomainPitchStats>(model.Domains.Count);
+        foreach ((SourceDomainKey key, DomainPitchStats stats) in model.Domains)
+        {
+            domains[key] = rejectedDomains.Contains(key)
+                ? stats with { Accepted = false, TuningCents = null }
+                : stats;
+        }
+        return new PitchNormalizationModel(views, domains, model.NotesByDomain, model.Thresholds);
     }
 
     /// <summary>Off-mode identity changes: the raw list converted 1:1 (no collapse,
@@ -499,7 +558,7 @@ internal static class PitchNormalizationStage
     }
 
     /// <summary>
-    /// Pass 3 tuning-center detector (FR-4 / D7-D8), per <see cref="MidiTrackKey"/>
+    /// Pass 3 tuning-center detector (FR-4 / D7-D8), per <see cref="SourceDomainKey"/>
     /// domain. Estimates the domain's tuning BIAS — never a bend value — from attack
     /// residuals (InitialMidiNote − round(InitialMidiNote), in cents) collected over
     /// STABLE note regions only. Portamento, vibrato, attack transients and
@@ -510,7 +569,7 @@ internal static class PitchNormalizationStage
     /// Rejected domains get bias 0 plus a Diagnostics warning.
     /// </summary>
     private static TuningDetection DetectTuningCenter(
-        MidiTrackKey key, IReadOnlyList<NoteEvent> notes,
+        SourceDomainKey key, IReadOnlyList<NoteEvent> notes,
         PitchNormalizationThresholds t, List<string>? warnings)
     {
         // Float guard for boundary comparisons: residuals are |Δ midi|·100 so exact

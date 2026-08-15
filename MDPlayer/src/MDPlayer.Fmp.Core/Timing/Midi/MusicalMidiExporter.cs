@@ -275,7 +275,7 @@ internal sealed class MusicalMidiExporter
             timeline,
             _options.PitchNormalizationMode,
             _options.PitchNormalizationThresholds ?? PitchNormalizationThresholds.Default,
-            TrackKeyFor,
+            SourceDomainKeyFor,
             pitchWarnings);
         if (pitchWarnings.Count > 0 && Diagnostics is not null)
             Diagnostics.Warnings.AddRange(pitchWarnings);
@@ -302,6 +302,15 @@ internal sealed class MusicalMidiExporter
 
         PreparePitchScratch(sourceIndex);
         TrackAllocator allocator = BuildTracks(sourceIndex);
+        // Phase 4 endpoint tuning consensus (D1/D13b): one tuning state per MIDI
+        // endpoint. The allocator grants each melodic track a unique (port,
+        // channel), so equal-bias dedupe is the norm; DIFFERING accepted biases on
+        // one endpoint (forced channels / future channel sharing) reject those
+        // domains and rebuild their views bias-free — never two conflicting
+        // tunings on one channel, never a silently-applied track-local tuning
+        // (spec §1 "Conflicting tuning centers"). Runs BEFORE bend-range resolution
+        // and note planning so every pitch consumer reads the final views.
+        pitchModel = ResolveEndpointTuningConsensus(timeline, pitchModel, allocator);
         // Per-domain bend-range resolution runs BEFORE note planning: EmitNote
         // encodes every bend against the slot's effective range, and the RPN setup
         // emits the same value (Patch B + per-domain auto-expansion).
@@ -1811,6 +1820,66 @@ internal sealed class MusicalMidiExporter
     }
 
     /// <summary>
+    /// Phase 4 endpoint tuning consensus (D1/D13b). One MIDI endpoint carries at
+    /// most ONE tuning state: collect the accepted tuning bias of every melodic
+    /// domain assigned to each endpoint (each slot owns exactly one domain —
+    /// <see cref="TrackSlot.Domain"/>.<see cref="MidiVoiceDomain.Source"/>).
+    /// Equal biases on one endpoint are ONE tuning (dedupe per endpoint);
+    /// DIFFERING accepted biases mean no single valid domain center exists for
+    /// that channel — both domains are rejected and their views rebuilt bias-free
+    /// via <see cref="PitchNormalizationStage.RebuildWithoutBias"/> (spec §1:
+    /// never a silently-applied track-local tuning; bias 0 → nothing subtracted →
+    /// nothing to restore → pitch preserved through bends). Byte-deterministic:
+    /// identical inputs produce identical rejections and identical bytes.
+    /// </summary>
+    private PitchNormalizationModel ResolveEndpointTuningConsensus(
+        VisualizationTimeline timeline, PitchNormalizationModel model, TrackAllocator allocator)
+    {
+        var biasByEndpoint = new Dictionary<MidiEndpoint, double>();
+        var domainByEndpoint = new Dictionary<MidiEndpoint, SourceDomainKey>();
+        var rejected = new HashSet<SourceDomainKey>();
+        foreach (KeyValuePair<MidiTrackKey, TrackSlot> pair in allocator.Slots)
+        {
+            TrackSlot slot = pair.Value;
+            if (slot.Percussive)
+                continue;
+            SourceDomainKey domain = slot.Domain.Source;
+            if (!model.Domains.TryGetValue(domain, out DomainPitchStats? stats) || !stats.Accepted)
+                continue;
+            double bias = stats.TuningCents!.Value;
+            MidiEndpoint endpoint = slot.Track.Endpoint;
+            if (biasByEndpoint.TryGetValue(endpoint, out double existing))
+            {
+                if (Math.Abs(existing - bias) > 1e-9)
+                {
+                    // Two conflicting accepted tuning centers on one channel: no
+                    // single valid domain center — reject BOTH, keep the endpoint
+                    // untuned (bias 0, pitch preserved through bends).
+                    rejected.Add(domainByEndpoint[endpoint]);
+                    rejected.Add(domain);
+                    biasByEndpoint.Remove(endpoint);
+                    domainByEndpoint.Remove(endpoint);
+                }
+                // Equal biases dedupe into the one tuning already recorded.
+                continue;
+            }
+            biasByEndpoint[endpoint] = bias;
+            domainByEndpoint[endpoint] = domain;
+        }
+
+        if (rejected.Count == 0)
+            return model;
+        if (Diagnostics is not null)
+        {
+            Diagnostics.Warnings.Add(
+                "pitch tuning: conflicting tuning centers on one MIDI endpoint; domains [" +
+                string.Join(", ", rejected.Select(d => d.ToString()).OrderBy(d => d, StringComparer.Ordinal)) +
+                "] rejected (bias 0, pitch preserved through bends)");
+        }
+        return PitchNormalizationStage.RebuildWithoutBias(timeline, model, rejected);
+    }
+
+    /// <summary>
     /// Emits the pitch-bend-range RPN setup (Patch B) once per melodic track that
     /// actually emits bends, at logical tick 0. A track that emits no bends gets
     /// no RPN setup. The range is the slot's EFFECTIVE range: max(configured
@@ -1863,7 +1932,10 @@ internal sealed class MusicalMidiExporter
             TrackSlot slot = orderedSlots[index].Value;
             if (slot.Percussive)
                 continue;
-            if (!model.Domains.TryGetValue(key, out DomainPitchStats? stats) || !stats.Accepted)
+            // The pitch domain key IS the slot's source domain (D1): the model was
+            // keyed by SourceDomainKeyFor == slot.Domain.Source, so this lookup is
+            // exact by construction (never reconstructed from the track key).
+            if (!model.Domains.TryGetValue(slot.Domain.Source, out DomainPitchStats? stats) || !stats.Accepted)
                 continue;
             double bias = stats.TuningCents!.Value;
             // Base-100 IR decomposition (D10): coarse semitones + fine cents. The
@@ -1994,6 +2066,31 @@ internal sealed class MusicalMidiExporter
         c = string.CompareOrdinal(a.Instrument.Canonical, b.Instrument.Canonical);
         if (c != 0) return c;
         return a.SourceChannel.CompareTo(b.SourceChannel);
+    }
+
+    /// <summary>The pitch-normalization domain owning a source note: device +
+    /// voice family + source channel (D1). Domains are deliberately
+    /// instrument-agnostic — the pitch stage models one tuning center per SOURCE,
+    /// not per exported track — while <see cref="TrackKeyFor"/> splits further by
+    /// instrument. The musical source domain IS the export pitch domain, so the
+    /// key RESOLVES exactly what the track resolution carries: explicit
+    /// <c>note.Domain</c> first, then the device / voice family / source channel
+    /// parsed from the note's real channel id, and the canonical placeholder
+    /// triple only when the channel identity genuinely cannot be resolved (the
+    /// SAME identity the exported track uses). The key is NEVER fabricated from a
+    /// channel hash and NEVER carries InstrumentIdentity, TrackLayout or display
+    /// names (spec §1 / D1).</summary>
+    private SourceDomainKey SourceDomainKeyFor(NoteEvent note)
+    {
+        if (note.Domain is SourceDomainKey domain)
+            return domain;
+        // Propagate the source event's real channel identity through the single
+        // track-resolution path (TrackKeyFor parses the same device/voice/channel
+        // fields and owns the placeholder decision), so the pitch-domain key is
+        // always byte-equal to the exported slot domain (slot.Domain.Source) —
+        // the end-to-end "exported pitch key = SourceDomainKey" guarantee.
+        MidiTrackKey key = TrackKeyFor(note);
+        return new SourceDomainKey(key.Device, key.VoiceFamily, key.SourceChannel);
     }
 
     /// <summary>The MIDI track key owning a source note. The note is owned by the
