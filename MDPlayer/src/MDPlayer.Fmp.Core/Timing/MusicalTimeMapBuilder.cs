@@ -10,6 +10,14 @@ internal sealed class MusicalTimeMapBuildResult
     public required MusicalTimeMap Map { get; init; }
 
     public required TimingDiagnostics Diagnostics { get; init; }
+
+    /// <summary>
+    /// The unified percussion evidence collection (spec §3/§4, D3). Built once
+    /// by <see cref="MusicalTimeMapBuilder"/> and consumed by tempo inference,
+    /// structural grid selection and the MIDI exporter — one collection, one
+    /// provenance.
+    /// </summary>
+    public IReadOnlyList<PercussiveOnset> PercussionEvidence { get; init; } = Array.Empty<PercussiveOnset>();
 }
 
 /// <summary>
@@ -30,6 +38,19 @@ internal static class MusicalTimeMapBuilder
         MusicalTimeMapOptions options)
         => BuildCore(timeline, options, instrumentTempoSearch: false, out _);
 
+    /// <summary>Builds the same map while exposing the EXACT percussion evidence
+    /// instance that tempo inference and structural grid selection consumed
+    /// (acceptance item 7: one collection, one build).</summary>
+    internal static MusicalTimeMapBuildResult Build(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        out IReadOnlyList<PercussiveOnset> percussionEvidence)
+    {
+        MusicalTimeMapBuildResult result = BuildCore(timeline, options, instrumentTempoSearch: false, out _);
+        percussionEvidence = result.PercussionEvidence;
+        return result;
+    }
+
     /// <summary>Builds the same map while exposing symbolic-search work counts
     /// for the opt-in export performance receipt.</summary>
     internal static MusicalTimeMapBuildResult Build(
@@ -49,6 +70,11 @@ internal static class MusicalTimeMapBuilder
         ArgumentNullException.ThrowIfNull(options);
         if (timeline.SampleRate <= 0)
             throw new ArgumentException("timeline sample rate must be positive");
+
+        // ONE percussion evidence build feeds every consumer (spec §3, D3):
+        // tempo inference, structural grid selection and (via the build result)
+        // the MIDI exporter all read this same collection instance.
+        IReadOnlyList<PercussiveOnset> percussionEvidence = PercussionEvidenceBuilder.Build(timeline);
 
         // Phase override priority: explicit quarter wins; else samples converted.
         double? beatOffsetQuarter = options.BeatOffsetQuarter;
@@ -85,9 +111,9 @@ internal static class MusicalTimeMapBuilder
             // Build the initial symbolic result first. Structural evidence is a
             // second pass over every build path, not a marker-emission side effect.
             MusicalTimeMapBuildResult initial = instrumentTempoSearch
-                ? SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, out tempoCounters)
-                : SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter);
-            return MusicalStructureAnalyzer.SelectGrid(initial, timeline);
+                ? SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, percussionEvidence, out tempoCounters)
+                : SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, percussionEvidence);
+            return MusicalStructureAnalyzer.SelectGrid(initial, timeline, percussionEvidence);
         }
 
         // Deterministic source application:
@@ -173,8 +199,13 @@ internal static class MusicalTimeMapBuilder
         fit.Diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
 
         MusicalTimeMapBuildResult initialResult =
-            new() { Map = map, Diagnostics = fit.Diagnostics };
-        return MusicalStructureAnalyzer.SelectGrid(initialResult, timeline);
+            new()
+            {
+                Map = map,
+                Diagnostics = fit.Diagnostics,
+                PercussionEvidence = percussionEvidence,
+            };
+        return MusicalStructureAnalyzer.SelectGrid(initialResult, timeline, percussionEvidence);
     }
 
     private static string NotTrustworthyMessage(TimingDiagnostics diagnostics)

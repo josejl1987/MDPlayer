@@ -95,13 +95,18 @@ internal static class MusicalStructureAnalyzer
     /// <summary>
     /// Scores retained timing grids against source-loop and repeated-content evidence.
     /// Only symbolic maps are eligible; authoritative driver/user timing is unchanged.
+    /// <paramref name="percussionEvidence"/> is the SAME unified evidence instance
+    /// that tempo inference consumed (spec §3/§7, D3); grid scoring derives its
+    /// percussion signals from it, never re-reading the timeline.
     /// </summary>
     internal static MusicalTimeMapBuildResult SelectGrid(
         MusicalTimeMapBuildResult initial,
-        VisualizationTimeline timeline)
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         ArgumentNullException.ThrowIfNull(initial);
         ArgumentNullException.ThrowIfNull(timeline);
+        ArgumentNullException.ThrowIfNull(percussionEvidence);
         MusicalTimeMap map = initial.Map;
         if (map.Segments.Count != 1 || map.GridCandidates.Count == 0
             || map.Segments[0].Source != TimingSource.SymbolicInference)
@@ -127,7 +132,7 @@ internal static class MusicalStructureAnalyzer
         // a single coincidental phase alignment is phase luck, not tempo
         // evidence, and must not dominate the ranking.
         (double restartBaseline, Dictionary<(double Bpm, Meter Meter), int> restartFamilySupport) =
-            ComputeRestartSignalPlan(map, timeline, sourceEvidence);
+            ComputeRestartSignalPlan(map, timeline, sourceEvidence, percussionEvidence);
 
         ScoredGrid[] ranked = map.GridCandidates
             .Select(candidate =>
@@ -135,7 +140,7 @@ internal static class MusicalStructureAnalyzer
                 MusicalTimeMap variant = VariantMap(map, candidate);
                 return new ScoredGrid(
                     candidate,
-                    GridStructuralScore(candidate, variant, timeline, sourceEvidence, restartBaseline, restartFamilySupport));
+                    GridStructuralScore(candidate, variant, timeline, sourceEvidence, restartBaseline, restartFamilySupport, percussionEvidence));
             })
             .Where(value => double.IsFinite(value.Score.Score))
             .OrderByDescending(value => value.Score.Score)
@@ -351,7 +356,7 @@ internal static class MusicalStructureAnalyzer
         RestartBoundaryEvidence? winnerRestart = CaptureRestartBoundaryEvidence(
             VariantMap(map, winner.Candidate),
             sourceEvidence,
-            BuildBarsForMap(VariantMap(map, winner.Candidate), timeline) ?? Array.Empty<BarFeature>());
+            BuildBarsForMap(VariantMap(map, winner.Candidate), timeline, percussionEvidence) ?? Array.Empty<BarFeature>());
         double restartFitThreshold = Math.Exp(-(RestartBoundaryErrorLimitDownbeat * RestartBoundaryErrorLimitDownbeat)
             / (2 * RestartBoundarySigmaBars * RestartBoundarySigmaBars));
         bool restartDownbeatGate = winnerRestart is { } evidence
@@ -453,11 +458,18 @@ internal static class MusicalStructureAnalyzer
         diagnostics.Warnings.Add(
             $"joint structural timing selected {selected.Segments[0].BeatsPerMinute:0.###} BPM " +
             $"({winner.Score.Score:0.###} score, {winner.Candidate.Meter} grid)");
-        return new MusicalTimeMapBuildResult { Map = selected, Diagnostics = diagnostics };
+        return new MusicalTimeMapBuildResult
+        {
+            Map = selected,
+            Diagnostics = diagnostics,
+            PercussionEvidence = percussionEvidence,
+        };
     }
 
     /// <summary>Compatibility view for existing analyzer tests; production callers
-    /// must use the map-plus-diagnostics boundary above.</summary>
+    /// must use the map-plus-diagnostics boundary above. Re-derives the unified
+    /// percussion evidence from the timeline so the test surface exercises the
+    /// same evidence semantics as production.</summary>
     internal static MusicalTimeMap SelectGrid(
         MusicalTimeMap map,
         VisualizationTimeline timeline)
@@ -477,8 +489,16 @@ internal static class MusicalStructureAnalyzer
         {
             Map = map,
             Diagnostics = diagnostics,
-        }, timeline).Map;
+        }, timeline, PercussionEvidenceBuilder.Build(timeline)).Map;
     }
+
+    /// <summary>Compatibility overload for analyzer tests building a result
+    /// directly; production callers must pass the SAME evidence instance that
+    /// tempo inference consumed (spec §3/§7).</summary>
+    internal static MusicalTimeMapBuildResult SelectGrid(
+        MusicalTimeMapBuildResult initial,
+        VisualizationTimeline timeline)
+        => SelectGrid(initial, timeline, PercussionEvidenceBuilder.Build(timeline));
 
     /// <summary>
     /// Records a machine-readable rejection: stable gate keys joined by commas
@@ -646,11 +666,20 @@ internal static class MusicalStructureAnalyzer
     }
 
     public static MusicalStructure Analyze(MusicalTimeMap map, VisualizationTimeline timeline)
+        => Analyze(map, timeline, PercussionEvidenceBuilder.Build(timeline));
+
+    /// <summary>Structural analysis consuming the SAME unified percussion
+    /// evidence instance that timing consumed (spec §3/§7, D3); the bar
+    /// percussion side is fed from it, never re-reading the timeline.</summary>
+    public static MusicalStructure Analyze(
+        MusicalTimeMap map,
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         if (map.Meter is not Meter meter || meter.QuartersPerBar <= 0
             || map.FirstDownbeatQuarter is null
             || map.Confidence < 0.60)
-            return BuildContentOnlyFallback(map, timeline);
+            return BuildContentOnlyFallback(map, timeline, percussionEvidence);
 
         double quartersPerBar = meter.QuartersPerBar;
         double barOrigin = map.FirstDownbeatQuarter.Value;
@@ -661,7 +690,7 @@ internal static class MusicalStructureAnalyzer
 
         var pickup = new BarFeature(-1, barOrigin - quartersPerBar, barOrigin);
         BarFeature[] bars = BuildBars(
-            map, timeline.Notes, timeline.Rhythm, timeline.AggregateHits,
+            map, timeline.Notes, percussionEvidence,
             barOrigin, quartersPerBar, barCount, pickup);
         SourceLoopEvidence sourceEvidence = CaptureSourceLoopEvidence(timeline);
         RepeatedBlock[] loops = DetectSourceLoop(map, sourceEvidence, bars)
@@ -694,11 +723,13 @@ internal static class MusicalStructureAnalyzer
     /// </summary>
     private static MusicalStructure BuildContentOnlyFallback(
         MusicalTimeMap map,
-        VisualizationTimeline timeline)
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         MusicalTimeMapBuildResult reselect = SelectGrid(
             new MusicalTimeMapBuildResult { Map = map, Diagnostics = new TimingDiagnostics() },
-            timeline);
+            timeline,
+            percussionEvidence);
         GridSelectionDiagnostics? selection = reselect.Diagnostics.GridSelection;
         if (selection is not { TopCandidates.Count: > 0 })
             return MusicalStructure.Empty;
@@ -728,7 +759,7 @@ internal static class MusicalStructureAnalyzer
                 var candidate = new MusicalGridCandidate(
                     receipt.Bpm, receipt.Meter, receipt.QuarterAtSourceStart,
                     receipt.FirstDownbeatQuarter, receipt.CandidatePrior);
-                RepeatedBlock? block = AnalyzeCandidateEvidence(map, candidate, timeline)
+                RepeatedBlock? block = AnalyzeCandidateEvidence(map, candidate, timeline, percussionEvidence)
                     .BestRepeatedBlock;
                 if (block is null
                     || block.Similarity < ContentFallbackSimilarity
@@ -749,7 +780,7 @@ internal static class MusicalStructureAnalyzer
             return MusicalStructure.Empty;
 
         MusicalTimeMap grid = VariantMap(map, bestCandidate);
-        BarFeature[]? bars = BuildBarsForMap(grid, timeline);
+        BarFeature[]? bars = BuildBarsForMap(grid, timeline, percussionEvidence);
         if (bars is null || bars.Length == 0)
             return MusicalStructure.Empty;
 
@@ -790,7 +821,8 @@ internal static class MusicalStructureAnalyzer
     internal static CandidateStructuralEvidence AnalyzeCandidateEvidence(
         MusicalTimeMap sourceMap,
         MusicalGridCandidate candidate,
-        VisualizationTimeline timeline)
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         MusicalTimeMap variant = VariantMap(sourceMap, candidate);
         if (variant.Meter is not Meter meter || meter.QuartersPerBar <= 0)
@@ -834,7 +866,7 @@ internal static class MusicalStructureAnalyzer
         }
 
         int barCount = Math.Max(1, (int)Math.Ceiling((lastQuarter - downbeat) / quartersPerBar));
-        BarFeature[] bars = BuildBarsForMap(variant, timeline)!;
+        BarFeature[] bars = BuildBarsForMap(variant, timeline, percussionEvidence)!;
         bool rangeCovered = bars.Length > 0 && bars[^1].QuarterEnd >= lastQuarter;
 
         SourceLoopEvidence sourceEvidence = CaptureSourceLoopEvidence(timeline);
@@ -931,7 +963,8 @@ internal static class MusicalStructureAnalyzer
         ComputeRestartSignalPlan(
             MusicalTimeMap source,
             VisualizationTimeline timeline,
-            SourceLoopEvidence sourceEvidence)
+            SourceLoopEvidence sourceEvidence,
+            IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         var support = new Dictionary<(double Bpm, Meter Meter), int>();
         var familyMinFit = new Dictionary<(double Bpm, Meter Meter), double>();
@@ -940,7 +973,7 @@ internal static class MusicalStructureAnalyzer
             MusicalTimeMap variant = VariantMap(source, candidate);
             if (variant.Meter is not Meter meter || variant.FirstDownbeatQuarter is not double)
                 continue;
-            BarFeature[]? bars = BuildBarsForMap(variant, timeline);
+            BarFeature[]? bars = BuildBarsForMap(variant, timeline, percussionEvidence);
             if (bars is null)
                 continue;
             double? fit = CaptureRestartBoundaryEvidence(variant, sourceEvidence, bars)?.BoundaryFit;
@@ -967,7 +1000,8 @@ internal static class MusicalStructureAnalyzer
         VisualizationTimeline timeline,
         SourceLoopEvidence sourceEvidence,
         double restartBaseline,
-        IReadOnlyDictionary<(double Bpm, Meter Meter), int> restartFamilySupport)
+        IReadOnlyDictionary<(double Bpm, Meter Meter), int> restartFamilySupport,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         // No meter means no bar grid to score at all — the candidate cannot be
         // ranked, only this hard rejection is possible.
@@ -1002,9 +1036,9 @@ internal static class MusicalStructureAnalyzer
             // Bar-anchored signals: only when a downbeat pins the bar grid.
             onsetFit = OnsetGridFit(map, timeline, db);
             Add(onsetFit, 0.20);
-            rhythm = RhythmRoleFit(map, timeline, db, quartersPerBar);
+            rhythm = RhythmRoleFit(map, percussionEvidence, db, quartersPerBar);
             Add(rhythm.TotalHits > 0 ? rhythm.Fit : null, 0.20);
-            BarFeature[] bars = BuildBarsForMap(map, timeline)!;
+            BarFeature[] bars = BuildBarsForMap(map, timeline, percussionEvidence)!;
             restartEvidence = CaptureRestartBoundaryEvidence(map, sourceEvidence, bars);
             restartBoundaryFit = restartEvidence?.BoundaryFit;
             // Hypothesis 8: the discriminating restart signal contributes only
@@ -1206,14 +1240,17 @@ internal static class MusicalStructureAnalyzer
 
     private static RhythmRoleEvidence RhythmRoleFit(
         MusicalTimeMap map,
-        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
         double downbeat,
         double quartersPerBar)
     {
-        RhythmEvent[] hits = (timeline.Rhythm ?? Array.Empty<RhythmEvent>())
-            .Where(hit => hit is not null)
-            .ToArray();
-        if (hits.Length == 0)
+        // Unified evidence fit (spec §3/§7, D3): the SAME percussion collection
+        // that tempo inference consumed. Role labels come from the evidence —
+        // never re-derived from the timeline — and unknown-role onsets keep the
+        // generic whole-beat subdivision catch-all (they are never forced into a
+        // BD/SD template, and they never count toward knownRoleHits or
+        // distinctRoles).
+        if (percussionEvidence.Count == 0)
             return default;
 
         // Meter-aware role targets (spec Patch 3d). 3/4 and 6/8 share
@@ -1228,12 +1265,12 @@ internal static class MusicalStructureAnalyzer
         double total = 0;
         int knownRoleHits = 0;
         var distinctRoles = new HashSet<RhythmRole>();
-        foreach (RhythmEvent hit in hits)
+        foreach (PercussiveOnset onset in percussionEvidence)
         {
             double beat = PositiveModulo(
-                map.SampleToQuarterPosition(hit.SamplePosition) - downbeat,
+                map.SampleToQuarterPosition(onset.SamplePosition) - downbeat,
                 quartersPerBar);
-            RhythmRole role = RhythmRoleClassifier.Classify(hit);
+            RhythmRole role = onset.Role;
             double fit = role switch
             {
                 RhythmRole.Bd when isSixEight => WeightedRoleAlignment(
@@ -1281,11 +1318,12 @@ internal static class MusicalStructureAnalyzer
             total += fit;
         }
 
-        double fitScore = total / hits.Length;
+        double fitScore = total / percussionEvidence.Count;
         // The strong rhythm gate: at least 16 known-role hits spanning at least
         // two distinct roles, with the weighted fit >= 0.85.
         bool strong = knownRoleHits >= 16 && distinctRoles.Count >= 2 && fitScore >= 0.85;
-        return new RhythmRoleEvidence(fitScore, strong, knownRoleHits, hits.Length, distinctRoles.Count);
+        return new RhythmRoleEvidence(
+            fitScore, strong, knownRoleHits, percussionEvidence.Count, distinctRoles.Count);
     }
 
     private static double WeightedRoleAlignment(
@@ -1444,8 +1482,7 @@ internal static class MusicalStructureAnalyzer
     private static BarFeature[] BuildBars(
         MusicalTimeMap map,
         IReadOnlyList<NoteEvent>? notes,
-        IReadOnlyList<RhythmEvent>? rhythm,
-        IReadOnlyList<AggregateHitEvent>? aggregateHits,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
         double barOrigin,
         double quartersPerBar,
         int barCount,
@@ -1513,13 +1550,11 @@ internal static class MusicalStructureAnalyzer
             }
         }
 
-        if (rhythm is not null)
+        if (percussionEvidence is not null)
         {
-            foreach (RhythmEvent hit in rhythm)
+            foreach (PercussiveOnset onset in percussionEvidence)
             {
-                if (hit is null)
-                    continue;
-                double quarter = map.SampleToQuarterPosition(hit.SamplePosition);
+                double quarter = map.SampleToQuarterPosition(onset.SamplePosition);
                 int barIndex = (int)Math.Floor((quarter - barOrigin) / quartersPerBar);
                 if (barIndex < 0)
                 {
@@ -1527,38 +1562,14 @@ internal static class MusicalStructureAnalyzer
                     if (pickup is not null && quarter < barOrigin)
                         pickup.AddRhythmOnset(
                             OnsetSlotInSpan(quarter, pickup.QuarterStart, quartersPerBar),
-                            hit.ChannelId, hit.Domain);
+                            onset.VoiceId, onset.Domain);
                     continue;
                 }
                 if (barIndex >= barCount)
                     continue;
                 double barStart = barOrigin + barIndex * quartersPerBar;
                 bars[barIndex].AddRhythmOnset(
-                    OnsetSlotInSpan(quarter, barStart, quartersPerBar), hit.ChannelId, hit.Domain);
-            }
-        }
-
-        if (aggregateHits is not null)
-        {
-            foreach (AggregateHitEvent hit in aggregateHits)
-            {
-                if (hit is null)
-                    continue;
-                double quarter = map.SampleToQuarterPosition(hit.SamplePosition);
-                int barIndex = (int)Math.Floor((quarter - barOrigin) / quartersPerBar);
-                if (barIndex < 0)
-                {
-                    if (pickup is not null && quarter < barOrigin)
-                        pickup.AddRhythmOnset(
-                            OnsetSlotInSpan(quarter, pickup.QuarterStart, quartersPerBar),
-                            hit.VoiceId, null);
-                    continue;
-                }
-                if (barIndex >= barCount)
-                    continue;
-                double barStart = barOrigin + barIndex * quartersPerBar;
-                bars[barIndex].AddRhythmOnset(
-                    OnsetSlotInSpan(quarter, barStart, quartersPerBar), hit.VoiceId, null);
+                    OnsetSlotInSpan(quarter, barStart, quartersPerBar), onset.VoiceId, onset.Domain);
             }
         }
 
@@ -1577,7 +1588,8 @@ internal static class MusicalStructureAnalyzer
     /// Returns null when the map lacks meter or a downbeat.</summary>
     private static BarFeature[]? BuildBarsForMap(
         MusicalTimeMap map,
-        VisualizationTimeline timeline)
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         if (map.Meter is not Meter meter || map.FirstDownbeatQuarter is not double downbeat)
             return null;
@@ -1589,8 +1601,7 @@ internal static class MusicalStructureAnalyzer
         return BuildBars(
             map,
             timeline.Notes,
-            timeline.Rhythm,
-            timeline.AggregateHits,
+            percussionEvidence,
             downbeat,
             quartersPerBar,
             barCount);

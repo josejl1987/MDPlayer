@@ -8,11 +8,13 @@ namespace Fmp.Core.Timing;
 /// Builds the unified percussion evidence stream (spec §3/§4/§6, D3) from a
 /// timeline. Called EXACTLY once per time map by <see cref="MusicalTimeMapBuilder"/>;
 /// the same collection is consumed by tempo inference, structural grid selection
-/// and the MIDI exporter. Sources, in dedup priority order:
+/// and the MIDI exporter. Sources, in cross-kind dedup priority order:
 /// NativeRhythm (RhythmEvent, authoritative) &gt; AggregateHit (always evidence)
-/// &gt; ClassifiedNote (FM note judged percussive). Events are deduplicated only
-/// when they refer to the same physical attack (Domain + VoiceId + sample);
-/// simultaneous kick and snare at one sample remain separate events.
+/// &gt; ClassifiedNote (FM note judged percussive). Kind-priority dedup applies
+/// only ACROSS kinds — a non-native event claiming the same physical attack
+/// slot (Domain + VoiceId + sample) as a native event is dropped; every native
+/// RhythmEvent always appears (§5), so simultaneous kick and snare at one
+/// sample remain separate events even when they share a rhythm voice.
 /// </summary>
 internal static class PercussionEvidenceBuilder
 {
@@ -28,10 +30,16 @@ internal static class PercussionEvidenceBuilder
         if (timeline is null)
             return Array.Empty<PercussiveOnset>();
 
-        var byAttack = new Dictionary<AttackKey, PercussiveOnset>();
+        // Native rhythm events are authoritative (spec §5): EVERY RhythmEvent
+        // appears with its shared-vocabulary role and its own strength — two
+        // distinct RhythmEvents that share a physical slot (e.g. kick + snare on
+        // one rhythm voice at one sample) are two attacks and both survive.
+        // Kind-priority dedup (NativeRhythm > AggregateHit > ClassifiedNote)
+        // therefore applies only ACROSS kinds: a non-native event claiming the
+        // same attack slot as a native event is dropped.
+        var nativeKeys = new HashSet<AttackKey>();
+        var result = new List<PercussiveOnset>();
 
-        // Native rhythm events are authoritative: every RhythmEvent appears
-        // with its shared-vocabulary role and its own strength.
         if (timeline.Rhythm is not null)
         {
             foreach (RhythmEvent rhythm in timeline.Rhythm)
@@ -44,7 +52,8 @@ internal static class PercussionEvidenceBuilder
                     rhythm.Strength,
                     PercussionEvidenceKind.NativeRhythm,
                     Confidence: 1.0);
-                byAttack.TryAdd(new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition), onset);
+                nativeKeys.Add(new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition));
+                result.Add(onset);
             }
         }
 
@@ -52,6 +61,7 @@ internal static class PercussionEvidenceBuilder
         // classifier has no authoritative vocabulary for aggregate labels).
         if (timeline.AggregateHits is not null)
         {
+            var aggregateKeys = new HashSet<AttackKey>();
             foreach (AggregateHitEvent hit in timeline.AggregateHits)
             {
                 var onset = new PercussiveOnset(
@@ -62,13 +72,17 @@ internal static class PercussionEvidenceBuilder
                     hit.Strength,
                     PercussionEvidenceKind.AggregateHit,
                     Confidence: 1.0);
-                byAttack.TryAdd(new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition), onset);
+                var key = new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition);
+                if (nativeKeys.Contains(key) || !aggregateKeys.Add(key))
+                    continue;
+                result.Add(onset);
             }
         }
 
         // FM notes enter the stream only when classified percussive.
         if (timeline.Notes is not null)
         {
+            var classifiedKeys = new HashSet<AttackKey>();
             foreach (NoteEvent note in timeline.Notes)
             {
                 if (note.Mode is not (VisualizationNoteMode.Fm or VisualizationNoteMode.Fm3Operator))
@@ -88,11 +102,14 @@ internal static class PercussionEvidenceBuilder
                     classification.Confidence,
                     PercussionEvidenceKind.ClassifiedNote,
                     classification.Confidence);
-                byAttack.TryAdd(new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition), onset);
+                var key = new AttackKey(onset.Domain, onset.VoiceId, onset.SamplePosition);
+                if (nativeKeys.Contains(key) || !classifiedKeys.Add(key))
+                    continue;
+                result.Add(onset);
             }
         }
 
-        return byAttack.Values
+        return result
             .OrderBy(onset => onset.SamplePosition)
             .ThenBy(onset => onset.Domain?.ToString() ?? string.Empty, StringComparer.Ordinal)
             .ThenBy(onset => onset.VoiceId, StringComparer.Ordinal)

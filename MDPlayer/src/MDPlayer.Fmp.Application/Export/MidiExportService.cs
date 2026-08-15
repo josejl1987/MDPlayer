@@ -54,7 +54,7 @@ public sealed class MidiExportService
         {
             return Failed($"Invalid timing input: {ex.Message}");
         }
-        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline);
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline, build.PercussionEvidence);
 
         try
         {

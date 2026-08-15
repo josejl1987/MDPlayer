@@ -950,7 +950,7 @@ internal static class CorpusReporter
             foreach ((GridCandidateReceipt receipt, int rank) in ranked)
             {
                 CandidateStructuralEvidence evidence = MusicalStructureAnalyzer
-                    .AnalyzeCandidateEvidence(build.Map, ReconstructCandidate(receipt), timeline);
+                    .AnalyzeCandidateEvidence(build.Map, ReconstructCandidate(receipt), timeline, build.PercussionEvidence);
                 RepeatedBlock? block = evidence.BestRepeatedBlock;
                 if (block is not null
                     && Math.Abs(block.LengthBars - expectedLoop) <= expectation.LoopToleranceBars
@@ -969,7 +969,7 @@ internal static class CorpusReporter
         CandidateStructuralEvidence? expectedEvidence = expectedReceipt is null
             ? null
             : MusicalStructureAnalyzer.AnalyzeCandidateEvidence(
-                build.Map, ReconstructCandidate(expectedReceipt), timeline);
+                build.Map, ReconstructCandidate(expectedReceipt), timeline, build.PercussionEvidence);
 
         return new CandidateTraceResult(
             expectedRank,

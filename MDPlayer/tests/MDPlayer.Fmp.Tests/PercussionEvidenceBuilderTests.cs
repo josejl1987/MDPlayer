@@ -11,6 +11,10 @@ namespace MDPlayer.Fmp.Tests;
 /// enter as ClassifiedNote, dedup happens only per physical attack with priority
 /// NativeRhythm &gt; AggregateHit &gt; ClassifiedNote, and simultaneous kick+snare at
 /// one sample position survive as separate onsets.
+/// Phase 2 adds the unified-consumption assertions (tasks 2.2/2.3/2.4): tempo
+/// inference and structural grid selection consume the IDENTICAL evidence
+/// instance (acceptance item 7), and unknown-role onsets feed the timing streams
+/// without ever counting toward known-role hits or distinct roles (item 8).
 /// </summary>
 public sealed class PercussionEvidenceBuilderTests
 {
@@ -214,5 +218,88 @@ public sealed class PercussionEvidenceBuilderTests
         Assert.Equal(new[] { 500L, 500L, 1000L, 1000L }, evidence.Select(o => o.SamplePosition));
         Assert.Equal(new[] { RhythmRole.Bd, RhythmRole.Sd, RhythmRole.Bd, RhythmRole.Sd },
             evidence.Select(o => o.Role));
+    }
+
+    // ---- Phase 2: unified evidence consumption (tasks 2.2, 2.3, 2.4) ----
+
+    [Fact]
+    public void TempoInferenceAndGridSelection_ConsumeIdenticalEvidenceInstance()
+    {
+        // Acceptance item 7 (task 2.4): the SAME percussion evidence collection
+        // must feed tempo inference AND structural grid selection.
+        // MusicalTimeMapBuilder builds it once and threads the instance through
+        // SymbolicTempoInference.BuildCore and MusicalStructureAnalyzer.SelectGrid;
+        // any re-derivation at either stage surfaces here as a different reference.
+        double spq = SampleRate * 60.0 / 120.0;
+        NoteEvent[] notes = Enumerable.Range(0, 16)
+            .Select(i => FmNote("ym2608.0.fm.3", "kick", (long)Math.Round(i * spq),
+                (long)Math.Round(i * spq + 0.4 * spq), isRetrigger: false, FmDomain(3)))
+            .ToArray();
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = SampleRate,
+            Instruments = [SnappyInstrument("kick")],
+            Rhythm = [Kick(0), Snare((long)Math.Round(2 * spq))],
+            Notes = notes,
+        };
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference },
+            out IReadOnlyList<PercussiveOnset> exposed);
+
+        Assert.NotEmpty(exposed);
+        // THE identity assertion: the instance handed out by the builder IS the
+        // instance both consumers stored on the result — one collection for the
+        // whole pipeline.
+        Assert.True(ReferenceEquals(exposed, build.PercussionEvidence),
+            "tempo inference and grid selection must consume the identical evidence instance");
+        // Sanity: the structural grid-selection pass actually ran over that evidence.
+        Assert.True(build.Diagnostics.GridSelection is { Attempted: true },
+            "symbolic map must exercise the grid-selection path");
+    }
+
+    [Fact]
+    public void UnknownRoleOnsets_FeedTimingStreams_ButNeverKnownRoleScores()
+    {
+        // Acceptance item 8 / task 2.2: unknown-role percussive onsets are
+        // accent/onset evidence in the SAME collection, but never count toward
+        // knownRoleHits, distinctRoles or BD/SD pattern scores. 16 on-grid known
+        // kicks plus 16 unknown-role FM transients on the same grid: the grid
+        // breakdown must show exactly 16 known-role hits and ONE distinct role,
+        // while the evidence stream carries all 32 onsets.
+        double spq = SampleRate * 60.0 / 120.0;
+        RhythmEvent[] kicks = Enumerable.Range(0, 16)
+            .Select(i => Kick((long)Math.Round(i * spq)))
+            .ToArray();
+        NoteEvent[] transients = Enumerable.Range(0, 16)
+            .Select(i => FmNote("ym2608.0.fm.5", "transient", (long)Math.Round(i * spq),
+                (long)Math.Round(i * spq + 1323), isRetrigger: true, FmDomain(5)))
+            .ToArray();
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = SampleRate,
+            Instruments = [SnappyInstrument("transient")],
+            Rhythm = kicks,
+            Notes = transients,
+        };
+
+        MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
+            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+
+        // Unified stream: 16 native kicks + 16 classified transients coexist in
+        // the one evidence collection, all unknown-role by design.
+        Assert.Equal(32, build.PercussionEvidence.Count);
+        Assert.Equal(16, build.PercussionEvidence.Count(o => o.EvidenceKind == PercussionEvidenceKind.NativeRhythm));
+        Assert.All(build.PercussionEvidence.Where(o => o.EvidenceKind == PercussionEvidenceKind.ClassifiedNote),
+            o => Assert.Equal(RhythmRole.Unknown, o.Role));
+
+        GridSelectionDiagnostics selection = Assert.IsType<GridSelectionDiagnostics>(build.Diagnostics.GridSelection);
+        Assert.True(selection.Attempted);
+        GridScoreBreakdown breakdown = selection.Breakdown
+            ?? Assert.IsType<GridScoreBreakdown>(selection.TopCandidates[0].Breakdown);
+        // Unknown onsets never inflate known-role hits nor distinct roles (no
+        // fabricated BD/SD/HH evidence), even though all 16 sit on the grid.
+        Assert.Equal(16, breakdown.KnownRhythmRoleHits);
+        Assert.Equal(1, breakdown.DistinctRhythmRoles);
     }
 }

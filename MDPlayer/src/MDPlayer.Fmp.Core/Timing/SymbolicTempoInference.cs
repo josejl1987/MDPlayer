@@ -116,15 +116,16 @@ internal static class SymbolicTempoInference
     internal const double ScoreTieEpsilon = 1e-12;
 
     /// <summary>Default build: no instrumentation, no counter allocation, no
-    /// counter increments on the hot path (acc is null throughout).</summary>
+    /// counter increments on the hot path (acc is null throughout). This
+    /// compatibility form carries no percussion evidence (spec §3/D3); direct
+    /// callers that want the unified evidence stream must use the overload that
+    /// accepts <see cref="PercussiveOnset"/> (production goes through
+    /// <see cref="MusicalTimeMapBuilder"/>).</summary>
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
         MusicalTimeMapOptions options,
         double? beatOffsetQuarter)
-    {
-        Onset[] onsets = CollectOnsets(timeline);
-        return BuildCore(timeline, options, beatOffsetQuarter, onsets, acc: null);
-    }
+        => Build(timeline, options, beatOffsetQuarter, Array.Empty<PercussiveOnset>());
 
     /// <summary>
     /// Build overload with opt-in counters (TI-INSTRUMENT). Only callers that opt
@@ -138,11 +139,38 @@ internal static class SymbolicTempoInference
         MusicalTimeMapOptions options,
         double? beatOffsetQuarter,
         out TempoInferenceCounters counters)
+        => Build(timeline, options, beatOffsetQuarter, Array.Empty<PercussiveOnset>(), out counters);
+
+    /// <summary>Default build consuming the unified percussion evidence
+    /// (spec §3/§7, D3): role, accent and onset streams all read the SAME
+    /// collection that structural grid selection and the exporter consume.</summary>
+    internal static MusicalTimeMapBuildResult Build(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        double? beatOffsetQuarter,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
+    {
+        Onset[] onsets = CollectOnsets(timeline);
+        return BuildCore(timeline, options, beatOffsetQuarter, onsets, percussionEvidence, acc: null);
+    }
+
+    /// <summary>
+    /// Evidence-consuming build with opt-in counters (TI-INSTRUMENT). Only
+    /// callers that opt in allocate a CounterAccumulator and pay the per-call
+    /// counter increments; the default evidence-consuming path runs with
+    /// acc = null and performs NO counter work.
+    /// </summary>
+    internal static MusicalTimeMapBuildResult Build(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        double? beatOffsetQuarter,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
+        out TempoInferenceCounters counters)
     {
         var acc = new CounterAccumulator();
         Onset[] onsets = CollectOnsets(timeline);
         acc.OnsetCount = onsets.Length;
-        MusicalTimeMapBuildResult result = BuildCore(timeline, options, beatOffsetQuarter, onsets, acc);
+        MusicalTimeMapBuildResult result = BuildCore(timeline, options, beatOffsetQuarter, onsets, percussionEvidence, acc);
         counters = new TempoInferenceCounters(
             acc.OnsetCount, acc.UniqueSampleCount,
             acc.ScoreForPhaseCalls, acc.SubdivisionFitEvals,
@@ -155,6 +183,7 @@ internal static class SymbolicTempoInference
         MusicalTimeMapOptions options,
         double? beatOffsetQuarter,
         Onset[] onsets,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
         CounterAccumulator? acc)
     {
         // Keep the established phase scorer as a bounded fallback and compatibility
@@ -166,14 +195,14 @@ internal static class SymbolicTempoInference
         double? fallbackAlternativeBpm = null;
         double? fallbackAlternativeScore = null;
         var searchedCandidates = new List<TempoCandidate>();
-        RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(timeline);
+        RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(percussionEvidence);
         if (onsets.Length >= 2)
         {
             (double searchedBpm, long searchedPhase, double searchedScore, List<TempoCandidate> candidates) =
                 Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
             searchedCandidates.AddRange(candidates);
             long[] durations = CollectDurations(timeline);
-            Onset[] accents = CollectAccents(timeline);
+            Onset[] accents = CollectAccents(percussionEvidence);
             (TempoCandidate resolved, double? alternative, double resolvedScore, double? alternativeScore) =
                 ResolveHalfDouble(
                     searchedBpm, candidates, samples, weights,
@@ -197,9 +226,9 @@ internal static class SymbolicTempoInference
             fallbackScore = Math.Max(fallbackScore, 0.75);
         }
 
-        Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline);
+        Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline, percussionEvidence);
         MetricalTiming hierarchy = InferMetricalTiming(
-            timeline, hierarchyOnsets, fallbackBpm, fallbackPhaseSample, fallbackScore,
+            timeline, hierarchyOnsets, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
             fallbackAlternativeBpm, fallbackAlternativeScore);
         double bestBpm = hierarchy.BeatDuration > 0
             ? timeline.SampleRate * 60.0 / hierarchy.BeatDuration
@@ -402,7 +431,12 @@ internal static class SymbolicTempoInference
                 "treat phase/tempo as inferred");
         }
         diagnostics.SegmentCount = 1;
-        return new MusicalTimeMapBuildResult { Map = map, Diagnostics = diagnostics };
+        return new MusicalTimeMapBuildResult
+        {
+            Map = map,
+            Diagnostics = diagnostics,
+            PercussionEvidence = percussionEvidence,
+        };
     }
 
     /// <summary>Confidence from normalized fit and alias margin: a strong fit with a
@@ -419,6 +453,7 @@ internal static class SymbolicTempoInference
     private static MetricalTiming InferMetricalTiming(
         VisualizationTimeline timeline,
         Onset[] onsets,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
         double fallbackBpm,
         long fallbackPhaseSample,
         double fallbackScore,
@@ -465,7 +500,7 @@ internal static class SymbolicTempoInference
         }
 
         TatumLevel tatum = InferTatum(intervals, onsets);
-        List<BeatLevelScore> levels = ScoreBeatLevels(timeline, onsets, tatum);
+        List<BeatLevelScore> levels = ScoreBeatLevels(timeline, onsets, tatum, percussionEvidence);
         BeatLevelScore rawBest = levels[0];
         // Do not let a bar-period accent alone promote the beat to a double-level
         // grid. When the salience evidence is effectively tied, choose the simpler
@@ -664,10 +699,11 @@ internal static class SymbolicTempoInference
     private static List<BeatLevelScore> ScoreBeatLevels(
         VisualizationTimeline timeline,
         Onset[] onsets,
-        TatumLevel tatum)
+        TatumLevel tatum,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         int[] multiples = { 2, 3, 4, 6, 8 };
-        Dictionary<int, double> voicePeriodicity = VoicePeriodicityByMultiple(timeline, tatum);
+        Dictionary<int, double> voicePeriodicity = VoicePeriodicityByMultiple(timeline, tatum, percussionEvidence);
         var result = new List<BeatLevelScore>(multiples.Length);
         foreach (int multiple in multiples)
         {
@@ -777,9 +813,10 @@ internal static class SymbolicTempoInference
 
     private static Dictionary<int, double> VoicePeriodicityByMultiple(
         VisualizationTimeline timeline,
-        TatumLevel tatum)
+        TatumLevel tatum,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
-        var raw = CollectSymbolicOnsets(timeline);
+        var raw = CollectSymbolicOnsets(timeline, percussionEvidence);
         var binsByVoice = new Dictionary<string, (HashSet<long> Bins, bool IsRhythm)>(StringComparer.Ordinal);
         foreach (SymbolicOnset onset in raw)
         {
@@ -1951,9 +1988,11 @@ internal static class SymbolicTempoInference
         return totalWeight > 0 ? weightedFit / totalWeight : 0.5;
     }
 
-    private static Onset[] CollectCollapsedOnsets(VisualizationTimeline timeline)
+    private static Onset[] CollectCollapsedOnsets(
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
-        SymbolicOnset[] raw = CollectSymbolicOnsets(timeline);
+        SymbolicOnset[] raw = CollectSymbolicOnsets(timeline, percussionEvidence);
         var folded = new List<Onset>();
         foreach (IGrouping<long, SymbolicOnset> group in raw
             .OrderBy(onset => onset.SourceTime)
@@ -1972,35 +2011,67 @@ internal static class SymbolicTempoInference
         return folded.ToArray();
     }
 
-    private static SymbolicOnset[] CollectSymbolicOnsets(VisualizationTimeline timeline)
+    private static SymbolicOnset[] CollectSymbolicOnsets(
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
         var raw = new List<SymbolicOnset>();
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        // Unified percussion evidence (spec §3/§7, D3): native rhythm events and
+        // aggregate hits keep their established weights; classified FM notes
+        // join the onset stream at the plain note-attack weight they replace.
+        foreach (PercussiveOnset onset in percussionEvidence)
         {
-            if (rhythm is null)
-                continue;
-            raw.Add(new SymbolicOnset(
-                rhythm.SamplePosition,
-                rhythm.ChannelId ?? rhythm.Voice ?? "rhythm",
-                MetricalRhythmWeight(rhythm.Strength),
-                IsRhythm: true));
+            switch (onset.EvidenceKind)
+            {
+                case PercussionEvidenceKind.NativeRhythm:
+                    raw.Add(new SymbolicOnset(
+                        onset.SamplePosition,
+                        onset.VoiceId,
+                        MetricalRhythmWeight((float)onset.Strength),
+                        IsRhythm: true));
+                    break;
+                case PercussionEvidenceKind.AggregateHit:
+                    raw.Add(new SymbolicOnset(onset.SamplePosition, onset.VoiceId, 1.0, IsRhythm: true));
+                    break;
+                case PercussionEvidenceKind.ClassifiedNote:
+                    raw.Add(new SymbolicOnset(onset.SamplePosition, onset.VoiceId, 0.6, IsRhythm: true));
+                    break;
+            }
         }
-        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
-        {
-            if (hit is null)
-                continue;
-            raw.Add(new SymbolicOnset(hit.SamplePosition, hit.VoiceId ?? "aggregate", 1.0, IsRhythm: true));
-        }
+        // Melodic note attacks stay surface activity (0.6), excluding any note
+        // already represented in the evidence stream as a classified onset so a
+        // percussive FM note never double-counts.
+        HashSet<(SourceDomainKey? Domain, string VoiceId, long SamplePosition)> classifiedAttacks =
+            CollectClassifiedAttackKeys(percussionEvidence);
         foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
         {
             if (note is null)
                 continue;
             if (note.IsRetrigger)
                 continue;
+            if (classifiedAttacks.Contains((note.Domain, note.ChannelId ?? string.Empty, note.StartSample)))
+                continue;
             double weight = 0.6; // normal note attack
             raw.Add(new SymbolicOnset(note.StartSample, note.ChannelId ?? "note", weight));
         }
         return raw.ToArray();
+    }
+
+    /// <summary>Physical-attack keys of classified onsets, so the melodic-note
+    /// loop of the consumers never double-counts an FM note that already entered
+    /// the unified evidence stream. Dedup semantics mirror
+    /// <see cref="PercussionEvidenceBuilder"/> (Domain + VoiceId + sample).</summary>
+    private static HashSet<(SourceDomainKey? Domain, string VoiceId, long SamplePosition)>
+        CollectClassifiedAttackKeys(IReadOnlyList<PercussiveOnset> percussionEvidence)
+    {
+        var keys = new HashSet<(SourceDomainKey?, string, long)>();
+        foreach (PercussiveOnset onset in percussionEvidence)
+        {
+            if (onset.EvidenceKind != PercussionEvidenceKind.ClassifiedNote)
+                continue;
+            keys.Add((onset.Domain, onset.VoiceId, onset.SamplePosition));
+        }
+        return keys;
     }
 
     /// <summary>
@@ -2221,47 +2292,50 @@ internal static class SymbolicTempoInference
         return durations.ToArray();
     }
 
-    private static Onset[] CollectAccents(VisualizationTimeline timeline)
+    private static Onset[] CollectAccents(IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
+        // Unified evidence accents (spec §3/§7, D3): rhythm and aggregate hits
+        // keep their established per-sample dedup and weights; classified FM
+        // notes contribute as aggregate-strength accents REGARDLESS of role —
+        // an Unknown-role onset is still accent evidence (it NEVER contributes
+        // to known-role hits / distinct roles / BD-SD pattern scores, which
+        // live only in CollectRhythmRoles).
         var seen = new HashSet<long>();
         var accented = new List<Onset>();
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        foreach (PercussiveOnset onset in percussionEvidence)
         {
-            if (rhythm is null || !seen.Add(rhythm.SamplePosition))
+            if (!seen.Add(onset.SamplePosition))
                 continue;
-            accented.Add(new Onset(rhythm.SamplePosition, WeightFor(rhythm.Strength, high: true)));
-        }
-        foreach (AggregateHitEvent hit in timeline.AggregateHits ?? Array.Empty<AggregateHitEvent>())
-        {
-            if (hit is null || !seen.Add(hit.SamplePosition))
-                continue;
-            accented.Add(new Onset(hit.SamplePosition, 1.0));
+            switch (onset.EvidenceKind)
+            {
+                case PercussionEvidenceKind.NativeRhythm:
+                    accented.Add(new Onset(onset.SamplePosition, WeightFor((float)onset.Strength, high: true)));
+                    break;
+                case PercussionEvidenceKind.AggregateHit:
+                case PercussionEvidenceKind.ClassifiedNote:
+                    accented.Add(new Onset(onset.SamplePosition, 1.0));
+                    break;
+            }
         }
         return accented.ToArray();
     }
 
-    private static RhythmRoleOnset[] CollectRhythmRoles(VisualizationTimeline timeline)
+    private static RhythmRoleOnset[] CollectRhythmRoles(IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
+        // Unified evidence roles (spec §3/§7, D3): ONLY known-role onsets enter
+        // role evidence; Unknown-role onsets contribute to the onset/accent
+        // streams only and never to knownRoleHits/distinctRoles/BD-SD scores.
+        // Native rhythm events keep their established strength weighting;
+        // classified FM notes enter at the note-attack strength (1.0).
         var result = new List<RhythmRoleOnset>();
-        foreach (RhythmEvent rhythm in timeline.Rhythm ?? Array.Empty<RhythmEvent>())
+        foreach (PercussiveOnset onset in percussionEvidence)
         {
-            if (rhythm is null)
+            if (onset.Role == RhythmRole.Unknown)
                 continue;
-            RhythmRole role = RhythmRoleClassifier.Classify(rhythm);
-            if (role != RhythmRole.Unknown)
-                result.Add(new RhythmRoleOnset(
-                    rhythm.SamplePosition,
-                    Math.Clamp(0.8 + rhythm.Strength, 0.2, 2.0),
-                    role));
-        }
-
-        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
-        {
-            if (note is null)
-                continue;
-            RhythmRole role = RhythmRoleClassifier.Classify(note);
-            if (role != RhythmRole.Unknown)
-                result.Add(new RhythmRoleOnset(note.StartSample, 1.0, role));
+            double strength = onset.EvidenceKind == PercussionEvidenceKind.NativeRhythm
+                ? Math.Clamp(0.8 + onset.Strength, 0.2, 2.0)
+                : 1.0;
+            result.Add(new RhythmRoleOnset(onset.SamplePosition, strength, onset.Role));
         }
         return result.ToArray();
     }

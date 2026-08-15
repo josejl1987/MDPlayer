@@ -86,7 +86,7 @@ internal static class MidiCommand
         MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline, mapOptions);
         tempoWatch.Stop();
         TimingDiagnostics diagnostics = build.Diagnostics;
-        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline);
+        MusicalStructure structure = MusicalStructureAnalyzer.Analyze(build.Map, timeline, build.PercussionEvidence);
 
         var exportOptions = new MusicalMidiExportOptions
         {
