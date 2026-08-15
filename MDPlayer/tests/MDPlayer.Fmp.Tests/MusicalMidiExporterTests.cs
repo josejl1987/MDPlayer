@@ -1,6 +1,8 @@
 using Fmp.Core.Midi;
 using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
+using NoteOnEvent = Melanchall.DryWetMidi.Core.NoteOnEvent;
+using NoteOffEvent = Melanchall.DryWetMidi.Core.NoteOffEvent;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
@@ -688,6 +690,105 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
+    public void TwoSourceAttacks_SameMidiTick_BothSurvive()
+    {
+        // Spec §2: two source attacks at the SAME sample round to one MIDI tick.
+        // Legacy behavior suppressed the second via (track, tick) dedup; both
+        // NoteOns must now survive and the receipt must report the collision as
+        // informational with zero dropped attacks.
+        var notes = new[]
+        {
+            NewNote("v", 0, 1000, 60),
+            NewNote("v", 0, 2000, 62),
+        };
+        MidiSemanticDecoder.Result decoded = Decode(notes);
+
+        Assert.Equal(2, CountNoteOns(decoded, 0));
+        Melanchall.DryWetMidi.Common.SevenBitNumber attack60 = (Melanchall.DryWetMidi.Common.SevenBitNumber)60;
+        Melanchall.DryWetMidi.Common.SevenBitNumber attack62 = (Melanchall.DryWetMidi.Common.SevenBitNumber)62;
+        Assert.Contains(decoded.Events.Values.SelectMany(e => e), e
+            => e.Event is NoteOnEvent { NoteNumber: var note60 } && note60 == attack60);
+        Assert.Contains(decoded.Events.Values.SelectMany(e => e), e
+            => e.Event is NoteOnEvent { NoteNumber: var note62 } && note62 == attack62);
+    }
+
+    [Fact]
+    public void Retrigger_SameTick_IsNotDeduplicated()
+    {
+        // Spec §2: a monophonic retrigger at one tick must decode as previous
+        // NoteOff → new NoteOn, and the attack must NOT be dropped.
+        double spq = Sr * 60.0 / 120.0;
+        var notes = new[]
+        {
+            NewNote("v", 0, (long)Math.Round(spq), 60),
+            NewNote("v", (long)Math.Round(spq), (long)Math.Round(spq) + 1000, 60) with { IsRetrigger = true },
+        };
+        MidiSemanticDecoder.Result decoded = Decode(notes);
+
+        long retriggerTick = decoded.Events.Values.SelectMany(e => e)
+            .First(e => e.Event is NoteOffEvent).Tick;
+        var atTick = decoded.Events.Values.SelectMany(e => e)
+            .Where(e => e.Tick == retriggerTick).ToList();
+        Assert.Equal(2, atTick.Count);
+        Assert.IsType<NoteOffEvent>(atTick[0].Event);
+        Assert.IsType<NoteOnEvent>(atTick[1].Event);
+        // The retrigger attack arrives as its own NoteOn — never suppressed.
+        Assert.Equal(2, CountAllNoteOns(decoded));
+    }
+
+    [Fact]
+    public void InstrumentChange_SameTick_IsNotDeduplicated()
+    {
+        // Spec §2: two sequential instruments reusing one physical voice, second
+        // attack on the same tick as the first — both source NoteOns survive.
+        var notes = new[]
+        {
+            NewNote("v", 0, 1000, 60) with { InstrumentId = "inst-a" },
+            NewNote("v", 0, 2000, 62) with { InstrumentId = "inst-b" },
+        };
+        MidiSemanticDecoder.Result decoded = Decode(notes);
+
+        Assert.Equal(2, CountNoteOns(decoded, 0));
+    }
+
+    [Fact]
+    public void DistinctSourceSamples_RoundingToSameTick_ArePreserved()
+    {
+        // Spec §2: two attacks at DISTINCT source samples that still round to the
+        // same MIDI tick (10 samples < half tick at 120 BPM / 960 PPQ) — both must
+        // survive; sample identity is never collapsed into one MIDI NoteOn.
+        var notes = new[]
+        {
+            NewNote("v", 0, 1000, 60),
+            NewNote("v", 10, 2000, 62),
+        };
+        MidiSemanticDecoder.Result decoded = Decode(notes);
+
+        Assert.Equal(2, CountNoteOns(decoded, 0));
+    }
+
+    [Fact]
+    public void AttackCounters_DroppedSourceAttacks_AlwaysZero()
+    {
+        // Spec §2/§11 invariant: droppedSourceAttacks == 0 in normal export and all
+        // counters are populated (receipt aliases sourceNotes / initialMidiNoteOns /
+        // sameTickAttackCollisions / droppedSourceAttacks).
+        double spq = Sr * 60.0 / 120.0;
+        var notes = new[]
+        {
+            NewNote("v", 0, 1000, 60),
+            NewNote("v", 0, 2000, 62),
+            NewNote("v2", (long)Math.Round(spq), (long)Math.Round(spq) + 1000, 64),
+        };
+        SourceAttackCounters counters = ExportResult(notes).AttackCounters;
+
+        Assert.Equal(3, counters.SourceNoteCount);
+        Assert.Equal(3, counters.InitialNoteOnCount);
+        Assert.Equal(1, counters.SameTickAttackCollisions);
+        Assert.Equal(0, counters.DroppedSourceAttacks);
+    }
+
+    [Fact]
     public void Export_UnknownMeter_OmitsTimeSignature()
     {
         // §64: excellent beat/tempo anchors but no bar information => correct beat
@@ -1213,6 +1314,45 @@ public sealed class MusicalMidiExporterTests
         };
         return new TimelineState { Timeline = timeline };
     }
+
+    /// <summary>Exports the given notes on a fixed 120 BPM 4/4 timeline and returns
+    /// the full result receipt (attack counters included).</summary>
+    private static MusicalMidiExportResult ExportResult(NoteEvent[] notes)
+    {
+        double spq = Sr * 60.0 / 120.0;
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = notes.Max(n => n.EndSample) + 10_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Beats = new[] { new BeatEvent(0, 0.0), new BeatEvent((long)Math.Round(spq), 1.0) },
+        };
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = 120,
+            Meter = new Meter(4, 4),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+        })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        return exporter.Export(timeline);
+    }
+
+    private static MidiSemanticDecoder.Result Decode(NoteEvent[] notes)
+        => MidiSemanticDecoder.Decode(ExportResult(notes).Bytes);
+
+    private static int CountNoteOns(MidiSemanticDecoder.Result decoded, long tick)
+        => decoded.Events.Values.SelectMany(e => e)
+            .Count(e => e.Tick == tick && e.Event is NoteOnEvent);
+
+    private static int CountAllNoteOns(MidiSemanticDecoder.Result decoded)
+        => decoded.Events.Values.SelectMany(e => e).Count(e => e.Event is NoteOnEvent);
 
     private static BeatEvent[] BuildBeats(double bpm)
     {

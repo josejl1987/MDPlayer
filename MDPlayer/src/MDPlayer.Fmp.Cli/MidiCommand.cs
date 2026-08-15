@@ -239,7 +239,6 @@ internal static class MidiCommand
                 p.SourceEventsProcessed,
                 p.SourceEventsSkipped,
                 p.GeneratedMidiEvents,
-                p.SuppressedMidiEvents,
                 p.PitchCalculations,
                 p.PitchCalculationsAvoided,
                 p.BendEventsEmitted,

@@ -150,7 +150,30 @@ internal sealed class MusicalMidiExportResult
 
     /// <summary>Nested stage timings and operation counts when requested.</summary>
     public MidiPerformanceSnapshot? Performance { get; set; }
+
+    /// <summary>
+    /// Source-attack fidelity counters (spec §2): every valid source NoteEvent
+    /// reaches the note planner, so same-tick attacks all survive. The receipt
+    /// aliases these as <c>sourceNotes</c>, <c>initialMidiNoteOns</c>,
+    /// <c>sameTickAttackCollisions</c>, <c>droppedSourceAttacks</c>.
+    /// </summary>
+    public required SourceAttackCounters AttackCounters { get; init; }
 }
+
+/// <summary>
+/// Source-attack fidelity counters (spec §2, §11, D8). <see cref="SourceNoteCount"/>
+/// is the number of source NoteEvents that entered planning;
+/// <see cref="InitialNoteOnCount"/> is the number of MIDI NoteOns planned — equal
+/// to the source count because the same-tick dedup was removed.
+/// <see cref="SameTickAttackCollisions"/> counts distinct source attacks whose
+/// timestamps round to the same (track, tick) — informational only, never an error
+/// signal. <see cref="DroppedSourceAttacks"/> MUST always be 0 in normal export.
+/// </summary>
+internal sealed record SourceAttackCounters(
+    int SourceNoteCount,
+    int InitialNoteOnCount,
+    int SameTickAttackCollisions,
+    int DroppedSourceAttacks);
 
 /// <summary>
 /// Turns a <see cref="VisualizationTimeline"/> into a Format 1 MIDI file by routing
@@ -294,7 +317,11 @@ internal sealed class MusicalMidiExporter
                 "(SSG noise has no pitch to serialize)");
 
         stageStart = _performance?.StartStage(MidiPerformanceStage.EventGeneration) ?? 0;
-        var emittedNoteTicks = new HashSet<(MidiTrackKey Key, long Tick)>(sourceIndex.Notes.Count);
+        // Spec §2: NO (track, tick) NoteOn suppression. Every source NoteEvent that
+        // reached the index is planned and emitted, so two distinct source attacks
+        // collapsing onto one MIDI tick both survive. Collisions are counted
+        // (informational) but nothing is dropped.
+        int sourceNoteCount = sourceIndex.Notes.Count;
         var plannable = new List<PlannableNote>(sourceIndex.Notes.Count);
         foreach (IndexedNote indexedNote in sourceIndex.Notes)
         {
@@ -303,7 +330,10 @@ internal sealed class MusicalMidiExporter
             TrackSlot? slot = allocator.SlotFor(key);
             if (slot is null)
                 continue;
-            plannable.Add(new PlannableNote(slot, note, key));
+            // SourceIndex is the stable source-order tie-break (D5): notes that are
+            // otherwise identical still sort in the order the source presented them,
+            // making same-tick retrigger/polyphony emission deterministic.
+            plannable.Add(new PlannableNote(slot, note, key, plannable.Count));
         }
         plannable.Sort(static (a, b) =>
         {
@@ -312,25 +342,18 @@ internal sealed class MusicalMidiExporter
             c = a.Note.StartSample.CompareTo(b.Note.StartSample);
             if (c != 0) return c;
             c = b.Note.EndSample.CompareTo(a.Note.EndSample);
-            return c != 0 ? c : a.Note.InitialMidiNote.CompareTo(b.Note.InitialMidiNote);
+            if (c != 0) return c;
+            c = a.Note.InitialMidiNote.CompareTo(b.Note.InitialMidiNote);
+            return c != 0 ? c : a.SourceIndex.CompareTo(b.SourceIndex);
         });
-        int plannableWrite = 0;
-        for (int index = 0; index < plannable.Count; index++)
+        int initialNoteOnCount = plannable.Count;
+        int sameTickAttackCollisions = 0;
+        var plannedTicks = new HashSet<(MidiTrackKey Key, long Tick)>(plannable.Count);
+        foreach (PlannableNote pn in plannable)
         {
-            PlannableNote candidate = plannable[index];
-            MidiTrackKey key = candidate.Key;
-            if (emittedNoteTicks.Add((key, TimeTick(candidate.Note.StartSample)))
-                && plannableWrite < plannable.Count)
-            {
-                plannable[plannableWrite++] = candidate;
-            }
-            else if (_performance is not null)
-            {
-                _performance.SuppressedMidiEvents++;
-            }
+            if (!plannedTicks.Add((pn.Key, TimeTick(pn.Note.StartSample))))
+                sameTickAttackCollisions++;
         }
-        if (plannableWrite < plannable.Count)
-            plannable.RemoveRange(plannableWrite, plannable.Count - plannableWrite);
         if (_performance is not null)
         {
             _performance.TimelineSorts++;
@@ -504,6 +527,8 @@ internal sealed class MusicalMidiExporter
             Diagnostics = Diagnostics ?? NullDiagnostics,
             PitchDiagnostics = pitchDiagnostics,
             OriginShiftTicks = originShiftTicks,
+            AttackCounters = new SourceAttackCounters(
+                sourceNoteCount, initialNoteOnCount, sameTickAttackCollisions, DroppedSourceAttacks: 0),
             Performance = _performance?.Snapshot(),
         };
     }
@@ -2325,8 +2350,11 @@ internal sealed class MusicalMidiExporter
     private sealed record UnknownDrumAssignment(
         MidiTrackKey IdentityKey, int Note, string Source);
 
-    /// <summary>A single source note ready for pitch/note planning against its slot.</summary>
-    private readonly record struct PlannableNote(TrackSlot Slot, NoteEvent Note, MidiTrackKey Key);
+    /// <summary>A single source note ready for pitch/note planning against its slot.
+    /// <see cref="SourceIndex"/> is the position the note occupied in the source
+    /// enumeration, used as the final deterministic tie-break (spec §2, D5).</summary>
+    private readonly record struct PlannableNote(
+        TrackSlot Slot, NoteEvent Note, MidiTrackKey Key, int SourceIndex);
 
     /// <summary>A planned pitch event at an absolute MIDI tick: the target pitch and its
     /// encoded bend, resolved through tick-domain collapse and re-anchoring.</summary>

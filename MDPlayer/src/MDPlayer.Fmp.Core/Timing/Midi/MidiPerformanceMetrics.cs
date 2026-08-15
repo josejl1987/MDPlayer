@@ -28,7 +28,6 @@ internal sealed class MidiPerformanceMetrics
     public long SourceEventsProcessed { get; set; }
     public long SourceEventsSkipped { get; set; }
     public long GeneratedMidiEvents { get; set; }
-    public long SuppressedMidiEvents { get; set; }
     public long PitchCalculations { get; set; }
     public long PitchCalculationsAvoided { get; set; }
     public long BendEventsEmitted { get; set; }
@@ -93,7 +92,6 @@ internal sealed class MidiPerformanceMetrics
             SourceEventsProcessed,
             SourceEventsSkipped,
             GeneratedMidiEvents,
-            SuppressedMidiEvents,
             PitchCalculations,
             PitchCalculationsAvoided,
             BendEventsEmitted,
@@ -149,7 +147,6 @@ public sealed record MidiPerformanceSnapshot(
     long SourceEventsProcessed,
     long SourceEventsSkipped,
     long GeneratedMidiEvents,
-    long SuppressedMidiEvents,
     long PitchCalculations,
     long PitchCalculationsAvoided,
     long BendEventsEmitted,
