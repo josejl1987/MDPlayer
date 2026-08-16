@@ -1588,3 +1588,19 @@ residual mode (cents), stable residual MAD (cents), baseline confidence,
 raw bend transitions, after-dedup, after-deadband and expressive transitions,
 plus the accepted tuning and warnings. Thresholds are configurable and
 calibrated from real corpus reports — never hardcoded final values.
+MDPlayer Visualization Benchmark (§23.4)
+
+## Corpus report (§12) — 8-song corpus
+
+| Source | SourceID(CNT) | Mapper(CNT) | AllNotes | vs | Wall | Dur | Reattacks | IOI | PitchCV | PitchLift | NotesLost | DrumsLost | droppedSrc | Suite | DecodedDur | SrcAttacks | SameTick | NativePerc | FMClassified | KnownRole | GmDrums | MaxOnErr | MaxOffErr | MaxPitchErr |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `Twilight Express` | `de96f6de79ba (1)` | `MusicalMidiExporter (8)` | 1952 | `f6d3e0ea` | 0.076 | 78.9 | 14 | 0.217 | 0.054 | 0.249 | 0 | 0 | 0 | `corpus-midi-export/v1` | 81.3 | 1952 | 0 | 0 | 0 | 0 | 0 | 1.397007 | 1.298282 | — |
+| `Robotnik` | `a57c4eae302f (1)` | `MusicalMidiExporter (8)` | 1071 | `f6d3e0ea` | 0.013 | 65.089 | 0 | 0.267 | 0.085 | 0.025 | 0 | 0 | 0 | `corpus-midi-export/v1` | 64.573 | 1071 | 0 | 0 | 0 | 0 | 0 | 0.000428 | 0.000435 | 0.026162 |
+| `Smoking Head` | `fcecc98526ed (1)` | `MusicalMidiExporter (8)` | 1600 | `f6d3e0ea` | 0.022 | 85.827 | 40 | 0.167 | 0.058 | 0.248 | 0 | 0 | 0 | `corpus-midi-export/v1` | 86.161 | 1600 | 0 | 0 | 0 | 0 | 0 | 0.916237 | 1.165761 | — |
+| `XA2020` | `f971bf109205 (1)` | `MusicalMidiExporter (8)` | 4415 | `f6d3e0ea` | 0.034 | 112.23 | 49 | 0.167 | 0.083 | 0 | 0 | 0 | 0 | `corpus-midi-export/v1` | 113.435 | 4415 | 0 | 0 | 0 | 0 | 1399 | — | — | — |
+| `Triumphal Arch` | `742b06cdca9b (1)` | `MusicalMidiExporter (8)` | 3667 | `f6d3e0ea` | 0.045 | 117.711 | 0 | 0.692 | 0.148 | 0 | 0 | 0 | 0 | `corpus-midi-export/v1` | 118.398 | 3667 | 0 | 0 | 0 | 0 | 633 | — | — | — |
+| `21 Master Ninja.vgz` | `0474f69dfd87 (1)` | `MusicalMidiExporter (8)` | 10161 | `f6d3e0ea` | 0.052 | 180.593 | 0 | 0.1 | 0.082 | 0.048 | 0 | 0 | 0 | `corpus-midi-export/v1` | 180.593 | 10161 | 0 | 0 | 0 | 0 | 0 | 1.203729 | 1.103435 | — |
+| `02 Stranger ~ Wandering Swordsman.vgz` | `c3bb4198d2df (1)` | `MusicalMidiExporter (8)` | 5401 | `f6d3e0ea` | 0.038 | 182.937 | 0 | 0.204 | 0.129 | 0 | 0 | 0 | 0 | `corpus-midi-export/v1` | 182.448 | 5401 | 0 | 0 | 0 | 0 | 2020 | — | — | — |
+| `XA2021.OVI` | `b2e5851127e3 (1)` | `MusicalMidiExporter (8)` | 154 | `f6d3e0ea` | 0.001 | 300 | 17 | 0.177 | 0.056 | 0 | 0 | 0 | 0 | `corpus-midi-export/v1` | 6.054 | 154 | 0 | 0 | 0 | 0 | 0 | 0.000299 | 0.000299 | 0.000714 |
+
+Mapper participated in 8 successful exports; source counts are corpus-appearance counts. Wall = export wall-clock (sec). IOI = mean across voices of per-voice median inter-onset-interval (sec). PitchCV = mean across voices of per-voice pitch coefficient of variation. PitchLift = max accepted rekey distance (semitones). Errors are decode-only maxima (sec / semitones); BPM/grid calibration untouched (spec 13).
