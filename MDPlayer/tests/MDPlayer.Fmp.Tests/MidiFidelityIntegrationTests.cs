@@ -648,4 +648,351 @@ public sealed class MidiFidelityIntegrationTests
         Assert.True(build.Diagnostics.SampleZeroQuarter < 0);
         Assert.True(build.Map.SampleToQuarterPosition(0) < 0);
     }
+
+    // ── Phase 7: spec §10 independent fidelity oracle ───────────────────────────
+    // Wall-clock positions are reconstructed ONLY from the Set Tempo events, the
+    // SMF division (PPQ) and event ticks — never from MusicalTimeMap or any
+    // internal timeline structure. Bounds: NoteOn/NoteOff within half a local tick
+    // + ε with NO length accumulation; per-voice IOIs within tick resolution;
+    // effective pitch within 0.01 semitone at every NoteOn and pitch-change point.
+
+    private const double OracleBpm = 120.0;
+    private const double OracleSpq = Sr * 60.0 / OracleBpm;
+    private const double OracleQuarterSeconds = 60.0 / OracleBpm;
+    private const double OracleEpsilon = 1e-6;
+
+    /// <summary>Expected tick for a source sample under the fixed 120 BPM map
+    /// (mirrors MusicalTimeMap.SampleToTick's AwayFromZero rounding).</summary>
+    private static long OracleTickOf(long sample) =>
+        (long)Math.Round(sample * (double)Ppq / OracleSpq, MidpointRounding.AwayFromZero);
+
+    private static BeatEvent[] OracleBeatQuarters(int count)
+    {
+        var beats = new BeatEvent[count];
+        for (int i = 0; i < count; i++)
+            beats[i] = new BeatEvent((long)Math.Round(i * OracleSpq), i);
+        return beats;
+    }
+
+    private static VisualizationTimeline OracleTimeline(NoteEvent[] notes, RhythmEvent[]? rhythm = null) => new()
+    {
+        StartSample = 0,
+        EndSample = notes.Max(n => n.EndSample) + 10_000,
+        SampleRate = Sr,
+        Notes = notes,
+        Rhythm = rhythm,
+        Beats = OracleBeatQuarters(Math.Max(2, notes.Length + 4)),
+    };
+
+    private static MusicalMidiExportResult OracleExport(NoteEvent[] notes, RhythmEvent[]? rhythm = null) =>
+        ExportResult(OracleTimeline(notes, rhythm), OracleBpm,
+            new MusicalMidiExportOptions { EmitPitchBend = true }, new Meter(4, 4));
+
+    private static double OracleHalfLocalTickSeconds(MidiSemanticDecoder.Result decoded) =>
+        decoded.WallClockSeconds(1) / 2.0 + OracleEpsilon;
+
+    private static NoteEvent[] OracleSortedByStart(IEnumerable<NoteEvent> notes) =>
+        notes.OrderBy(n => n.StartSample).ToArray();
+
+    private static IReadOnlyList<(long Tick, int Note, int Channel)> OracleNoteOns(MidiSemanticDecoder.Result decoded)
+    {
+        var ons = decoded.Events.Values.SelectMany(e => e)
+            .Where(e => e.Event is Melanchall.DryWetMidi.Core.NoteOnEvent on && on.Velocity != 0)
+            .Select(e => (e.Tick, Note: (int)((Melanchall.DryWetMidi.Core.NoteOnEvent)e.Event).NoteNumber, e.Channel))
+            .OrderBy(t => t.Tick)
+            .ThenBy(t => t.Note)
+            .ToList();
+        Assert.NotEmpty(ons);
+        return ons;
+    }
+
+    private static IReadOnlyList<(long Tick, int Note, int Channel)> OracleNoteOffs(MidiSemanticDecoder.Result decoded)
+    {
+        var offs = decoded.Events.Values.SelectMany(e => e)
+            .Where(e => e.Event is Melanchall.DryWetMidi.Core.NoteOffEvent)
+            .Select(e => (e.Tick, Note: (int)((Melanchall.DryWetMidi.Core.NoteOffEvent)e.Event).NoteNumber, e.Channel))
+            .OrderBy(t => t.Tick)
+            .ThenBy(t => t.Note)
+            .ToList();
+        Assert.NotEmpty(offs);
+        return offs;
+    }
+
+    [Fact]
+    public void Fidelity_TempoMap_IsReconstructedFromSetTempoPpqAndTicksOnly()
+    {
+        // The oracle's wall clock is rebuilt purely from the SMF: the Set Tempo
+        // event (500 000 µs/quarter = 120 BPM) at tick 0 plus the header division.
+        // Nothing from MusicalTimeMap or any internal timeline structure is read.
+        double spq = OracleSpq;
+        var notes = new[]
+        {
+            Note("v", 0, 2000, 60),
+            Note("v", (long)Math.Round(spq), (long)Math.Round(spq) + 2000, 62),
+        };
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(notes).Bytes);
+
+        Assert.Equal(Ppq, decoded.Ppq);
+        Assert.Contains(decoded.TempoMap, t => t.Tick == 0 && t.UsPerQuarter == 500_000);
+        Assert.Equal(0.0, decoded.WallClockSeconds(0), 6);
+        Assert.Equal(OracleQuarterSeconds, decoded.WallClockSeconds(OracleTickOf((long)Math.Round(spq))), 6);
+        // End-of-song wall clock from ticks alone: (EndSample)/Sr within half one
+        // local tick (no accumulation over the whole song).
+        long lastOff = OracleTickOf((long)Math.Round(spq) + 2000);
+        double songWall = decoded.WallClockSeconds(lastOff);
+        double bound = OracleHalfLocalTickSeconds(decoded);
+        Assert.True(Math.Abs(songWall - (double)((long)Math.Round(spq) + 2000) / Sr) <= bound,
+            $"song wall {songWall:0.000000}s vs source {((long)Math.Round(spq) + 2000) / (double)Sr:0.000000}s");
+    }
+
+    [Fact]
+    public void Fidelity_NoteOnWallClock_MatchesSourceStart()
+    {
+        // Spec §10: decoded NoteOn wall-clock ≈ StartSample/SampleRate with error
+        // ≤ half a local MIDI tick + ε, including a non-grid-aligned attack
+        // (start + 137 samples) and a second voice.
+        double spq = OracleSpq;
+        var notes = OracleSortedByStart(new[]
+        {
+            Note("v", 0, 2000, 60),
+            Note("v", (long)Math.Round(spq), (long)Math.Round(spq) + 2000, 62),
+            Note("v2", (long)Math.Round(3 * spq), (long)Math.Round(3 * spq) + 2000, 65),
+            Note("v", (long)Math.Round(2 * spq) + 137, (long)Math.Round(2 * spq) + 2000 + 137, 64),
+        });
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(notes).Bytes);
+        double bound = OracleHalfLocalTickSeconds(decoded);
+        IReadOnlyList<(long Tick, int Note, int Channel)> ons = OracleNoteOns(decoded);
+
+        Assert.Equal(notes.Length, ons.Count);
+        for (int i = 0; i < ons.Count; i++)
+        {
+            long expectedTick = OracleTickOf(notes[i].StartSample);
+            double sourceWall = (double)notes[i].StartSample / Sr;
+            double decodedWall = decoded.WallClockSeconds(ons[i].Tick);
+            Assert.True(Math.Abs(decodedWall - sourceWall) <= bound,
+                $"NoteOn {i}: decoded wall {decodedWall:0.000000}s vs source {sourceWall:0.000000}s " +
+                $"(tick {ons[i].Tick}, expected {expectedTick}, bound {bound:0.000000}s)");
+        }
+    }
+
+    [Fact]
+    public void Fidelity_NoteOffWallClock_MatchesSourceEnd()
+    {
+        // Spec §10: decoded NoteOff wall-clock ≈ EndSample/SampleRate within half
+        // a local tick + ε; each note's endpoints are checked independently — a
+        // length error in one note never inherits into the next.
+        double spq = OracleSpq;
+        var notes = OracleSortedByStart(new[]
+        {
+            Note("v", 0, 2000, 60),
+            Note("v", (long)Math.Round(spq), (long)Math.Round(spq) + 2000, 62),
+            Note("v", (long)Math.Round(2 * spq) + 137, (long)Math.Round(2 * spq) + 2000 + 137, 64),
+            Note("v2", (long)Math.Round(3 * spq), (long)Math.Round(3 * spq) + 2000, 65),
+        });
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(notes).Bytes);
+        double bound = OracleHalfLocalTickSeconds(decoded);
+        IReadOnlyList<(long Tick, int Note, int Channel)> offs = OracleNoteOffs(decoded);
+
+        Assert.Equal(notes.Length, offs.Count);
+        for (int i = 0; i < offs.Count; i++)
+        {
+            long expectedTick = OracleTickOf(notes[i].EndSample);
+            double sourceWall = (double)notes[i].EndSample / Sr;
+            double decodedWall = decoded.WallClockSeconds(offs[i].Tick);
+            Assert.True(Math.Abs(decodedWall - sourceWall) <= bound,
+                $"NoteOff {i}: decoded wall {decodedWall:0.000000}s vs source {sourceWall:0.000000}s " +
+                $"(tick {offs[i].Tick}, expected {expectedTick}, bound {bound:0.000000}s)");
+        }
+    }
+
+    [Fact]
+    public void Fidelity_NoLengthAccumulation_LongSong()
+    {
+        // A ~96 s song (97 two-quarter attacks per voice, plus a second voice and
+        // one non-grid-aligned note): every NoteOn/NoteOff error stays within half
+        // a local tick — errors NEVER accumulate with song length (spec §10).
+        double spq = OracleSpq;
+        var notes = new List<NoteEvent>();
+        for (int i = 0; i < 97; i++)
+        {
+            long start = (long)Math.Round(i * 2 * spq);
+            // v2 starts 13 samples late: one extra tick, so per-voice onsets are
+            // never same-tick and the index pairing below is unambiguous.
+            notes.Add(Note("v1", start, start + 2000, 60 + (i % 12)));
+            notes.Add(Note("v2", start + 13, start + 4013, 72 + (i % 12)));
+        }
+        // A deliberately misaligned attack late in the song exercises the same bound.
+        notes.Add(Note("v2", (long)Math.Round(193 * spq) + 137, (long)Math.Round(193 * spq) + 3000, 84));
+        NoteEvent[] dueOns = OracleSortedByStart(notes);
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(dueOns).Bytes);
+        double bound = OracleHalfLocalTickSeconds(decoded);
+
+        IReadOnlyList<(long Tick, int Note, int Channel)> ons = OracleNoteOns(decoded);
+        IReadOnlyList<(long Tick, int Note, int Channel)> offs = OracleNoteOffs(decoded);
+        Assert.Equal(dueOns.Length, ons.Count);
+        Assert.Equal(dueOns.Length, offs.Count);
+        for (int i = 0; i < dueOns.Length; i++)
+        {
+            double onWall = decoded.WallClockSeconds(ons[i].Tick);
+            double onSource = (double)dueOns[i].StartSample / Sr;
+            Assert.True(Math.Abs(onWall - onSource) <= bound,
+                $"NoteOn {i}: decoded {onWall:0.000000}s vs source {onSource:0.000000}s");
+            double offWall = decoded.WallClockSeconds(offs[i].Tick);
+            double offSource = (double)dueOns[i].EndSample / Sr;
+            Assert.True(Math.Abs(offWall - offSource) <= bound,
+                $"NoteOff {i}: decoded {offWall:0.000000}s vs source {offSource:0.000000}s");
+        }
+    }
+
+    [Fact]
+    public void Fidelity_PerVoiceIoi_RoundTripsWithinTickResolution()
+    {
+        // Spec §10: adjacent source attacks PER PHYSICAL VOICE round-trip as
+        // inter-onset intervals within tick resolution. Two voices, one attack
+        // every two quarters (1 s): each endpoint's successive NoteOns are
+        // exactly one expected tick-delta apart and the wall-clock IOI matches.
+        double spq = OracleSpq;
+        const int attackCount = 8;
+        var notes = new List<NoteEvent>();
+        for (int i = 0; i < attackCount; i++)
+        {
+            long start = (long)Math.Round(i * 2 * spq);
+            notes.Add(Note("v1", start, start + 2000, 60 + i));
+            notes.Add(Note("v2", start, start + 2000, 72 + i));
+        }
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(notes.ToArray()).Bytes);
+        double bound = OracleHalfLocalTickSeconds(decoded);
+        long expectedDelta = OracleTickOf((long)Math.Round(2 * spq));
+        Assert.Equal(Ppq * 2, expectedDelta);
+
+        foreach (((int Port, int Channel) key, List<MidiSemanticDecoder.TimedEvent> events) in decoded.Events)
+        {
+            var ons = events.Where(e => e.Event is Melanchall.DryWetMidi.Core.NoteOnEvent on && on.Velocity != 0)
+                .Select(e => e.Tick)
+                .OrderBy(t => t)
+                .ToList();
+            if (ons.Count < 2)
+                continue; // RPN/setup-only endpoints carry no onsets.
+            Assert.Equal(attackCount, ons.Count);
+            for (int i = 1; i < ons.Count; i++)
+            {
+                long tickDelta = ons[i] - ons[i - 1];
+                Assert.Equal(expectedDelta, tickDelta);
+                double sourceIoi = 2 * OracleQuarterSeconds;
+                double decodedIoi = decoded.WallClockSeconds(ons[i]) - decoded.WallClockSeconds(ons[i - 1]);
+                Assert.True(Math.Abs(decodedIoi - sourceIoi) <= bound,
+                    $"endpoint {key}: IOI {decodedIoi:0.000000}s vs source {sourceIoi:0.000000}s");
+            }
+        }
+    }
+
+    private const string OracleTunedVoiceInstrument = "ym2608:0:fm:1";
+
+    private static NoteEvent[] OracleTunedFmVoice(string instrumentId, int count, double biasCents)
+    {
+        double[] bases = { 60, 62, 64, 65, 67, 69, 71, 72, 74, 76 };
+        var notes = new NoteEvent[count];
+        for (int i = 0; i < count; i++)
+        {
+            notes[i] = new NoteEvent(
+                ChannelId: "ym2608.0.fm.1",
+                StartSample: i * 100_000L,
+                EndSample: i * 100_000L + 50_000,
+                InitialFrequencyHz: 440,
+                InitialMidiNote: bases[i % bases.Length] + biasCents / 100.0,
+                InstrumentId: instrumentId,
+                Mode: VisualizationNoteMode.Fm,
+                IsRetrigger: false,
+                Pitch: Array.Empty<PitchChange>());
+        }
+        return notes;
+    }
+
+    private static double OracleEndPitch(NoteEvent note)
+    {
+        if (note.Pitch is { Count: > 0 })
+        {
+            for (int i = note.Pitch.Count - 1; i >= 0; i--)
+            {
+                PitchChange change = note.Pitch[i];
+                if (change.SamplePosition >= note.StartSample && change.SamplePosition < note.EndSample)
+                    return change.MidiNote;
+            }
+        }
+        return note.InitialMidiNote;
+    }
+
+    private static void OracleAssertPitchBound(int noteNumber, int activeBend, int bendRange,
+        int fineCents, double expected, string boundary)
+    {
+        double actual = MidiSemanticDecoder.EffectivePitch(noteNumber, activeBend, bendRange, fineCents);
+        Assert.True(Math.Abs(actual - expected) <= 0.01,
+            $"{boundary}: decoded effective pitch {actual:0.###} != source pitch {expected:0.###} " +
+            $"(note {noteNumber}, bend {activeBend}, range {bendRange})");
+    }
+
+    [Fact]
+    public void Fidelity_EffectivePitch_WithinHalfCent()
+    {
+        // Spec §10: effectiveMidiPitch = baseNote + bend + coarse tuning + fine
+        // tuning must satisfy |eff − source| ≤ 0.01 semitone at every NoteOn and
+        // at pitch-change points — the +21c source bias is subtracted by the
+        // pitch stage and RESTORED via RPN tuning on the endpoint, and the
+        // expressive note's mid-note bend lands at its source pitch.
+        var expressive = new NoteEvent(
+            ChannelId: "ym2608.0.fm.1",
+            StartSample: 0,
+            EndSample: 50_000,
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60.21,
+            InstrumentId: OracleTunedVoiceInstrument,
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: new[] { new PitchChange(25_000, 0, 60.71) });
+        NoteEvent[] notes = new[] { expressive }
+            .Concat(OracleTunedFmVoice(OracleTunedVoiceInstrument, count: 10, biasCents: 21.0).Skip(1))
+            .ToArray();
+        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(OracleExport(notes).Bytes);
+
+        // One tuning state on the one physical voice endpoint, restored at +21c.
+        var tuned = decoded.State.Single(kv => kv.Value.HasTuning);
+        Assert.Equal(21.0, tuned.Value.FineTuningCents, 1);
+        int bendRange = tuned.Value.BendRange;
+        int fineCents = (int)Math.Round(tuned.Value.FineTuningCents);
+        int activeBend = 0;
+
+        // Walk the endpoint's events in exported order, maintaining live bend
+        // state, and verify pitch consensus at every boundary and the pitch-change
+        // point (spec §10).
+        IReadOnlyList<MidiSemanticDecoder.TimedEvent> events = decoded.Events[tuned.Key];
+        NoteEvent[] byStart = OracleSortedByStart(notes);
+        int current = -1;
+        foreach (MidiSemanticDecoder.TimedEvent timed in events)
+        {
+            switch (timed.Event)
+            {
+                case Melanchall.DryWetMidi.Core.PitchBendEvent bend:
+                    activeBend = bend.PitchValue - 8192;
+                    if (timed.Tick == OracleTickOf(25_000))
+                    {
+                        // pitch-change point: the expressive note's bend target.
+                        double effective = MidiSemanticDecoder.EffectivePitch(60, activeBend, bendRange,
+                            fineCents, coarseTuningSemitones: 0);
+                        Assert.True(Math.Abs(effective - 60.71) <= 0.01,
+                            $"pitch-change point: effective {effective:0.###} != source 60.71");
+                    }
+                    break;
+                case Melanchall.DryWetMidi.Core.NoteOnEvent on when on.Velocity != 0:
+                    current++;
+                    OracleAssertPitchBound(on.NoteNumber, activeBend, bendRange, fineCents,
+                        byStart[current].InitialMidiNote, "NoteOn");
+                    break;
+                case Melanchall.DryWetMidi.Core.NoteOffEvent off:
+                    OracleAssertPitchBound(off.NoteNumber, activeBend, bendRange, fineCents,
+                        OracleEndPitch(byStart[current]), "NoteOff");
+                    break;
+            }
+        }
+        Assert.Equal(notes.Length, current + 1);
+    }
 }

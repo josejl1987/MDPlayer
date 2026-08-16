@@ -168,6 +168,15 @@ internal sealed class MusicalMidiExportResult
     /// <c>sameTickAttackCollisions</c>, <c>droppedSourceAttacks</c>.
     /// </summary>
     public required SourceAttackCounters AttackCounters { get; init; }
+
+    /// <summary>
+    /// Percussion-fidelity receipt (spec §11, D8): the unified percussion
+    /// evidence stream split by source kind and role resolution, the GM-drum
+    /// export outcome, and the source-attack aliases
+    /// (<c>sourceNotes</c>/<c>initialMidiNoteOns</c>/<c>sameTickAttackCollisions</c>/
+    /// <c>droppedSourceAttacks</c>). DroppedSourceAttacks MUST always be 0.
+    /// </summary>
+    public required PercussionFidelityReceipt Percussion { get; init; }
 }
 
 /// <summary>
@@ -182,6 +191,26 @@ internal sealed class MusicalMidiExportResult
 internal sealed record SourceAttackCounters(
     int SourceNoteCount,
     int InitialNoteOnCount,
+    int SameTickAttackCollisions,
+    int DroppedSourceAttacks);
+
+/// <summary>
+/// Percussion-fidelity receipt (spec §11, D8): nativeRhythmEvents / aggregateHits /
+/// classifiedNoteEvents split the unified evidence stream by source kind,
+/// knownRoleEvents / unknownRoleEvents by role resolution, exportedGmDrumEvents
+/// counts the GM-drum NoteOns actually written (native rhythm hits + gate-passing
+/// FM remaps), and sourceNotes / initialMidiNoteOns / sameTickAttackCollisions /
+/// droppedSourceAttacks alias the attack counters. droppedSourceAttacks MUST be 0.
+/// </summary>
+internal sealed record PercussionFidelityReceipt(
+    int NativeRhythmEvents,
+    int AggregateHits,
+    int ClassifiedNoteEvents,
+    int KnownRoleEvents,
+    int UnknownRoleEvents,
+    int ExportedGmDrumEvents,
+    int SourceNotes,
+    int InitialMidiNoteOns,
     int SameTickAttackCollisions,
     int DroppedSourceAttacks);
 
@@ -426,8 +455,10 @@ internal sealed class MusicalMidiExporter
         // mappings), so no CC10 is emitted for remapped hits. Each remap is one
         // NoteOn + one NoteOff: the source attack survives exactly once, so
         // DroppedSourceAttacks stays 0.
+        int exportedGmDrumEvents = 0;
         foreach (DrumRemapHit hit in _drumRemapScratch)
         {
+            exportedGmDrumEvents++;
             AddTrackEvent(hit.Slot.Track, PackedMidiEvent.Note(
                 hit.Start, hit.Slot.Index, hit.Slot.Channel, hit.Note, hit.Velocity, noteOn: true));
             AddTrackEvent(hit.Slot.Track, PackedMidiEvent.Note(
@@ -475,6 +506,7 @@ internal sealed class MusicalMidiExporter
             AddTrackEvent(slot.Track, PackedMidiEvent.Note(on, slot.Index, slot.Channel, note, velocity, noteOn: true));
             AddTrackEvent(slot.Track, PackedMidiEvent.Note(
                 on + ShortHitTicks, slot.Index, slot.Channel, note, velocity, noteOn: false));
+            exportedGmDrumEvents++;
         }
 
         // Fixed bounded pitch-bend-range RPN setup, emitted only on melodic tracks
@@ -588,6 +620,18 @@ internal sealed class MusicalMidiExporter
         pitchDiagnostics.Domains.AddRange(pitchModel.Domains.Values
             .OrderBy(d => d.Key.ToString(), StringComparer.Ordinal));
         pitchDiagnostics.Warnings.AddRange(pitchWarnings);
+        int nativeRhythmEvents = 0, aggregateHits = 0, classifiedNoteEvents = 0,
+            knownRoleEvents = 0, unknownRoleEvents = 0;
+        foreach (PercussiveOnset onset in _options.PercussionEvidence)
+        {
+            switch (onset.EvidenceKind)
+            {
+                case PercussionEvidenceKind.NativeRhythm: nativeRhythmEvents++; break;
+                case PercussionEvidenceKind.AggregateHit: aggregateHits++; break;
+                case PercussionEvidenceKind.ClassifiedNote: classifiedNoteEvents++; break;
+            }
+            if (onset.Role != RhythmRole.Unknown) knownRoleEvents++; else unknownRoleEvents++;
+        }
         return new MusicalMidiExportResult
         {
             Bytes = bytes,
@@ -596,6 +640,10 @@ internal sealed class MusicalMidiExporter
             PitchDiagnostics = pitchDiagnostics,
             OriginShiftTicks = originShiftTicks,
             AttackCounters = new SourceAttackCounters(
+                sourceNoteCount, initialNoteOnCount, sameTickAttackCollisions, DroppedSourceAttacks: 0),
+            Percussion = new PercussionFidelityReceipt(
+                nativeRhythmEvents, aggregateHits, classifiedNoteEvents,
+                knownRoleEvents, unknownRoleEvents, exportedGmDrumEvents,
                 sourceNoteCount, initialNoteOnCount, sameTickAttackCollisions, DroppedSourceAttacks: 0),
             Performance = _performance?.Snapshot(),
         };

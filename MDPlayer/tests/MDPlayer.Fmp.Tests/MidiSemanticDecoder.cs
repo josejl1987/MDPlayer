@@ -44,6 +44,32 @@ internal sealed class MidiSemanticDecoder
         public readonly Dictionary<(int Port, int Channel), EndpointState> State = new();
         public readonly List<(long Tick, int UsPerQuarter)> TempoMap = new();
         public readonly List<TrackInfo> Tracks = new();
+
+        /// <summary>SMF division (ticks per quarter note) read from the file header.</summary>
+        public int Ppq;
+
+        /// <summary>
+        /// Wall-clock seconds at the given tick, reconstructed ONLY from the Set
+        /// Tempo events, PPQ and tick positions (spec §10 oracle) — never from any
+        /// internal timeline structure. O(tempo-map entries) per call; single-segment
+        /// songs are a constant-time linear walk.
+        /// </summary>
+        public double WallClockSeconds(long tick)
+        {
+            double totalUs = 0;
+            long prevTick = 0;
+            int usPerQuarter = 500_000;
+            foreach ((long tempoTick, int usPerQuarterAt) in TempoMap.OrderBy(t => t.Tick))
+            {
+                if (tempoTick >= tick)
+                    break;
+                totalUs += (tempoTick - prevTick) * (double)usPerQuarter;
+                prevTick = tempoTick;
+                usPerQuarter = usPerQuarterAt;
+            }
+            totalUs += (tick - prevTick) * (double)usPerQuarter;
+            return totalUs / 1_000_000.0 / Math.Max(1, Ppq);
+        }
     }
 
     internal sealed record TimedEvent(long Tick, int Port, int Channel, MidiEvent Event);
@@ -54,7 +80,12 @@ internal sealed class MidiSemanticDecoder
         {
             EndOfTrackStoringPolicy = EndOfTrackStoringPolicy.Store,
         });
-        var result = new Result();
+        var result = new Result
+        {
+            Ppq = file.TimeDivision is TicksPerQuarterNoteTimeDivision tpqn
+                ? tpqn.TicksPerQuarterNote
+                : 0,
+        };
         var pendingRpn = new Dictionary<(int, int), int>();
         long tick = 0;
         int trackIndex = 0;

@@ -908,6 +908,62 @@ public sealed class MusicalMidiExporterTests
     }
 
     [Fact]
+    public void PercussionReceipt_Counters_ReflectEvidenceKindsAndExportOutcome()
+    {
+        // Spec §11 / D8: the receipt splits the unified evidence stream by kind
+        // and role, counts exported GM drum NoteOns, and aliases the attack
+        // counters — droppedSourceAttacks MUST be 0. Fixture: one native rhythm
+        // (bd), one gate-passing kick remap (ClassifiedNote, Bd ≥ 0.80), one
+        // confidently-percussive-unknown transient (stays melodic).
+        InstrumentDefinition kick = GateInstrument("kick", 7,
+            GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31));
+        InstrumentDefinition transient = GateInstrument("transient_4", 7,
+            GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31));
+        NoteEvent[] notes =
+        {
+            GateNote("ym2608.0.fm.1", "kick", midi: 60),
+            GateNote("ym2608.0.fm.4", "transient_4", midi: 62),
+        };
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = notes.Max(n => n.EndSample) + 10_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Instruments = new[] { kick, transient },
+            Rhythm = new[] { new RhythmEvent("bd", "rhythm.bd", 0, 1.0f, 0f) },
+            Beats = BuildBeats(120),
+        };
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = 120,
+            Meter = new Meter(4, 4),
+            DetectTempoChanges = true,
+        });
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+            PercussionEvidence = build.PercussionEvidence,
+        })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        MusicalMidiExportResult result = exporter.Export(timeline);
+
+        PercussionFidelityReceipt receipt = result.Percussion;
+        Assert.Equal(1, receipt.NativeRhythmEvents);      // the bd rhythm event
+        Assert.Equal(0, receipt.AggregateHits);           // no aggregate-hit timeline
+        Assert.Equal(2, receipt.ClassifiedNoteEvents);    // kick + transient
+        Assert.Equal(2, receipt.KnownRoleEvents);         // bd + kick
+        Assert.Equal(1, receipt.UnknownRoleEvents);       // transient
+        Assert.Equal(2, receipt.ExportedGmDrumEvents);    // native bd hit + kick remap
+        Assert.Equal(2, receipt.SourceNotes);             // the two FM notes
+        Assert.Equal(2, receipt.InitialMidiNoteOns);
+        Assert.Equal(0, receipt.SameTickAttackCollisions); // distinct tracks at 4400
+        Assert.Equal(0, receipt.DroppedSourceAttacks);     // §11 invariant
+    }
+
+    [Fact]
     public void Export_UnknownMeter_OmitsTimeSignature()
     {
         // §64: excellent beat/tempo anchors but no bar information => correct beat

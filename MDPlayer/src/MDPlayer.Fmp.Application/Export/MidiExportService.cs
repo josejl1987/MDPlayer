@@ -100,7 +100,7 @@ public sealed class MidiExportService
                         coreResult = exporter.Export(timeline);
                         return coreResult.Bytes;
                     });
-                performance = recorder.Complete();
+                performance = recorder.Complete(MirrorPercussionReceipt(coreResult));
             }
             else
             {
@@ -203,6 +203,23 @@ public sealed class MidiExportService
 
     private static MidiExportResult Failed(string error) =>
         new() { Succeeded = false, Error = error };
+
+    /// <summary>Mirrors the Core percussion-fidelity receipt (spec §11, D8) into
+    /// the performance summary surface — plain counters, never giant dumps.</summary>
+    private static object? MirrorPercussionReceipt(MusicalMidiExportResult? coreResult) =>
+        coreResult is null ? null : new
+        {
+            coreResult.Percussion.NativeRhythmEvents,
+            coreResult.Percussion.AggregateHits,
+            coreResult.Percussion.ClassifiedNoteEvents,
+            coreResult.Percussion.KnownRoleEvents,
+            coreResult.Percussion.UnknownRoleEvents,
+            coreResult.Percussion.ExportedGmDrumEvents,
+            coreResult.Percussion.SourceNotes,
+            coreResult.Percussion.InitialMidiNoteOns,
+            coreResult.Percussion.SameTickAttackCollisions,
+            coreResult.Percussion.DroppedSourceAttacks,
+        };
 
     /// <summary>Maps the public DTO list to the Core exporter's override type.</summary>
     private static IReadOnlyList<VoiceExportOverride> ToVoiceOverrides(IReadOnlyList<MidiVoiceOption> options)

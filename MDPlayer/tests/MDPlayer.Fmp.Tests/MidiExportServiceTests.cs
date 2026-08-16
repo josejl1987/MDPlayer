@@ -64,6 +64,26 @@ public sealed class MidiExportServiceTests
     }
 
     [Fact]
+    public void PerformanceReceipts_EnabledMirrorPercussionFidelityReceipt()
+    {
+        // Spec §11 / D8: when performance receipts are enabled, the Core
+        // percussion-fidelity receipt rides on the summary — plain counters,
+        // never giant dumps; droppedSourceAttacks MUST be 0.
+        string path = WriteTimeline(BuildTimeline(withBeats: true));
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(path,
+            new MidiExportRequest { EnablePerformanceReceipts = true, PerformanceFixture = "pinned-midi-fixture" });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.NotNull(result.Performance);
+        using JsonDocument json = JsonDocument.Parse(result.Performance!.ToJson());
+        JsonElement percussion = json.RootElement.GetProperty("Percussion");
+        Assert.True(percussion.TryGetProperty("SourceNotes", out JsonElement sourceNotes));
+        Assert.Equal(8, sourceNotes.GetInt32());
+        Assert.Equal(0, percussion.GetProperty("DroppedSourceAttacks").GetInt32());
+        Assert.True(percussion.TryGetProperty("ExportedGmDrumEvents", out _));
+    }
+
+    [Fact]
     public void PerformanceReceipts_DisabledPreserveOutputEquivalence()
     {
         string path = WriteTimeline(BuildTimeline(withBeats: true));
