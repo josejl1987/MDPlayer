@@ -463,6 +463,10 @@ internal sealed class MusicalMidiExporter
             int velocity = ToMidiDrumVelocity(rhythm.Strength);
             int pan = ToMidiPan(rhythm.Pan);
             long on = TimeTick(rhythm.SamplePosition) + originShiftTicks;
+            // §9: quantize the hit tick; the NoteOff shifts by the SAME delta, so
+            // the short-hit duration is preserved. CC10 (rank 2) still precedes the
+            // NoteOn (rank 4) within the tick.
+            on += QuantizeTick(on) - on;
             if (!lastPanByKey.TryGetValue(rhythmKey, out int lastPan) || lastPan != pan)
             {
                 AddTrackEvent(slot.Track, PackedMidiEvent.ControlChange(on, slot.Index, slot.Channel, 10, pan));
@@ -479,7 +483,9 @@ internal sealed class MusicalMidiExporter
         // emits the per-domain tuning RPN (FR-5).
         EmitBendRangeSetup(allocator, pitchModel);
 
-        ApplyQuantizationToGrid(allocator);
+        // §9 quantization is INLINE in every emitter (EmitNote, rhythm hits, drum
+        // remaps): the whole logical note shifts as one unit. No post-pass exists,
+        // so Off is a strict no-op and quantized output preserves duration.
 
         // Endpoint uniqueness is enforced as a hard invariant across the exported
         // track set, in addition to the writer's own guard.
@@ -1085,6 +1091,12 @@ internal sealed class MusicalMidiExporter
             long off = TimeTick(note.EndSample) + originShift;
             if (off <= on)
                 off = on + 1;
+            // §9 whole-logical-note quantization: one delta computed from the on
+            // tick is applied to the reset bend, NoteOn AND NoteOff, so source
+            // duration survives exactly (off' = on' + off − on). Off => delta 0.
+            long nonBendQuantDelta = QuantizeTick(on) - on;
+            on += nonBendQuantDelta;
+            off += nonBendQuantDelta;
             // The non-fold contract is "the note-on sounds at its TRUE (integer)
             // pitch". With bends disabled an out-of-range pitch (source or after
             // transpose) has no legal key to sound at — clamping would silently
@@ -1119,6 +1131,15 @@ internal sealed class MusicalMidiExporter
         long endTick = TimeTick(note.EndSample);
         if (note.EndSample > note.StartSample && endTick == startTick)
             endTick = startTick + 1; // real collapsed note: minimum 1 tick (§29).
+
+        // §9 whole-logical-note quantization: one delta from the on tick shifts the
+        // ENTIRE logical note — initial reset bend, NoteOn, every pitch state and
+        // re-anchor triple, and the final NoteOff — as one unit. off' = on' + (off − on)
+        // keeps the source duration exact; boundary decisions that compare against the
+        // raw endTick (SCC settle) are unaffected because every event moves together.
+        long onTick = startTick + originShift;
+        long quantDelta = QuantizeTick(onTick) - onTick;
+        long emissionShift = originShift + quantDelta;
 
         int baseNote = SelectBaseNote(anchors[0].Target, bendRange, note);
         long currentBaseFrom = startTick;
@@ -1172,11 +1193,11 @@ internal sealed class MusicalMidiExporter
         int beforeOn = lastBendByEndpoint.TryGetValue(endpoint, out int last) ? last : 0;
         if (beforeOn != initialBend)
             AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
-                startTick + originShift, slot.Index, slot.Channel, initialBend));
+                startTick + emissionShift, slot.Index, slot.Channel, initialBend));
         lastBendByEndpoint[endpoint] = initialBend;
 
         AddTrackEvent(slot.Track, PackedMidiEvent.Note(
-            startTick + originShift, slot.Index, slot.Channel, baseNote, vel, noteOn: true));
+            startTick + emissionShift, slot.Index, slot.Channel, baseNote, vel, noteOn: true));
 
         // Topological emission: pitch states (incl. re-anchor initial bends) in
         // tick order; a re-anchor additionally notes-off the old base and notes-on
@@ -1195,24 +1216,24 @@ internal sealed class MusicalMidiExporter
                 if (re.Tick == t)
                 {
                     AddTrackEvent(slot.Track, PackedMidiEvent.Note(
-                        t + originShift, slot.Index, slot.Channel, re.OldBase, vel, noteOn: false));
+                        t + emissionShift, slot.Index, slot.Channel, re.OldBase, vel, noteOn: false));
                     AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
-                        t + originShift, slot.Index, slot.Channel, re.InitialBend));
+                        t + emissionShift, slot.Index, slot.Channel, re.InitialBend));
                     AddTrackEvent(slot.Track, PackedMidiEvent.Note(
-                        t + originShift, slot.Index, slot.Channel, re.NewBase, vel, noteOn: true));
+                        t + emissionShift, slot.Index, slot.Channel, re.NewBase, vel, noteOn: true));
                     lastBendByEndpoint[endpoint] = re.InitialBend;
                     reIdx++;
                     continue;
                 }
             }
             AddTrackEvent(slot.Track, PackedMidiEvent.PitchBend(
-                t + originShift, slot.Index, slot.Channel, state.EncodedBend));
+                t + emissionShift, slot.Index, slot.Channel, state.EncodedBend));
             lastBendByEndpoint[endpoint] = state.EncodedBend;
         }
 
         // Final note-off on the current base.
         AddTrackEvent(slot.Track, PackedMidiEvent.Note(
-            endTick + originShift, slot.Index, slot.Channel, currentBase, vel, noteOn: false));
+            endTick + emissionShift, slot.Index, slot.Channel, currentBase, vel, noteOn: false));
     }
 
     private List<(long Position, double Target, int Order)> BuildPitchAnchors(
@@ -1421,46 +1442,35 @@ internal sealed class MusicalMidiExporter
         }
     }
 
-    private void ApplyQuantizationToGrid(TrackAllocator allocator)
+    /// <summary>Quantization grid in ticks for the configured mode (0 = Off). Off is a
+    /// STRICT no-op (§9 / §0 "no implicit quantization"): with grid 0 every quantize
+    /// helper returns its input untouched, so the lossless timeline stays lossless.</summary>
+    private int QuantizeGridTicks
     {
-        string mode = (_options.Quantize ?? "off").ToLowerInvariant();
-        int gridTicks = mode switch
+        get
         {
-            "1/8" => _ppq / 2,
-            "1/16" => _ppq / 4,
-            "1/32" => _ppq / 8,
-            _ => 0,
-        };
-        if (gridTicks <= 0)
-            return;
-        for (int index = 1; index <= allocator.Tracks.Count; index++)
-        {
-            MidiTrack track = allocator.Tracks[index];
-            if (track.UsesPackedEvents)
+            string mode = (_options.Quantize ?? "off").ToLowerInvariant();
+            return mode switch
             {
-                for (int eventIndex = 0; eventIndex < track.PackedEvents.Count; eventIndex++)
-                {
-                    PackedMidiEvent evt = track.PackedEvents[eventIndex];
-                    if (evt.Kind != PackedMidiEventKind.NoteOn)
-                        continue;
-                    // Quantize start to the nearest grid line; keep end duration.
-                    long group = (evt.Tick + gridTicks / 2) / gridTicks * gridTicks;
-                    evt.Tick = Math.Max(0, group);
-                    track.PackedEvents[eventIndex] = evt;
-                }
-            }
-            else
-            {
-                foreach (MidiEventBase evt in track.Events)
-                {
-                    if (evt is not MidiNoteEvent note || !note.NoteOn)
-                        continue;
-                    // Quantize start to the nearest grid line; keep end duration.
-                    long group = (note.Tick + gridTicks / 2) / gridTicks * gridTicks;
-                    note.Tick = Math.Max(0, group);
-                }
-            }
+                "1/8" => _ppq / 2,
+                "1/16" => _ppq / 4,
+                "1/32" => _ppq / 8,
+                _ => 0,
+            };
         }
+    }
+
+    /// <summary>Rounds a tick to the nearest grid line, never negative. With Off
+    /// (grid ≤ 0) the tick passes through unchanged. Same formula the retired
+    /// post-pass applied to NoteOn alone — now applied by each emitter to the
+    /// WHOLE logical note (§9), never implicitly.</summary>
+    private long QuantizeTick(long tick)
+    {
+        int grid = QuantizeGridTicks;
+        if (grid <= 0)
+            return tick;
+        long group = (tick + grid / 2) / grid * grid;
+        return Math.Max(0, group);
     }
 
     /// <summary>
@@ -2272,8 +2282,11 @@ internal sealed class MusicalMidiExporter
             return false; // excluded voice: neither melodic nor percussion track exists.
         VoiceExportOverride voiceOverride = _options.OverrideFor(pn.Note.ChannelId);
         int velocity = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
-        _drumRemapScratch.Add(new DrumRemapHit(
-            slot, note, velocity, TimeTick(pn.Note.StartSample) + originShiftTicks));
+        long start = TimeTick(pn.Note.StartSample) + originShiftTicks;
+        // §9: quantize the hit tick; the NoteOff at Start + ShortHitTicks shifts by
+        // the same delta via the emission loop (duration preserved).
+        start += QuantizeTick(start) - start;
+        _drumRemapScratch.Add(new DrumRemapHit(slot, note, velocity, start));
         return true;
     }
 

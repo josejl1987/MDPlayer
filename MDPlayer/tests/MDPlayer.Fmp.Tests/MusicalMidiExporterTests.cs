@@ -501,6 +501,125 @@ public sealed class MusicalMidiExporterTests
         Assert.Equal(0, qTick % (Ppq / 4));
     }
 
+    // ── Phase 6: whole-logical-note quantization (§9; D9) ─────────────────────────
+
+    /// <summary>One note starting off-grid with a mid-note pitch change (bend path),
+    /// plus the off-grid sample arithmetic shared by the Quantization_* tests.</summary>
+    private static (VisualizationTimeline Timeline, long RawOn, long RawChange, long RawOff) QuantizeFixture()
+    {
+        double spq = Sr * 60.0 / 120.0; // 22050 samples = quarter = 960 ticks
+        long start = (long)Math.Round(spq) + 1200; // off-grid attack
+        long change = start + 15_000;
+        long end = start + 40_000;
+        var note = new NoteEvent(
+            ChannelId: "v",
+            StartSample: start,
+            EndSample: end,
+            InitialFrequencyHz: 440,
+            InitialMidiNote: 60,
+            InstrumentId: "inst",
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: false,
+            Pitch: new[] { new PitchChange(change, 440 * Math.Pow(2, 1.0 / 12), 61.0) });
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = end + 20_000,
+            SampleRate = Sr,
+            Notes = new[] { note },
+        };
+        long rawOn = TimeTickOf(start);
+        long rawChange = TimeTickOf(change);
+        long rawOff = TimeTickOf(end);
+        return (timeline, rawOn, rawChange, rawOff);
+    }
+
+    // One 120-BPM quarter is Sr*60/120 samples = 960 ticks, so ticks-per-sample is 960/22050.
+    private static long TimeTickOf(long sample) => (long)Math.Round(sample * (double)Ppq / (Sr * 60.0 / 120.0));
+
+    [Fact]
+    public void Quantization_ShiftsWholeLogicalNote()
+    {
+        // §9: with quantization on, EVERY event of the logical note — NoteOn, each
+        // pitch state, and NoteOff — moves by the SAME delta = quantizedOn − rawOn.
+        (VisualizationTimeline timeline, long rawOn, long rawChange, long rawOff) = QuantizeFixture();
+        var raw = new TimelineState { Timeline = timeline, FixedBpm = 120 };
+        var q = new TimelineState { Timeline = timeline, FixedBpm = 120, Quantize = "1/16" };
+
+        ParsedMidi rawParsed = Parser.Parse(Export(raw));
+        ParsedMidi qParsed = Parser.Parse(Export(q));
+
+        ParsedPitchNote rawNote = Assert.Single(rawParsed.Notes);
+        ParsedPitchNote qNote = Assert.Single(qParsed.Notes);
+        Assert.Equal(rawOn, rawNote.On);
+        long delta = qNote.On - rawNote.On;
+        // The attack is genuinely off-grid, so quantization really moved it.
+        Assert.NotEqual(0, delta);
+        Assert.Equal(0, qNote.On % (Ppq / 4));
+
+        // NoteOff shifts by the same delta as NoteOn (duration preserved).
+        Assert.Equal(qNote.Off, rawNote.Off + delta);
+
+        // Every mid-note pitch state shifts by that SAME delta.
+        ParsedBend rawBend = Assert.Single(rawParsed.Bends);
+        ParsedBend qBend = Assert.Single(qParsed.Bends);
+        Assert.Equal(rawChange, rawBend.Tick);
+        Assert.Equal(rawBend.Tick + delta, qBend.Tick);
+        Assert.Equal(rawBend.Bend, qBend.Bend);
+    }
+
+    [Fact]
+    public void Quantization_PreservesDuration()
+    {
+        // off' = on' + (off − on): source duration survives quantization exactly,
+        // even when on itself snaps to a different grid line.
+        (VisualizationTimeline timeline, long rawOn, _, long rawOff) = QuantizeFixture();
+        var raw = new TimelineState { Timeline = timeline, FixedBpm = 120 };
+        var q = new TimelineState { Timeline = timeline, FixedBpm = 120, Quantize = "1/16" };
+
+        ParsedPitchNote rawNote = Assert.Single(Parser.Parse(Export(raw)).Notes);
+        ParsedPitchNote qNote = Assert.Single(Parser.Parse(Export(q)).Notes);
+
+        Assert.Equal(rawOff - rawOn, rawNote.Off - rawNote.On);
+        Assert.Equal(rawNote.Off - rawNote.On, qNote.Off - qNote.On);
+    }
+
+    [Fact]
+    public void Quantization_PreservesPitchContour()
+    {
+        // The pitch contour is the sequence of (time-from-on, bend, base) points.
+        // Quantization translates the whole group, so every relative offset and
+        // every bend value must be identical between raw and quantized output.
+        (VisualizationTimeline timeline, long rawOn, _, _) = QuantizeFixture();
+        var raw = new TimelineState { Timeline = timeline, FixedBpm = 120 };
+        var q = new TimelineState { Timeline = timeline, FixedBpm = 120, Quantize = "1/16" };
+
+        ParsedMidi rawParsed = Parser.Parse(Export(raw));
+        ParsedMidi qParsed = Parser.Parse(Export(q));
+
+        var rawContour = rawParsed.Bends.Select(b => (b.Tick - rawParsed.Notes[0].On, b.Bend)).OrderBy(p => p.Item1).ToArray();
+        var qContour = qParsed.Bends.Select(b => (b.Tick - qParsed.Notes[0].On, b.Bend)).OrderBy(p => p.Item1).ToArray();
+        Assert.Equal(rawContour, qContour);
+
+        // Base key and channel are untouched by the translation.
+        Assert.Equal(rawParsed.Notes[0].Note, qParsed.Notes[0].Note);
+        Assert.Equal(rawParsed.Notes[0].Channel, qParsed.Notes[0].Channel);
+    }
+
+    [Fact]
+    public void QuantizationOff_IsNoOp()
+    {
+        // §9 scenario: quantization Off is a STRICT no-op — the same input exported
+        // twice yields byte-identical output, and equality with an explicit default.
+        (VisualizationTimeline timeline, _, _, _) = QuantizeFixture();
+        var state = new TimelineState { Timeline = timeline, FixedBpm = 120, Quantize = "off" };
+
+        byte[] first = Export(state);
+        byte[] second = Export(state);
+
+        Assert.Equal(first, second);
+    }
+
     [Fact]
     public void Export_NegativePickup_PreservedAfterGlobalShift()
     {
