@@ -1,5 +1,6 @@
 #nullable enable
 
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Midi;
@@ -15,6 +16,14 @@ namespace Fmp.Core.Midi;
 /// </summary>
 internal static class GeneralMidiDrumMapper
 {
+    /// <summary>
+    /// Configuration-internal confidence gate (spec §8, D7): a percussive source
+    /// onset is remapped to a GM drum note only when its evidence-driven role
+    /// classification is at least this confident. NOT a CLI option. Unknown-role
+    /// onsets never pass, whatever their confidence.
+    /// </summary>
+    internal const double RequiredDrumRoleConfidence = 0.80;
+
     public static bool TryMap(RhythmEvent rhythm, out int note)
     {
         ArgumentNullException.ThrowIfNull(rhythm);
@@ -52,6 +61,39 @@ internal static class GeneralMidiDrumMapper
 
         note = 0;
         return false;
+    }
+
+    /// <summary>
+    /// NoteEvent-capable GM drum mapping (spec §8, D6/D7): maps a classified
+    /// <see cref="PercussiveOnset"/> to a GM percussion note, gated by the
+    /// internal <see cref="RequiredDrumRoleConfidence"/> threshold. Role == Unknown
+    /// or confidence below the threshold returns false — the note stays on its
+    /// melodic track and remains percussion evidence (never invented roles, never
+    /// a fabricated GM tom). The onset carries no pan, so tom/top resolve to their
+    /// deterministic center mappings.
+    /// </summary>
+    public static bool TryMap(PercussiveOnset onset, out int note)
+    {
+        ArgumentNullException.ThrowIfNull(onset);
+
+        if (onset.Role == RhythmRole.Unknown
+            || onset.Confidence < RequiredDrumRoleConfidence)
+        {
+            note = 0;
+            return false;
+        }
+
+        note = onset.Role switch
+        {
+            RhythmRole.Bd => 36,
+            RhythmRole.Sd => 38,
+            RhythmRole.Rim => 37,
+            RhythmRole.Hh => 42,
+            RhythmRole.Tom => MapTom(0f),
+            RhythmRole.Top => MapTopCymbal(0f),
+            _ => 0,
+        };
+        return note != 0;
     }
 
     private static string? LegacyRhythmVoice(string identity)

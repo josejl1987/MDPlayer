@@ -71,6 +71,7 @@ public sealed class MidiExportService
                 VoiceOverrides = ToVoiceOverrides(request.VoiceOptions),
                 EnablePerformanceMetrics = request.EnablePerformanceMetrics,
                 TempoInferenceCounters = tempoCounters,
+                PercussionEvidence = build.PercussionEvidence,
             })
             {
                 Diagnostics = build.Diagnostics,

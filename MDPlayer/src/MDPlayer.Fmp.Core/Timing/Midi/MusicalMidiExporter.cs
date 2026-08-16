@@ -73,6 +73,16 @@ internal sealed class MusicalMidiExportOptions
     /// boundary around map construction.</summary>
     public TempoInferenceCounters TempoInferenceCounters { get; init; }
 
+    /// <summary>
+    /// The unified percussion evidence collection (spec §3/§8, D3/D6): built ONCE
+    /// by <see cref="PercussionEvidenceBuilder"/> in <see cref="MusicalTimeMapBuilder"/>
+    /// and relayed here verbatim — the exporter never re-invokes the builder. The
+    /// drum-remap gate consults only these onsets: a percussive source NoteEvent
+    /// remaps to a GM drum note on MIDI channel 10 only when its evidence entry has
+    /// a known role at or above <see cref="GeneralMidiDrumMapper.RequiredDrumRoleConfidence"/>.
+    /// </summary>
+    public IReadOnlyList<PercussiveOnset> PercussionEvidence { get; init; } = Array.Empty<PercussiveOnset>();
+
     /// <summary>Resolve the override for a channel, or the voice's default if none.</summary>
     public VoiceExportOverride OverrideFor(string channelId)
     {
@@ -205,6 +215,27 @@ internal sealed class MusicalMidiExporter
     // separation without coupling track count to structure or marker emission.
     private bool _groupPhysicalVoices;
 
+    /// <summary>
+    /// Gate-passing classified percussion onsets (spec §8, D6/D7), keyed by the
+    /// physical attack they describe (Domain + VoiceId + SamplePosition) so each
+    /// source NoteEvent can be matched to its evidence entry deterministically.
+    /// Built ONCE per export from <see cref="MusicalMidiExportOptions.PercussionEvidence"/>;
+    /// only ClassifiedNote onsets with a known role at or above
+    /// <see cref="GeneralMidiDrumMapper.RequiredDrumRoleConfidence"/> enter.
+    /// </summary>
+    private Dictionary<(SourceDomainKey? Domain, string VoiceId, long SamplePosition), PercussiveOnset> _drumRemapLookup =
+        new();
+
+    private readonly List<DrumRemapHit> _drumRemapScratch = new();
+
+    /// <summary>Canonical identity of the track carrying gate-passing FM drum
+    /// remaps (spec §8, D6/D7). A dedicated identity keeps remapped hits disjoint
+    /// from native rhythm voices while still routing to MIDI channel 9 (GM
+    /// percussion): the allocator keys percussion routing on the Rhythm family.</summary>
+    private const string GmDrumRemapCanonical = "rhythm:gm-drum";
+
+    private Dictionary<NoteEvent, MidiTrackKey> _drumRemapKeyCache =
+        new(ReferenceEqualityComparer.Instance);
     private Dictionary<NoteEvent, MidiTrackKey> _noteTrackKeyCache =
         new(ReferenceEqualityComparer.Instance);
     private Dictionary<RhythmEvent, MidiTrackKey> _rhythmTrackKeyCache =
@@ -254,6 +285,9 @@ internal sealed class MusicalMidiExporter
             timeline.Notes?.Count ?? 0, ReferenceEqualityComparer.Instance);
         _rhythmTrackKeyCache = new Dictionary<RhythmEvent, MidiTrackKey>(
             timeline.Rhythm?.Count ?? 0, ReferenceEqualityComparer.Instance);
+        _drumRemapKeyCache = new Dictionary<NoteEvent, MidiTrackKey>(
+            timeline.Notes?.Count ?? 0, ReferenceEqualityComparer.Instance);
+        BuildDrumRemapLookup(timeline);
         _performance = _options.EnablePerformanceMetrics ? new MidiPerformanceMetrics() : null;
         _performance?.SetTempoInferenceCounters(_options.TempoInferenceCounters);
         _allocatedBefore = _performance is null ? 0 : GC.GetAllocatedBytesForCurrentThread();
@@ -378,9 +412,28 @@ internal sealed class MusicalMidiExporter
             new(allocator.Tracks.Count);
         foreach (PlannableNote pn in plannable)
         {
+            if (TryRemapToGmDrum(pn, allocator, originShiftTicks))
+                continue;
             EmitNote(pn.Slot, pn.Note, pitchModel, originShiftTicks, lastBendByEndpoint);
         }
         _performance?.StopStage(MidiPerformanceStage.EventGeneration, stageStart);
+
+        // Spec §8 drum-remap emission: gate-passing classified FM onsets were
+        // held out of the melodic pass above; each becomes a short GM drum hit
+        // on its percussion track (channel 9 = 1-based channel 10). Order is the
+        // plannable (slot, tick, source) order — deterministic across runs.
+        // The onset carries no pan (D6: tom/top resolve to deterministic center
+        // mappings), so no CC10 is emitted for remapped hits. Each remap is one
+        // NoteOn + one NoteOff: the source attack survives exactly once, so
+        // DroppedSourceAttacks stays 0.
+        foreach (DrumRemapHit hit in _drumRemapScratch)
+        {
+            AddTrackEvent(hit.Slot.Track, PackedMidiEvent.Note(
+                hit.Start, hit.Slot.Index, hit.Slot.Channel, hit.Note, hit.Velocity, noteOn: true));
+            AddTrackEvent(hit.Slot.Track, PackedMidiEvent.Note(
+                hit.Start + ShortHitTicks, hit.Slot.Index, hit.Slot.Channel, hit.Note, hit.Velocity, noteOn: false));
+        }
+        _drumRemapScratch.Clear();
 
         // Rhythm voices → percussion pitches (Batch 4 drum allocation + Patch 6).
         // Known YM2608 rhythm identities map semantically to GM percussion notes;
@@ -1784,6 +1837,16 @@ internal sealed class MusicalMidiExporter
             AddKey(indexedNote.Key, indexedNote.Note.ChannelId);
             eventCapacityByKey[indexedNote.Key] =
                 eventCapacityByKey.GetValueOrDefault(indexedNote.Key) + indexedNote.EventCapacity;
+            if (TryGetGatePassingRemap(indexedNote.Note, out _))
+            {
+                // Spec §8 gate: this source attack remaps to a GM drum note on
+                // MIDI channel 9 (1-based channel 10), so its percussion track
+                // must join the deterministic key order before event generation.
+                MidiTrackKey remapKey = DrumRemapKeyFor(indexedNote.Note);
+                AddKey(remapKey, indexedNote.Note.ChannelId);
+                eventCapacityByKey[remapKey] =
+                    eventCapacityByKey.GetValueOrDefault(remapKey) + 2; // NoteOn + NoteOff
+            }
         }
         foreach (IndexedRhythm indexedRhythm in sourceIndex.Rhythms)
         {
@@ -2158,9 +2221,86 @@ internal sealed class MusicalMidiExporter
         _rhythmTrackKeyCache[rhythm] = result;
         return result;
     }
+
+    /// <summary>
+    /// Builds the spec §8 drum-remap lookup ONCE per export from the unified
+    /// percussion evidence collection (D3: the exporter never re-invokes
+    /// <see cref="PercussionEvidenceBuilder"/>). Only ClassifiedNote onsets whose
+    /// role classification passes the internal confidence gate enter — Unknown
+    /// roles and below-threshold confidence never qualify (they remain melodic
+    /// notes and keep feeding timing as evidence). Keyed by the physical attack
+    /// (Domain + VoiceId + SamplePosition) so each source NoteEvent matches its
+    /// evidence entry deterministically.
+    /// </summary>
+    private void BuildDrumRemapLookup(VisualizationTimeline timeline)
+    {
+        _drumRemapLookup.Clear();
+        _drumRemapScratch.Clear();
+        foreach (PercussiveOnset onset in _options.PercussionEvidence)
+        {
+            if (onset.EvidenceKind != PercussionEvidenceKind.ClassifiedNote)
+                continue;
+            if (!GeneralMidiDrumMapper.TryMap(onset, out _))
+                continue;
+            var key = (onset.Domain, onset.VoiceId, onset.SamplePosition);
+            if (!_drumRemapLookup.ContainsKey(key))
+                _drumRemapLookup[key] = onset;
+        }
+    }
+
+    private bool TryGetGatePassingRemap(NoteEvent note, out PercussiveOnset onset) =>
+        _drumRemapLookup.TryGetValue((note.Domain, note.ChannelId, note.StartSample), out onset);
+
+    /// <summary>
+    /// Applies the spec §8 drum-remap gate to one planned source note. A note
+    /// with a pass-gated classified onset leaves the melodic pass and is
+    /// scheduled as a GM drum hit on MIDI channel 9 (1-based channel 10);
+    /// everything else is emitted melodically and still participates in timing
+    /// as percussion evidence. Returns true when the note was remapped — the
+    /// caller must NOT EmitNote it. High-confidence known roles map through the
+    /// existing <see cref="GeneralMidiDrumMapper"/> (D6); no GM tom is invented
+    /// to make the percussion channel non-empty.
+    /// </summary>
+    private bool TryRemapToGmDrum(PlannableNote pn, TrackAllocator allocator, long originShiftTicks)
+    {
+        if (!TryGetGatePassingRemap(pn.Note, out PercussiveOnset onset))
+            return false;
+        if (!GeneralMidiDrumMapper.TryMap(onset, out int note))
+            return false;
+        TrackSlot? slot = allocator.SlotFor(DrumRemapKeyFor(pn.Note));
+        if (slot is null)
+            return false; // excluded voice: neither melodic nor percussion track exists.
+        VoiceExportOverride voiceOverride = _options.OverrideFor(pn.Note.ChannelId);
+        int velocity = Math.Clamp(voiceOverride.Velocity ?? _options.Velocity, 1, 127);
+        _drumRemapScratch.Add(new DrumRemapHit(
+            slot, note, velocity, TimeTick(pn.Note.StartSample) + originShiftTicks));
+        return true;
+    }
+
+    /// <summary>The exported percussion track key owning a gate-passing FM drum
+    /// remap (spec §8, D6/D7): the source device/voice/channel with a dedicated
+    /// Rhythm-family canonical identity, so the allocator routes it to GM
+    /// percussion channel 9 (1-based channel 10) and it never collides with
+    /// native rhythm voices. Collapsed like every exported track key.
+    /// Unresolvable channel identities keep the Rhythm identity and the
+    /// placeholder device — a drum remap never lands on a melodic channel.</summary>
+    private MidiTrackKey DrumRemapKeyFor(NoteEvent note)
+    {
+        if (_drumRemapKeyCache.TryGetValue(note, out MidiTrackKey cached))
+            return cached;
+        var instrument = new InstrumentIdentity(IdentityFamily.Rhythm, 0, GmDrumRemapCanonical);
+        MidiTrackKey result = note.Domain is SourceDomainKey domain
+            ? new MidiTrackKey(domain.Device, domain.VoiceFamily, domain.Index, instrument)
+            : TryParseSourceDomain(note.ChannelId, out DeviceId device, out VoiceKind voice, out int sourceChannel)
+                ? new MidiTrackKey(device, voice, sourceChannel, instrument)
+                : PlaceholderKey(note.ChannelId) with { Instrument = instrument };
+        result = CollapsePhysicalTrack(result);
+        _drumRemapKeyCache[note] = result;
+        return result;
+    }
+
     private MidiTrackKey ExportTrackKeyFor(NoteEvent note) =>
         CollapsePhysicalTrack(TrackKeyFor(note));
-
     private MidiTrackKey ExportTrackKeyFor(RhythmEvent rhythm) =>
         CollapsePhysicalTrack(RhythmKeyFor(rhythm));
 
@@ -2452,6 +2592,14 @@ internal sealed class MusicalMidiExporter
     /// enumeration, used as the final deterministic tie-break (spec §2, D5).</summary>
     private readonly record struct PlannableNote(
         TrackSlot Slot, NoteEvent Note, MidiTrackKey Key, int SourceIndex);
+
+    /// <summary>A gate-passing classified FM onset scheduled for GM drum emission
+    /// (spec §8, D6/D7): a short hit on its percussion track (NoteOn + NoteOff at
+    /// <see cref="Start"/> / <see cref="Start"/> + ShortHitTicks). Collected during
+    /// the melodic pass in plannable order and emitted in that same deterministic
+    /// order.</summary>
+    private readonly record struct DrumRemapHit(
+        TrackSlot Slot, int Note, int Velocity, long Start);
 
     /// <summary>A planned pitch event at an absolute MIDI tick: the target pitch and its
     /// encoded bend, resolved through tick-domain collapse and re-anchoring.</summary>

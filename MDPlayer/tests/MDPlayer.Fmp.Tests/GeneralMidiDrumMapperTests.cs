@@ -1,4 +1,5 @@
 using Fmp.Core.Midi;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Xunit;
 
@@ -82,5 +83,57 @@ public sealed class GeneralMidiDrumMapperTests
         Assert.False(GeneralMidiDrumMapper.TryMap(
             new RhythmEvent("noise", "ay8910:0:noise:0", 0, 0.8f, 0f), out _),
             "non-YM2608 sample identities must not map semantically");
+    }
+
+    // ── Phase 5: evidence-driven PercussiveOnset path (spec §8; D6, D7) ──────────
+
+    private static PercussiveOnset Onset(RhythmRole role, double confidence) =>
+        new(
+            SamplePosition: 4400,
+            Domain: null,
+            VoiceId: "ym2608.0.fm.1",
+            Role: role,
+            Strength: 1.0,
+            EvidenceKind: PercussionEvidenceKind.ClassifiedNote,
+            Confidence: confidence);
+
+    [Theory]
+    [InlineData((int)RhythmRole.Bd, 36)]   // Bass Drum 1
+    [InlineData((int)RhythmRole.Sd, 38)]   // Acoustic Snare
+    [InlineData((int)RhythmRole.Rim, 37)]  // Side Stick
+    [InlineData((int)RhythmRole.Hh, 42)]   // Closed Hi-Hat
+    [InlineData((int)RhythmRole.Tom, 48)]  // Hi-Mid Tom — onset carries no pan (D6)
+    [InlineData((int)RhythmRole.Top, 49)]  // Crash Cymbal 1 — center mapping, no pan (D6)
+    public void KnownRole_AtOrAboveThreshold_MapsToGmNote(int role, int expected)
+    {
+        // Onset carries no pan, so tom/top resolve to their deterministic center
+        // mappings (MapTom(0)/MapTopCymbal(0)) instead of MapYm2608Voice's pan.
+        Assert.True(GeneralMidiDrumMapper.TryMap(Onset((RhythmRole)role, 0.85), out int note));
+        Assert.Equal(expected, note);
+    }
+
+    [Fact]
+    public void ThresholdBoundary_ExactZeroPointEight_Passes()
+    {
+        Assert.True(GeneralMidiDrumMapper.TryMap(Onset(RhythmRole.Bd, 0.80), out int note));
+        Assert.Equal(36, note);
+    }
+
+    [Fact]
+    public void UnknownRole_NeverPasses_RegardlessOfConfidence()
+    {
+        // Role == Unknown is a hard blocker even at max confidence: a confidently
+        // percussive but unidentifiable onset stays melodic (never an invented
+        // role, never a fabricated GM tom to fill channel 10).
+        Assert.False(GeneralMidiDrumMapper.TryMap(Onset(RhythmRole.Unknown, 0.99), out int note));
+        Assert.Equal(0, note);
+    }
+
+    [Fact]
+    public void BelowThreshold_ReturnsFalse()
+    {
+        Assert.False(GeneralMidiDrumMapper.TryMap(Onset(RhythmRole.Sd, 0.70), out int note));
+        Assert.Equal(0, note);
+        Assert.False(GeneralMidiDrumMapper.TryMap(Onset(RhythmRole.Bd, 0.79), out _));
     }
 }

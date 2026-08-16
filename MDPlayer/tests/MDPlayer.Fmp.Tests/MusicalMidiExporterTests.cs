@@ -1275,6 +1275,142 @@ public sealed class MusicalMidiExporterTests
         public double? FixedBpm;
     }
 
+    // ── Phase 5: GM drum remap gate (spec §8; D6, D7) ────────────────────────────
+
+    private static FmOperatorDefinition GateOp(int ar, int sl, int sr, int rr, int tl = 30) =>
+        new(ar, sr, sr, rr, sl, tl, 0, 1, 0, AmplitudeModulation: false, SsgEnvelope: 0);
+
+    private static InstrumentDefinition GateInstrument(string id, int algorithm, params FmOperatorDefinition[] ops) =>
+        new(id, "Fm", algorithm, Feedback: 0, Ams: null, Fms: null, ops);
+
+    /// <summary>Fast-attack decaying transient: percussive, role from the shared
+    /// vocabulary, confidence computed by <see cref="FmPercussionClassifier"/>.</summary>
+    private static NoteEvent GateNote(string channelId, string instrumentId, int midi) =>
+        new(
+            ChannelId: channelId,
+            StartSample: 4400,
+            EndSample: 4400 + 1323, // 30 ms gate at 44.1 kHz → short
+            InitialFrequencyHz: 261.6,
+            InitialMidiNote: midi,
+            InstrumentId: instrumentId,
+            Mode: VisualizationNoteMode.Fm,
+            IsRetrigger: true,
+            Pitch: Array.Empty<PitchChange>());
+
+    /// <summary>Exports a timeline carrying FM notes + their instrument table and
+    /// returns the bytes plus the unified percussion evidence the map built for
+    /// them (the exporter consumed that SAME collection — D3 relay, never a
+    /// builder re-invocation).</summary>
+    private static byte[] ExportWithDrumEvidence(
+        NoteEvent[] notes, InstrumentDefinition[] instruments, out IReadOnlyList<PercussiveOnset> evidence)
+    {
+        var timeline = new VisualizationTimeline
+        {
+            StartSample = 0,
+            EndSample = notes.Max(n => n.EndSample) + 10_000,
+            SampleRate = Sr,
+            Notes = notes,
+            Instruments = instruments,
+            Beats = BuildBeats(120),
+        };
+        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = 120,
+            Meter = new Meter(4, 4),
+            DetectTempoChanges = true,
+        });
+        evidence = build.PercussionEvidence;
+        var exporter = new MusicalMidiExporter(build.Map, Ppq, new MusicalMidiExportOptions
+        {
+            EmitPitchBend = true,
+            PercussionEvidence = build.PercussionEvidence,
+        })
+        {
+            Diagnostics = build.Diagnostics,
+        };
+        return exporter.Export(timeline).Bytes;
+    }
+
+    [Fact]
+    public void Export_KnownRoleAtOrAboveThreshold_RemapsToGmDrumChannel9()
+    {
+        // Fixture from Phase 1: a kick-vocabulary fast-attack decaying retrigger
+        // classifies Bd at confidence >= 0.80 — the ONLY path into the gate.
+        InstrumentDefinition kick = GateInstrument("kick", 7,
+            GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31));
+        NoteEvent note = GateNote("ym2608.0.fm.1", "kick", midi: 60);
+        byte[] bytes = ExportWithDrumEvidence(new[] { note }, new[] { kick }, out IReadOnlyList<PercussiveOnset> evidence);
+
+        // "Live classification at export time" (evidence-driven, not channel names):
+        // the unified collection holds the classified onset...
+        PercussiveOnset onset = Assert.Single(evidence);
+        Assert.Equal(PercussionEvidenceKind.ClassifiedNote, onset.EvidenceKind);
+        Assert.Equal(RhythmRole.Bd, onset.Role);
+        Assert.True(onset.Confidence >= GeneralMidiDrumMapper.RequiredDrumRoleConfidence);
+
+        // ...and the exported bytes carry ONE GM drum hit on channel 9 (0-based =
+        // 1-based channel 10), never the melodic pitch 60.
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.Contains(parsed.NoteOns, n => n.Note == 36 && n.Channel == 9);
+        Assert.DoesNotContain(parsed.NoteOns, n => n.Note == 60);
+    }
+
+    [Fact]
+    public void Export_UnknownRole_StaysMelodic_AndStillFeedsTimingEvidence()
+    {
+        // Confidently percussive but role = Unknown (0.92, the classifier's cap):
+        // the gate MUST NOT remap (no invented roles, no fabricated GM tom), the
+        // note keeps its melodic pitch and track, and it still participates as
+        // percussion evidence in timing.
+        InstrumentDefinition transient = GateInstrument("transient_4", 7,
+            GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31));
+        NoteEvent note = GateNote("ym2608.0.fm.4", "transient_4", midi: 62);
+        byte[] bytes = ExportWithDrumEvidence(new[] { note }, new[] { transient }, out IReadOnlyList<PercussiveOnset> evidence);
+
+        PercussiveOnset onset = Assert.Single(evidence);
+        Assert.Equal(PercussionEvidenceKind.ClassifiedNote, onset.EvidenceKind);
+        Assert.Equal(RhythmRole.Unknown, onset.Role);
+        Assert.True(onset.Confidence >= 0.80, $"unknown role must not be gated on confidence under the cap: {onset.Confidence}");
+
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.Contains(parsed.NoteOns, n => n.Note == 62 && n.Channel != 9);
+        Assert.DoesNotContain(parsed.NoteOns, n => n.Channel == 9);
+    }
+
+    [Fact]
+    public void Export_BelowThreshold_StaysMelodic_AndStillFeedsTimingEvidence()
+    {
+        // No instrument envelope → the conservative fallback classifies the
+        // repeated short attack percussive at only 0.70. Role is Unknown anyway,
+        // but the test pins the BELOW-THRESHOLD branch of the gate (spec §8:
+        // IsPercussive && Role != Unknown && Confidence >= 0.80 required).
+        NoteEvent note = GateNote("ym2608.0.fm.7", "missing", midi: 63);
+        byte[] bytes = ExportWithDrumEvidence(new[] { note }, Array.Empty<InstrumentDefinition>(), out IReadOnlyList<PercussiveOnset> evidence);
+
+        PercussiveOnset onset = Assert.Single(evidence);
+        Assert.Equal(PercussionEvidenceKind.ClassifiedNote, onset.EvidenceKind);
+        Assert.Equal(0.70, onset.Confidence, precision: 6);
+
+        ParsedMidi parsed = Parser.Parse(bytes);
+        Assert.Contains(parsed.NoteOns, n => n.Note == 63 && n.Channel != 9);
+        Assert.DoesNotContain(parsed.NoteOns, n => n.Channel == 9);
+    }
+
+    [Fact]
+    public void Export_DrumRemap_IsDeterministicAcrossRuns()
+    {
+        InstrumentDefinition kick = GateInstrument("kick", 7,
+            GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31), GateOp(31, 0, 31, 31));
+        NoteEvent note = GateNote("ym2608.0.fm.1", "kick", midi: 60);
+
+        byte[] first = ExportWithDrumEvidence(new[] { note }, new[] { kick }, out IReadOnlyList<PercussiveOnset> firstEvidence);
+        byte[] second = ExportWithDrumEvidence(new[] { note }, new[] { kick }, out IReadOnlyList<PercussiveOnset> secondEvidence);
+        // "Deterministic and stable across runs": byte-identical output and
+        // byte-identical evidence — no ordering, lookup or allocation instability.
+        Assert.Equal(first, second);
+        Assert.Equal(Assert.Single(firstEvidence), Assert.Single(secondEvidence));
+    }
+
     private static double FrequencyToMidinote(double freq) => 69 + 12 * Math.Log2(freq / 440.0);
 
     private static NoteEvent NewNote(string voice, long start, long end, int midi)
