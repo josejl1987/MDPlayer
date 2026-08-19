@@ -6,10 +6,9 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Unit tests for the semantic YM2608 rhythm → General MIDI drum-kit note
-/// selection. Only the six rhythm:&lt;voice&gt; identities are mapped; any other
-/// sample identity is unknown and must signal the exporter's unique-note
-/// allocator (TryMap returns false rather than a fixed fallback note).
+/// Semantic GM mapping for explicitly classified rhythm voices. Unknown identities
+/// return false so the raw transcriber preserves the attack with note 60 rather
+/// than fabricating a semantic GM role.
 /// </summary>
 public sealed class GeneralMidiDrumMapperTests
 {
@@ -72,10 +71,9 @@ public sealed class GeneralMidiDrumMapperTests
     [Fact]
     public void UnknownIdentity_ReturnsFalse_NotFallback()
     {
-        // There is NO defensive Map() fallback: a non-semantic identity (OPL
         // percussion, SSG noise, user samples) returns false with an unset note
-        // (0) so it routes to the exporter's deterministic unknown-note
-        // preallocation. It must never resolve to side stick (37) or any other
+        // (0); the raw transcriber preserves it with deterministic note 60. It
+        // must never resolve to side stick (37) or any other semantic GM role.
         // semantic GM role.
         var unknown = new RhythmEvent("drums", "drums", 0, 1.0f, 0f);
         Assert.False(GeneralMidiDrumMapper.TryMap(unknown, out int note));

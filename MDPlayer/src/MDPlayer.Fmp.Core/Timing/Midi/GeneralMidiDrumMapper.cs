@@ -10,9 +10,9 @@ namespace Fmp.Core.Midi;
 /// percussion notes. Physical domain/index is authoritative; the legacy
 /// <c>rhythm:&lt;name&gt;</c> identity is accepted only when no physical domain
 /// is available. There is intentionally NO fallback <c>Map()</c> — unknown
-/// identities return false and route through the exporter's deterministic
-/// unknown-note preallocation; an unknown identity must never masquerade as
-/// a semantic GM role (side stick or otherwise).
+/// identities return false and the raw transcriber preserves the attack with
+/// its deterministic unknown note; an unknown identity must never masquerade
+/// as a semantic GM role (side stick or otherwise).
 /// </summary>
 internal static class GeneralMidiDrumMapper
 {

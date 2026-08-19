@@ -7,8 +7,8 @@ namespace Fmp.Core.Timing;
 /// <summary>
 /// Builds the unified percussion evidence stream (spec §3/§4/§6, D3) from a
 /// timeline. Called EXACTLY once per time map by <see cref="MusicalTimeMapBuilder"/>;
-/// the same collection is consumed by tempo inference, structural grid selection
-/// and the MIDI exporter. Sources, in cross-kind dedup priority order:
+/// the same collection is consumed by tempo inference and structural grid
+/// selection. Sources, in cross-kind dedup priority order:
 /// NativeRhythm (RhythmEvent, authoritative) &gt; AggregateHit (always evidence)
 /// &gt; ClassifiedNote (FM note judged percussive). Kind-priority dedup applies
 /// only ACROSS kinds — a non-native event claiming the same physical attack

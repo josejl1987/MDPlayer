@@ -6,7 +6,7 @@ namespace MDPlayer.Fmp.Tests;
 /// <summary>
 /// Phase-3 catalog, deduplication, and note-mapping tests operating on the
 /// tracker output (spec §30). These assert identity/catalog semantics that the
-/// timeline emitter and MIDI exporter depend on in later phases.
+/// timeline emitters and MIDI transcription.
 /// </summary>
 public sealed class DacSampleCatalogTests
 {

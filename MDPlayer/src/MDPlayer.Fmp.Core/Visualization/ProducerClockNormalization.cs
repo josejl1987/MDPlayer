@@ -39,10 +39,9 @@
 //     it converts an explicit, unambiguous mismatch exactly once and rejects
 //     an ambiguous/unknown clock instead of hiding it.
 //
-//   No MIDI component (MusicalMidiExporter, MidiFileWriter, DacMidiExporter,
-//   rhythm/DAC conversion) compensates for a clock mismatch — they consume the
-//   already-normalized timeline through MusicalTimeMap (spec §7). Do not add
-//   sample-rate/BPM compensation downstream of this boundary.
+//   No MIDI component compensates for a clock mismatch downstream. The raw
+//   MidiTranscriber consumes the already normalized timeline and applies only its
+//   fixed sample-to-tick conversion. Do not add sample-rate/BPM compensation downstream.
 // -----------------------------------------------------------------------------
 
 using Fmp.Core.Timing;

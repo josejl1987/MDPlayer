@@ -74,7 +74,8 @@ internal sealed class MusicalTimeMap
     /// <summary>
     /// Absolute quarter-note position of the first known downbeat, when one is
     /// established (driver bar info, user override, or high-confidence accent
-    /// inference). Null when unknown — the exporter must NOT invent a downbeat.
+    /// inference). Null when unknown — downstream timing consumers must not invent
+    /// a downbeat.
     /// </summary>
     public double? FirstDownbeatQuarter { get; }
 

@@ -192,7 +192,7 @@ internal sealed record TimingEvent(
 /// <c>MusicalTimeMapOptions.QuartersPerBeat</c> (default 1.0) when the driver beat
 /// unit differs. The scale is applied exactly once — in
 /// <c>MusicalTimeMapBuilder.BuildAnchors</c> (quarter = BeatIndex * QuartersPerBeat);
-/// the MIDI exporter performs no further conversion. Fractional (non-integer)
+/// MIDI serialization performs no further conversion. Fractional (non-integer)
 /// BeatIndex values are legal; non-finite values are filtered at the boundary.
 /// Serialized as <c>{"sample": N, "beat": I}</c>. Producers:
 /// <c>TimelineBuilder.AddBeat</c> (programmatic) and <c>TimelineBuilder.Merge</c>

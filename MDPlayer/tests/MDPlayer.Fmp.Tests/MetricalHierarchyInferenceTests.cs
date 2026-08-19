@@ -91,32 +91,6 @@ public sealed class MetricalHierarchyInferenceTests
         Assert.Equal(2_400, build.Map.SampleToTick(10_000, Ppq));
     }
 
-    [Fact]
-    public void SymbolicExport_WritesTempoAtTickZeroAndUsesSourceMappedTicks()
-    {
-        VisualizationTimeline timeline = Timeline(1_000, 4, includeAccentVoice: true);
-        MusicalTimeMapBuildResult build = Build(timeline);
-        var exporter = new MusicalMidiExporter(build.Map, Ppq,
-            new MusicalMidiExportOptions { EmitPitchBend = false })
-        {
-            Diagnostics = build.Diagnostics,
-        };
-
-        MidiSemanticDecoder.Result decoded = MidiSemanticDecoder.Decode(exporter.Export(timeline).Bytes);
-        Assert.NotEmpty(decoded.TempoMap);
-        Assert.Equal(0, decoded.TempoMap[0].Tick);
-        long expected = build.Map.SampleToTick(10_000, Ppq);
-        Assert.Contains(decoded.Events.Values.SelectMany(events => events), eventInfo =>
-            eventInfo.Event is Melanchall.DryWetMidi.Core.NoteOnEvent && eventInfo.Tick == expected);
-
-        double secondsPerTick = decoded.TempoMap[0].UsPerQuarter / 1_000_000.0 / Ppq;
-        foreach (long sample in new[] { 0L, 1_000L, 4_000L, 10_000L, 90_000L })
-        {
-            double midiSeconds = build.Map.SampleToTick(sample, Ppq) * secondsPerTick;
-            double sourceSeconds = (double)sample / SampleRate;
-            Assert.InRange(Math.Abs(midiSeconds - sourceSeconds), 0, secondsPerTick + 1e-9);
-        }
-    }
 
     [Fact]
     public void SourceTimeMapping_StaysBoundedAtLateEventsWithoutAccumulatedDrift()

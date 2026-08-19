@@ -163,7 +163,7 @@ internal sealed class MidiSemanticDecoder
         }
         else if (cc.ControlNumber == 100)
         {
-            // RPN number = (CC101 MSB << 7) | CC100 LSB. The exporter only uses
+            // RPN number = (CC101 MSB << 7) | CC100 LSB. MIDI transcription uses
             // RPNs with MSB 0: 0x0000 (bend range), 0x0001 (coarse tuning),
             // 0x0002 (fine tuning). 127 = null-RPN unselect, tracked but inert.
             if (pendingRpn.TryGetValue(key, out int rpnMsb) && rpnMsb == 0 && (byte)cc.ControlValue <= 2)
@@ -181,7 +181,7 @@ internal sealed class MidiSemanticDecoder
         else if (cc.ControlNumber == 38 && pendingRpn.TryGetValue(key, out int rpn38))
         {
             if (rpn38 == 1)
-                state.CoarseTuningSemitones |= cc.ControlValue; // LSB (0 in the exporter)
+                state.CoarseTuningSemitones |= cc.ControlValue; // LSB (normally 0)
             else if (rpn38 == 2)
                 state.FineTuningValue |= cc.ControlValue; // LSB of the 14-bit fine value
         }

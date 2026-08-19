@@ -92,9 +92,9 @@ internal static class Program
     }
 
     /// <summary>
-    /// Runs a tracked VGZ/OVI through capture, SourceTimeline, the application
-    /// MIDI service, and the canonical writer. This is intentionally an evidence
-    /// mode: it never substitutes a synthetic or approximate path.
+    /// Runs a tracked VGZ/OVI through capture, the application MIDI service, and
+    /// the canonical writer. This is intentionally an evidence mode: it never
+    /// substitutes a synthetic or approximate path.
     /// </summary>
     private static int RunMidiFixture(string[] args)
     {

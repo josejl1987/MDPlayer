@@ -89,8 +89,8 @@ public sealed class Ay8910TimelineDecoderTests
     public void Tone_VolumeZero_ClosesNote()
     {
         // Volume is the gate: dropping to 0 closes the segment; raising it again
-        // opens a new segment (the exporter's normalization merges unchanged
-        // adjacent segments — INV3 — but the decoder itself must show the gate).
+        // opens a new segment (the normalization stage merges unchanged adjacent
+        // segments — INV3 — but the decoder itself must show the gate).
         var (decoder, timeline) = NewDecoder();
         WritePeriod(decoder, 0, 200);
         decoder.Process(W(0, 7, MixerToneOnly));

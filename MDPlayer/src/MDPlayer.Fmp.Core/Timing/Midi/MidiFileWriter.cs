@@ -87,10 +87,10 @@ internal sealed class MidiTrack
 /// <summary>
 /// Standard MIDI file (SMF) Format 1 serializer built as a thin adapter over the
 /// Melanchall.DryWetMidi library, driven by a
-/// <see cref="Fmp.Core.Timing.MusicalTimeMap"/>-derived event stream. Track 0 is
-/// the conductor track (tempo, time signature, markers, metadata); every other
-/// track holds one logical voice. Events are ordered deterministically within a
-/// tick (by tick, then <see cref="MidiEventOrder.Rank"/>, then
+/// <see cref="MidiTranscriber"/>-derived event stream. Track 0 is the conductor
+/// track (tempo, time signature, markers, metadata); every other track holds one
+/// logical voice. Events are ordered deterministically within a tick (by tick,
+/// then <see cref="MidiEventOrder.Rank"/>, then
 /// <see cref="MidiEventBase.SourceOrder"/>), so the same input always produces
 /// identical bytes. Tempo events are guaranteed to precede any notes at the same
 /// tick. This class performs NO timing conversion of its own.

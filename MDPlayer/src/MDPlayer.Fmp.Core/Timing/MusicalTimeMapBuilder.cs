@@ -13,9 +13,8 @@ internal sealed class MusicalTimeMapBuildResult
 
     /// <summary>
     /// The unified percussion evidence collection (spec §3/§4, D3). Built once
-    /// by <see cref="MusicalTimeMapBuilder"/> and consumed by tempo inference,
-    /// structural grid selection and the MIDI exporter — one collection, one
-    /// provenance.
+    /// by <see cref="MusicalTimeMapBuilder"/> and consumed by tempo inference and
+    /// structural grid selection — one collection, one provenance.
     /// </summary>
     public IReadOnlyList<PercussiveOnset> PercussionEvidence { get; init; } = Array.Empty<PercussiveOnset>();
 }
@@ -72,8 +71,8 @@ internal static class MusicalTimeMapBuilder
             throw new ArgumentException("timeline sample rate must be positive");
 
         // ONE percussion evidence build feeds every consumer (spec §3, D3):
-        // tempo inference, structural grid selection and (via the build result)
-        // the MIDI exporter all read this same collection instance.
+        // tempo inference and structural grid selection all read this same
+        // collection instance.
         IReadOnlyList<PercussiveOnset> percussionEvidence = PercussionEvidenceBuilder.Build(timeline);
 
         // Phase override priority: explicit quarter wins; else samples converted.

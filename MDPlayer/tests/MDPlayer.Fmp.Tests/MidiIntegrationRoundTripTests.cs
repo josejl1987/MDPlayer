@@ -8,71 +8,13 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// WP06 T040 - the end-to-end acceptance matrix. Builds a timeline, fits its
-/// musical time map, exports Format 1 MIDI, then round-trips the bytes through an
-/// INDEPENDENT existing parser (MidiDocument, the repo's MIDI playback backend,
-/// spec section 70) verifying format==1, division==PPQ, track count, tempo values,
-/// event ticks and End-of-Track. Also covers the FR-005 acceptance matrix
-/// (auto strongest / driver fails w/o authority / fixed requires BPM / strict
-/// rejects unresolved / non-strict fallback visible) and byte determinism.
+/// WP06 T040 - timing-source acceptance matrix. Builds timelines and verifies
+/// automatic, driver, fixed, strict, and symbolic timing-source selection plus
+/// diagnostics and deterministic inference behavior.
 /// </summary>
 public sealed class MidiIntegrationRoundTripTests
 {
     private const int Sr = 44_100;
-
-    [Fact]
-    public void RoundTrip_Format1_Division_Tracks_Tempo_Eot()
-    {
-        TimelineFixture fx = new(Sr, bpm: 120, withBeats: true);
-        byte[] bytes = Export(fx, ppq: 960);
-
-        MidiDocument doc = MidiDocument.Parse(bytes);
-        Assert.Equal(960, doc.Division);
-        // Conductor + at least one musical track for the notes.
-        Assert.True(doc.Events.GroupBy(e => e.Track).Count() >= 1);
-        Assert.Contains(doc.Tempos, t => t.MicrosecondsPerQuarter == 500_000);
-        Assert.True(doc.EndTick > 0, "the exported file must contain an End-of-Track");
-        Assert.Contains(doc.Events, e => e.Type == MidiMessageType.NoteOn && e.Data2 > 0);
-    }
-
-    [Fact]
-    public void RoundTrip_Division_MatchesConfiguredPpq()
-    {
-        TimelineFixture fx = new(Sr, bpm: 100, withBeats: true);
-        byte[] bytes = Export(fx, ppq: 480);
-        MidiDocument doc = MidiDocument.Parse(bytes);
-        Assert.Equal(480, doc.Division);
-    }
-
-    [Fact]
-    public void RoundTrip_NoteTicks_AlignToConfiguredGrid()
-    {
-        double spq = Sr * 60.0 / 120.0;
-        var timeline = new VisualizationTimeline
-        {
-            StartSample = 0,
-            EndSample = (long)Math.Round(4 * spq) + 20_000,
-            SampleRate = Sr,
-            Notes = new[]
-            {
-                NewNote("v", 0, (long)spq, 60),
-                NewNote("v", (long)Math.Round(1 * spq), (long)Math.Round(2 * spq), 62),
-                NewNote("v", (long)Math.Round(2 * spq), (long)Math.Round(3 * spq), 64),
-            },
-            Beats = Enumerable.Range(0, 12)
-                .Select(i => new BeatEvent((long)Math.Round(i * spq), i))
-                .ToArray(),
-        };
-        var fx = new TimelineFixture(Sr, 120, withBeats: true) { TimelineOverride = timeline };
-        byte[] bytes = Export(fx, 960);
-        MidiDocument doc = MidiDocument.Parse(bytes);
-        long[] ticks = doc.Events.Where(e => e.Type == MidiMessageType.NoteOn && e.Data2 > 0)
-            .Select(e => e.Tick).OrderBy(t => t).ToArray();
-        Assert.Equal(3, ticks.Length);
-        Assert.InRange(ticks[0], 0L, 1L);
-        Assert.InRange(ticks[1], 959L, 961L);
-        Assert.InRange(ticks[2], 1919L, 1921L);
-    }
 
     /* FR-005 */
     [Fact]
@@ -151,34 +93,10 @@ public sealed class MidiIntegrationRoundTripTests
             Assert.Contains(build.Diagnostics.Warnings, w => w.Contains("ambiguity", StringComparison.OrdinalIgnoreCase));
     }
 
-    [Fact]
-    public void SameInput_ProducesSameBytes()
-    {
-        TimelineFixture fx = new(Sr, 120, withBeats: true);
-        Assert.Equal(Export(fx, 960), Export(fx, 960));
-    }
 
     private static NoteEvent NewNote(string voice, long start, long end, int midi)
         => new(voice, start, end, 440, midi, "inst", VisualizationNoteMode.Fm, false, Array.Empty<PitchChange>());
 
-    private static string WriteTimeline(VisualizationTimeline timeline)
-    {
-        string path = Path.Combine(Path.GetTempPath(), "mdplayer-midi-" + Guid.NewGuid().ToString("N") + ".json");
-        VisualizationJsonWriter.Write(path, timeline);
-        return path;
-    }
-
-    private static byte[] Export(TimelineFixture fx, int ppq)
-    {
-        VisualizationTimeline timeline = fx.TimelineOverride ?? fx.Timeline;
-        var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
-        {
-            FixedBpm = fx.FixedBpm, Meter = fx.Meter, DetectTempoChanges = true,
-        });
-        var exporter = new MusicalMidiExporter(build.Map, ppq, new MusicalMidiExportOptions { EmitPitchBend = true })
-        { Diagnostics = build.Diagnostics };
-        return exporter.Export(timeline).Bytes;
-    }
 
     private sealed class TimelineFixture
     {

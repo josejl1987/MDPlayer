@@ -8,7 +8,7 @@ namespace Fmp.Benchmarks;
 /// <summary>
 /// Independent reference MIDI analyzer. Decodes a serialized .mid file using
 /// ONLY DryWetMIDI 8.0.3 plus the raw bytes (SHA-256), with no dependency on
-/// VisualizationTimeline / MusicalTimeMap / MusicalMidiExporter internals.
+/// application timeline internals.
 /// Note reconstruction is a pure FIFO per-(port,channel,note) matcher that
 /// treats velocity-0 NoteOn as a NoteOff and supports overlapping same-pitch
 /// attacks. Tempo integration uses the file's OWN Set Tempo events.
@@ -161,41 +161,52 @@ internal static class ReferenceMidiAnalyzer
         {
             if (smpte) return 0.0;
             double seconds = 0.0;
-            long prev = 0;
+            long previousTick = 0;
             int us = 500_000; // initial 120 BPM default
-            foreach (var (t, u) in curve)
+            foreach (var (tempoTick, tempoUs) in curve)
             {
-                long segmentTicks = t - prev;
-                if (segmentTicks > 0)
-                    seconds += segmentTicks * us / (1_000_000.0 * ppq);
-                us = u;
-                prev = t;
-                if (tick <= t)
+                if (tick <= tempoTick)
                 {
-                    if (tick < t)
-                    {
-                        // roll back the overshoot
-                        seconds -= (t - tick) * us / (1_000_000.0 * ppq);
-                    }
-                    break;
+                    if (tick > previousTick)
+                        seconds += (tick - previousTick) * us / (1_000_000.0 * ppq);
+                    return seconds;
                 }
+
+                seconds += (tempoTick - previousTick) * us / (1_000_000.0 * ppq);
+                previousTick = tempoTick;
+                us = tempoUs;
             }
-            if (tick > prev)
-                seconds += (tick - prev) * us / (1_000_000.0 * ppq);
+
+            if (tick > previousTick)
+                seconds += (tick - previousTick) * us / (1_000_000.0 * ppq);
             return seconds;
         }
 
-        // ---- Flatten timed events across tracks, stable by time ----
-        var evts = new List<(long time, MidiEvent midiEvent, int track)>();
+        // ---- Flatten timed events across tracks, stable by time and
+        // intra-track order. PortPrefixEvent changes the port for subsequent
+        // events in that track; absent prefixes use the SMF default port 0.
+        var trackPorts = new int[chunks.Length];
+        var evts = new List<(long time, MidiEvent midiEvent, int track, int order, int port)>();
         for (int ti = 0; ti < chunks.Length; ti++)
         {
+            int port = 0;
+            int order = 0;
             foreach (TimedEvent ev in chunks[ti].GetTimedEvents())
-                evts.Add((ev.Time, ev.Event, ti));
+            {
+                if (ev.Event is PortPrefixEvent prefix)
+                {
+                    port = prefix.Port;
+                    trackPorts[ti] = port;
+                }
+                evts.Add((ev.Time, ev.Event, ti, order++, port));
+            }
         }
         evts.Sort((a, b) =>
         {
             int c = a.time.CompareTo(b.time);
-            return c != 0 ? c : a.track.CompareTo(b.track);
+            if (c != 0) return c;
+            c = a.track.CompareTo(b.track);
+            return c != 0 ? c : a.order.CompareTo(b.order);
         });
 
         // ---- Track names ----
@@ -210,8 +221,7 @@ internal static class ReferenceMidiAnalyzer
             }
             trackNames.Add(name);
         }
-        var tracks = chunks.Select((c, i) => new TrackInfo(i, trackNames[i], PortOf(i))).ToList();
-
+        var tracks = chunks.Select((c, i) => new TrackInfo(i, trackNames[i], trackPorts[i])).ToList();
         // ---- Note reconstruction (FIFO per port/channel/note) ----
         string key(int port, int channel, int note) => $"{port}:{channel}:{note}";
         var open = new Dictionary<string, Queue<AttackRec>>();
@@ -239,13 +249,11 @@ internal static class ReferenceMidiAnalyzer
         var pitchSet = new HashSet<int>();
 
         var allBends = new List<(string endpoint, long tick, int value, int track, int channel)>();
-        var rangeChanges = new Dictionary<string, int>(); // channel -> count of bend-range RPN changes
+        var rangeChanges = new Dictionary<string, int>(); // endpoint -> count of bend-range RPN changes
 
         for (int i = 0; i < evts.Count; i++)
         {
-            var (time, midiEvent, track) = evts[i];
-            int port = PortOf(track);
-
+            var (time, midiEvent, track, _, port) = evts[i];
             switch (midiEvent)
             {
                 case NoteOnEvent on when on.Velocity > 0:
@@ -255,10 +263,17 @@ internal static class ReferenceMidiAnalyzer
                     int note = on.NoteNumber;
                     string ek = EndpointKey(port, channel);
                     string k = key(port, channel, note);
-                    if (!open.TryGetValue(k, out var q)) { q = new Queue<AttackRec>(); open[k] = q; }
+                    if (!open.TryGetValue(k, out var q))
+                    {
+                        q = new Queue<AttackRec>();
+                        open[k] = q;
+                    }
                     bool wasActive = q.Count > 0;
-                    double range = activeRange.TryGetValue(ek, out double r) ? r : 24.0;
-                    double bend = BendOffset(activeBend.TryGetValue(ek, out int pv) ? pv : 8192, range);
+                    double range = activeRange.TryGetValue(ek, out double r)
+                        ? r
+                        : DefaultBendRangeSemitones;
+                    double bend = BendOffset(
+                        activeBend.TryGetValue(ek, out int pv) ? pv : 8192, range);
                     q.Enqueue(new AttackRec(time, on.Velocity, note, track, range, bend));
                     pitchClassHistogram.TryGetValue((note % 12 + 12) % 12, out int pc);
                     pitchClassHistogram[(note % 12 + 12) % 12] = pc + 1;
@@ -270,15 +285,22 @@ internal static class ReferenceMidiAnalyzer
                 case NoteOffEvent off:
                 {
                     noteOffCount++;
-                    int channel = midiEvent is NoteOnEvent zon ? zon.Channel : ((NoteOffEvent)midiEvent).Channel;
-                    int note = midiEvent is NoteOnEvent ? ((NoteOnEvent)midiEvent).NoteNumber : ((NoteOffEvent)midiEvent).NoteNumber;
+                    int channel = midiEvent is NoteOnEvent zon
+                        ? zon.Channel
+                        : ((NoteOffEvent)midiEvent).Channel;
+                    int note = midiEvent is NoteOnEvent
+                        ? ((NoteOnEvent)midiEvent).NoteNumber
+                        : ((NoteOffEvent)midiEvent).NoteNumber;
                     string k = key(port, channel, note);
                     if (open.TryGetValue(k, out var q) && q.Count > 0)
                     {
                         AttackRec attack = q.Dequeue();
                         string ek = EndpointKey(port, channel);
-                        double range = activeRange.TryGetValue(ek, out double rr) ? rr : 24.0;
-                        double endBend = BendOffset(activeBend.TryGetValue(ek, out int epv) ? epv : 8192, range);
+                        double range = activeRange.TryGetValue(ek, out double rr)
+                            ? rr
+                            : DefaultBendRangeSemitones;
+                        double endBend = BendOffset(
+                            activeBend.TryGetValue(ek, out int epv) ? epv : 8192, range);
                         var noteOut = new NoteOut(
                             port, channel, track, note, attack.Velocity,
                             attack.StartTick, time, TickToSeconds(attack.StartTick), TickToSeconds(time),
@@ -300,32 +322,39 @@ internal static class ReferenceMidiAnalyzer
                     allBends.Add((ek, time, bend.PitchValue, track, channel));
                     break;
                 }
-                case ProgramChangeEvent pc:
+                case ProgramChangeEvent:
                     programChanges++;
                     break;
                 case ControlChangeEvent cc:
                 {
                     int ctrl = cc.ControlNumber;
-                    if (ctrl is 0 or 32) { bankSelects++; }
-                    else if (ccCounts.ContainsKey(ctrl)) ccCounts[ctrl]++;
-                    else ccCounts[ctrl] = 1;
-                    // RPN/NRPN bend-range handling (RPN 0,0 = pitch bend range, channel)
+                    if (ctrl is 0 or 32)
+                        bankSelects++;
+                    else if (ccCounts.ContainsKey(ctrl))
+                        ccCounts[ctrl]++;
+                    else
+                        ccCounts[ctrl] = 1;
+
                     int channel = cc.Channel;
                     string ek = EndpointKey(port, channel);
                     if (ctrl == 101 || ctrl == 100)
                     {
-                        if (!rpn.TryGetValue(ek, out var rr)) { rr = new int[2]; rpn[ek] = rr; }
+                        if (!rpn.TryGetValue(ek, out var rr))
+                        {
+                            rr = new int[2];
+                            rpn[ek] = rr;
+                        }
                         rr[ctrl == 101 ? 0 : 1] = cc.ControlValue;
                     }
-                    else if (ctrl == 6)
+                    else if (ctrl == 6
+                        && rpn.TryGetValue(ek, out var rangeRpn)
+                        && rangeRpn[0] == 0
+                        && rangeRpn[1] == 0)
                     {
-                        if (rpn.TryGetValue(ek, out var rr) && rr[0] == 0 && rr[1] == 0)
-                        {
-                            double newRange = cc.ControlValue;
-                            activeRange[ek] = newRange > 0 ? newRange : 24.0;
-                            rangeChanges.TryGetValue(channel.ToString(), out int rc);
-                            rangeChanges[channel.ToString()] = rc + 1;
-                        }
+                        double newRange = rangeRpn[0] == 0 ? cc.ControlValue : 0;
+                        activeRange[ek] = newRange > 0 ? newRange : DefaultBendRangeSemitones;
+                        rangeChanges.TryGetValue(ek, out int rc);
+                        rangeChanges[ek] = rc + 1;
                     }
                     else
                     {
@@ -338,16 +367,17 @@ internal static class ReferenceMidiAnalyzer
                     break;
             }
 
-            // same-tick reusable detection: any two note-ons at identical (endpoint,tick,note) -> sameTick
+            // same-tick reusable detection: any two note-ons at identical
+            // (endpoint,tick,note) -> sameTick
         }
 
         // ---- Same-tick NoteOns: count of (endpoint,note) groups with >1 distinct same-tick attacks ----
         var onGroups = new Dictionary<string, int>();
-        foreach (var (time, midiEvent, track) in evts)
+        foreach (var (time, midiEvent, track, _, port) in evts)
         {
             if (midiEvent is NoteOnEvent on && on.Velocity > 0)
             {
-                string gk = key(PortOf(track), on.Channel, on.NoteNumber) + "@" + time;
+                string gk = key(port, on.Channel, on.NoteNumber) + "@" + time;
                 onGroups.TryGetValue(gk, out int c);
                 onGroups[gk] = c + 1;
             }
@@ -364,8 +394,11 @@ internal static class ReferenceMidiAnalyzer
                 int channel = int.Parse(parts[1]);
                 int note = int.Parse(parts[2]);
                 string ek = EndpointKey(port, channel);
-                double range = activeRange.TryGetValue(ek, out double rr) ? rr : 24.0;
-                double endBend = BendOffset(activeBend.TryGetValue(ek, out int epv) ? epv : 8192, range);
+                double range = activeRange.TryGetValue(ek, out double rr)
+                    ? rr
+                    : DefaultBendRangeSemitones;
+                double endBend = BendOffset(
+                    activeBend.TryGetValue(ek, out int epv) ? epv : 8192, range);
                 notes.Add(new NoteOut(port, channel, attack.Track, note, attack.Velocity,
                     attack.StartTick, totalTicks, TickToSeconds(attack.StartTick), TickToSeconds(totalTicks),
                     note + attack.BendOffsetAtAttack, note + endBend));
@@ -457,10 +490,7 @@ internal static class ReferenceMidiAnalyzer
 
     private sealed record AttackRec(long StartTick, int Velocity, int Note, int Track, double Range, double BendOffsetAtAttack);
 
-    private const double DefaultBendRangeSemitones = 24.0;
-
-    /// <summary>Port derived from track index (standard MIDI has a single port stream per track).</summary>
-    private static int PortOf(int track) => track;
+    private const double DefaultBendRangeSemitones = 2.0;
 
     private static string EndpointKey(int port, int channel) => $"{port}:{channel}";
 
@@ -474,23 +504,24 @@ internal static class ReferenceMidiAnalyzer
     {
         if (ppq <= 0) return 0.0;
         double seconds = 0.0;
-        long prev = 0;
+        long previousTick = 0;
         int us = 500_000;
-        foreach (var (t, u) in curve)
+        foreach (var (tempoTick, tempoUs) in curve)
         {
-            long seg = t - prev;
-            if (seg > 0) seconds += seg * us / (1_000_000.0 * ppq);
-            us = u;
-            prev = t;
-            if (targetTick <= t)
+            if (targetTick <= tempoTick)
             {
-                if (targetTick < t)
-                    seconds -= (t - targetTick) * us / (1_000_000.0 * ppq);
+                if (targetTick > previousTick)
+                    seconds += (targetTick - previousTick) * us / (1_000_000.0 * ppq);
                 return seconds;
             }
+
+            seconds += (tempoTick - previousTick) * us / (1_000_000.0 * ppq);
+            previousTick = tempoTick;
+            us = tempoUs;
         }
-        if (targetTick > prev)
-            seconds += (targetTick - prev) * us / (1_000_000.0 * ppq);
+
+        if (targetTick > previousTick)
+            seconds += (targetTick - previousTick) * us / (1_000_000.0 * ppq);
         return seconds;
     }
 

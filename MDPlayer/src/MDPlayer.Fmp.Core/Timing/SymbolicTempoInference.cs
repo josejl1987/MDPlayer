@@ -143,7 +143,7 @@ internal static class SymbolicTempoInference
 
     /// <summary>Default build consuming the unified percussion evidence
     /// (spec §3/§7, D3): role, accent and onset streams all read the SAME
-    /// collection that structural grid selection and the exporter consume.</summary>
+    /// collection that structural grid selection consumes.</summary>
     internal static MusicalTimeMapBuildResult Build(
         VisualizationTimeline timeline,
         MusicalTimeMapOptions options,

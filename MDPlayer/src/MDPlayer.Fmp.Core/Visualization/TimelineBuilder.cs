@@ -293,7 +293,7 @@ internal sealed class TimelineBuilder
     /// through <c>NormalizeClock</c> before calling this method. The <c>BeatIndex</c>
     /// unit is the MIDI quarter note (increment-1 == one quarter note, FR-009); it
     /// is interpreted by <c>MusicalTimeMapBuilder.BuildAnchors</c> — never converted
-    /// here or in the exporter.
+    /// here or during MIDI serialization.
     /// </summary>
     public void AddBeat(BeatEvent value)
     {

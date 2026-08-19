@@ -11,13 +11,12 @@ namespace Fmp.Benchmarks;
 /// <summary>
 /// Raw-fidelity MIDI corpus oracle. Runs the eight tracked songs through the
 /// production pipeline (TimelineCaptureService capture — always fresh, never a
-/// timeline cache — then <see cref="MidiTranscriber"/>) and reports decode-only
-/// fidelity maxima measured purely from the exported SMF bytes (Set Tempo,
-/// tick deltas and note events only; no musical model involved): source notes,
-/// native-rhythm hits on channel 10, same-tick attack collisions and one-tick
-/// notes. The raw transport contract — exactly one 500000us Set Tempo at tick
-/// 0, no time signatures, no markers, no velocity/instrument projection — is
-/// asserted per song. Expectations live ONLY in this harness (spec DoD).
+/// timeline cache — then <see cref="MidiTranscriber"/>) and independently decodes
+/// the resulting SMF. Every source NoteEvent is matched to its physical decoded
+/// attack/release and effective pitch (including pitch bend and RPN range), not
+/// merely counted. Native rhythm, fixed transport, metadata absence, collision
+/// accounting and determinism remain separate checks. Expectations live ONLY in
+/// this harness (spec DoD).
 /// Receipts are written to the gitignored artifacts location AND printed
 /// inline; nothing is committed.
 /// </summary>
@@ -73,11 +72,12 @@ internal static class RawMidiCorpusReporter
         }
 
         Console.WriteLine("MDPlayer raw-fidelity MIDI corpus (fresh capture, MidiTranscriber)");
-        Console.WriteLine("song | notes | rhythm | collisions | oneTick | melodicOn | percOn | determinism | pass");
+        Console.WriteLine("song | notes | rhythm | collisions | oneTick | melodicOn | percOn | tickMismatch | pitchMismatch | determinism | pass");
         foreach (SongReceipt row in rows)
         {
             Console.WriteLine($"{row.SongName} | {row.SourceNotes} | {row.RhythmHits} | {row.Collisions} | "
                 + $"{row.OneTickNotes} | {row.MelodicNoteOns} | {row.PercussionNoteOns} | "
+                + $"{row.NoteTickMismatches} | {row.NotePitchMismatches} | "
                 + $"{(row.Deterministic ? "yes" : "NO")} | {(row.Pass ? "PASS" : "FAIL")}");
         }
 
@@ -88,6 +88,11 @@ internal static class RawMidiCorpusReporter
             sameTickAttackCollisions = rows.Max(r => r.Collisions),
             oneTickNotes = rows.Max(r => r.OneTickNotes),
         };
+        var strictMaxima = new
+        {
+            noteTickMismatches = rows.Max(r => r.NoteTickMismatches),
+            notePitchMismatches = rows.Max(r => r.NotePitchMismatches),
+        };
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             schema = "mdplayer.raw-midi-corpus/v1",
@@ -96,6 +101,7 @@ internal static class RawMidiCorpusReporter
             passed = rows.Count(r => r.Pass),
             failed = rows.Count(r => !r.Pass),
             decodeOnlyFidelityMaxima = maxima,
+            timelineSmfFidelityMaxima = strictMaxima,
             songs = rows.Select(r => r.Receipt).ToArray(),
         }, new JsonSerializerOptions { WriteIndented = true }));
 
@@ -135,6 +141,8 @@ internal static class RawMidiCorpusReporter
         int OneTickNotes,
         int MelodicNoteOns,
         int PercussionNoteOns,
+        int NoteTickMismatches,
+        int NotePitchMismatches,
         bool Deterministic,
         bool Pass,
         object Receipt);
@@ -176,6 +184,13 @@ internal static class RawMidiCorpusReporter
                 checks.Add(new { name, expected, actual, pass = ok, detail });
             }
 
+            NoteFidelity fidelity = CompareTimeline(timeline, decoded.Notes);
+            Check("timeline-note-fidelity",
+                fidelity.Pass,
+                $"{sourceNotes} notes with exact start/end ticks and decoded pitch",
+                $"decoded={fidelity.DecodedNotes}, startTickMismatch={fidelity.StartTickMismatches}, "
+                    + $"endTickMismatch={fidelity.EndTickMismatches}, pitchMismatch={fidelity.PitchMismatches}",
+                "compares every VisualizationTimeline.NoteEvent against its decoded SMF attack/release and effective pitch");
             Check("transport-single-120bpm",
                 decoded.TempoCount == 1 && decoded.TempoMicroseconds == 500_000,
                 "one Set Tempo, 500000us, at tick 0",
@@ -233,6 +248,8 @@ internal static class RawMidiCorpusReporter
                     rhythmHits,
                     melodicNoteOns = decoded.MelodicNoteOns,
                     percussionNoteOns = decoded.PercussionNoteOns,
+                    noteTickMismatches = fidelity.StartTickMismatches + fidelity.EndTickMismatches,
+                    notePitchMismatches = fidelity.PitchMismatches,
                     sameTickAttackCollisions = first.Diagnostics.SameTickAttackCollisions,
                     oneTickNotes = first.Diagnostics.OneTickNotes,
                     transportMicrosecondsPerQuarter = decoded.TempoMicroseconds,
@@ -245,7 +262,9 @@ internal static class RawMidiCorpusReporter
             };
             return new SongReceipt(songName, sourceNotes, rhythmHits,
                 first.Diagnostics.SameTickAttackCollisions, first.Diagnostics.OneTickNotes,
-                decoded.MelodicNoteOns, decoded.PercussionNoteOns, deterministic, pass, receipt);
+                decoded.MelodicNoteOns, decoded.PercussionNoteOns,
+                fidelity.StartTickMismatches + fidelity.EndTickMismatches,
+                fidelity.PitchMismatches, deterministic, pass, receipt);
         }
         catch (Exception ex)
         {
@@ -256,9 +275,17 @@ internal static class RawMidiCorpusReporter
                 error = $"pipeline crashed: {ex.Message}",
                 pass = false,
             };
-            return new SongReceipt(songName, 0, 0, 0, 0, 0, 0, false, false, receipt);
+            return new SongReceipt(songName, 0, 0, 0, 0, 0, 0, 0, 0, false, false, receipt);
         }
     }
+
+    private sealed record DecodedNote(
+        int Track, int Port, int Channel, int Note, long StartTick, long EndTick,
+        double StartPitch, double EndPitch);
+
+    private sealed record DecodeAttack(
+        int Track, int Port, int Channel, int Note, int Velocity,
+        long StartTick, double StartPitch);
 
     private sealed record DecodeResult(
         int TempoCount,
@@ -268,27 +295,42 @@ internal static class RawMidiCorpusReporter
         int MelodicNoteOns,
         int PercussionNoteOns,
         int SameTickCollisions,
-        int OffAtOnPlusOne);
+        int OffAtOnPlusOne,
+        IReadOnlyList<DecodedNote> Notes);
 
-    /// <summary>Decode-only measurement: tempo, time signature, marker and note
-    /// counts plus per-channel same-tick attack collisions, all from the SMF
-    /// bytes. No musical model is involved.</summary>
+    /// <summary>
+    /// Independent SMF decode. Besides transport/count checks, it reconstructs
+    /// every note using the actual track port, channel, pitch-bend state and RPN
+    /// range state at the event's position.
+    /// </summary>
     private static DecodeResult DecodeOnly(byte[] bytes)
     {
         Melanchall.DryWetMidi.Core.MidiFile file = MidiFile.Read(new MemoryStream(bytes),
             new ReadingSettings { EndOfTrackStoringPolicy = EndOfTrackStoringPolicy.Store });
 
-        int tempoCount = 0, tempoUs = 0, sigs = 0, markers = 0, melodicOn = 0, percOn = 0, offAtOnPlusOne = 0, collisions = 0;
-        foreach (TrackChunk chunk in file.GetTrackChunks())
+        int tempoCount = 0, tempoUs = 0, sigs = 0, markers = 0;
+        int melodicOn = 0, percOn = 0, offAtOnPlusOne = 0, collisions = 0;
+        var decodedNotes = new List<DecodedNote>();
+        var open = new Dictionary<(int Port, int Channel, int Note), Queue<DecodeAttack>>();
+        var activeBend = new Dictionary<(int Port, int Channel), int>();
+        var activeRange = new Dictionary<(int Port, int Channel), double>();
+        var rpn = new Dictionary<(int Port, int Channel), (int Msb, int Lsb)>();
+        TrackChunk[] chunks = file.GetTrackChunks().ToArray();
+
+        for (int trackIndex = 0; trackIndex < chunks.Length; trackIndex++)
         {
+            TrackChunk chunk = chunks[trackIndex];
             var attacksPerTick = new Dictionary<(int Channel, long Tick), int>();
-            var open = new List<(int Channel, long OnTick)>();
+            int port = 0;
             long tick = 0;
             foreach (MidiEvent evt in chunk.Events)
             {
                 tick += evt.DeltaTime;
                 switch (evt)
                 {
+                    case PortPrefixEvent prefix:
+                        port = prefix.Port;
+                        break;
                     case SetTempoEvent tempo:
                         tempoCount++;
                         if (tempoCount == 1)
@@ -301,32 +343,225 @@ internal static class RawMidiCorpusReporter
                         markers++;
                         break;
                     case NoteOnEvent on when (int)on.Velocity > 0:
-                        if ((int)on.Channel == 9)
+                    {
+                        int channel = (int)on.Channel;
+                        int note = (int)on.NoteNumber;
+                        var endpoint = (port, channel);
+                        double range = activeRange.TryGetValue(endpoint, out double knownRange)
+                            ? knownRange
+                            : 2.0;
+                        int pitchValue = activeBend.TryGetValue(endpoint, out int knownBend)
+                            ? knownBend
+                            : 8192;
+                        var attack = new DecodeAttack(
+                            trackIndex, port, channel, note, (int)on.Velocity, tick,
+                            note + BendOffset(pitchValue, range));
+                        var key = (port, channel, note);
+                        if (!open.TryGetValue(key, out Queue<DecodeAttack>? queue))
+                        {
+                            queue = new Queue<DecodeAttack>();
+                            open[key] = queue;
+                        }
+                        queue.Enqueue(attack);
+                        if (channel == 9)
                             percOn++;
                         else
                             melodicOn++;
-                        var key = ((int)on.Channel, tick);
-                        attacksPerTick[key] = attacksPerTick.TryGetValue(key, out int count) ? count + 1 : 1;
-                        open.Add(((int)on.Channel, tick));
-                        break;
-                    case NoteOffEvent off:
-                        for (int index = open.Count - 1; index >= 0; index--)
+                        if (channel != 9)
                         {
-                            if (open[index].Channel == (int)off.Channel)
-                            {
-                                if (tick - open[index].OnTick == 1)
-                                    offAtOnPlusOne++;
-                                open.RemoveAt(index);
-                                break;
-                            }
+                            var collisionKey = (channel, tick);
+                            attacksPerTick[collisionKey] =
+                                attacksPerTick.TryGetValue(collisionKey, out int count) ? count + 1 : 1;
                         }
                         break;
+                    }
+                    case NoteOnEvent:
+                    case NoteOffEvent:
+                    {
+                        int channel;
+                        int note;
+                        if (evt is NoteOnEvent zeroOn)
+                        {
+                            channel = (int)zeroOn.Channel;
+                            note = (int)zeroOn.NoteNumber;
+                        }
+                        else
+                        {
+                            NoteOffEvent zeroOff = (NoteOffEvent)evt;
+                            channel = (int)zeroOff.Channel;
+                            note = (int)zeroOff.NoteNumber;
+                        }
+                        var key = (port, channel, note);
+                        if (!open.TryGetValue(key, out Queue<DecodeAttack>? queue) || queue.Count == 0)
+                            break;
+
+                        DecodeAttack attack = queue.Dequeue();
+                        var endpoint = (port, channel);
+                        double range = activeRange.TryGetValue(endpoint, out double knownRange)
+                            ? knownRange
+                            : 2.0;
+                        int pitchValue = activeBend.TryGetValue(endpoint, out int knownBend)
+                            ? knownBend
+                            : 8192;
+                        double endPitch = note + BendOffset(pitchValue, range);
+                        decodedNotes.Add(new DecodedNote(
+                            attack.Track, attack.Port, attack.Channel, attack.Note,
+                            attack.StartTick, tick, attack.StartPitch, endPitch));
+                        if (tick - attack.StartTick == 1)
+                            offAtOnPlusOne++;
+                        break;
+                    }
+                    case PitchBendEvent bend:
+                        activeBend[(port, (int)bend.Channel)] = bend.PitchValue;
+                        break;
+                    case ControlChangeEvent cc:
+                    {
+                        var endpoint = (port, (int)cc.Channel);
+                        int control = (int)cc.ControlNumber;
+                        if (control is 101 or 100)
+                        {
+                            rpn.TryGetValue(endpoint, out var state);
+                            rpn[endpoint] = control == 101
+                                ? (cc.ControlValue, state.Lsb)
+                                : (state.Msb, cc.ControlValue);
+                        }
+                        else if (control == 6
+                            && rpn.TryGetValue(endpoint, out var state)
+                            && state.Msb == 0
+                            && state.Lsb == 0)
+                        {
+                            activeRange[endpoint] = Math.Max(1, (int)cc.ControlValue);
+                        }
+                        break;
+                    }
                 }
             }
             collisions += attacksPerTick.Values.Count(count => count > 1);
         }
-        return new(tempoCount, tempoUs, sigs, markers, melodicOn, percOn, collisions, offAtOnPlusOne);
+
+        return new(tempoCount, tempoUs, sigs, markers, melodicOn, percOn,
+            collisions, offAtOnPlusOne, decodedNotes);
     }
+
+    private sealed record NoteFidelity(
+        int ExpectedNotes,
+        int DecodedNotes,
+        int StartTickMismatches,
+        int EndTickMismatches,
+        int PitchMismatches)
+    {
+        public bool Pass =>
+            ExpectedNotes == DecodedNotes
+            && StartTickMismatches == 0
+            && EndTickMismatches == 0
+            && PitchMismatches == 0;
+    }
+
+    private static NoteFidelity CompareTimeline(
+        VisualizationTimeline timeline,
+        IReadOnlyList<DecodedNote> decoded)
+    {
+        IReadOnlyList<Fmp.Core.Visualization.NoteEvent> source =
+            timeline.Notes ?? Array.Empty<Fmp.Core.Visualization.NoteEvent>();
+        var voices = source
+            .Select((note, index) => (note, index, voice: VoiceId(note)))
+            .GroupBy(item => item.voice, StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .ToArray();
+
+        int startMismatches = 0;
+        int endMismatches = 0;
+        int pitchMismatches = 0;
+        int decodedCount = 0;
+        for (int voiceIndex = 0; voiceIndex < voices.Length; voiceIndex++)
+        {
+            int port = voiceIndex / 15;
+            int slot = voiceIndex % 15;
+            int channel = slot < 9 ? slot : slot + 1;
+            int track = voiceIndex + 1; // track 0 is the conductor.
+            var expected = voices[voiceIndex]
+                .OrderBy(item => ToTick(timeline, item.note.StartSample))
+                .ThenByDescending(item => ToTick(timeline, item.note.EndSample))
+                .ThenBy(item => BaseNote(item.note))
+                .ThenBy(item => item.index)
+                .ToArray();
+            var actual = decoded
+                .Where(note => note.Track == track && note.Port == port && note.Channel == channel)
+                .OrderBy(note => note.StartTick)
+                .ThenByDescending(note => note.EndTick)
+                .ThenBy(note => note.Note)
+                .ToArray();
+            decodedCount += actual.Length;
+
+            int compared = Math.Min(expected.Length, actual.Length);
+            for (int index = 0; index < compared; index++)
+            {
+                Fmp.Core.Visualization.NoteEvent sourceNote = expected[index].note;
+                DecodedNote decodedNote = actual[index];
+                long expectedStart = ToTick(timeline, sourceNote.StartSample);
+                long expectedEnd = ToTick(timeline, sourceNote.EndSample);
+                if (expectedEnd <= expectedStart)
+                    expectedEnd = checked(expectedStart + 1);
+                if (decodedNote.StartTick != expectedStart)
+                    startMismatches++;
+                if (decodedNote.EndTick != expectedEnd)
+                    endMismatches++;
+
+                double expectedStartPitch = SourcePitchAt(sourceNote, sourceNote.StartSample);
+                double expectedEndPitch = SourcePitchAt(sourceNote, sourceNote.EndSample);
+                if (decodedNote.Note != BaseNote(sourceNote)
+                    || Math.Abs(decodedNote.StartPitch - expectedStartPitch) > 0.025
+                    || Math.Abs(decodedNote.EndPitch - expectedEndPitch) > 0.025)
+                {
+                    pitchMismatches++;
+                }
+            }
+
+            pitchMismatches += Math.Abs(expected.Length - actual.Length);
+        }
+
+        return new(source.Count, decodedCount, startMismatches, endMismatches, pitchMismatches);
+    }
+
+    private static string VoiceId(Fmp.Core.Visualization.NoteEvent note)
+    {
+        if (note.Domain is SourceDomainKey domain)
+            return "domain:" + domain;
+        if (!string.IsNullOrWhiteSpace(note.ChannelId))
+            return "channel:" + note.ChannelId;
+        throw new InvalidOperationException("Source note has no physical voice identity.");
+    }
+
+    private static long ToTick(VisualizationTimeline timeline, long sample)
+    {
+        long delta = checked(sample - timeline.StartSample);
+        if (delta < 0)
+            throw new InvalidOperationException("Source sample precedes timeline start.");
+        decimal ticks = (decimal)delta * (2m * Ppq) / timeline.SampleRate;
+        return decimal.ToInt64(decimal.Round(ticks, 0, MidpointRounding.AwayFromZero));
+    }
+
+    private static int BaseNote(Fmp.Core.Visualization.NoteEvent note) =>
+        (int)Math.Clamp(
+            checked((long)Math.Round(SourcePitchAt(note, note.StartSample), MidpointRounding.AwayFromZero)),
+            0L, 127L);
+
+    private static double SourcePitchAt(Fmp.Core.Visualization.NoteEvent note, long sample)
+    {
+        double pitch = note.InitialMidiNote;
+        foreach (PitchChange change in note.Pitch ?? Array.Empty<PitchChange>())
+        {
+            if (change.SamplePosition > sample)
+                break;
+            if (change.SamplePosition == note.EndSample && sample == note.EndSample)
+                continue;
+            pitch = change.MidiNote;
+        }
+        return pitch;
+    }
+
+    private static double BendOffset(int pitchValue, double rangeSemitones) =>
+        ((pitchValue - 8192) / 8192.0) * rangeSemitones;
 
     private static string Sanitize(string name) =>
         string.Concat(name.Where(char.IsLetterOrDigit));
@@ -334,8 +569,8 @@ internal static class RawMidiCorpusReporter
     private static string FileHash(string path) =>
         Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
 
-    /// <summary>Gitignored raw-midi receipt artifacts directory, sibling of the
-    /// legacy musical receipts.</summary>
+    /// <summary>Gitignored raw-MIDI receipt artifacts directory, sibling of other
+    /// receipt artifacts.</summary>
     private static string RawMidiArtifactsDir(string root)
     {
         string[] candidates =

@@ -77,10 +77,10 @@ internal static class ReferenceMidiComparator
         // A "*DEFAULT*" key supplies the rule for reference tracks not otherwise
         // listed, keeping the versioned track-map.json explicit without
         // hard-coding every GD3 tag name.
-        string defaultRule = nameMap.TryGetValue("*DEFAULT*", out string? dr) ? dr : "*ALL*";
+        string defaultRule = nameMap.TryGetValue("*DEFAULT*", out string? dr) ? dr : "*INDEX*";
         var aggregateRefIndices = new HashSet<int>();
         var usedCand = new bool[candNames.Count];
-        var candByName = new Dictionary<string, int>();
+        var candByName = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < candNames.Count; i++)
             if (candNames[i] is string cn)
                 candByName[cn] = i;
@@ -88,57 +88,47 @@ internal static class ReferenceMidiComparator
         for (int i = 0; i < refNames.Count; i++)
         {
             string? rn = refNames[i];
-            int candIdx;
-            if (rn is not null && nameMap.TryGetValue(rn, out string? cn))
+            int candIdx = -1;
+            bool aggregate = false;
+
+            if (rn is string refName && nameMap.TryGetValue(refName, out string? mapped))
             {
-                if (cn == "*ALL*")
+                if (mapped == "*ALL*")
                 {
-                    // aggregate all candidate note-bearing tracks into one list
-                    aggregateRefIndices.Add(i);
-                    trackPairs.Add((rn, "*ALL* (aggregate)", i, -1));
-                    continue;
+                    aggregate = true;
                 }
-                if (cn is not null && candByName.TryGetValue(cn, out int byName))
+                else if (!string.IsNullOrEmpty(mapped) && candByName.TryGetValue(mapped, out int mappedIdx))
                 {
-                    candIdx = byName;
+                    candIdx = mappedIdx;
                 }
-                else
+                else if (i < candNames.Count)
                 {
-                    candIdx = i < candNames.Count ? i : -1;
+                    candIdx = i;
                 }
             }
-            else if (rn is null || !nameMap.ContainsKey(rn))
+            else if (defaultRule == "*ALL*")
             {
-                // Apply the versioned default rule for unmapped reference tracks.
-                if (defaultRule == "*ALL*")
-                {
-                    aggregateRefIndices.Add(i);
-                    trackPairs.Add((rn, "*ALL* (aggregate)", i, -1));
-                    continue;
-                }
-                if (defaultRule is not null && candByName.TryGetValue(defaultRule, out int dBy))
-                {
-                    candIdx = dBy;
-                }
-                else
-                {
-                    candIdx = i < candNames.Count ? i : -1;
-                }
+                aggregate = true;
             }
-            else if (rn is not null && candByName.TryGetValue(rn, out int sameName))
+            else if (defaultRule != "*INDEX*" && candByName.TryGetValue(defaultRule, out int defaultIdx))
             {
-                candIdx = sameName; // same-name fallback
+                candIdx = defaultIdx;
+            }
+            else if (rn is string sameName && candByName.TryGetValue(sameName, out int sameNameIdx))
+            {
+                candIdx = sameNameIdx;
             }
             else if (i < candNames.Count)
             {
-                candIdx = i; // index fallback
-            }
-            else
-            {
-                candIdx = -1; // no candidate pair
+                candIdx = i;
             }
 
-            if (candIdx >= 0 && !usedCand[candIdx])
+            if (aggregate)
+            {
+                aggregateRefIndices.Add(i);
+                trackPairs.Add((rn, "*ALL* (aggregate)", i, -1));
+            }
+            else if (candIdx >= 0 && !usedCand[candIdx])
             {
                 usedCand[candIdx] = true;
                 trackPairs.Add((rn, candNames[candIdx], i, candIdx));
@@ -276,13 +266,13 @@ internal static class ReferenceMidiComparator
     // ---- percentile helpers ----
 
     private static double MedianMs(List<double> xs)
-        => xs.Count == 0 ? 0.0 : Percentile(xs, 0.50) * 1000.0;
+        => xs.Count == 0 ? 0.0 : Percentile(xs, 0.50);
 
     private static double PercentileMs(List<double> xs, double p)
-        => xs.Count == 0 ? 0.0 : Percentile(xs, p) * 1000.0;
+        => xs.Count == 0 ? 0.0 : Percentile(xs, p);
 
     private static double MaxMs(List<double> xs)
-        => xs.Count == 0 ? 0.0 : xs.Max() * 1000.0;
+        => xs.Count == 0 ? 0.0 : xs.Max();
 
     private static double MedianSemitones(List<double> xs)
         => xs.Count == 0 ? 0.0 : Percentile(xs, 0.50);

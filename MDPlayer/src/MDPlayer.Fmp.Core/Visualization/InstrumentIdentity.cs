@@ -110,8 +110,8 @@ internal readonly record struct InstrumentIdentity(
     /// <summary>
     /// Parses a canonical identity string (the <see cref="NoteEvent.InstrumentId"/> /
     /// rhythm <c>InstrumentId</c> values emitted by the decoders) back into a typed
-    /// identity. Returns false for placeholder/unresolved tokens, which is the
-    /// exporter's signal to collapse a source channel to a single per-channel track.
+    /// identity. Returns false for placeholder/unresolved tokens, allowing callers
+    /// to collapse a source channel to a single per-channel track.
     /// </summary>
     public static bool TryParse(string canonical, out InstrumentIdentity identity)
     {
@@ -183,8 +183,8 @@ internal readonly record struct InstrumentIdentity(
             return true;
         }
         // PSG voice-type tokens (SN76489): tone/noise are display-only semantics —
-        // PSG has no timbre identity (spec 30) — but they must parse so the
-        // exporter never collapses them to a placeholder.
+        // PSG has no timbre identity (spec 30) — but they must parse so MIDI track
+        // naming never collapses them to a placeholder.
         if (canonical is "sn76489:tone" or "sn76489:noise")
         {
             identity = new InstrumentIdentity(IdentityFamily.Ssg, 0, canonical);
@@ -272,7 +272,7 @@ internal readonly record struct MidiTrackKey(
     int SourceChannel,
     InstrumentIdentity Instrument)
 {
-    // Compatibility constructor for existing plan/unit fixtures. New exporters
+    // Compatibility constructor for existing plan/unit fixtures. New callers
     // must use the full device + voice-family identity above.
     public MidiTrackKey(ChipType chip, int sourceChannel, InstrumentIdentity instrument)
         : this(new DeviceId(chip, 0), VoiceKind.Pcm, sourceChannel, instrument) { }

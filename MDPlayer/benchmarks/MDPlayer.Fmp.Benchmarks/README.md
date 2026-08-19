@@ -11,11 +11,13 @@ configuration, and environment receipts.
 The harness does not invent a baseline: until a reproducible frozen baseline is
 provided, comparison is `baseline-unavailable` and no speedup claim is made.
 
-`--corpus-receipts [fixture]` runs the eight-song raw-fidelity corpus through
-the same fresh-capture -> transcriber pipeline and reports decode-only fidelity
-maxima (source notes, native-rhythm hits, same-tick attack collisions, one-tick
-notes) plus the raw transport invariants (single 500000us Set Tempo, no time
-signatures/markers). `--corpus-receipts --midi-scale N` times the transcriber
+`--corpus-receipts [fixture]` runs the eight-song raw-fidelity corpus through the
+same fresh-capture -> transcriber pipeline. It independently decodes each SMF
+and compares every source note's physical track/port/channel, exact start tick,
+exact end tick, emitted base note, and effective attack/release pitch including
+pitch bend and RPN range. It also checks native rhythm counts, fixed transport,
+metadata absence, collision accounting and deterministic bytes. Counts alone do
+not make a receipt pass. `--corpus-receipts --midi-scale N` times the transcriber
 over N and 2N generated source events.
 
 Standalone Phase 2 modes:

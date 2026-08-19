@@ -424,8 +424,8 @@ public sealed class MusicalTimingTests
     // scaled by MusicalTimeMapOptions.QuartersPerBeat (default 1.0) exactly once in
     // MusicalTimeMapBuilder.BuildAnchors (quarter = BeatIndex * QuartersPerBeat).
     // These tests drive the same BeatEvent -> BuildAnchors -> BeatGridFitter ->
-    // MusicalTimeMap path the MIDI exporter consumes; no exporter-side conversion
-    // exists and none is allowed.
+    // MusicalTimeMap path used by timing analysis; no MIDI-side conversion exists
+    // and none is allowed.
 
     private static VisualizationTimeline BeatTimeline(double samplesPerBeatStep, int count)
         => new()
@@ -457,8 +457,8 @@ public sealed class MusicalTimingTests
     public void ProducerBoundary_QpbN_BeatIndexScalesToQuarter()
     {
         // QuartersPerBeat = 2.0 (one BeatIndex step == two quarter notes): beat i at
-        // sample i*44100 (22050*2) maps to quarter i*2 — the FR-009 scale factor is
-        // applied at the producer boundary, not in the exporter.
+        // sample i*44100 (22050*2) maps to quarter i*2 — the FR-009 scale factor
+        // is applied at the producer boundary, not during MIDI serialization.
         double spq = Sr * 60.0 / 120.0;
         const double qpb = 2.0;
         var timeline = BeatTimeline(spq * qpb, count: 5);

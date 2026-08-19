@@ -19,8 +19,8 @@ internal enum PercussionEvidenceKind
 
 /// <summary>
 /// One percussive attack in the unified percussion evidence stream (spec §3/§4,
-/// D3). Timing stages and the MIDI exporter all consume the SAME collection of
-/// these onsets, built exactly once by <see cref="PercussionEvidenceBuilder"/>.
+/// D3). Timing stages consume the SAME collection of these onsets, built exactly
+/// once by <see cref="PercussionEvidenceBuilder"/>.
 /// <see cref="RhythmRole.Unknown"/> is a valid role: an onset may be
 /// confidently percussive without a kick/snare/hat identity.
 /// </summary>

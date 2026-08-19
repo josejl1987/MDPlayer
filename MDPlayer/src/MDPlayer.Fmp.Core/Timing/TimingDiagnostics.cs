@@ -81,7 +81,7 @@ internal sealed record GridSelectionDiagnostics
 }
 
 /// <summary>
-/// The outcome of a beat-grid fit, exposed so the exporter can report — never
+/// The outcome of a beat-grid fit, exposed so timing consumers can report — never
 /// hide — how confident it is and what it had to infer. Phase and tempo carry
 /// separate confidence because "BPM known" does not imply "grid known".
 /// </summary>

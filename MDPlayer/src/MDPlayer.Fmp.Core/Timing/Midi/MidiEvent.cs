@@ -17,7 +17,7 @@ internal abstract record MidiEventBase
 
     /// <summary>
     /// Deterministic secondary ordering key for equal-priority events sharing a
-    /// tick. Populated by the exporter from the source event sequence so the
+    /// tick. Populated by the transcriber from the source event sequence so the
     /// writer's absolute-tick sort is fully deterministic and never depends on
     /// insertion order, dictionary enumeration, hash codes, object identity, or
     /// thread scheduling (§34, §45, §73). Lower values sort first.
