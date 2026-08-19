@@ -494,9 +494,11 @@ internal static class ReferenceMidiAnalyzer
 
     private static string EndpointKey(int port, int channel) => $"{port}:{channel}";
 
-    /// <summary>Sign-symmetric bend decode: +/-Full range across the 0..16383 window centered at 8192.</summary>
+    /// <summary>Decode the asymmetric MIDI bend domain used by MidiTranscriber.</summary>
     private static double BendOffset(int pitchValue, double rangeSemitones)
-        => ((pitchValue - 8192) / 8192.0) * rangeSemitones;
+        => pitchValue < 8192
+            ? ((pitchValue - 8192) / 8192.0) * rangeSemitones
+            : ((pitchValue - 8192) / 8191.0) * rangeSemitones;
 
     private static double Bpm(int usPerQuarter) => usPerQuarter > 0 ? 60_000_000.0 / usPerQuarter : 0.0;
 

@@ -328,4 +328,74 @@ public sealed class MidiTranscriberFidelityTests
             Assert.Equal(96, (int)noteOn.Velocity);
         }
     }
+    [Fact]
+    public void SamplePlayback_UsesDeterministicIdentityBankAndExactTicks()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("voice-b", 0, Sr / 2, "sample-z", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("voice-a", Sr / 2, Sr, "sample-a", null, 1.0, 1.0f, 0, false, false),
+            ],
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(2, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(3, MidiRoundTrip.TrackChunks(result.Bytes).Count);
+
+        IReadOnlyList<(long Tick, MidiEvent Event)> voiceA = Track(result.Bytes, 1);
+        IReadOnlyList<(long Tick, MidiEvent Event)> voiceB = Track(result.Bytes, 2);
+        var aOn = voiceA.First(e => e.Event is NoteOnEvent);
+        var bOn = voiceB.First(e => e.Event is NoteOnEvent);
+        Assert.Equal(960, aOn.Tick);
+        Assert.Equal(0, bOn.Tick);
+        Assert.Equal(0, ((NoteOnEvent)aOn.Event).NoteNumber);
+        Assert.Equal(1, ((NoteOnEvent)bOn.Event).NoteNumber);
+        Assert.Equal(0, ((ControlChangeEvent)voiceA.First(e => e.Event is ControlChangeEvent).Event).ControlValue);
+    }
+
+    [Fact]
+    public void SamplePlayback_RetriggerPlacesNoteOffBeforeNextIdentityAttack()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("voice", 0, Sr / 2, "sample-a", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("voice", Sr / 2, Sr, "sample-b", null, 1.0, 1.0f, 0, true, false),
+            ],
+        };
+
+        IReadOnlyList<(long Tick, MidiEvent Event)> events =
+            Track(Transcriber.Transcribe(timeline).Bytes, 1);
+        var atBoundary = events.Where(e => e.Tick == Ppq).ToArray();
+        Assert.IsType<NoteOffEvent>(atBoundary[0].Event);
+        Assert.Contains(atBoundary, e => e.Event is NoteOnEvent);
+    }
+
+    [Fact]
+    public void SamplePlayback_PitchedIdentityEmitsBendButNullPitchDoesNot()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("pitched", 0, Sr, "sample-pitched", 60.5, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("identity", 0, Sr, "sample-identity", null, 1.0, 1.0f, 0, false, false),
+            ],
+        };
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.DoesNotContain(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
+        Assert.Contains(Track(result.Bytes, 2), e => e.Event is PitchBendEvent);
+    }
 }

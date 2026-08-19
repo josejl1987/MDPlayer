@@ -31,7 +31,15 @@ musical timing; raw transcription is the sole MIDI export path.
 - Retriggers at the same tick are ordered `NoteOff → pitch bend → NoteOn`.
   Multiple pitch writes at one tick collapse to the final source state.
 - Initial pitch and `PitchChange` values are encoded as a MIDI note plus pitch bend.
-  Each physical voice receives its required bend range.
+  Each physical voice receives its required bend range; the corpus oracle checks
+  every emitted pitch-state tick, not only attack/release endpoints.
+- Every `SamplePlaybackEvent` produces one identity-trigger NoteOn/NoteOff on a
+  deterministic sample voice track. `SampleId`s are sorted and mapped to MIDI
+  bank/note identities; `StartSample` and `EndSample` use the same absolute tick
+  conversion and one-tick clamp. A non-null `MidiPitch` may be represented by a
+  bend relative to the identity note; null pitch never invents tonal pitch.
+- `Ppz8`, ADPCM-B and YM2612 DAC playback are represented through
+  `SamplePlaybackEvent`; they are part of the raw source-event universe.
 - `timeline.Rhythm` is serialized on MIDI channel 10 (zero-based channel 9), with
   semantic GM mapping where a rhythm role exists and note 60 otherwise. Every
   rhythm hit remains one attack.
@@ -39,21 +47,16 @@ musical timing; raw transcription is the sole MIDI export path.
   melodic physical note. GM percussion conversion requires an explicit upstream
   rhythm classification; guessing from FM voice/register shape is outside this
   transcriber.
-- No meter, beat phase, marker, instrument, quantization, tempo inference, or
-  musical layout is emitted by this path.
-- Serialization is deterministic for identical timeline bytes and options.
-
-## SMF layout
-
 The writer emits Format 1:
 
 ```text
 Conductor: Set Tempo(0, 500000)
-Voice 0:   PortPrefix + physical events
-Voice 1:   PortPrefix + physical events
+Voice 0:   PortPrefix + physical NoteEvent events
+Sample 0:  PortPrefix + bank/note identity triggers
 ...
 Rhythm:    PortPrefix + channel 9 events, when timeline.Rhythm is non-empty
 ```
+
 
 Each physical track has a unique `(port, channel)` endpoint. Channel 9 is reserved
 for native rhythm; melodic endpoints skip it. Track event ordering is explicit and
@@ -63,19 +66,19 @@ established the retrigger barrier.
 ## Validation oracle
 
 `MDPlayer/benchmarks/MDPlayer.Fmp.Benchmarks/RawMidiCorpusReporter.cs` is the raw
-corpus gate. It must decode the generated SMF independently and compare every
-`VisualizationTimeline.NoteEvent` with its decoded attack/release:
+corpus gate. It independently decodes the generated SMF and compares:
 
-- exact start tick;
-- exact end tick, including one-tick clamping;
-- emitted base note;
-- effective pitch at attack and release, including pitch bend and RPN range;
-- physical track, port, and channel;
-- source/output note counts and native rhythm attacks;
+- every `NoteEvent` attack/release, base note, physical endpoint and effective
+  pitch;
+- every interior `PitchChange` bend tick and effective pitch;
+- every `RhythmEvent` start tick, one-tick release and mapped drum identity;
+- every `SamplePlaybackEvent` start/end tick, physical endpoint, bank/note
+  identity and optional attack pitch;
+- the complete source-event universe (`Notes + Rhythm + SamplePlayback`);
 - fixed transport and deterministic bytes.
 
 Counts alone are insufficient evidence. A receipt that does not pass the
-per-note comparison is not a demolition gate.
+per-event comparisons is not a demolition gate.
 
 ## Reference tooling
 

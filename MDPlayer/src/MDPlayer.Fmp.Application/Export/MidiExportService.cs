@@ -106,6 +106,7 @@ public sealed class MidiExportService
             $"song: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz",
             "musical-grid: not inferred; phase: not applicable",
             $"source-notes: {diagnostics.SourceNoteCount}; native-rhythm: {diagnostics.NativeRhythmHitCount}; "
+                + $"sample-playback: {diagnostics.SamplePlaybackCount}; "
                 + $"same-tick-attacks: {diagnostics.SameTickAttackCollisions}; one-tick-notes: {diagnostics.OneTickNotes}",
         };
         if (performance is not null)

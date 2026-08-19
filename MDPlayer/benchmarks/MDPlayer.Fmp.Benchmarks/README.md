@@ -13,12 +13,13 @@ provided, comparison is `baseline-unavailable` and no speedup claim is made.
 
 `--corpus-receipts [fixture]` runs the eight-song raw-fidelity corpus through the
 same fresh-capture -> transcriber pipeline. It independently decodes each SMF
-and compares every source note's physical track/port/channel, exact start tick,
-exact end tick, emitted base note, and effective attack/release pitch including
-pitch bend and RPN range. It also checks native rhythm counts, fixed transport,
-metadata absence, collision accounting and deterministic bytes. Counts alone do
-not make a receipt pass. `--corpus-receipts --midi-scale N` times the transcriber
-over N and 2N generated source events.
+and compares every source `NoteEvent`, `RhythmEvent` and `SamplePlaybackEvent`:
+physical endpoint, exact onset/release ticks, emitted identity/base note,
+effective pitch, all interior pitch-state bends, and deterministic bytes. It
+also checks the complete source-event universe, fixed transport, metadata
+absence and collision accounting. Counts alone do not make a receipt pass.
+`--corpus-receipts --midi-scale N` times the transcriber over N and 2N generated
+source events.
 
 Standalone Phase 2 modes:
 

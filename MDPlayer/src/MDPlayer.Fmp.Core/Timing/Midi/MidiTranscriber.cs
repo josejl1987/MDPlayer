@@ -14,6 +14,7 @@ internal sealed class MidiTranscriptionResult
 internal sealed record MidiTranscriptionDiagnostics(
     int SourceNoteCount,
     int NativeRhythmHitCount,
+    int SamplePlaybackCount,
     int SameTickAttackCollisions,
     int OneTickNotes);
 
@@ -51,9 +52,15 @@ internal sealed class MidiTranscriber
 
         IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
         IReadOnlyList<RhythmEvent> rhythm = timeline.Rhythm ?? Array.Empty<RhythmEvent>();
+        IReadOnlyList<SamplePlaybackEvent> samples =
+            timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>();
         IndexedNote[] indexed = notes
             .Select((note, index) => new IndexedNote(note, index, VoiceId(note)))
             .ToArray();
+        IndexedSample[] indexedSamples = samples
+            .Select((sample, index) => new IndexedSample(sample, index))
+            .ToArray();
+        Dictionary<string, DacNoteAssignment> sampleAssignments = SampleAssignments(samples);
 
         int collisions = CountSameTickAttacks(timeline, indexed);
         int oneTickNotes = 0;
@@ -130,6 +137,62 @@ internal sealed class MidiTranscriber
             tracks.Add(track);
         }
 
+        IGrouping<string, IndexedSample>[] sampleVoices = indexedSamples
+            .GroupBy(sample => sample.Event.VoiceId, StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .ToArray();
+        for (int sampleVoiceIndex = 0; sampleVoiceIndex < sampleVoices.Length; sampleVoiceIndex++)
+        {
+            IndexedSample[] sampleEvents = sampleVoices[sampleVoiceIndex]
+                .OrderBy(sample => sample.SourceIndex)
+                .ToArray();
+            int endpointIndex = voices.Length + sampleVoiceIndex;
+            MidiEndpoint endpoint = MelodicEndpoint(endpointIndex);
+            int trackIndex = tracks.Count;
+            int bendRange = SampleBendRange(sampleEvents, sampleAssignments);
+            var track = new MidiTrack
+            {
+                Name = "Sample " + sampleEvents[0].Event.VoiceId,
+                Endpoint = endpoint,
+            };
+            var plan = new List<Planned>(sampleEvents.Length * 4);
+            if (bendRange > 0)
+                plan.Add(new Planned(0, long.MinValue, int.MinValue, -1, 0,
+                    new MidiBendRangeEvent(0, trackIndex, endpoint.Channel, bendRange)));
+
+            foreach (IndexedSample source in sampleEvents)
+            {
+                SamplePlaybackEvent sample = source.Event;
+                ValidateSample(timeline, sample);
+                DacNoteAssignment identity = sampleAssignments[sample.SampleId];
+                long onTick = ToTick(timeline, sample.StartSample);
+                long offTick = ToTick(timeline, sample.EndSample);
+                if (offTick <= onTick)
+                {
+                    offTick = checked(onTick + 1);
+                    oneTickNotes++;
+                }
+
+                plan.Add(new Planned(offTick, sample.EndSample, source.SourceIndex, 0, 0,
+                    new MidiNoteEvent(offTick, trackIndex, endpoint.Channel,
+                        identity.Note, DefaultVelocity, NoteOn: false)));
+                plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 0,
+                    new MidiBankEvent(onTick, trackIndex, endpoint.Channel, identity.Bank)));
+                if (sample.MidiPitch is double pitch)
+                {
+                    plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 1,
+                        new MidiPitchBendEvent(onTick, trackIndex, endpoint.Channel,
+                            EncodeBend(pitch - identity.Note, bendRange))));
+                }
+                plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 2, 0,
+                    new MidiNoteEvent(onTick, trackIndex, endpoint.Channel,
+                        identity.Note, DefaultVelocity, NoteOn: true)));
+            }
+
+            FinishTrack(track, plan);
+            tracks.Add(track);
+        }
+
         if (rhythm.Count > 0)
             tracks.Add(BuildRhythmTrack(timeline, rhythm, tracks.Count));
 
@@ -139,8 +202,65 @@ internal sealed class MidiTranscriber
         {
             Bytes = bytes,
             Tracks = tracks,
-            Diagnostics = new MidiTranscriptionDiagnostics(notes.Count, rhythm.Count, collisions, oneTickNotes),
+            Diagnostics = new MidiTranscriptionDiagnostics(
+                notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes),
         };
+    }
+
+    private static Dictionary<string, DacNoteAssignment> SampleAssignments(
+        IReadOnlyList<SamplePlaybackEvent> samples)
+    {
+        var assignments = new Dictionary<string, DacNoteAssignment>(StringComparer.Ordinal);
+        DacNoteMapper mapper = new();
+        foreach (string sampleId in samples
+            .Select(sample => sample.SampleId)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal))
+        {
+            int ordinal = assignments.Count;
+            if (ordinal >= 128 * 128)
+                throw new InvalidOperationException(
+                    "MIDI sample identity table exceeds the representable bank/note range.");
+            assignments.Add(sampleId, mapper.Map(ordinal));
+        }
+        return assignments;
+    }
+
+    private static int SampleBendRange(
+        IReadOnlyList<IndexedSample> samples,
+        IReadOnlyDictionary<string, DacNoteAssignment> assignments)
+    {
+        double maximum = 0;
+        foreach (IndexedSample indexed in samples)
+        {
+            ValidateSamplePitch(indexed.Event);
+            if (indexed.Event.MidiPitch is not double pitch)
+                continue;
+            int baseNote = assignments[indexed.Event.SampleId].Note;
+            maximum = Math.Max(maximum, Math.Abs(pitch - baseNote));
+        }
+        if (maximum <= 0)
+            return 0;
+        if (maximum > 127.0 + 1e-9)
+            throw new InvalidOperationException(
+                $"Required sample pitch-bend excursion {maximum:0.###} exceeds MIDI's 127-semitone limit.");
+        return Math.Clamp((int)Math.Ceiling(maximum), MinimumBendRange, 127);
+    }
+
+    private static void ValidateSample(VisualizationTimeline timeline, SamplePlaybackEvent sample)
+    {
+        if (sample.StartSample < timeline.StartSample || sample.EndSample < sample.StartSample)
+            throw new InvalidOperationException("Sample playback range is outside the timeline.");
+        if (string.IsNullOrWhiteSpace(sample.SampleId))
+            throw new InvalidOperationException("Sample playback has no stable sample identity.");
+        ValidateSamplePitch(sample);
+    }
+
+    private static void ValidateSamplePitch(SamplePlaybackEvent sample)
+    {
+        if (sample.MidiPitch is double pitch && !double.IsFinite(pitch))
+            throw new InvalidOperationException(
+                $"Sample playback pitch for '{sample.SampleId}' is not finite.");
     }
 
     private MidiTrack BuildRhythmTrack(
@@ -335,6 +455,7 @@ internal sealed class MidiTranscriber
     private static int BoundaryRank(int phase) => phase == 0 ? 0 : 1;
 
     private sealed record IndexedNote(NoteEvent Note, int SourceIndex, string Voice);
+    private sealed record IndexedSample(SamplePlaybackEvent Event, int SourceIndex);
     private sealed record Planned(
         long Tick, long SourceSample, int SourceIndex, int Phase, int LocalOrder, MidiEventBase Event);
 }
