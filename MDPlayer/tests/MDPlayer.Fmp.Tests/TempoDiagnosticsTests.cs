@@ -273,10 +273,10 @@ public sealed class TempoDiagnosticsTests
         Assert.Equal(0.13, d.AliasMargin.Value, precision: 9);
     }
 
-    // ---- T-11: CLI JSON report ---------------------------------------------------
+    // ---- T-11: CLI JSON report (raw-fidelity) ------------------------------------
 
     [Fact]
-    public void CliTimingReport_Symbolic_ContainsAliasMarginAndSample0Quarter()
+    public void CliTimingReport_RawContainsTransportAndFidelityCounters()
     {
         string timelinePath = WriteTimeline(NinjaPattern());
         string outPath = Path.Combine(Path.GetTempPath(), $"mdplayer-p2-{Guid.NewGuid():N}.mid");
@@ -288,19 +288,20 @@ public sealed class TempoDiagnosticsTests
                 "--timeline", timelinePath,
                 "--output", outPath,
                 "--timing-report", reportPath,
-                "--tempo-source", "symbolic",
                 "dummy.vgz",
             });
             Assert.True(exit == 0, $"exit={exit}");
 
             using var doc = JsonDocument.Parse(File.ReadAllText(reportPath));
-            JsonElement inference = doc.RootElement.GetProperty("tempoInference");
-            Assert.Equal(112, Math.Round(inference.GetProperty("selectedBpm").GetDouble()));
-            Assert.True(inference.GetProperty("aliasMargin").GetDouble() > 0,
-                "symbolic timing report must carry aliasMargin");
-            Assert.True(inference.TryGetProperty("sample0Quarter", out JsonElement q0)
-                && q0.ValueKind == JsonValueKind.Number,
-                "symbolic timing report must carry sample0Quarter");
+            Assert.Equal("raw-fidelity", doc.RootElement.GetProperty("mode").GetString());
+            Assert.Equal(960, doc.RootElement.GetProperty("ppq").GetInt32());
+            Assert.Equal(120, doc.RootElement.GetProperty("transportBpm").GetInt32());
+            Assert.Equal(500_000, doc.RootElement.GetProperty("transportMicrosecondsPerQuarter").GetInt32());
+            Assert.False(doc.RootElement.GetProperty("musicalGridInferred").GetBoolean(),
+                "the raw report must not claim any musical grid inference");
+            Assert.False(doc.RootElement.TryGetProperty("tempoInference", out _),
+                "the raw report must not carry the musical tempoInference block");
+            Assert.True(doc.RootElement.GetProperty("sourceNotes").GetInt32() > 0);
         }
         finally
         {
@@ -310,38 +311,37 @@ public sealed class TempoDiagnosticsTests
     }
 
     [Fact]
-    public void CliTimingReport_DriverPath_HasNoTempoInferenceBlock()
+    public void CliTimingReport_RejectsRemovedTempoSourceOptionLoudly()
     {
-        var timeline = new VisualizationTimeline
-        {
-            StartSample = 0,
-            EndSample = 8_000_000,
-            SampleRate = Sr,
-            Notes = Enumerable.Range(0, 8)
-                .Select(i => Note("v", i * (long)Math.Round(Sr * 60.0 / 120.0), i * (long)Math.Round(Sr * 60.0 / 120.0) + 2000, 60 + i))
-                .ToArray(),
-        };
-        string timelinePath = WriteTimeline(timeline);
+        // The musical vocabulary was removed from the CLI option surface.
+        // A stale script passing --tempo-source/--bpm must fail loudly at parse
+        // time (exit 2), never silently degrade to the fixed 120 BPM transport.
+        string timelinePath = WriteTimeline(NinjaPattern());
         string outPath = Path.Combine(Path.GetTempPath(), $"mdplayer-p2-{Guid.NewGuid():N}.mid");
-        string reportPath = Path.Combine(Path.GetTempPath(), $"mdplayer-p2-{Guid.NewGuid():N}.json");
         try
         {
             int exit = MidiCommand.Handle(new[]
             {
                 "--timeline", timelinePath,
                 "--output", outPath,
-                "--timing-report", reportPath,
+                "--tempo-source", "symbolic",
+                "dummy.vgz",
+            });
+            Assert.Equal(2, exit);
+
+            int exitWithBpm = MidiCommand.Handle(new[]
+            {
+                "--timeline", timelinePath,
+                "--output", outPath,
                 "--tempo-source", "fixed",
                 "--bpm", "120",
                 "dummy.vgz",
             });
-            Assert.True(exit == 0, $"exit={exit}");
-            using var doc = JsonDocument.Parse(File.ReadAllText(reportPath));
-            Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("tempoInference").ValueKind);
+            Assert.Equal(2, exitWithBpm);
         }
         finally
         {
-            foreach (string p in new[] { timelinePath, outPath, reportPath })
+            foreach (string p in new[] { timelinePath, outPath })
                 if (File.Exists(p)) File.Delete(p);
         }
     }

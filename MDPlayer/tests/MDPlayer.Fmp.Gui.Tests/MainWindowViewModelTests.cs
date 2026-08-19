@@ -65,26 +65,21 @@ public sealed class MainWindowViewModelTests
     }
 
     [AvaloniaFact]
-    public async Task MidiExportOptions_ExposeDefaultsAndTempoSourceSelection()
+    public async Task MidiExportOptions_ExposeOnlyRawTranscriptionResolution()
     {
         Harness h = Harness.Create();
         try
         {
             Assert.Equal(960, h.VM.MidiPpq);
-            Assert.Equal("auto", h.VM.MidiTempoSource);
-            Assert.Equal("4/4", h.VM.MidiMeter);
-            Assert.Equal("off", h.VM.MidiQuantize);
-            Assert.True(h.VM.MidiPitchBend);
-            Assert.False(h.VM.IsFixedTempoSelected);
-
-            h.VM.MidiTempoSource = "fixed";
-            Assert.True(h.VM.IsFixedTempoSelected);
-            h.VM.MidiTempoSource = "auto";
-            Assert.False(h.VM.IsFixedTempoSelected);
-
-            Assert.Contains("fixed", h.VM.MidiTempoSourceOptions);
-            Assert.Contains("1/8", h.VM.MidiQuantizeOptions);
             Assert.Contains(960, h.VM.MidiPpqOptions);
+
+            // The musical vocabulary was removed from the surface. Only PPQ
+            // survives; everything tied to tempo/meter/quantization/voice
+            // projection is gone and must not be resolvable.
+            Assert.DoesNotContain("MidiTempoSource", h.VM.GetType().GetProperties().Select(p => p.Name));
+            Assert.DoesNotContain("MidiMeter", h.VM.GetType().GetProperties().Select(p => p.Name));
+            Assert.DoesNotContain("MidiQuantize", h.VM.GetType().GetProperties().Select(p => p.Name));
+            Assert.DoesNotContain("MidiVoiceOptions", h.VM.GetType().GetProperties().Select(p => p.Name));
         }
         finally
         {

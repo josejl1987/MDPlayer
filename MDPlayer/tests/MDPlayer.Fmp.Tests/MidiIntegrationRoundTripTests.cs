@@ -99,22 +99,6 @@ public sealed class MidiIntegrationRoundTripTests
     }
 
     [Fact]
-    public void Fixed_RequiresBpm_AppPath_Fails()
-    {
-        var request = new MidiExportRequest
-        { TempoSource = MidiTempoSource.Fixed };
-        TimelineFixture fx = new(Sr, 120, withBeats: true);
-        string path = WriteTimeline(fx.Timeline);
-        try
-        {
-            var result = new MidiExportService().ExportFromTimelinePath(path, request);
-            Assert.False(result.Succeeded);
-            Assert.Contains("Bpm", result.Error);
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    [Fact]
     public void Fixed_WithoutPhase_NotClaimedBeatAligned()
     {
         TimelineFixture fx = new(Sr, 120, withBeats: false);

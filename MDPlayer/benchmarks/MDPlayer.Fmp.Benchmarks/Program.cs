@@ -4,7 +4,6 @@ using System.Security.Cryptography;
 using Fmp.Application.Export;
 using Fmp.Cli;
 using Fmp.Core.Midi;
-using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Fmp.Core.Visualization.Rendering;
 
@@ -22,8 +21,15 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
-        Console.WriteLine("MDPlayer Visualization Benchmark (§23.4)");
-        Console.WriteLine();
+        // Reference-MIDI JSON commands must emit pure JSON (no banner) so the
+        // output is machine-parseable and the report can reuse it deterministically.
+        bool referenceJsonCmd = args.Length > 0 &&
+            (args[0] == "--reference-analyze" || args[0] == "--reference-compare" || args[0] == "--reference-report");
+        if (!referenceJsonCmd)
+        {
+            Console.WriteLine("MDPlayer Visualization Benchmark (§23.4)");
+            Console.WriteLine();
+        }
 
         if (args.Length > 0)
         {
@@ -44,7 +50,13 @@ internal static class Program
                         ? RunPerfScope(args.Skip(1).ToArray())
                         : 2;
                 case "--corpus-receipts":
-                    return CorpusReporter.Run(args);
+                    return RawMidiCorpusReporter.Run(args);
+                case "--reference-analyze":
+                    return args.Length > 1 ? RunReferenceAnalyze(args[1]) : 2;
+                case "--reference-compare":
+                    return RunReferenceCompare(args.Skip(1).ToArray());
+                case "--reference-report":
+                    return RunReferenceReport(args.Skip(1).ToArray());
             }
         }
 
@@ -98,7 +110,11 @@ internal static class Program
         }
 
         int ppq = ReadIntOption(args, "--ppq", 960);
-        double? bpm = ReadDoubleOption(args, "--bpm");
+        if (ReadDoubleOption(args, "--bpm") is not null)
+        {
+            Console.Error.WriteLine("error: --bpm was removed; the MIDI transport is fixed at 120 BPM");
+            return 2;
+        }
         string root = MidiFixtureResolver.FindRepositoryRoot(fixture);
         var settings = new BatchRenderSettings
         {
@@ -119,10 +135,7 @@ internal static class Program
         var request = new MidiExportRequest
         {
             Ppq = ppq,
-            Bpm = bpm,
-            TempoSource = bpm is null ? Fmp.Application.Export.MidiTempoSource.Auto : Fmp.Application.Export.MidiTempoSource.Fixed,
             EnablePerformanceReceipts = true,
-            EnablePerformanceMetrics = true,
             PerformanceFixture = Path.GetFileName(fixture),
         };
         MidiExportResult export = new MidiExportService().Export(timeline, request);
@@ -138,17 +151,16 @@ internal static class Program
         var receipt = new
         {
             schema = "mdplayer.midi-fixture-receipt/v1",
-            harness = "TimelineCaptureService -> SourceTimeline -> MusicalMidiExporter -> MidiFileWriter",
+            harness = "TimelineCaptureService -> MidiTranscriber -> MidiFileWriter",
             input = new { path = Path.GetRelativePath(root, fixture), sha256 = FileHash(fixture), sizeBytes = inputInfo.Length },
             duration = new { seconds = (timeline.EndSample - timeline.StartSample) / (double)timeline.SampleRate, startSample = timeline.StartSample, endSample = timeline.EndSample, sampleRate = timeline.SampleRate },
             sourceEvents = CountSourceEvents(timeline),
             emittedMidiEvents = allEvents.Length,
             phases = new object[] { new { phase = "capture", wallMilliseconds = captureWatch.ElapsedMilliseconds, cpuMilliseconds = 0L, allocatedBytes = captureBytes, eventCount = CountSourceEvents(timeline) } }.Concat(events.Cast<object>()),
-            semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = 0, tracks = tracks.Count },
-            performance = export.PerformanceMetrics?.WithOuterStageTimings(
-                captureSeconds: captureWatch.Elapsed.TotalSeconds),
+            semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = allEvents.OfType<MidiControlChangeEvent>().Count(), tracks = tracks.Count },
+            performance = export.Performance?.ToHumanReadable(),
             output = new { sha256 = outputHash, sizeBytes = export.Bytes.Length },
-            configuration = new { request.Ppq, request.Bpm, request.Quantize, request.EmitPitchBend, request.BendRangeSemitones, request.UsePercussionChannel, request.Velocity },
+            configuration = new { request.Ppq },
             environment = new { runtime = Environment.Version.ToString(), os = Environment.OSVersion.ToString(), processorCount = Environment.ProcessorCount },
             comparison = new { status = "baseline-unavailable", baseline = (object?)null, candidate = (object?)null, targetSpeedupClaim = (double?)null },
         };
@@ -304,12 +316,12 @@ internal static class Program
     private static int RunMidiScale(int n)
     {
         if (n < 1) return 2;
-        Console.WriteLine("MDPlayer MIDI-2 scaling benchmark (real exporter/writer harness)");
+        Console.WriteLine("MDPlayer MIDI-2 scaling benchmark (real transcriber/writer harness)");
         MidiScaleMeasurement first = MeasureMidi(n);
         MidiScaleMeasurement doubleSize = MeasureMidi(checked(n * 2));
         var report = new
         {
-            harness = "MusicalMidiExporter -> MidiFileWriter",
+            harness = "MidiTranscriber -> MidiFileWriter",
             input = "deterministic generated MIDI timeline; fixed 44.1kHz/120BPM/960PPQ",
             baseline = (object?)null,
             candidate = new { n = first, twoN = doubleSize },
@@ -322,15 +334,14 @@ internal static class Program
     private static MidiScaleMeasurement MeasureMidi(int sourceEvents)
     {
         VisualizationTimeline timeline = BuildMidiTimeline(sourceEvents);
-        var map = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions { FixedBpm = 120 }).Map;
-        var exporter = new MusicalMidiExporter(map, 960);
+        var transcriber = new MidiTranscriber(960);
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
         int gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
         long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         Stopwatch watch = Stopwatch.StartNew();
-        MusicalMidiExportResult result = exporter.Export(timeline);
+        MidiTranscriptionResult result = transcriber.Transcribe(timeline);
         watch.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         int emitted = result.Tracks.Sum(t => t.Events.Count);
@@ -835,5 +846,63 @@ internal static class Program
             Notes = notes.ToArray(),
             Rhythm = rhythm.ToArray(),
         };
+    }
+
+    /// <summary>
+    /// Reference-driven MIDI analysis: prints the structural JSON for a .mid path.
+    /// </summary>
+    private static int RunReferenceAnalyze(string midiPath)
+    {
+        if (!File.Exists(midiPath))
+        {
+            Console.Error.WriteLine($"error: MIDI file not found: {midiPath}");
+            return 2;
+        }
+        var result = ReferenceMidiAnalyzer.Analyze(midiPath);
+        Console.WriteLine(ReferenceMidiAnalyzer.ToJson(result));
+        return 0;
+    }
+
+    /// <summary>
+    /// Reference-driven MIDI comparison: --reference-compare &lt;ref.mid&gt; &lt;cand.mid&gt; [trackmap.json].
+    /// </summary>
+    private static int RunReferenceCompare(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("usage: --reference-compare <ref.mid> <cand.mid> [trackmap.json]");
+            return 2;
+        }
+        string refPath = args[0];
+        string candPath = args[1];
+        string? trackMap = args.Length > 2 ? args[2] : null;
+        if (!File.Exists(refPath))
+        {
+            Console.Error.WriteLine($"error: reference MIDI not found: {refPath}");
+            return 2;
+        }
+        if (!File.Exists(candPath))
+        {
+            Console.Error.WriteLine($"error: candidate MIDI not found: {candPath}");
+            return 2;
+        }
+        var result = ReferenceMidiComparator.Compare(refPath, candPath, trackMap);
+        Console.WriteLine(ReferenceMidiComparator.ToJson(result));
+        return 0;
+    }
+
+    /// <summary>
+    /// Reference-driven report: --reference-report &lt;manifest.json&gt; [outputDir].
+    /// </summary>
+    private static int RunReferenceReport(string[] args)
+    {
+        if (args.Length < 1)
+        {
+            Console.Error.WriteLine("usage: --reference-report <manifest.json> [outputDir]");
+            return 2;
+        }
+        string manifest = args[0];
+        string outputDir = args.Length > 1 ? args[1] : ".";
+        return ReferenceMidiReport.Run(manifest, outputDir);
     }
 }

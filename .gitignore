@@ -394,3 +394,6 @@ vendor/
 coverage/
 .cache/
 tmp/
+
+# Reference-driven MIDI recovery: local machine config (never commit absolute paths)
+benchmarks/MDPlayer.Fmp.Benchmarks/ReferenceMidi/reference.local.json

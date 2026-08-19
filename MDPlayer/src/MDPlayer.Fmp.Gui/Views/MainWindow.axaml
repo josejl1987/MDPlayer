@@ -407,92 +407,17 @@
             <!-- MIDI EXPORT -->
             <StackPanel Spacing="8">
               <TextBlock Classes="section-title" Text="MIDI EXPORT"/>
-              <TextBlock Classes="caption" Text="Resolution and tempo used when writing the Format 1 MIDI file." TextWrapping="Wrap"/>
+              <TextBlock Classes="caption"
+                         Text="Raw transcription preserves source timing and pitch. The MIDI transport is fixed at 120 BPM; no tempo, meter, quantization, marker or instrument inference is applied."
+                         TextWrapping="Wrap"/>
               <Grid ColumnDefinitions="110,*" ColumnSpacing="12" RowSpacing="8"
-                    RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+                    RowDefinitions="Auto">
                 <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="PPQ"
                            VerticalAlignment="Center"/>
                 <ComboBox Grid.Row="0" Grid.Column="1" Classes="compact"
                           SelectedItem="{Binding MidiPpq}"
                           ItemsSource="{Binding MidiPpqOptions}"/>
-
-                <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Tempo source"
-                           VerticalAlignment="Center"/>
-                <ComboBox Grid.Row="1" Grid.Column="1" Classes="compact"
-                          ItemsSource="{Binding MidiTempoSourceOptions}"
-                          SelectedItem="{Binding MidiTempoSource}"/>
-
-                <TextBlock Grid.Row="2" Grid.Column="0" Classes="field-label" Text="BPM"
-                           VerticalAlignment="Center"/>
-                <TextBox Grid.Row="2" Grid.Column="1" Classes="compact"
-                         Text="{Binding MidiBpm}"
-                         Watermark="auto"/>
-
-                <TextBlock Grid.Row="3" Grid.Column="0" Classes="field-label" Text="Meter"
-                           VerticalAlignment="Center"/>
-                <TextBox Grid.Row="3" Grid.Column="1" Classes="compact"
-                         Text="{Binding MidiMeter}"
-                         Watermark="auto"/>
-
-                <TextBlock Grid.Row="4" Grid.Column="0" Classes="field-label" Text="Quantize"
-                           VerticalAlignment="Center"/>
-                <ComboBox Grid.Row="4" Grid.Column="1" Classes="compact"
-                          ItemsSource="{Binding MidiQuantizeOptions}"
-                          SelectedItem="{Binding MidiQuantize}"/>
               </Grid>
-              <CheckBox Content="Emit pitch-bend for fractional pitch &amp; glissando"
-                        IsChecked="{Binding MidiPitchBend}"/>
-              <CheckBox Content="Emit loop/section markers"
-                        IsChecked="{Binding MidiEmitMarkers}"/>
-              <CheckBox Content="Emit track name &amp; timing metadata"
-                        IsChecked="{Binding MidiEmitConductorMetadata}"/>
-              <Grid ColumnDefinitions="110,*" ColumnSpacing="12" RowSpacing="8"
-                    RowDefinitions="Auto">
-                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Velocity"
-                           VerticalAlignment="Center"/>
-                <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
-                               Value="{Binding MidiVelocity}" Minimum="1" Maximum="127" Increment="1"/>
-              </Grid>
-              <TextBlock Classes="caption" Text="Select &quot;fixed&quot; tempo source to apply the BPM override above."
-                         IsVisible="{Binding IsFixedTempoSelected}" TextWrapping="Wrap"/>
-
-              <TextBlock Classes="section-title" Text="VOICES"/>
-              <TextBlock Classes="caption" Text="{Binding MidiVoiceSummary}"
-                         IsVisible="{Binding HasMidiVoices}" TextWrapping="Wrap"/>
-              <ItemsControl ItemsSource="{Binding MidiVoiceOptions}"
-                            IsVisible="{Binding HasMidiVoices}">
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate>
-                    <StackPanel Spacing="4" Margin="0,2,0,6">
-                      <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="13"
-                                 TextTrimming="CharacterEllipsis"/>
-                      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                        <CheckBox Grid.Column="0" Content="Include"
-                                  IsChecked="{Binding Include}"/>
-                        <Grid Grid.Column="1" ColumnDefinitions="70,*,70,*" ColumnSpacing="6"
-                              RowDefinitions="Auto,Auto">
-                          <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="Program" VerticalAlignment="Center"/>
-                          <NumericUpDown Grid.Row="0" Grid.Column="1" Classes="compact"
-                                         Value="{Binding Program}" Minimum="-1" Maximum="127" Increment="1"/>
-                          <TextBlock Grid.Row="0" Grid.Column="2" Classes="field-label" Text="Channel" VerticalAlignment="Center"/>
-                          <NumericUpDown Grid.Row="0" Grid.Column="3" Classes="compact"
-                                         Value="{Binding Channel}" Minimum="-1" Maximum="15" Increment="1"/>
-                          <TextBlock Grid.Row="1" Grid.Column="0" Classes="field-label" Text="Vel" VerticalAlignment="Center"/>
-                          <NumericUpDown Grid.Row="1" Grid.Column="1" Classes="compact"
-                                         Value="{Binding Velocity}" Minimum="1" Maximum="127" Increment="1"/>
-                          <TextBlock Grid.Row="1" Grid.Column="2" Classes="field-label" Text="Transpose" VerticalAlignment="Center"/>
-                          <NumericUpDown Grid.Row="1" Grid.Column="3" Classes="compact"
-                                         Value="{Binding TransposeSemitones}" Minimum="-24" Maximum="24" Increment="1"/>
-                        </Grid>
-                        <CheckBox Grid.Column="2" Content="Drum" IsChecked="True"
-                                  IsVisible="{Binding IsPercussion}" IsEnabled="False"/>
-                      </Grid>
-                    </StackPanel>
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
-              <TextBlock Classes="caption" Text="No voices detected. Open a file to populate the per-voice panel."
-                         IsVisible="{Binding !HasMidiVoices}" TextWrapping="Wrap"/>
             </StackPanel>
 
           </StackPanel>

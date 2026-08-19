@@ -1,3 +1,4 @@
+#if LEGACY_MIDI_CORPUS
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -1447,3 +1448,4 @@ internal static class CorpusReporter
         }
     }
 }
+#endif

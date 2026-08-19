@@ -31,12 +31,6 @@ public sealed class ExportPerformanceSummary
     public ExportPerformanceComparison Comparison { get; init; } =
         new("not-run", null, null, null, null, null);
 
-    /// <summary>
-    /// Mirror of the Core percussion-fidelity receipt (spec §11, D8) populated
-    /// when performance receipts are enabled; null otherwise.
-    /// </summary>
-    public object? Percussion { get; init; }
-
     public string ToJson() => JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
 
     public IReadOnlyList<string> ToHumanReadable()
@@ -82,7 +76,7 @@ internal sealed class ExportPerformanceRecorder
         }
     }
 
-    public ExportPerformanceSummary Complete(object? percussion = null) => new()
+    public ExportPerformanceSummary Complete() => new()
     {
         Fixture = _fixture,
         Input = _input,
@@ -95,6 +89,5 @@ internal sealed class ExportPerformanceRecorder
             ProcessorCount = Environment.ProcessorCount,
         },
         Phases = _phases.ToArray(),
-        Percussion = percussion,
     };
 }

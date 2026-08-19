@@ -245,119 +245,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private int _midiPpq = 960;
 
-    /// <summary>MIDI pulses-per-quarter-note resolution.</summary>
+    /// <summary>MIDI pulses-per-quarter-note resolution for raw transcription.</summary>
     public int MidiPpq { get => _midiPpq; set => SetProperty(ref _midiPpq, Math.Clamp(value, 96, 9600)); }
 
-    /// <summary>PPQ choices for the export ComboBox.</summary>
     public IReadOnlyList<int> MidiPpqOptions { get; } =
         new[] { 240, 480, 960, 1920, 3840 };
-
-    /// <summary>True when the "fixed" tempo source is chosen (reveals the BPM override preview line).</summary>
-    public bool IsFixedTempoSelected => string.Equals(_midiTempoSource, "fixed", StringComparison.OrdinalIgnoreCase);
-
-    private string _midiTempoSource = "auto";
-
-    /// <summary>Tempo resolution strategy: auto | driver | symbolic | fixed.</summary>
-    public string MidiTempoSource
-    {
-        get => _midiTempoSource;
-        set
-        {
-            if (SetProperty(ref _midiTempoSource, string.IsNullOrWhiteSpace(value) ? "auto" : value))
-                OnPropertyChanged(nameof(IsFixedTempoSelected));
-        }
-    }
-
-    private string _midiBpm = "";
-
-    /// <summary>User-specified BPM override (used only when tempo source is "fixed").</summary>
-    public string MidiBpm
-    {
-        get => _midiBpm;
-        set => SetProperty(ref _midiBpm, value ?? "");
-    }
-
-    private string _midiMeter = "4/4";
-
-    /// <summary>Meter override string, e.g. "4/4". Blank => unknown/auto.</summary>
-    public string MidiMeter
-    {
-        get => _midiMeter;
-        set => SetProperty(ref _midiMeter, value ?? "");
-    }
-
-    /// <summary>Tempo-source options for the GUI ComboBox.</summary>
-    public IReadOnlyList<string> MidiTempoSourceOptions { get; } =
-        new[] { "auto", "driver", "symbolic", "fixed" };
-
-    /// <summary>Quantization options for the GUI ComboBox.</summary>
-    public IReadOnlyList<string> MidiQuantizeOptions { get; } =
-        new[] { "off", "1/16", "1/8", "1/4" };
-
-    private string _midiQuantize = "off";
-
-    /// <summary>Musical-time quantization grid, or "off".</summary>
-    public string MidiQuantize
-    {
-        get => _midiQuantize;
-        set => SetProperty(ref _midiQuantize, value ?? "off");
-    }
-
-    private bool _midiPitchBend = true;
-
-    /// <summary>Emit pitch-bend to express fractional pitch/glissando contours.</summary>
-    public bool MidiPitchBend
-    {
-        get => _midiPitchBend;
-        set => SetProperty(ref _midiPitchBend, value);
-    }
-
-    private int _midiVelocity = 90;
-
-    /// <summary>Default note velocity for exported voices (1–127).</summary>
-    public int MidiVelocity
-    {
-        get => _midiVelocity;
-        set => SetProperty(ref _midiVelocity, Math.Clamp(value, 1, 127));
-    }
-
-    private bool _midiEmitMarkers = true;
-
-    /// <summary>Emit loop/section markers on the conductor track.</summary>
-    public bool MidiEmitMarkers
-    {
-        get => _midiEmitMarkers;
-        set => SetProperty(ref _midiEmitMarkers, value);
-    }
-
-    private bool _midiEmitConductorMetadata = true;
-
-    /// <summary>Emit conductor track name / source metadata / timing-confidence text.</summary>
-    public bool MidiEmitConductorMetadata
-    {
-        get => _midiEmitConductorMetadata;
-        set => SetProperty(ref _midiEmitConductorMetadata, value);
-    }
-
-    /// <summary>Per-voice export options (populated from the captured timeline).</summary>
-    public ObservableCollection<MidiVoiceOptionItemViewModel> MidiVoiceOptions { get; } = new();
-
-    /// <summary>The voices found in the captured timeline (label for the panel header).</summary>
-    private string _midiVoiceSummary = "";
-
-    public string MidiVoiceSummary
-    {
-        get => _midiVoiceSummary;
-        set => SetProperty(ref _midiVoiceSummary, value ?? "");
-    }
-
-    public bool HasMidiVoices => MidiVoiceOptions.Count > 0;
-
-    public void RaiseMidiVoiceSummaryChanged()
-    {
-        OnPropertyChanged(nameof(MidiVoiceSummary));
-        OnPropertyChanged(nameof(HasMidiVoices));
-    }
 
     public string InputTitle => _input?.Title ?? _input?.DisplayName ?? "No input open";
 
@@ -1371,19 +1263,13 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            // Reuse the live preview session's captured timeline so the export
-            // reflects exactly what the user is previewing. Uses the same
-            // reusable-capture lease as the render path.
-            var request = BuildMidiRequestFromControls();
+            // Raw MIDI is a direct transcription of the captured timeline. No
+            // tempo/grid or per-voice projection is part of this command.
+            var request = new MidiExportRequest { Ppq = MidiPpq };
             MidiExportResult result;
             if (_session is null)
             {
-                var service = new MidiExportService();
-                var probe = service.ProbeVoices(_input.FullPath);
-                if (probe.Succeeded)
-                    SyncMidiVoiceOptions(probe.Voices);
-                request = BuildMidiRequestFromControls(CaptureVoiceOptions());
-                result = service.ExportFromTimelinePath(_input.FullPath, request);
+                result = new MidiExportService().ExportFromTimelinePath(_input.FullPath, request);
             }
             else
             {
@@ -1391,12 +1277,7 @@ public sealed class MainWindowViewModel : ObservableObject
                     await _session.AcquireReusableCaptureAsync(_request!, _exportCts.Token))
                 {
                     string timelinePath = Path.Combine(lease.DirectoryPath, "timeline.json");
-                    var service = new MidiExportService();
-                    var probe = service.ProbeVoices(timelinePath);
-                    if (probe.Succeeded)
-                        SyncMidiVoiceOptions(probe.Voices);
-                    request = BuildMidiRequestFromControls(CaptureVoiceOptions());
-                    result = service.ExportFromTimelinePath(timelinePath, request);
+                    result = new MidiExportService().ExportFromTimelinePath(timelinePath, request);
                 }
             }
 
@@ -1417,77 +1298,6 @@ public sealed class MainWindowViewModel : ObservableObject
             MidiExportNotice = "MIDI export failed: " + ex.Message;
             MidiExportNoticeIsError = true;
         }
-    }
-
-    /// <summary>Builds a request from the GUI controls (before voice overrides).</summary>
-    private MidiExportRequest BuildMidiRequestFromControls(IReadOnlyList<MidiVoiceOption>? voiceOptions = null) => new()
-    {
-        Ppq = MidiPpq,
-        Meter = string.IsNullOrWhiteSpace(MidiMeter) ? null : MidiMeter,
-        TempoSource = ParseTempoSource(MidiTempoSource),
-        Bpm = ParseBpmOverride(MidiBpm, MidiTempoSource),
-        Quantize = string.IsNullOrWhiteSpace(MidiQuantize) ? "off" : MidiQuantize,
-        EmitPitchBend = MidiPitchBend,
-        UsePercussionChannel = true,
-        Velocity = MidiVelocity,
-        EmitMarkers = MidiEmitMarkers,
-        EmitConductorMetadata = MidiEmitConductorMetadata,
-        VoiceOptions = voiceOptions ?? Array.Empty<MidiVoiceOption>(),
-    };
-
-    /// <summary>Copies the discovered voices into the panel (keeping existing edits for matching channel ids).</summary>
-    private void SyncMidiVoiceOptions(IReadOnlyList<MidiVoiceDescriptor> voices)
-    {
-        if (voices is null || voices.Count == 0)
-            return;
-        var existing = MidiVoiceOptions.ToDictionary(v => v.ChannelId, StringComparer.Ordinal);
-        MidiVoiceOptions.Clear();
-        foreach (MidiVoiceDescriptor voice in voices)
-        {
-            if (existing.TryGetValue(voice.ChannelId, out MidiVoiceOptionItemViewModel? prior))
-            {
-                // Keep the user's edits for this voice; only the labels stay fresh.
-                prior.ReplaceDescriptor(voice);
-                MidiVoiceOptions.Add(prior);
-            }
-            else
-            {
-                MidiVoiceOptions.Add(new MidiVoiceOptionItemViewModel(voice));
-            }
-        }
-        MidiVoiceSummary = $"{MidiVoiceOptions.Count} voice(s)";
-        RaiseMidiVoiceSummaryChanged();
-    }
-
-    /// <summary>Materializes the current per-voice panel edits into request DTOs.</summary>
-    private IReadOnlyList<MidiVoiceOption> CaptureVoiceOptions()
-    {
-        var options = new List<MidiVoiceOption>();
-        foreach (MidiVoiceOptionItemViewModel vm in MidiVoiceOptions)
-        {
-            bool defaultProgram = vm.IsPercussion || vm.Program == -1;
-            bool defaultChannel = vm.Channel == -1;
-            options.Add(vm.ToOption(defaultProgram, defaultChannel));
-        }
-        return options;
-    }
-
-    private static MidiTempoSource ParseTempoSource(string value)
-        => value?.Trim().ToLowerInvariant() switch
-        {
-            "driver" => Fmp.Application.Export.MidiTempoSource.Driver,
-            "symbolic" => Fmp.Application.Export.MidiTempoSource.Symbolic,
-            "fixed" => Fmp.Application.Export.MidiTempoSource.Fixed,
-            _ => Fmp.Application.Export.MidiTempoSource.Auto,
-        };
-
-    private static double? ParseBpmOverride(string text, string tempoSource)
-    {
-        if (!string.Equals(tempoSource?.Trim(), "fixed", StringComparison.OrdinalIgnoreCase))
-            return null; // BPM only acts as an override when the user chose "fixed".
-        if (!double.TryParse(text, out double bpm) || !double.IsFinite(bpm) || bpm <= 0)
-            return null;
-        return Math.Clamp(bpm, 20, 400);
     }
 
     // ---- Request snapshot handling ----
