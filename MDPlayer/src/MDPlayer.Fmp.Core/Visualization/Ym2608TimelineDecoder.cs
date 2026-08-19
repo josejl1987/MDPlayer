@@ -21,6 +21,7 @@ internal sealed class Ym2608TimelineDecoder
     private readonly MutableNote?[] _fm3OperatorNotes = new MutableNote?[4];
     private readonly MutableNote?[] _ssgNotes = new MutableNote?[3];
     private readonly int[] _ssgPrevVolume = new int[3];
+    private readonly bool[] _ssgNoiseActive = new bool[3];
     private readonly List<MutableNote> _notes = [];
     private readonly List<RhythmEvent> _rhythm = [];
     private readonly List<AdpcmBEvent> _adpcmB = [];
@@ -569,23 +570,34 @@ internal sealed class Ym2608TimelineDecoder
             VisualizationNoteMode mode = GetSsgMode(toneEnabled, noiseEnabled, envelopeEnabled);
             string instrumentId = GetSsgInstrumentId(mode, envelopeShape);
             GetOrAddSsgInstrument(instrumentId);
-            Pitch pitch = toneEnabled ? DecodeSsgPitch(period) : Pitch.Unpitched;
+            if (!toneEnabled)
+            {
+                // Pure SSG noise has no pitch. Preserve it as an unpitched
+                // activity event, never as a melodic NoteEvent.
+                if (noiseEnabled && audible && !_ssgNoiseActive[channel])
+                {
+                    _timeline.AddNoiseState(new NoiseStateEvent(
+                        $"ym2608.0.ssg.{channel + 1}",
+                        samplePosition,
+                        checked(samplePosition + 1),
+                        null,
+                        null,
+                        envelopeEnabled ? 1.0f : volume / 15.0f,
+                        NoiseMode.HardwareDefined));
+                }
+                _ssgNoiseActive[channel] = noiseEnabled && audible;
+                CloseNote(ref _ssgNotes[channel], samplePosition);
+                continue;
+            }
+            _ssgNoiseActive[channel] = false;
+            Pitch pitch = DecodeSsgPitch(period);
 
             MutableNote? active = _ssgNotes[channel];
             bool modeChanged = active == null
                 || active.Mode != mode
                 || !string.Equals(active.InstrumentId, instrumentId, StringComparison.Ordinal);
 
-            // The SSG has no key-on register. A volume rise (e.g. 9→11) is the
-            // FMP driver's way of retriggering a note — equivalent to the FM
-            // 0x28 key-on. Close the old note and open a new one.
-            bool volumeRetriggered = active != null
-                && !envelopeEnabled
-                && volume > _ssgPrevVolume[channel]
-                && volume >= 3
-                && _ssgPrevVolume[channel] > 0;
-
-            if (modeChanged || volumeRetriggered)
+            if (modeChanged)
             {
                 CloseNote(ref _ssgNotes[channel], samplePosition);
                 var note = new MutableNote(

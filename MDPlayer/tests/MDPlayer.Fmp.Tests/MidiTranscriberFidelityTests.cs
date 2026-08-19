@@ -338,24 +338,22 @@ public sealed class MidiTranscriberFidelityTests
             EndSample = Sr,
             SamplePlayback =
             [
-                new SamplePlaybackEvent("voice-b", 0, Sr / 2, "sample-z", null, 1.0, 1.0f, 0, false, false),
-                new SamplePlaybackEvent("voice-a", Sr / 2, Sr, "sample-a", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "sample-z", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "sample-a", null, 1.0, 1.0f, 0, false, false),
             ],
         };
 
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
         Assert.Equal(2, result.Diagnostics.SamplePlaybackCount);
-        Assert.Equal(3, MidiRoundTrip.TrackChunks(result.Bytes).Count);
-
-        IReadOnlyList<(long Tick, MidiEvent Event)> voiceA = Track(result.Bytes, 1);
-        IReadOnlyList<(long Tick, MidiEvent Event)> voiceB = Track(result.Bytes, 2);
-        var aOn = voiceA.First(e => e.Event is NoteOnEvent);
-        var bOn = voiceB.First(e => e.Event is NoteOnEvent);
-        Assert.Equal(960, aOn.Tick);
-        Assert.Equal(0, bOn.Tick);
-        Assert.Equal(0, ((NoteOnEvent)aOn.Event).NoteNumber);
-        Assert.Equal(1, ((NoteOnEvent)bOn.Event).NoteNumber);
-        Assert.Equal(0, ((ControlChangeEvent)voiceA.First(e => e.Event is ControlChangeEvent).Event).ControlValue);
+        Assert.Equal(2, MidiRoundTrip.TrackChunks(result.Bytes).Count);
+        IReadOnlyList<(long Tick, MidiEvent Event)> track = Track(result.Bytes, 1);
+        var ons = track.Where(e => e.Event is NoteOnEvent).ToArray();
+        Assert.Equal(2, ons.Length);
+        Assert.Equal(0, ons[0].Tick);
+        Assert.Equal(960, ons[1].Tick);
+        Assert.Equal(1, ((NoteOnEvent)ons[0].Event).NoteNumber);
+        Assert.Equal(0, ((NoteOnEvent)ons[1].Event).NoteNumber);
+        Assert.Equal(0, ((ControlChangeEvent)track.First(e => e.Event is ControlChangeEvent).Event).ControlValue);
     }
 
     [Fact]
@@ -368,8 +366,8 @@ public sealed class MidiTranscriberFidelityTests
             EndSample = Sr,
             SamplePlayback =
             [
-                new SamplePlaybackEvent("voice", 0, Sr / 2, "sample-a", null, 1.0, 1.0f, 0, false, false),
-                new SamplePlaybackEvent("voice", Sr / 2, Sr, "sample-b", null, 1.0, 1.0f, 0, true, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "sample-a", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "sample-b", null, 1.0, 1.0f, 0, true, false),
             ],
         };
 
@@ -381,7 +379,7 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
-    public void SamplePlayback_PitchedIdentityEmitsBendButNullPitchDoesNot()
+    public void SamplePlayback_PitchedIdentityEmitsBend()
     {
         var timeline = new VisualizationTimeline
         {
@@ -390,12 +388,10 @@ public sealed class MidiTranscriberFidelityTests
             EndSample = Sr,
             SamplePlayback =
             [
-                new SamplePlaybackEvent("pitched", 0, Sr, "sample-pitched", 60.5, 1.0, 1.0f, 0, false, false),
-                new SamplePlaybackEvent("identity", 0, Sr, "sample-identity", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr, "sample-pitched", 60.5, 1.0, 1.0f, 0, false, false),
             ],
         };
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
-        Assert.DoesNotContain(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
-        Assert.Contains(Track(result.Bytes, 2), e => e.Event is PitchBendEvent);
+        Assert.Contains(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
     }
 }

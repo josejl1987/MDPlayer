@@ -49,11 +49,12 @@ internal sealed class MidiTranscriber
             throw new InvalidOperationException("Timeline sample rate must be positive.");
         if (timeline.EndSample < timeline.StartSample)
             throw new InvalidOperationException("Timeline end precedes timeline start.");
-
         IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
         IReadOnlyList<RhythmEvent> rhythm = timeline.Rhythm ?? Array.Empty<RhythmEvent>();
         IReadOnlyList<SamplePlaybackEvent> samples =
-            timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>();
+            (timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>())
+                .Where(IsRawSamplePlayback)
+                .ToArray();
         IndexedNote[] indexed = notes
             .Select((note, index) => new IndexedNote(note, index, VoiceId(note)))
             .ToArray();
@@ -206,6 +207,9 @@ internal sealed class MidiTranscriber
                 notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes),
         };
     }
+
+    private static bool IsRawSamplePlayback(SamplePlaybackEvent sample) =>
+        string.Equals(sample.VoiceId, "ym2612.0.pcm.dac", StringComparison.Ordinal);
 
     private static Dictionary<string, DacNoteAssignment> SampleAssignments(
         IReadOnlyList<SamplePlaybackEvent> samples)

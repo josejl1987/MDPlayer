@@ -44,11 +44,11 @@ internal sealed class Sn76489TimelineDecoder : IChipTimelineDecoder
             if (_latchedVolume)
                 _volumes[_latchedChannel] = data & 0x0F;
             else if (_latchedChannel < 3)
-                _periods[_latchedChannel] = (_periods[_latchedChannel] & 0x3F00) | (data & 0x3F);
+                _periods[_latchedChannel] = (_periods[_latchedChannel] & 0x03F0) | (data & 0x0F);
         }
         else if (!_latchedVolume && _latchedChannel < 3)
         {
-            _periods[_latchedChannel] = (_periods[_latchedChannel] & 0x003F) | ((data & 0x3F) << 4);
+            _periods[_latchedChannel] = (_periods[_latchedChannel] & 0x000F) | ((data & 0x3F) << 4);
         }
 
         Reconcile(_latchedChannel, write.SamplePosition);

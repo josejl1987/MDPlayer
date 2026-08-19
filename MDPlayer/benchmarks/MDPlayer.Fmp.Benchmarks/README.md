@@ -11,13 +11,17 @@ configuration, and environment receipts.
 The harness does not invent a baseline: until a reproducible frozen baseline is
 provided, comparison is `baseline-unavailable` and no speedup claim is made.
 
-`--corpus-receipts [fixture]` runs the eight-song raw-fidelity corpus through the
+`--corpus-receipts [fixture]` runs the tracked raw corpus through the
 same fresh-capture -> transcriber pipeline. It independently decodes each SMF
-and compares every source `NoteEvent`, `RhythmEvent` and `SamplePlaybackEvent`:
-physical endpoint, exact onset/release ticks, emitted identity/base note,
-effective pitch, all interior pitch-state bends, and deterministic bytes. It
-also checks the complete source-event universe, fixed transport, metadata
-absence and collision accounting. Counts alone do not make a receipt pass.
+and compares every authoritative source event: `NoteEvent`, `RhythmEvent`, and
+sample-only `SamplePlaybackEvent` (currently YM2612 DAC). It checks physical
+endpoint, exact onset/release ticks, emitted identity/base note, effective pitch,
+all interior pitch-state bends, and deterministic bytes. PCM ownership is
+exclusive: a sample view must not also appear as a native rhythm hit. The
+receipt reports source/decoded sample counts, exact ownership collisions, and
+source/decoded duplicate `(voice,tick,sampleId)` attacks. It also checks the
+unique source-attack universe, fixed transport and metadata absence. Counts
+alone do not make a receipt pass.
 `--corpus-receipts --midi-scale N` times the transcriber over N and 2N generated
 source events.
 

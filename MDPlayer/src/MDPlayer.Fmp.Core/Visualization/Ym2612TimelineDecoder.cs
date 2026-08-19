@@ -167,10 +167,14 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
                 IdentityKind = AssetIdentityKind.ContentHash,
             });
         }
-
         string lastEmittedSampleId = null;
+
         foreach (DacPlaybackEvent evt in _dacTracker.PlaybackEvents)
         {
+            // An implicit register stream that spans the entire capture is an
+            // activity placeholder, not a recognized sample trigger.
+            if (evt.WasImplicit && evt.StartSample <= 0 && evt.EndSample >= endSample)
+                continue;
             if (evt.SampleId is null)
                 continue;
             double playbackRate = evt.InitialRateHz is double rate && rate > 0

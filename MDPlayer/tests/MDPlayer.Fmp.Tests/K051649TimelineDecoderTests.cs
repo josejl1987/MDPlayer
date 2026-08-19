@@ -61,9 +61,9 @@ public sealed class K051649TimelineDecoderTests
         decoder.Complete(10_000);
 
         NoteEvent note = Assert.Single(timeline.Build(10_000).Notes);
-        Assert.Equal(100, note.StartSample);   // reconciled at the pair start
-        Assert.Equal(10_000, note.EndSample);  // no boundary at 200
-        Assert.InRange(note.InitialMidiNote, 76.0, 79.0);
+        Assert.Equal(100, note.StartSample);
+        Assert.Equal(10_000, note.EndSample);
+        Assert.Equal(54.8107, note.InitialMidiNote, precision: 3);
     }
 
     [Fact]

@@ -33,13 +33,15 @@ musical timing; raw transcription is the sole MIDI export path.
 - Initial pitch and `PitchChange` values are encoded as a MIDI note plus pitch bend.
   Each physical voice receives its required bend range; the corpus oracle checks
   every emitted pitch-state tick, not only attack/release endpoints.
-- Every `SamplePlaybackEvent` produces one identity-trigger NoteOn/NoteOff on a
-  deterministic sample voice track. `SampleId`s are sorted and mapped to MIDI
-  bank/note identities; `StartSample` and `EndSample` use the same absolute tick
-  conversion and one-tick clamp. A non-null `MidiPitch` may be represented by a
-  bend relative to the identity note; null pitch never invents tonal pitch.
-- `Ppz8`, ADPCM-B and YM2612 DAC playback are represented through
-  `SamplePlaybackEvent`; they are part of the raw source-event universe.
+- `SamplePlaybackEvent` is a metadata/view family, not automatically an
+  independent musical attack. The raw transcriber currently exports only the
+  sample-only YM2612 DAC voice (`ym2612.0.pcm.dac`) as identity-trigger
+  NoteOn/NoteOff events. `SampleId`s are sorted and mapped to MIDI bank/note
+  identities; `StartSample` and `EndSample` use the same absolute tick
+  conversion and one-tick clamp. Null `MidiPitch` never invents tonal pitch.
+- OKI/PPZ8/ADPCM sample views remain available for downstream projection but are
+  not emitted alongside an authoritative `RhythmEvent` in raw MIDI. A source
+  attack must have one owner.
 - `timeline.Rhythm` is serialized on MIDI channel 10 (zero-based channel 9), with
   semantic GM mapping where a rhythm role exists and note 60 otherwise. Every
   rhythm hit remains one attack.

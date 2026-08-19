@@ -44,7 +44,8 @@ internal sealed record DacPlaybackEvent(
     double? InitialRateHz,
     IReadOnlyList<DacRatePoint> RatePoints,
     double? Gain,
-    double? Pan);
+    double? Pan,
+    bool WasImplicit = false);
 
 /// <summary>A structured diagnostic for malformed or unsupported DAC input.</summary>
 internal sealed record DacDiagnostic(

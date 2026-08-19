@@ -105,17 +105,23 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
                 state.Volume = Math.Clamp(write.Data, 0, 15) / 15f;
                 state.Current?.Update(state.FrequencyHz, state.MidiNote, state.Volume, state.Pan);
                 break;
-            case 11: // playback FNUM (the shim passes the 32-bit value)
-                state.FrequencyHz = DecodeFrequency(write.Data);
-                state.MidiNote = ToMidi(state.FrequencyHz);
-                state.Current?.Update(state.FrequencyHz, state.MidiNote, state.Volume, state.Pan);
+            case 11: // playback FNUM (fixed-point ratio, 0x8000 = source rate)
+                state.FrequencyFnum = write.Data;
+                state.FrequencyHz = DecodeFrequency(state.FrequencyFnum, state.BaseFrequencyHz);
+                state.MidiNote = null; // sample root pitch is not known here.
+                state.Current?.Update(state.FrequencyHz, null, state.Volume, state.Pan);
                 break;
             case 19: // pan, represented by the driver's signed control value
                 state.Pan = DecodePan(write.Data);
                 state.Current?.Update(state.FrequencyHz, state.MidiNote, state.Volume, state.Pan);
                 break;
-            case 21: // source/sample base frequency; it is metadata only here
-                state.BaseFrequencyHz = write.Data > 0 ? write.Data : state.BaseFrequencyHz;
+            case 21: // source/sample base frequency
+                if (write.Data > 0)
+                {
+                    state.BaseFrequencyHz = write.Data;
+                    if (state.FrequencyFnum is int fnum)
+                        state.FrequencyHz = DecodeFrequency(fnum, state.BaseFrequencyHz);
+                }
                 break;
             case 22: // source/bank selector used by some FMP builds
                 if (write.Data >= 0)
@@ -170,14 +176,9 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
         state.Current = null;
     }
 
-    private static int? ClampNullable(int value) => value >= 0 ? value : null;
-
-    private static double? DecodeFrequency(int value)
-        => value is > 0 and <= 384_000 ? value : null;
-
-    private static double? ToMidi(double? frequency)
-        => frequency is > 0 and <= 384_000
-            ? 69.0 + 12.0 * Math.Log2(frequency.Value / 440.0)
+    private static double? DecodeFrequency(int fnum, int baseFrequencyHz)
+        => fnum > 0 && baseFrequencyHz > 0
+            ? baseFrequencyHz * (fnum / 32768.0)
             : null;
 
     private static float DecodePan(int value)
@@ -193,6 +194,7 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
     {
         public int? SampleNumber { get; set; }
         public double? FrequencyHz { get; set; }
+        public int? FrequencyFnum { get; set; }
         public double? MidiNote { get; set; }
         public float Volume { get; set; } = 1;
         public float Pan { get; set; }

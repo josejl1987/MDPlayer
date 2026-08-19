@@ -148,13 +148,6 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
         for (int channel = 0; channel < _notes.Length; channel++)
         {
             FlushPendingFrequency(channel);
-            if (_notes[channel] is MutableNote note
-                && note.TryCommitPending(endSample, _plateauSamples, out PendingPlateau plateau))
-            {
-                note.RemovePitchChangesFrom(plateau.SamplePosition);
-                Close(ref _notes[channel], plateau.SamplePosition);
-                StartNote(channel, plateau.SamplePosition, plateau.Pitch);
-            }
             Close(ref _notes[channel], endSample);
         }
     }
@@ -171,26 +164,13 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
             && ChipPitchDomain.IsRepresentable(pitch.FrequencyHz, pitch.MidiNote);
         if (!active)
         {
-            if (_notes[channel] is MutableNote note
-                && note.TryCommitPending(sample, _plateauSamples, out PendingPlateau plateau))
-            {
-                note.RemovePitchChangesFrom(plateau.SamplePosition);
-                Close(ref _notes[channel], plateau.SamplePosition);
-                StartNote(channel, plateau.SamplePosition, plateau.Pitch);
-            }
             Close(ref _notes[channel], sample);
             return;
         }
 
         if (_notes[channel] != null)
         {
-            MutableNote note = _notes[channel]!;
-            if (note.TryPromotePlateau(sample, pitch, _plateauSamples, out PendingPlateau plateau))
-            {
-                note.RemovePitchChangesFrom(plateau.SamplePosition);
-                Close(ref _notes[channel], plateau.SamplePosition);
-                StartNote(channel, plateau.SamplePosition, plateau.Pitch);
-            }
+            _notes[channel]!.AddPitch(sample, pitch);
             return;
         }
 
@@ -230,9 +210,9 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
     private Pitch DecodePitch(int channel)
     {
         int period = _frequency[channel];
-        if (period <= 0)
+        if (period <= 8)
             return Pitch.Unpitched;
-        return Pitch.FromFrequency(_device.ClockHz / (8.0 * period));
+        return Pitch.FromFrequency(_device.ClockHz / (32.0 * (period + 1)));
     }
 
     private void Close(ref MutableNote? note, long endSample)

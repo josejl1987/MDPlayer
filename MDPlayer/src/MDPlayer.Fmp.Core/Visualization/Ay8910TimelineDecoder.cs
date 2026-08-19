@@ -67,8 +67,10 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
     private void Reconcile(int channel, long sample)
     {
         bool toneEnabled = (_registers[7] & (1 << channel)) == 0;
-        int volume = _registers[8 + channel] & 0x0F;
-        bool audible = toneEnabled && volume > 0;
+        int volumeRegister = _registers[8 + channel];
+        int volume = volumeRegister & 0x0F;
+        bool envelopeEnabled = (volumeRegister & 0x10) != 0;
+        bool audible = toneEnabled && (envelopeEnabled || volume > 0);
         if (!audible)
         {
             Close(channel, sample);
@@ -115,11 +117,11 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
     /// in this decode path (reg 13 envelope writes are not tracked), and the
     /// register trace of the Gradius II fixture shows the volume genuinely returns
     /// to 0 between hits, so the volume edge is the complete trigger model.
-    /// </summary>
     private void ReconcileNoise(long sample)
     {
         bool noiseEnabled = (_registers[7] & 0x38) != 0x38;
-        bool audible = noiseEnabled && _registers[8..11].Any(value => (value & 0x0F) > 0);
+        bool audible = noiseEnabled && _registers[8..11]
+            .Any(value => (value & 0x10) != 0 || (value & 0x0F) > 0);
         if (!audible)
         {
             _noiseActive = false;

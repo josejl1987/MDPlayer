@@ -185,7 +185,8 @@ internal sealed class DacPlaybackTracker
     private void StartImplicitPlayback(DacOperation.DacByteConsumed op)
     {
         // A byte arrives with no explicit start. This implies the decoder
-        // began DAC playback implicitly; synthesize a start op.
+        // began DAC playback implicitly; synthesize a start op and retain that
+        // provenance so a full-capture placeholder can be rejected downstream.
         _active = ActivePlayback.Create(
             NextInstanceId(),
             ResolveSource(op.SourceId),
@@ -193,7 +194,8 @@ internal sealed class DacPlaybackTracker
             op.Position,
             op.Position,
             null,
-            null);
+            null,
+            wasImplicit: true);
         _active.Append(op.Value, op.Position);
     }
 
@@ -255,7 +257,8 @@ internal sealed class DacPlaybackTracker
             active.InitialRateHz,
             active.RatePoints.ToArray(),
             Gain: null,
-            Pan: null));
+            Pan: null,
+            WasImplicit: active.WasImplicit));
 
         if (truncated)
             Diagnose(timestamp, "truncated-input", "DAC playback ended before its declared length was available.");
@@ -301,14 +304,14 @@ internal sealed class DacPlaybackTracker
     {
         private readonly List<byte> _bytes = [];
         private readonly List<DacRatePoint> _ratePoints = [];
-
         private ActivePlayback(
             long instanceId,
             DacSourceStore source,
             long startSample,
             long startPosition,
             long? declaredLength,
-            double? rateHz)
+            double? rateHz,
+            bool wasImplicit)
         {
             InstanceId = instanceId;
             Source = source;
@@ -318,6 +321,7 @@ internal sealed class DacPlaybackTracker
             DeclaredLength = declaredLength;
             InitialRateHz = rateHz;
             CurrentRateHz = rateHz;
+            WasImplicit = wasImplicit;
         }
 
         public static ActivePlayback Create(
@@ -327,8 +331,9 @@ internal sealed class DacPlaybackTracker
             long startPosition,
             long cursorPosition,
             long? declaredLength,
-            double? rateHz)
-            => new(instanceId, source, startSample, startPosition, declaredLength, rateHz)
+            double? rateHz,
+            bool wasImplicit = false)
+            => new(instanceId, source, startSample, startPosition, declaredLength, rateHz, wasImplicit)
             {
                 ExpectedPosition = cursorPosition,
             };
@@ -342,6 +347,7 @@ internal sealed class DacPlaybackTracker
         public long? DeclaredLength { get; }
         public double? InitialRateHz { get; }
         public double? CurrentRateHz { get; private set; }
+        public bool WasImplicit { get; }
         public int PayloadLength => _bytes.Count;
         public IReadOnlyList<DacRatePoint> RatePoints => _ratePoints;
         public bool HasConsumedDeclaredLength =>
