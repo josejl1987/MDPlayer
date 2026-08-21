@@ -238,8 +238,10 @@ internal sealed class SinglePassComposer
                         long stageStart = Stopwatch.GetTimestamp();
                         session.RenderNext(index, anyGrid ? slot.Grid : ReadOnlySpan<byte>.Empty, slot.Frame);
                         metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
-
-                        stageStart = Stopwatch.GetTimestamp();
+                    },
+                    (slot, metrics) =>
+                    {
+                        long stageStart = Stopwatch.GetTimestamp();
                         try
                         {
                             ffmpegIn.Write(slot.Frame, 0, outFrameBytes);
@@ -405,8 +407,10 @@ internal sealed class SinglePassComposer
                         long stageStart = Stopwatch.GetTimestamp();
                         session.RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, slot.Frame);
                         metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
-
-                        stageStart = Stopwatch.GetTimestamp();
+                    },
+                    (slot, metrics) =>
+                    {
+                        long stageStart = Stopwatch.GetTimestamp();
                         try
                         {
                             input.Write(slot.Frame, 0, outFrameBytes);
@@ -549,10 +553,13 @@ internal sealed class SinglePassComposer
             long finalizationStart = 0;
             try
             {
-                // Bounded producer/consumer pipeline: the frame renderer fills
-                // reusable slots while FFmpeg drains the previous frames, so
-                // rendering overlaps with pipe writes instead of serializing
-                // (overlay rendering is the principal bottleneck).
+                // Three-stage bounded pipeline: a scope-fill producer
+                // (dedicated task) feeds ready; a dedicated render task
+                // composites each frame in order (overlay rendering is the
+                // principal bottleneck); the write stage (this thread) drains
+                // the rendered frames into the FFmpeg pipe. Render and write
+                // run concurrently, so t_frame ~ max(t_render, t_write)
+                // instead of their sum, with frames written in order.
                 pipelineMetrics = RunFramePipeline(
                     _options.QueueCapacity,
                     gridFrameBytes: frameRenderer.HasScopeSource
@@ -571,7 +578,6 @@ internal sealed class SinglePassComposer
                         {
                             slot.HasGrid = false;
                         }
-                        ReportProgress(progress, frameIndex, frameRenderer.TotalFrames);
                         return true;
                     },
                     (slot, frameIndex, metrics) =>
@@ -582,8 +588,10 @@ internal sealed class SinglePassComposer
                             slot.HasGrid ? slot.Grid : ReadOnlySpan<byte>.Empty,
                             slot.Frame);
                         metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
-
-                        stageStart = Stopwatch.GetTimestamp();
+                    },
+                    (slot, metrics) =>
+                    {
+                        long stageStart = Stopwatch.GetTimestamp();
                         try
                         {
                             WriteRawFrame(input, slot.Frame, frameRenderer.FrameByteCount);
@@ -599,7 +607,8 @@ internal sealed class SinglePassComposer
                     slot => session.Initialize(slot.Frame),
                     includeQueueWaitInCorrscopeMetrics: false,
                     cancellationToken,
-                    abortProducer: null);
+                    abortProducer: null,
+                    progress);
                 LastMetrics = pipelineMetrics with
                 {
                     Renderer = frameRenderer.Performance,
@@ -655,42 +664,65 @@ internal sealed class SinglePassComposer
         }
     }
 
-    private sealed class PipelineMetrics
+    /// <summary>
+    /// Per-stage accumulators shared by the pipeline's stages. Each field is
+    /// written by exactly one stage (the render and write stages touch
+    /// disjoint fields), so the stages never contend; waits and depths that
+    /// merge several stages are kept separate here and combined in
+    /// <see cref="ToComposeMetrics"/>.
+    /// </summary>
+    internal sealed class PipelineMetrics
     {
+        /// <summary>Write-stage renderReady.Take waits (encoder-side queue wait;
+        /// the successor to the old consumer's ready.Take wait).</summary>
         public long QueueWaitTicks;
+        /// <summary>Render-stage RenderNext time only.</summary>
         public long OverlayTicks;
+        /// <summary>Write-stage WriteRawFrame time only.</summary>
         public long FfmpegWriteTicks;
-        public long BlockingTicks;
-        public int MaxQueueDepth;
+        /// <summary>Scope-fill free.Take waits (merged into BlockingSeconds).</summary>
+        public long ProducerBlockingTicks;
+        /// <summary>Render-stage ready.Take waits (merged into BlockingSeconds).</summary>
+        public long RenderBlockingTicks;
+        /// <summary>Max depth observed on <c>ready</c> (merged into MaxQueueDepth).</summary>
+        public int ReadyMaxDepth;
+        /// <summary>Max depth observed on <c>renderReady</c> (merged into MaxQueueDepth).</summary>
+        public int RenderReadyMaxDepth;
+        /// <summary>Frames the render stage received without a scope grid
+        /// (clean scope EOF -> frozen tail).</summary>
         public long StarvationCount;
+        /// <summary>Frames successfully written to the encoder.</summary>
         public long FrameCount;
 
         public ComposeMetrics ToComposeMetrics(bool includeQueueWaitInCorrscopeMetrics, long wallStart, int queueCapacity)
         {
+            long blockingTicks = ProducerBlockingTicks + RenderBlockingTicks;
+            int maxQueueDepth = Math.Max(ReadyMaxDepth, RenderReadyMaxDepth);
             return new ComposeMetrics(
                 includeQueueWaitInCorrscopeMetrics
                     ? QueueWaitTicks / (double)Stopwatch.Frequency
                     : 0,
                 OverlayTicks / (double)Stopwatch.Frequency,
                 FfmpegWriteTicks / (double)Stopwatch.Frequency,
-                MaxQueueDepth,
+                maxQueueDepth,
                 StarvationCount,
-                BlockingTicks / (double)Stopwatch.Frequency,
+                blockingTicks / (double)Stopwatch.Frequency,
                 (Stopwatch.GetTimestamp() - wallStart) / (double)Stopwatch.Frequency,
                 FrameCount,
                 queueCapacity,
                 null,
                 QueueWaitTicks / (double)Stopwatch.Frequency,
-                BlockingTicks / (double)Stopwatch.Frequency,
+                blockingTicks / (double)Stopwatch.Frequency,
                 QueueWaitTicks / (double)Stopwatch.Frequency);
         }
     }
 
     /// <summary>
-    /// Reports frame-render progress as a 0..1 fraction, throttled to ~10Hz to
-    /// avoid flooding the progress stream on long renders. Consumers (and the
-    /// JSONL writer) read the fraction; missing updates simply show the last
-    /// reported progress until the stage completes at 1.
+    /// Reports encode progress as a 0..1 fraction of successfully written
+    /// frames, throttled to ~10Hz to avoid flooding the progress stream on
+    /// long renders. Consumers (and the JSONL writer) read the fraction;
+    /// missing updates simply show the last reported progress until the
+    /// stage completes at 1.
     /// </summary>
     private static void ReportProgress(Action<float>? progress, long frameIndex, long total)
     {
@@ -702,26 +734,80 @@ internal sealed class SinglePassComposer
             progress((float)Math.Clamp((double)frameIndex / total, 0, 1));
     }
 
-    private static ComposeMetrics RunFramePipeline(
+    /// <summary>
+    /// Runs the three-stage bounded frame pipeline shared by every Compose
+    /// path: 1. SCOPE FILL (a dedicated task) takes a pooled slot from
+    /// <c>free</c>, fills its scope grid via <paramref name="fillFrame"/>
+    /// (false = clean EOF), and publishes it to <c>ready</c>. 2. RENDER (a
+    /// dedicated task) drains <c>ready</c> in frame order, renders each frame
+    /// into its pooled output buffer via <paramref name="renderFrame"/> (the
+    /// single-threaded sequential session), and publishes the rendered slot
+    /// to <c>renderReady</c>. 3. WRITE (this thread) drains <c>renderReady</c>
+    /// in frame order, writes each frame to the encoder via
+    /// <paramref name="writeFrame"/> (false = broken pipe -> the
+    /// <c>stopped</c> path), reports <paramref name="progress"/> per encoded
+    /// frame, and returns the slot to <c>free</c>. Render and write therefore
+    /// overlap: t_frame ~ max(t_render, t_write) instead of their sum, with
+    /// in-order frames preserved by construction (one producer and one
+    /// consumer per queue).
+    ///
+    /// Slot pool: 2 x <paramref name="queueCapacity"/> slots. The scope grid
+    /// bytes are only needed until the frame is rendered, so the doubled
+    /// pool lets encode backpressure (a stalled FFmpeg pipe) absorb extra
+    /// rendered frames without stalling the render. This doubles frame buffer
+    /// memory (2 x queueCapacity x (grid + frame) bytes, e.g. 2 x 3 x 8.3 MB
+    /// at 1080p) - accepted to decouple encode backpressure from render; the
+    /// slot lifetime stays one pool, one return path.
+    ///
+    /// Queue capacities: <c>free</c> is sized to the pool; <c>ready</c> and
+    /// <c>renderReady</c> are deliberately capped at the original
+    /// <paramref name="queueCapacity"/> so the observed MaxQueueDepth stays
+    /// comparable to Options.QueueCapacity (and the recorded QueueCapacity),
+    /// and backpressure still works: a stage blocks when its upstream queue
+    /// is full or no slot is available.
+    ///
+    /// Metrics (see cref="PipelineMetrics"): OverlayTicks = render-stage
+    /// RenderNext time only; FfmpegWriteTicks = write-stage WriteRawFrame time
+    /// only; BlockingTicks = scope-fill free.Take waits + render-stage
+    /// ready.Take waits (merged); QueueWaitTicks (flag-gated) = write-stage
+    /// renderReady.Take waits (the encoder-side queue wait, successor to the
+    /// old consumer's ready.Take wait); MaxQueueDepth = max depth observed
+    /// across ready and renderReady; FrameCount = successfully written frames.
+    ///
+    /// Errors: a stage failure cancels the linked token so the other stages
+    /// exit promptly; after the joins, the root cause is rethrown (producer
+    /// -> render -> write priority), a plain cancellation surfaces as the
+    /// write stage's OperationCanceledException, and a write-stage broken
+    /// pipe (<c>stopped</c>) falls through so the caller can treat FFmpeg's
+    /// exit status and stderr as authoritative. Every slot is returned to
+    /// the pool exactly once on every path.
+    /// </summary>
+    internal static ComposeMetrics RunFramePipeline(
         int queueCapacity,
         int gridFrameBytes,
         int outFrameBytes,
         long totalFrames,
         Func<FrameSlot, long, bool> fillFrame,
-        Func<FrameSlot, long, PipelineMetrics, bool> consumeFrame,
+        Action<FrameSlot, long, PipelineMetrics> renderFrame,
+        Func<FrameSlot, PipelineMetrics, bool> writeFrame,
         Action<FrameSlot> initializeSession,
         bool includeQueueWaitInCorrscopeMetrics,
         CancellationToken cancellationToken,
-        Action abortProducer)
+        Action abortProducer,
+        Action<float>? progress = null)
     {
+        int slotCount = queueCapacity * 2;
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var free = new BlockingCollection<FrameSlot>(queueCapacity);
+        var free = new BlockingCollection<FrameSlot>(slotCount);
         var ready = new BlockingCollection<FrameSlot>(queueCapacity);
-        var slots = new FrameSlot[queueCapacity];
+        var renderReady = new BlockingCollection<FrameSlot>(queueCapacity);
+        var slots = new FrameSlot[slotCount];
         var metrics = new PipelineMetrics();
         long wallStart = Stopwatch.GetTimestamp();
         Exception producerError = null;
+        Exception renderError = null;
         Task producer = null;
+        Task renderer = null;
 
         try
         {
@@ -732,7 +818,7 @@ internal sealed class SinglePassComposer
             }
 
             // Reserve a pooled output buffer while the session is initialized.
-            // The producer starts only after it has been returned to the free queue.
+            // The stages start only after it has been returned to the free queue.
             FrameSlot initial = free.Take(CancellationToken.None);
             try
             {
@@ -743,6 +829,7 @@ internal sealed class SinglePassComposer
                 free.Add(initial);
             }
 
+            // Stage 1: scope fill (dedicated task): free -> fill -> ready.
             producer = Task.Run(() =>
             {
                 try
@@ -752,7 +839,7 @@ internal sealed class SinglePassComposer
                         linkedCancellation.Token.ThrowIfCancellationRequested();
                         long waitStart = Stopwatch.GetTimestamp();
                         FrameSlot slot = free.Take(linkedCancellation.Token);
-                        metrics.BlockingTicks += Stopwatch.GetTimestamp() - waitStart;
+                        metrics.ProducerBlockingTicks += Stopwatch.GetTimestamp() - waitStart;
                         bool published = false;
                         try
                         {
@@ -779,25 +866,91 @@ internal sealed class SinglePassComposer
                 }
             }, CancellationToken.None);
 
+            // Stage 2: render (dedicated task): ready -> RenderNext -> renderReady.
+            renderer = Task.Run(() =>
+            {
+                try
+                {
+                    for (long index = 0; index < totalFrames; index++)
+                    {
+                        // Check the token on every render iteration, not only when
+                        // blocked in Take: once the producer has published every
+                        // frame, Take returns immediately without examining the
+                        // token, so without this check a cancellation would be
+                        // ignored for the entire remainder of the pipeline.
+                        try
+                        {
+                            linkedCancellation.Token.ThrowIfCancellationRequested();
+                            long waitStart = Stopwatch.GetTimestamp();
+                            FrameSlot slot;
+                            try
+                            {
+                                slot = ready.Take(linkedCancellation.Token);
+                            }
+                            catch (Exception error)
+                            {
+                                renderError = error;
+                                break;
+                            }
+                            metrics.RenderBlockingTicks += Stopwatch.GetTimestamp() - waitStart;
+                            metrics.ReadyMaxDepth = Math.Max(metrics.ReadyMaxDepth, ready.Count);
+                            bool published = false;
+                            try
+                            {
+                                renderFrame(slot, index, metrics);
+                                renderReady.Add(slot, linkedCancellation.Token);
+                                published = true;
+                            }
+                            catch (Exception error)
+                            {
+                                renderError = error;
+                                linkedCancellation.Cancel();
+                            }
+                            finally
+                            {
+                                if (!published)
+                                    free.Add(slot, CancellationToken.None);
+                            }
+
+                            if (renderError != null)
+                                break;
+                        }
+                        catch (Exception error)
+                        {
+                            // A cancellation raised by the scope-fill failure must not
+                            // escape before the stages are joined; that join
+                            // rethrows the root cause (e.g. frame-boundary drift).
+                            renderError = error;
+                            break;
+                        }
+                    }
+                }
+                finally
+                {
+                    renderReady.CompleteAdding();
+                }
+            }, CancellationToken.None);
+
+            // Stage 3: write (this thread): renderReady -> encoder -> free.
             Exception consumerError = null;
             bool stopped = false;
             try
             {
                 for (long index = 0; index < totalFrames; index++)
                 {
-                    // Check the token on every consumer iteration, not only when
-                    // blocked in Take: once the producer has published every
+                    // Check the token on every write iteration, not only when
+                    // blocked in Take: once the render stage has published every
                     // frame, Take returns immediately without examining the
                     // token, so without this check a cancellation would be
                     // ignored for the entire remainder of the encode.
                     try
                     {
                         linkedCancellation.Token.ThrowIfCancellationRequested();
-                        FrameSlot slot;
                         long waitStart = Stopwatch.GetTimestamp();
+                        FrameSlot slot;
                         try
                         {
-                            slot = ready.Take(linkedCancellation.Token);
+                            slot = renderReady.Take(linkedCancellation.Token);
                         }
                         catch (Exception error)
                         {
@@ -807,10 +960,10 @@ internal sealed class SinglePassComposer
 
                         if (includeQueueWaitInCorrscopeMetrics)
                             metrics.QueueWaitTicks += Stopwatch.GetTimestamp() - waitStart;
-                        metrics.MaxQueueDepth = Math.Max(metrics.MaxQueueDepth, ready.Count);
+                        metrics.RenderReadyMaxDepth = Math.Max(metrics.RenderReadyMaxDepth, renderReady.Count);
                         try
                         {
-                            if (!consumeFrame(slot, index, metrics))
+                            if (!writeFrame(slot, metrics))
                             {
                                 stopped = true;
                                 linkedCancellation.Cancel();
@@ -818,6 +971,7 @@ internal sealed class SinglePassComposer
                             }
 
                             metrics.FrameCount++;
+                            ReportProgress(progress, index, totalFrames);
                         }
                         catch (Exception error)
                         {
@@ -828,14 +982,14 @@ internal sealed class SinglePassComposer
                         finally
                         {
                             // The slot remains pooled for the complete run and is
-                            // returned to ArrayPool only after the producer joins.
+                            // returned to ArrayPool only after the stages join.
                             free.Add(slot, CancellationToken.None);
                         }
                     }
                     catch (Exception error)
                     {
-                        // A cancellation raised by the producer's failure must not
-                        // escape before the producer task is joined; that join
+                        // A cancellation raised by an upstream stage's failure
+                        // must not escape before the stages are joined; that join
                         // rethrows the root cause (e.g. frame-boundary drift).
                         consumerError = error;
                         break;
@@ -851,12 +1005,26 @@ internal sealed class SinglePassComposer
                 }
             }
 
+            // Join the background stages; the write stage is this thread.
             producer.GetAwaiter().GetResult();
+            renderer.GetAwaiter().GetResult();
 
+            // Root-cause rethrow, generalizing the old producer/consumer
+            // priority: a real failure shadows the downstream stages'
+            // cancellation noise, a plain cancellation surfaces as the write
+            // stage's OperationCanceledException, and a write-stage broken
+            // pipe (stopped) falls through so the caller can treat FFmpeg's
+            // exit status and stderr as authoritative.
             if (producerError != null &&
-                !(producerError is OperationCanceledException && (stopped || consumerError != null)))
+                !(producerError is OperationCanceledException && (stopped || renderError != null || consumerError != null)))
             {
                 ExceptionDispatchInfo.Capture(producerError).Throw();
+            }
+
+            if (renderError != null &&
+                !(renderError is OperationCanceledException && (stopped || consumerError != null)))
+            {
+                ExceptionDispatchInfo.Capture(renderError).Throw();
             }
 
             if (consumerError != null)
@@ -871,19 +1039,26 @@ internal sealed class SinglePassComposer
             {
                 try { producer.GetAwaiter().GetResult(); } catch { }
             }
+            if (renderer != null)
+            {
+                try { renderer.GetAwaiter().GetResult(); } catch { }
+            }
 
             while (free.TryTake(out FrameSlot returned))
                 _ = returned;
             while (ready.TryTake(out FrameSlot returned))
                 _ = returned;
+            while (renderReady.TryTake(out FrameSlot returned))
+                _ = returned;
             free.Dispose();
             ready.Dispose();
+            renderReady.Dispose();
             foreach (FrameSlot slot in slots)
                 slot?.Return();
         }
     }
 
-    private sealed class FrameSlot
+    internal sealed class FrameSlot
     {
         public readonly byte[] Grid;
         public readonly byte[] Frame;

@@ -318,6 +318,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             noteColorMode: _options.NoteColor,
             palette: _options.Palette);
         _panels = BuildPanels();
+        AssignPanelStreamIds();
         _activityLabelCounts = new int[_panels.Length];
         _activityLabelCache = new string[_panels.Length];
         _headerStateInputs = new string[_panels.Length];
@@ -404,15 +405,11 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     internal void ResetPerformanceMetrics() => _performance.Reset();
 
     public long TotalFrames
-    {
-        get
-        {
-            long samples = Math.Max(0, _timeline.EndSample - _timeline.StartSample);
-            decimal frames = (decimal)samples * FpsNumerator
-                / (_timeline.SampleRate * FpsDenominator);
-            return (long)decimal.Ceiling(frames);
-        }
-    }
+        => FrameSampleClock.FrameCount(
+            Math.Max(0, _timeline.EndSample - _timeline.StartSample),
+            _timeline.SampleRate,
+            FpsNumerator,
+            FpsDenominator);
 
     /// <summary>
     /// Renders a full single-layer frame (static chrome + dynamic content) into
@@ -607,8 +604,37 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     internal SequentialCompositeSession CreateSequentialSession(bool scopeFramesAreOpaque = false)
         => new(this, scopeFramesAreOpaque);
 
+    /// <summary>
+    /// Assigns per-panel stream ids exactly once per panel layout. Called at
+    /// construction and again (idempotently) when a sequential session is
+    /// created, so direct and sequential renders always see the same stream
+    /// numbering — and therefore the same drawn content (FM3 operator
+    /// ribbons included from the first frame).
+    /// </summary>
+    private void AssignPanelStreamIds()
+    {
+        int noteStream = 0;
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+        {
+            PanelData panel = _panels[panelIndex];
+            PreparedPanel prepared = panel.Prepared;
+            panel.MainNoteStreamId = noteStream++;
+            panel.OperatorNoteStreamIds = new int[prepared.OperatorNotes.Length];
+            for (int operatorIndex = 0; operatorIndex < prepared.OperatorNotes.Length; operatorIndex++)
+                panel.OperatorNoteStreamIds[operatorIndex] = noteStream++;
+            panel.RhythmStreamId = panelIndex;
+            panel.NoiseStreamId = panelIndex;
+            panel.PlaybackStreamId = panelIndex;
+            panel.AggregateStreamId = panelIndex;
+        }
+    }
+
     internal SequentialRenderState CreateSequentialRenderState()
     {
+        // Idempotent: the same stream numbering is already assigned at
+        // construction so random-access and sequential renders always share
+        // one content set (operator ribbons included from frame 0).
+        AssignPanelStreamIds();
         var streams = new List<PreparedNote[]>();
         var rhythmStreams = new List<PreparedRhythmEvent[]>();
         var noiseStreams = new List<NoiseStateEvent[]>();
@@ -618,22 +644,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         {
             PanelData panel = _panels[panelIndex];
             PreparedPanel prepared = _panels[panelIndex].Prepared;
-            panel.MainNoteStreamId = streams.Count;
             streams.Add(prepared.MainNotes);
-            panel.OperatorNoteStreamIds = new int[prepared.OperatorNotes.Length];
             for (int operatorIndex = 0; operatorIndex < prepared.OperatorNotes.Length; operatorIndex++)
-            {
-                panel.OperatorNoteStreamIds[operatorIndex] = streams.Count;
                 streams.Add(prepared.OperatorNotes[operatorIndex]);
-            }
-
-            panel.RhythmStreamId = rhythmStreams.Count;
             rhythmStreams.Add(prepared.Rhythm);
-            panel.NoiseStreamId = noiseStreams.Count;
             noiseStreams.Add(prepared.Noise);
-            panel.PlaybackStreamId = playbackStreams.Count;
             playbackStreams.Add(prepared.SamplePlayback);
-            panel.AggregateStreamId = aggregateStreams.Count;
             aggregateStreams.Add(prepared.AggregateHits);
         }
         return new SequentialRenderState(
@@ -991,7 +1007,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         Span<byte> destination,
         bool drawSemantic = true)
     {
-        long relativeSample = OverlayLayout.FrameToSample(
+        long relativeSample = FrameSampleClock.SampleAtFrame(
             frameIndex,
             _timeline.SampleRate,
             FpsNumerator,
@@ -1019,7 +1035,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // Overview and device variants use a compact visual grammar: header
             // (name + current state), compact waveform/activity in the scope
             // region, and no piano-roll / pitch-gutter / operator content.
-            if (_layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
+            // Performance lanes keep the full roll grammar in full-width bands.
+            if (_layout.Variant is not (VisualizationLayoutVariant.DiagnosticGrid
+                or VisualizationLayoutVariant.PerformanceLanes))
             {
                 long waveformStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                 if (drawSemantic)
@@ -1482,8 +1500,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             rects.Add(_layout.GetHeaderRect(panelIndex));
             OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
             bool integratedScope =
-                _layout.Variant == VisualizationLayoutVariant.DiagnosticGrid
-                && _layout.HasRoll;
+                _layout.UsesIntegratedRoll;
             if (scopeFramePresent && integratedScope)
             {
                 // Corrscope replaces the complete body to the right of the
@@ -1790,8 +1807,18 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     /// <summary>Precomputes one gutter label per distinct sample identity (row order).</summary>
     private static string[] BuildSampleRowLabels(PreparedPanel prepared)
+        => BuildSampleRowTable(prepared).Labels;
+
+    private readonly record struct SampleRowTable(string[] Labels, Dictionary<string, int> RowByLabel);
+
+    /// <summary>
+    /// One preparation pass over the playback events: hash-based uniqueness,
+    /// one sort, and a label → row dictionary. O(S log S) instead of the
+    /// previous quadratic Contains/IndexOf scans.
+    /// </summary>
+    private static SampleRowTable BuildSampleRowTable(PreparedPanel prepared)
     {
-        var rows = new List<string>();
+        var distinct = new HashSet<string>(StringComparer.Ordinal);
         foreach (SamplePlaybackEvent e in prepared.SamplePlayback)
         {
             if (string.IsNullOrEmpty(e.SampleId))
@@ -1799,18 +1826,21 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             string label = ShortAssetLabel(
                 prepared.SamplesById.TryGetValue(e.SampleId, out SampleDefinition s) ? s.DisplayName : null,
                 e.SampleId);
-            if (!rows.Contains(label, StringComparer.Ordinal))
-                rows.Add(label);
+            distinct.Add(label);
         }
-        rows.Sort(StringComparer.Ordinal);
-        return rows.ToArray();
+        string[] labels = distinct.ToArray();
+        Array.Sort(labels, StringComparer.Ordinal);
+        var rowByLabel = new Dictionary<string, int>(labels.Length, StringComparer.Ordinal);
+        for (int i = 0; i < labels.Length; i++)
+            rowByLabel[labels[i]] = i;
+        return new SampleRowTable(labels, rowByLabel);
     }
 
     /// <summary>Precomputes the row index per playback event (parallel to <see cref="PreparedPanel.SamplePlayback"/>).</summary>
     private static int[] BuildSampleRowByPlaybackIndex(PreparedPanel prepared)
     {
+        SampleRowTable table = BuildSampleRowTable(prepared);
         var playback = prepared.SamplePlayback;
-        string[] labels = BuildSampleRowLabels(prepared);
         int[] rows = new int[playback.Length];
         for (int i = 0; i < playback.Length; i++)
         {
@@ -1821,8 +1851,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 string label = ShortAssetLabel(
                     prepared.SamplesById.TryGetValue(e.SampleId, out SampleDefinition s) ? s.DisplayName : null,
                     e.SampleId);
-                row = Array.IndexOf(labels, label);
-                if (row < 0)
+                if (!table.RowByLabel.TryGetValue(label, out row))
                     row = 0;
             }
             rows[i] = row;
@@ -1883,37 +1912,68 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // Compact overview/device panels share one static grammar: fill the
             // panel, open the scope region, draw the accent + channel name, and
             // skip all the full-grid chrome (pitch gutter, FM3 ribbons, rhythm
-            // rows, PCM lanes) that cannot fit.
-            if (_layout.Variant != VisualizationLayoutVariant.DiagnosticGrid)
+            // rows, PCM lanes) that cannot fit. Performance lanes keep the
+            // full-grid roll grammar but drop the boxed chrome.
+            if (_layout.Variant is not (VisualizationLayoutVariant.DiagnosticGrid
+                or VisualizationLayoutVariant.PerformanceLanes))
             {
                 DrawOverviewStaticPanel(frame, _panels[index]);
                 continue;
             }
 
-            FillRect(frame, panel, HeaderBackground);
-            FillRect(frame, timeline, TimelineBackground);
+            bool lanes = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes;
+            if (!lanes)
+            {
+                FillRect(frame, panel, HeaderBackground);
+                FillRect(frame, timeline, TimelineBackground);
+                StrokeRect(frame, panel, Border, 1);
+            }
+            else
+            {
+                FillRect(frame, timeline, TimelineBackground);
+            }
             // The scope region stays a transparent hole for the Corrscope
             // waveform, including DiagnosticGrid's integrated body where the
             // scope is the signal portion of the roll. Notes and lane chrome
             // drawn afterward remain visible over the hole.
             ClearRect(frame, scope);
-            StrokeRect(frame, panel, Border, 1);
 
-            OverlayColor accent = _panelAccents[index];
-            FillRect(frame, new OverlayRect(header.X, header.Y, 4, header.Height), accent);
-            if (header.Height > 0)
+            if (!lanes)
             {
-                // Channel name is clipped to its dedicated header slot so it
-                // can never collide with the live state or patch columns.
+                OverlayColor accent = _panelAccents[index];
+                FillRect(frame, new OverlayRect(header.X, header.Y, 4, header.Height), accent);
+                if (header.Height > 0)
+                {
+                    // Channel name is clipped to its dedicated header slot so it
+                    // can never collide with the live state or patch columns.
+                    OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
+                    DrawText(
+                        frame,
+                        nameSlot.X,
+                        nameSlot.Y + Math.Max(2, (nameSlot.Height - 14) / 2),
+                        Ellipsize(_panels[index].Label, 2, Math.Max(0, nameSlot.Width)),
+                        PrimaryText,
+                        2,
+                        nameSlot.Right);
+                }
+            }
+            else
+            {
+                // Lane label: compact scale-1 caption at the top of the pitch
+                // gutter, left-aligned so right-aligned pitch/rhythm labels in
+                // the same column stay readable.
                 OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
-                DrawText(
-                    frame,
-                    nameSlot.X,
-                    nameSlot.Y + Math.Max(2, (nameSlot.Height - 14) / 2),
-                    Ellipsize(_panels[index].Label, 2, Math.Max(0, nameSlot.Width)),
-                    PrimaryText,
-                    2,
-                    nameSlot.Right);
+                if (nameSlot.Width > 0)
+                {
+                    DrawText(
+                        frame,
+                        nameSlot.X,
+                        nameSlot.Y,
+                        Ellipsize(_panels[index].Label, 1, nameSlot.Width),
+                        PrimaryText,
+                        1,
+                        nameSlot.Right);
+                }
             }
 
             switch (_panels[index].TrackKind)
@@ -1965,6 +2025,17 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                         DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4), stateLabel, MutedText, 1, timeline.Right - 8);
                     }
                     break;
+            }
+        }
+
+        // Performance lanes: thin separators between adjacent bands instead of
+        // boxed panel borders, so the eye reads one shared time axis.
+        if (_layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            for (int index = 1; index < _panels.Length; index++)
+            {
+                int separatorY = _layout.GetPanelRect(index).Y;
+                DrawHorizontalLine(frame, 0, Width - 1, separatorY - 1, Border);
             }
         }
 
