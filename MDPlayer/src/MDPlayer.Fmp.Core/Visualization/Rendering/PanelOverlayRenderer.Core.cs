@@ -220,6 +220,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly AnalysisOverlayScene _analysisOverlay;
     private readonly RenderPerformanceMetrics _performance;
     private SequentialRenderState? _activeSequentialState;
+    internal bool TestDisableZohRuns { get; set; }
 
     /// <summary>
     /// Active-note flash (§9.1): 120 ms, 40% white mix, 120% max size, cubic

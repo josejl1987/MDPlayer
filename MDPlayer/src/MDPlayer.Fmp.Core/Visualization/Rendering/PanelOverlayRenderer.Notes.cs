@@ -691,8 +691,10 @@ internal sealed partial class PanelOverlayRenderer
         // segment, so rasterize each segment as exact alpha-batched runs.
         // This avoids a pitch lookup per column and keeps blending row-major
         // and exact (grid visible through translucent). Active/ornamented
-        // ribbons continue through the full per-column path.
-        if (!stipple
+        // ribbons continue through the full per-column path. TestDisableZohRuns
+        // forces the per-column reference for pixel-equivalence tests.
+        if (!TestDisableZohRuns
+            && !stipple
             && !stripe
             && !active
             && opacityFactor == 1.0
