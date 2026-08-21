@@ -687,19 +687,18 @@ internal sealed partial class PanelOverlayRenderer
         bool taper = note.ReleaseStyle == NoteReleaseStyle.Normal
             && note.EndSample - note.StartSample > _taperSamples;
 
-        // Most publishing notes are flat, inactive ribbons. Their geometry is
-        // constant in Y, so rasterize those pixels as contiguous opaque bands.
-        // This preserves the temporal opacity and release taper as deterministic
-        // quantized runs while avoiding a pitch lookup and strided writes for
-        // every pixel. Active/ornamented ribbons continue through the full path.
-        if (note.Pitch.Length == 0
-            && !stipple
+        // Inactive, non-decorated ribbons have constant Y per ZOH pitch
+        // segment, so rasterize each segment as exact alpha-batched runs.
+        // This avoids a pitch lookup per column and keeps blending row-major
+        // and exact (grid visible through translucent). Active/ornamented
+        // ribbons continue through the full per-column path.
+        if (!stipple
             && !stripe
             && !active
             && opacityFactor == 1.0
             && flashAmount == 0)
         {
-            DrawFlatPitchRibbonFast(
+            DrawZohPitchRibbonRuns(
                 frame,
                 note,
                 lane,
@@ -979,6 +978,221 @@ internal sealed partial class PanelOverlayRenderer
             if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
             FillColumnFractional(frame, x, top, bottom, fill, af, lane.Y, lane.Bottom);
         }
+    }
+
+    private void DrawZohPitchRibbonRuns(
+        Span<byte> frame,
+        PreparedNote note,
+        OverlayRect lane,
+        long currentSample,
+        OverlayColor fill,
+        int firstX,
+        int lastXExclusive,
+        double leftCoverage,
+        double rightCoverage,
+        long windowStart,
+        double samplesPerPixel,
+        double half,
+        bool taper,
+        double minMidi,
+        double maxMidi,
+        int playheadX)
+    {
+        int bodyFirst = Math.Max(lane.X, firstX);
+        int bodyLastExclusive = Math.Min(lane.Right, lastXExclusive);
+        if (bodyLastExclusive <= bodyFirst)
+        {
+            // Only edge columns may be visible.
+            if (firstX > lane.X && leftCoverage > 1e-3)
+            {
+                int x = firstX - 1;
+                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                if (sample < note.StartSample) sample = note.StartSample;
+                else if (sample > note.EndSample) sample = note.EndSample;
+                double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+                double af = leftCoverage * NormalRibbonOpacity * temporal;
+                if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                long sp = (long)Math.Round(sample);
+                double pitch = PitchContour.PitchAtSample(note, sp, _samplesPerFrame);
+                double cy = MidiToY(pitch, minMidi, maxMidi, lane);
+                FillColumnFractional(frame, x, cy - half, cy + half, fill, af, lane.Y, lane.Bottom);
+                if (_performance.Enabled) { _performance.RibbonColumnsEvaluated++; _performance.PitchSegmentsVisited++; }
+            }
+            if (lastXExclusive < lane.Right && rightCoverage > 1e-3)
+            {
+                int x = lastXExclusive;
+                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                if (sample < note.StartSample) sample = note.StartSample;
+                else if (sample > note.EndSample) sample = note.EndSample;
+                double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+                double af = rightCoverage * NormalRibbonOpacity * temporal;
+                if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                long sp = (long)Math.Round(sample);
+                double pitch = PitchContour.PitchAtSample(note, sp, _samplesPerFrame);
+                double cy = MidiToY(pitch, minMidi, maxMidi, lane);
+                FillColumnFractional(frame, x, cy - half, cy + half, fill, af, lane.Y, lane.Bottom);
+                if (_performance.Enabled) { _performance.RibbonColumnsEvaluated++; _performance.PitchSegmentsVisited++; }
+            }
+            return;
+        }
+
+        // Build ZOH pitch segments for the visible body interval.
+        // Each segment is constant pitch between pitch points.
+        PreparedPitchPoint[] pitchPoints = note.Pitch;
+        // Segments as (xStart, xEnd, pitch)
+        var segments = new List<(int x0, int x1, double pitch)>(Math.Max(1, pitchPoints.Length + 1));
+        int segStartX = bodyFirst;
+        double segPitch = note.InitialMidiNote;
+        int pitchIdx = -1;
+        // Find initial pitchIdx for segStartX's sample
+        {
+            double sampleAtSegStart = windowStart + (segStartX + 0.5 - lane.X) * samplesPerPixel;
+            long sp = (long)Math.Round(Math.Clamp(sampleAtSegStart, note.StartSample, note.EndSample));
+            // binary search for pitch point <= sp
+            int lo = 0, hi = pitchPoints.Length;
+            while (lo < hi) { int mid = lo + (hi - lo) / 2; if (pitchPoints[mid].SamplePosition <= sp) lo = mid + 1; else hi = mid; }
+            pitchIdx = lo - 1;
+            segPitch = pitchIdx < 0 ? note.InitialMidiNote : pitchPoints[pitchIdx].MidiNote;
+        }
+        // Collect pitch change X thresholds within body
+        for (int i = pitchIdx + 1; i < pitchPoints.Length; i++)
+        {
+            long ptSample = pitchPoints[i].SamplePosition;
+            if (ptSample < note.StartSample || ptSample > note.EndSample) continue;
+            // First x where round(sampleCenter) >= ptSample
+            int xThresh = FindFirstXForSample(ptSample, windowStart, samplesPerPixel, lane.X, bodyFirst, bodyLastExclusive);
+            if (xThresh <= segStartX) continue;
+            if (xThresh > bodyLastExclusive) break;
+            segments.Add((segStartX, xThresh, segPitch));
+            segStartX = xThresh;
+            segPitch = pitchPoints[i].MidiNote;
+            pitchIdx = i;
+        }
+        segments.Add((segStartX, bodyLastExclusive, segPitch));
+        if (_performance.Enabled) _performance.PitchSegmentsVisited += segments.Count;
+
+        // For each pitch segment, render its X interval as alpha-batched runs.
+        foreach (var (segX0, segX1, pitch) in segments)
+        {
+            if (segX1 <= segX0) continue;
+            double centreY = MidiToY(pitch, minMidi, maxMidi, lane);
+            double top = centreY - half;
+            double bottom = centreY + half;
+            int firstFull = Math.Max(lane.Y, (int)Math.Ceiling(top - 1e-9));
+            int lastFullExclusive = Math.Min(lane.Bottom, (int)Math.Floor(bottom + 1e-9));
+            if (lastFullExclusive <= firstFull && !(top < lane.Bottom && bottom > lane.Y)) continue;
+            double topCoverage = firstFull - top;
+            double bottomCoverage = bottom - lastFullExclusive;
+            bool hasTopFrac = topCoverage > 1e-3 && firstFull > lane.Y;
+            bool hasBottomFrac = bottomCoverage > 1e-3 && lastFullExclusive < lane.Bottom;
+
+            int segWidth = segX1 - segX0;
+            Span<double> segAlphaFactors = new double[segWidth];
+            Span<byte> segAlphaBytes = new byte[segWidth];
+            for (int i = 0; i < segWidth; i++)
+            {
+                int x = segX0 + i;
+                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                if (sample < note.StartSample) sample = note.StartSample;
+                else if (sample > note.EndSample) sample = note.EndSample;
+                double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+                double af = NormalRibbonOpacity * temporal;
+                if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                segAlphaFactors[i] = af;
+                segAlphaBytes[i] = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
+                if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+            }
+            // Batch by alpha byte
+            int runStart = 0;
+            byte prevAlpha = segAlphaBytes[0];
+            for (int i = 1; i <= segWidth; i++)
+            {
+                bool flush = i == segWidth || segAlphaBytes[i] != prevAlpha;
+                if (flush)
+                {
+                    int runLeft = segX0 + runStart;
+                    int runRight = segX0 + i;
+                    if (prevAlpha != 0)
+                    {
+                        if (lastFullExclusive > firstFull)
+                        {
+                            OverlayColor src = fill.WithAlpha(prevAlpha);
+                            for (int y = firstFull; y < lastFullExclusive; y++)
+                                for (int x = runLeft; x < runRight; x++)
+                                    BlendPixel(frame, x, y, src);
+                            if (_performance.Enabled) _performance.RibbonPixelsBlended += (long)(runRight - runLeft) * (lastFullExclusive - firstFull);
+                        }
+                        if (hasTopFrac)
+                        {
+                            int y = firstFull - 1;
+                            for (int x = runLeft; x < runRight; x++)
+                            {
+                                double af = segAlphaFactors[x - segX0];
+                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
+                                if (a != 0) { BlendPixel(frame, x, y, fill.WithAlpha(a)); if (_performance.Enabled) _performance.RibbonPixelsBlended++; }
+                            }
+                        }
+                        if (hasBottomFrac)
+                        {
+                            int y = lastFullExclusive;
+                            for (int x = runLeft; x < runRight; x++)
+                            {
+                                double af = segAlphaFactors[x - segX0];
+                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
+                                if (a != 0) { BlendPixel(frame, x, y, fill.WithAlpha(a)); if (_performance.Enabled) _performance.RibbonPixelsBlended++; }
+                            }
+                        }
+                    }
+                    if (i < segWidth) { runStart = i; prevAlpha = segAlphaBytes[i]; }
+                }
+            }
+        }
+
+        // Edge columns with fractional horizontal coverage, now with exact temporal/taper and correct pitch per edge.
+        if (firstX > lane.X && leftCoverage > 1e-3)
+        {
+            int x = firstX - 1;
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            if (sample < note.StartSample) sample = note.StartSample;
+            else if (sample > note.EndSample) sample = note.EndSample;
+            double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+            double af = leftCoverage * NormalRibbonOpacity * temporal;
+            if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+            long sp = (long)Math.Round(sample);
+            double pitch = PitchContour.PitchAtSample(note, sp, _samplesPerFrame);
+            double cy = MidiToY(pitch, minMidi, maxMidi, lane);
+            FillColumnFractional(frame, x, cy - half, cy + half, fill, af, lane.Y, lane.Bottom);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+        }
+        if (lastXExclusive < lane.Right && rightCoverage > 1e-3)
+        {
+            int x = lastXExclusive;
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            if (sample < note.StartSample) sample = note.StartSample;
+            else if (sample > note.EndSample) sample = note.EndSample;
+            double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+            double af = rightCoverage * NormalRibbonOpacity * temporal;
+            if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+            long sp = (long)Math.Round(sample);
+            double pitch = PitchContour.PitchAtSample(note, sp, _samplesPerFrame);
+            double cy = MidiToY(pitch, minMidi, maxMidi, lane);
+            FillColumnFractional(frame, x, cy - half, cy + half, fill, af, lane.Y, lane.Bottom);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+        }
+    }
+
+    private int FindFirstXForSample(long targetSample, long windowStart, double samplesPerPixel, int laneX, int low, int high)
+    {
+        int lo = low, hi = high;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            double sampleCenter = windowStart + (mid + 0.5 - laneX) * samplesPerPixel;
+            long sp = (long)Math.Round(sampleCenter);
+            if (sp < targetSample) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     private void FillFlatOpaqueBand(
