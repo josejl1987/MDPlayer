@@ -2263,6 +2263,19 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         Span<byte> gridTarget;
         byte[] scratch = null;
         bool willCache = canCacheLane;
+        // Constant-fold the translucent black-key band: inside the lane the
+        // grid always lands on the uniform static TimelineBackground, so
+        // blending per pixel re-computes one constant millions of times.
+        // Resolve it here once and fill opaquely — identical integer
+        // equation to BlendPixel, evaluated a single time.
+        OverlayColor bandSrc = BlackKeyBand;
+        int bA = bandSrc.A, bInv = 255 - bA;
+        OverlayColor under = TimelineBackground;
+        OverlayColor opaqueBand = new(
+            (byte)((bandSrc.R * bA + under.R * bInv + 127) / 255),
+            (byte)((bandSrc.G * bA + under.G * bInv + 127) / 255),
+            (byte)((bandSrc.B * bA + under.B * bInv + 127) / 255),
+            255);
         if (willCache)
         {
             byte[] cache = _laneGridCache[panelIndex];
@@ -2294,7 +2307,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 int top = Math.Min(yTop, yBottom);
                 int bottom = Math.Max(yTop, yBottom);
                 if (BlackPitchClasses.Contains(Mod(midi, 12)))
-                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
+                    FillRectOpaque(gridTarget, lane.X, lane.Right, top, bottom, opaqueBand);
 
                 if (Mod(midi, 12) == 0)
                 {
