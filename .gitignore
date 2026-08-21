@@ -56,6 +56,67 @@ review-output/
 .DS_Store
 Thumbs.db
 
+# --- Root-level upstream/vendored noise (Windows MDPlayer sources, native
+# builds, generated fixtures) that are not part of the Linux MDPlayer.Fmp
+# tree. The project itself lives under MDPlayer/. User media, patches and
+# installers at the root are intentionally left tracked/visible.
+third_party/
+*.cs
+*.resx
+*.Designer.cs
+*.csproj
+*.sln
+*.props
+*.targets
+MDPlayer/native/
+MDPlayer/MDPlayer/
+MDPlayer/test-video-output/
+MDPlayer/benchmarks/**/bin/
+MDPlayer/benchmarks/**/obj/
+*.cpp
+*.h
+*.c
+*.def
+*.map
+*.bak
+*.zip
+*.nsh
+*.nsi
+/*.axaml
+/*.axaml.cs
+*.visualization/
+*.scope/
+*.OVI
+*.wav
+*.metadata.json
+DefaultVolumeBalance_*.xml
+CACHEDIR.TAG
+tools.lock.json
+reasonix.toml
+report-manifest.json
+capture-manifest.json
+corpus.manifest.json
+acceptance-matrix.json
+baseline-tests.json
+files.json
+manifest.json
+index.json
+status.json
+meta.json
+track-map.json
+tasks.md
+plan.md
+spec.md
+research.md
+charter.md
+retrospective.yaml
+skills-registry.md
+agent_profiles_manifest.json
+synthesis-manifest.yaml
+requirements.lock
+KGSDIR.TAG
+
+
 # --- Local scratch (keep generic temp out of history) ---
 *.tmp
 *.log
@@ -86,3 +147,5 @@ MDPlayer/nuget-test/
 MDPlayer/packages/
 MDPlayer/test-video-output/
 MDPlayer/e2e-test.*
+MDPlayer/tests/Corpus/local/
+.kittify/skills-manifest.json
