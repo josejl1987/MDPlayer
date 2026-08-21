@@ -221,6 +221,11 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly RenderPerformanceMetrics _performance;
     private SequentialRenderState? _activeSequentialState;
     internal bool TestDisableZohRuns { get; set; }
+    private readonly double[][] _laneBaseAlphas;
+    private readonly long[] _laneBaseAlphaSamples;
+    private readonly long[] _laneBaseAlphaWindowStarts;
+    private readonly double[] _laneBaseAlphaSamplesPerPixel;
+    private readonly int[] _laneBaseAlphaPlayheadX;
 
     /// <summary>
     /// Active-note flash (§9.1): 120 ms, 40% white mix, 120% max size, cubic
@@ -320,6 +325,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             palette: _options.Palette);
         _panels = BuildPanels();
         AssignPanelStreamIds();
+        _laneBaseAlphas = new double[_panels.Length][];
+        _laneBaseAlphaSamples = new long[_panels.Length];
+        _laneBaseAlphaWindowStarts = new long[_panels.Length];
+        _laneBaseAlphaSamplesPerPixel = new double[_panels.Length];
+        _laneBaseAlphaPlayheadX = new int[_panels.Length];
+        Array.Fill(_laneBaseAlphaSamples, long.MinValue);
         _activityLabelCounts = new int[_panels.Length];
         _activityLabelCache = new string[_panels.Length];
         _headerStateInputs = new string[_panels.Length];
@@ -628,6 +639,31 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             panel.PlaybackStreamId = panelIndex;
             panel.AggregateStreamId = panelIndex;
         }
+    }
+
+    private double[] GetBaseAlphasForLane(int panelIndex, OverlayRect lane, long windowStart, double samplesPerPixel, long currentSample, int playheadX)
+    {
+        if (_laneBaseAlphas[panelIndex] != null
+            && _laneBaseAlphaSamples[panelIndex] == currentSample
+            && _laneBaseAlphaWindowStarts[panelIndex] == windowStart
+            && _laneBaseAlphaSamplesPerPixel[panelIndex] == samplesPerPixel
+            && _laneBaseAlphaPlayheadX[panelIndex] == playheadX
+            && _laneBaseAlphas[panelIndex].Length == lane.Width)
+            return _laneBaseAlphas[panelIndex];
+        double[] alphas = new double[lane.Width];
+        for (int i = 0; i < lane.Width; i++)
+        {
+            int x = lane.X + i;
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
+            alphas[i] = NormalRibbonOpacity * temporal;
+        }
+        _laneBaseAlphas[panelIndex] = alphas;
+        _laneBaseAlphaSamples[panelIndex] = currentSample;
+        _laneBaseAlphaWindowStarts[panelIndex] = windowStart;
+        _laneBaseAlphaSamplesPerPixel[panelIndex] = samplesPerPixel;
+        _laneBaseAlphaPlayheadX[panelIndex] = playheadX;
+        return alphas;
     }
 
     internal SequentialRenderState CreateSequentialRenderState()

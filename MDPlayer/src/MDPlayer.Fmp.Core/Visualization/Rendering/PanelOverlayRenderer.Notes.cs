@@ -704,6 +704,7 @@ internal sealed partial class PanelOverlayRenderer
                 frame,
                 note,
                 lane,
+                panel.Index,
                 currentSample,
                 fill,
                 firstX,
@@ -986,6 +987,7 @@ internal sealed partial class PanelOverlayRenderer
         Span<byte> frame,
         PreparedNote note,
         OverlayRect lane,
+        int panelIndex,
         long currentSample,
         OverlayColor fill,
         int firstX,
@@ -1073,6 +1075,8 @@ internal sealed partial class PanelOverlayRenderer
         segments.Add((segStartX, bodyLastExclusive, segPitch));
         if (_performance.Enabled) _performance.PitchSegmentsVisited += segments.Count;
 
+        double[] baseAlphas = GetBaseAlphasForLane(panelIndex, lane, windowStart, samplesPerPixel, currentSample, playheadX);
+
         // For each pitch segment, render its X interval as alpha-batched runs.
         foreach (var (segX0, segX1, pitch) in segments)
         {
@@ -1094,12 +1098,15 @@ internal sealed partial class PanelOverlayRenderer
             for (int i = 0; i < segWidth; i++)
             {
                 int x = segX0 + i;
-                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
-                if (sample < note.StartSample) sample = note.StartSample;
-                else if (sample > note.EndSample) sample = note.EndSample;
-                double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
-                double af = NormalRibbonOpacity * temporal;
-                if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                double baseAf = baseAlphas[x - lane.X];
+                double af = baseAf;
+                if (taper)
+                {
+                    double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                    if (sample < note.StartSample) sample = note.StartSample;
+                    else if (sample > note.EndSample) sample = note.EndSample;
+                    af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                }
                 segAlphaFactors[i] = af;
                 segAlphaBytes[i] = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
                 if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
