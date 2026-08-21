@@ -16,45 +16,51 @@ public sealed class RibbonExactnessTests
     public void ZohRuns_PixelIdenticalToPerColumn_ForFlatNote()
     {
         var timeline = CreateDenseTimelineForRibbonTest(flat: true, pitchBends: 0);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] withZoh = new byte[renderer.FrameByteCount];
-        byte[] withoutZoh = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, withZoh);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, withoutZoh);
-        AssertEqualWithDiff(withZoh, withoutZoh, renderer.Width, "Flat note");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] withZoh = new byte[rendererA.FrameByteCount];
+        byte[] withoutZoh = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, withZoh);
+        rendererB.RenderCompositeFrame(2, scope, withoutZoh);
+        AssertEqualWithDiff(withZoh, withoutZoh, rendererA.Width, "Flat note");
     }
 
     [Fact]
     public void ZohRuns_PixelIdentical_ForPitchBend()
     {
         var timeline = CreateDenseTimelineForRibbonTest(flat: false, pitchBends: 1);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] withZoh = new byte[renderer.FrameByteCount];
-        byte[] withoutZoh = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, withZoh);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, withoutZoh);
-        AssertEqualWithDiff(withZoh, withoutZoh, renderer.Width, "Pitch bend");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] withZoh = new byte[rendererA.FrameByteCount];
+        byte[] withoutZoh = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, withZoh);
+        rendererB.RenderCompositeFrame(2, scope, withoutZoh);
+        AssertEqualWithDiff(withZoh, withoutZoh, rendererA.Width, "Pitch bend");
     }
 
     [Fact]
     public void ZohRuns_PixelIdentical_ForMultiplePitchChanges()
     {
         var timeline = CreateDenseTimelineForRibbonTest(flat: false, pitchBends: 3);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] withZoh = new byte[renderer.FrameByteCount];
-        byte[] withoutZoh = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, withZoh);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, withoutZoh);
-        AssertEqualWithDiff(withZoh, withoutZoh, renderer.Width, "Multiple pitch changes");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] withZoh = new byte[rendererA.FrameByteCount];
+        byte[] withoutZoh = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, withZoh);
+        rendererB.RenderCompositeFrame(2, scope, withoutZoh);
+        AssertEqualWithDiff(withZoh, withoutZoh, rendererA.Width, "Multiple pitch changes");
     }
 
     private static void AssertEqualWithDiff(byte[] a, byte[] b, int width, string label)
@@ -102,31 +108,35 @@ public sealed class RibbonExactnessTests
     [Fact]
     public void ZohRuns_PixelIdentical_ForBlackKeyBand()
     {
-        var timeline = CreateTimelineWithNote(800, 3200, 61, 0); // C# black key
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var timeline = CreateTimelineWithNote(800, 3200, 61, 0);
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "Black-key band");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "Black-key band");
     }
 
     [Fact]
     public void ZohRuns_PixelIdentical_ForGridLine()
     {
         var timeline = CreateTimelineWithNote(800, 3200, 60, 0); // C grid line
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "Grid line");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "Grid line");
     }
 
     [Fact]
@@ -134,15 +144,17 @@ public sealed class RibbonExactnessTests
     {
         // Start/end at fractional X (801 vs 800 gives 1px shift with different coverage)
         var timeline = CreateTimelineWithNote(801, 3201, 60.5, 0);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "Fractional edges");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "Fractional edges");
     }
 
     [Fact]
@@ -153,16 +165,18 @@ public sealed class RibbonExactnessTests
         var futureTimeline = CreateTimelineWithNote(3000, 4000, 60, 0);
         foreach (var timeline in new[] { pastTimeline, futureTimeline })
         {
-            var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
-                new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-            byte[] a = new byte[renderer.FrameByteCount];
-            byte[] b = new byte[renderer.FrameByteCount];
-            var scope = new byte[renderer.ScopeFrameByteCount];
-            renderer.RenderCompositeFrame(2, scope, a);
-            renderer.TestDisableZohRuns = true;
-            renderer.RenderCompositeFrame(2, scope, b);
+            var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
             string label = timeline == pastTimeline ? "Past opacity" : "Future opacity";
-            AssertEqualWithDiff(a, b, renderer.Width, label);
+            AssertEqualWithDiff(a, b, rendererA.Width, label);
         }
     }
 
@@ -171,16 +185,17 @@ public sealed class RibbonExactnessTests
     {
         // Note covering playhead (playhead at lane center, note spanning it)
         var timeline = CreateTimelineWithNote(1500, 1700, 60, 0);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        // Frame 2's playhead is at 1600, note 1500-1700 covers it
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "Playhead contact");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "Playhead contact");
     }
 
     [Fact]
@@ -188,47 +203,52 @@ public sealed class RibbonExactnessTests
     {
         // Long note with Normal release where taper applies at tail
         var timeline = CreateTimelineWithNote(0, 5000, 60, 0);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        // Frame where note's tail is visible
-        renderer.RenderCompositeFrame(5, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(5, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "Release taper");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(5, scope, a);
+        rendererB.RenderCompositeFrame(5, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "Release taper");
     }
 
     [Fact]
     public void ZohRuns_PixelIdentical_ForSsgStripe()
     {
         var timeline = CreateTimelineWithNote(800, 3200, 60, 0, VisualizationNoteMode.SsgEnvelopeTone);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
         // SSG stripe is not handled by ZOH (falls back to per-column), so both paths are per-column and should match
-        AssertEqualWithDiff(a, b, renderer.Width, "SSG stripe");
+        AssertEqualWithDiff(a, b, rendererA.Width, "SSG stripe");
     }
 
     [Fact]
     public void ZohRuns_PixelIdentical_ForSsgStipple()
     {
         var timeline = CreateTimelineWithNote(800, 3200, 60, 0, VisualizationNoteMode.SsgToneNoise);
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "SSG stipple");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "SSG stipple");
     }
 
     [Fact]
@@ -247,14 +267,16 @@ public sealed class RibbonExactnessTests
             Notes = notes,
             Instruments = new[] { new InstrumentDefinition("fm:op", "fm", 4, 3, 0, 2, new[] { new FmOperatorDefinition(31, 10, 5, 4, 8, 20, 1, 2, 0, false, 0) }) },
         };
-        var renderer = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+        var rendererA = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
             new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
-        byte[] a = new byte[renderer.FrameByteCount];
-        byte[] b = new byte[renderer.FrameByteCount];
-        var scope = new byte[renderer.ScopeFrameByteCount];
-        renderer.RenderCompositeFrame(2, scope, a);
-        renderer.TestDisableZohRuns = true;
-        renderer.RenderCompositeFrame(2, scope, b);
-        AssertEqualWithDiff(a, b, renderer.Width, "FM3 operator");
+        var rendererB = new PanelOverlayRenderer(timeline, RendererTestLayout.Build(timeline, 960, 540, channels: VisualizationChannelFilter.Active),
+            new PanelOverlayRenderer.Options { FpsNumerator = Fps, EnablePerformanceMetrics = false });
+        rendererB.TestDisableZohRuns = true;
+        byte[] a = new byte[rendererA.FrameByteCount];
+        byte[] b = new byte[rendererB.FrameByteCount];
+        var scope = new byte[rendererA.ScopeFrameByteCount];
+        rendererA.RenderCompositeFrame(2, scope, a);
+        rendererB.RenderCompositeFrame(2, scope, b);
+        AssertEqualWithDiff(a, b, rendererA.Width, "FM3 operator");
     }
 }
