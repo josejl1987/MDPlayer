@@ -226,6 +226,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly long[] _laneBaseAlphaWindowStarts;
     private readonly double[] _laneBaseAlphaSamplesPerPixel;
     private readonly int[] _laneBaseAlphaPlayheadX;
+    private readonly byte[][] _laneGridCache;
+    private readonly double[] _laneGridMinMidi;
+    private readonly double[] _laneGridMaxMidi;
 
     /// <summary>
     /// Active-note flash (§9.1): 120 ms, 40% white mix, 120% max size, cubic
@@ -331,6 +334,10 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _laneBaseAlphaSamplesPerPixel = new double[_panels.Length];
         _laneBaseAlphaPlayheadX = new int[_panels.Length];
         Array.Fill(_laneBaseAlphaSamples, long.MinValue);
+        _laneGridCache = new byte[_panels.Length][];
+        _laneGridMinMidi = new double[_panels.Length];
+        _laneGridMaxMidi = new double[_panels.Length];
+        for (int i = 0; i < _panels.Length; i++) { _laneGridMinMidi[i] = double.NaN; _laneGridMaxMidi[i] = double.NaN; }
         _activityLabelCounts = new int[_panels.Length];
         _activityLabelCache = new string[_panels.Length];
         _headerStateInputs = new string[_panels.Length];
@@ -2172,13 +2179,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
         if (camera == null)
         {
-            // Fallback: use default range.
-            DrawPitchGridRange(frame, lane, timeline, 48, 72);
+            DrawPitchGridRange(frame, lane, timeline, 48, 72, panel.Index);
             return;
         }
 
         var (minMidi, maxMidi) = sharedRange ?? camera.GetPreciseRange(currentSample);
-        DrawPitchGridRange(frame, lane, timeline, minMidi, maxMidi);
+        DrawPitchGridRange(frame, lane, timeline, minMidi, maxMidi, panel.Index);
     }
 
     /// <summary>
@@ -2204,10 +2210,27 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         DrawText(frame, x, labelY, label, TertiaryText, 1, maxX);
     }
 
-    private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi)
+    private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi, int panelIndex = -1)
     {
         if (lane.Width <= 0 || lane.Height <= 0)
             return;
+        // Grid cache disabled: see comment at end of method.
+        // if (panelIndex >= 0 && panelIndex < _laneGridCache.Length)
+        // {
+        //     byte[] cached = _laneGridCache[panelIndex];
+        //     if (cached != null && cached.Length == lane.Width * lane.Height * 4
+        //         && _laneGridMinMidi[panelIndex] == minMidi && _laneGridMaxMidi[panelIndex] == maxMidi)
+        //     {
+        //         int laneRowBytes = lane.Width * 4;
+        //         for (int y = 0; y < lane.Height; y++)
+        //         {
+        //             int srcOffset = y * laneRowBytes;
+        //             int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
+        //             cached.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
+        //         }
+        //         return;
+        //     }
+        // }
         int firstSemitone = (int)Math.Floor(minMidi);
         int lastSemitone = (int)Math.Ceiling(maxMidi);
         for (int midi = firstSemitone; midi <= lastSemitone; midi++)
@@ -2240,6 +2263,25 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 }
             }
         }
+        // if (panelIndex >= 0 && panelIndex < _laneGridCache.Length)
+        // {
+        //     int laneRowBytes = lane.Width * 4;
+        //     byte[] cache = _laneGridCache[panelIndex];
+        //     int needed = lane.Width * lane.Height * 4;
+        //     if (cache == null || cache.Length != needed)
+        //     {
+        //         cache = new byte[needed];
+        //         _laneGridCache[panelIndex] = cache;
+        //     }
+        //     for (int y = 0; y < lane.Height; y++)
+        //     {
+        //         int srcOffset = ((lane.Y + y) * Width + lane.X) * 4;
+        //         int dstOffset = y * laneRowBytes;
+        //         frame.Slice(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(dstOffset, laneRowBytes));
+        //     }
+        //     _laneGridMinMidi[panelIndex] = minMidi;
+        //     _laneGridMaxMidi[panelIndex] = maxMidi;
+        // }
     }
 
     private readonly struct RectCopyPlan
