@@ -2214,23 +2214,46 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     {
         if (lane.Width <= 0 || lane.Height <= 0)
             return;
-        // Grid cache disabled: see comment at end of method.
-        // if (panelIndex >= 0 && panelIndex < _laneGridCache.Length)
-        // {
-        //     byte[] cached = _laneGridCache[panelIndex];
-        //     if (cached != null && cached.Length == lane.Width * lane.Height * 4
-        //         && _laneGridMinMidi[panelIndex] == minMidi && _laneGridMaxMidi[panelIndex] == maxMidi)
-        //     {
-        //         int laneRowBytes = lane.Width * 4;
-        //         for (int y = 0; y < lane.Height; y++)
-        //         {
-        //             int srcOffset = y * laneRowBytes;
-        //             int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
-        //             cached.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
-        //         }
-        //         return;
-        //     }
-        // }
+        bool laneCached = false;
+        bool canCacheLane = panelIndex >= 0 && panelIndex < _laneGridCache.Length && !_layout.UsesIntegratedRoll;
+        if (canCacheLane)
+        {
+            byte[] cached = _laneGridCache[panelIndex];
+            if (cached != null && cached.Length == lane.Width * lane.Height * 4
+                && _laneGridMinMidi[panelIndex] == minMidi && _laneGridMaxMidi[panelIndex] == maxMidi)
+            {
+                int laneRowBytes = lane.Width * 4;
+                for (int y = 0; y < lane.Height; y++)
+                {
+                    int srcOffset = y * laneRowBytes;
+                    int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
+                    cached.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
+                }
+                laneCached = true;
+            }
+        }
+        if (laneCached)
+        {
+            // Lane grid (black bands + C lines) is cached; still need to draw
+            // pitch labels which live in the timeline gutter, not the lane.
+            int firstLabelSemitone = (int)Math.Floor(minMidi);
+            int lastLabelSemitone = (int)Math.Ceiling(maxMidi);
+            for (int midi = firstLabelSemitone; midi <= lastLabelSemitone; midi++)
+            {
+                if (Mod(midi, 12) == 0)
+                {
+                    int octaveIndex = midi / 12 - 1;
+                    if ((uint)octaveIndex < COctaveLabels.Length)
+                    {
+                        string label = COctaveLabels[octaveIndex];
+                        int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
+                        if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
+                            DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
+                    }
+                }
+            }
+            return;
+        }
         int firstSemitone = (int)Math.Floor(minMidi);
         int lastSemitone = (int)Math.Ceiling(maxMidi);
         for (int midi = firstSemitone; midi <= lastSemitone; midi++)
@@ -2263,25 +2286,25 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 }
             }
         }
-        // if (panelIndex >= 0 && panelIndex < _laneGridCache.Length)
-        // {
-        //     int laneRowBytes = lane.Width * 4;
-        //     byte[] cache = _laneGridCache[panelIndex];
-        //     int needed = lane.Width * lane.Height * 4;
-        //     if (cache == null || cache.Length != needed)
-        //     {
-        //         cache = new byte[needed];
-        //         _laneGridCache[panelIndex] = cache;
-        //     }
-        //     for (int y = 0; y < lane.Height; y++)
-        //     {
-        //         int srcOffset = ((lane.Y + y) * Width + lane.X) * 4;
-        //         int dstOffset = y * laneRowBytes;
-        //         frame.Slice(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(dstOffset, laneRowBytes));
-        //     }
-        //     _laneGridMinMidi[panelIndex] = minMidi;
-        //     _laneGridMaxMidi[panelIndex] = maxMidi;
-        // }
+        if (panelIndex >= 0 && panelIndex < _laneGridCache.Length && !_layout.UsesIntegratedRoll)
+        {
+            int laneRowBytes = lane.Width * 4;
+            byte[] cache = _laneGridCache[panelIndex];
+            int needed = lane.Width * lane.Height * 4;
+            if (cache == null || cache.Length != needed)
+            {
+                cache = new byte[needed];
+                _laneGridCache[panelIndex] = cache;
+            }
+            for (int y = 0; y < lane.Height; y++)
+            {
+                int srcOffset = ((lane.Y + y) * Width + lane.X) * 4;
+                int dstOffset = y * laneRowBytes;
+                frame.Slice(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(dstOffset, laneRowBytes));
+            }
+            _laneGridMinMidi[panelIndex] = minMidi;
+            _laneGridMaxMidi[panelIndex] = maxMidi;
+        }
     }
 
     private readonly struct RectCopyPlan
