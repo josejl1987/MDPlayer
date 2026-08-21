@@ -2216,13 +2216,13 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             return;
         bool laneCached = false;
         bool canCacheLane = panelIndex >= 0 && panelIndex < _laneGridCache.Length && !_layout.UsesIntegratedRoll;
+        int laneRowBytes = lane.Width * 4;
         if (canCacheLane)
         {
             byte[] cached = _laneGridCache[panelIndex];
             if (cached != null && cached.Length == lane.Width * lane.Height * 4
                 && _laneGridMinMidi[panelIndex] == minMidi && _laneGridMaxMidi[panelIndex] == maxMidi)
             {
-                int laneRowBytes = lane.Width * 4;
                 for (int y = 0; y < lane.Height; y++)
                 {
                     int srcOffset = y * laneRowBytes;
@@ -2256,39 +2256,15 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         }
         int firstSemitone = (int)Math.Floor(minMidi);
         int lastSemitone = (int)Math.Ceiling(maxMidi);
-        for (int midi = firstSemitone; midi <= lastSemitone; midi++)
+        // When caching, render into a scratch lane buffer first so the cached
+        // bytes are exactly what a cache hit would blit — including the
+        // TimelineBackground the bands are translucent over. The static frame
+        // already carries that background inside the lane rect.
+        Span<byte> gridTarget;
+        byte[] scratch = null;
+        bool willCache = canCacheLane;
+        if (willCache)
         {
-            int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
-            int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
-            int top = Math.Min(yTop, yBottom);
-            int bottom = Math.Max(yTop, yBottom);
-            if (BlackPitchClasses.Contains(Mod(midi, 12)))
-                FillRect(frame, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
-
-            if (Mod(midi, 12) == 0)
-            {
-                DrawHorizontalLine(frame, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
-                // §20.1: use the precomputed label — no per-frame string formatting.
-                int octaveIndex = midi / 12 - 1;
-                // Clamp for relative/unusual pitch models (e.g. SPC relative
-                // semitones) that can produce midi=0 or negative values.
-                if ((uint)octaveIndex < COctaveLabels.Length)
-                {
-                    string label = COctaveLabels[octaveIndex];
-                    int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
-                    // Pitch labels are dynamic and must remain inside the
-                    // lane that will be restored by a sequential session.
-                    // Without this guard a bottom-edge glyph can spill into
-                    // the next panel header and leave stale pixels after a
-                    // seek or frame transition.
-                    if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
-                        DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
-                }
-            }
-        }
-        if (panelIndex >= 0 && panelIndex < _laneGridCache.Length && !_layout.UsesIntegratedRoll)
-        {
-            int laneRowBytes = lane.Width * 4;
             byte[] cache = _laneGridCache[panelIndex];
             int needed = lane.Width * lane.Height * 4;
             if (cache == null || cache.Length != needed)
@@ -2296,11 +2272,60 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 cache = new byte[needed];
                 _laneGridCache[panelIndex] = cache;
             }
+            // Seed with the static frame's lane rect: the translucent band
+            // blend must land on the same background a cold render would see.
             for (int y = 0; y < lane.Height; y++)
             {
                 int srcOffset = ((lane.Y + y) * Width + lane.X) * 4;
-                int dstOffset = y * laneRowBytes;
-                frame.Slice(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(dstOffset, laneRowBytes));
+                _staticFrame.AsSpan(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(y * laneRowBytes, laneRowBytes));
+            }
+            scratch = cache;
+            gridTarget = scratch;
+        }
+        else
+        {
+            gridTarget = frame;
+        }
+        {
+            for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
+            {
+                int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
+                int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
+                int top = Math.Min(yTop, yBottom);
+                int bottom = Math.Max(yTop, yBottom);
+                if (BlackPitchClasses.Contains(Mod(midi, 12)))
+                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
+
+                if (Mod(midi, 12) == 0)
+                {
+                    DrawHorizontalLine(gridTarget, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
+                    // §20.1: use the precomputed label — no per-frame string formatting.
+                    int octaveIndex = midi / 12 - 1;
+                    // Clamp for relative/unusual pitch models (e.g. SPC relative
+                    // semitones) that can produce midi=0 or negative values.
+                    if ((uint)octaveIndex < COctaveLabels.Length)
+                    {
+                        string label = COctaveLabels[octaveIndex];
+                        int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
+                        // Pitch labels are dynamic and must remain inside the
+                        // lane that will be restored by a sequential session.
+                        // Without this guard a bottom-edge glyph can spill into
+                        // the next panel header and leave stale pixels after a
+                        // seek or frame transition.
+                        if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
+                            DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
+                    }
+                }
+            }
+        }
+        if (willCache)
+        {
+            // Blit the freshly rendered lane buffer to the frame.
+            for (int y = 0; y < lane.Height; y++)
+            {
+                int srcOffset = y * laneRowBytes;
+                int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
+                scratch.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
             }
             _laneGridMinMidi[panelIndex] = minMidi;
             _laneGridMaxMidi[panelIndex] = maxMidi;

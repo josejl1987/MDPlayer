@@ -1077,6 +1077,17 @@ internal sealed partial class PanelOverlayRenderer
 
         double[] baseAlphas = GetBaseAlphasForLane(panelIndex, lane, windowStart, samplesPerPixel, currentSample, playheadX);
 
+        // Taper-tail X threshold: columns at or beyond this need per-X taper
+        // evaluation; everything before it has a constant final alpha per
+        // baseAf run.
+        int taperTailX = int.MaxValue;
+        if (taper)
+        {
+            double tailStartSample = note.EndSample - _taperSamples;
+            taperTailX = FindFirstXForSample(
+                (long)Math.Ceiling(tailStartSample), windowStart, samplesPerPixel, lane.X, bodyFirst, bodyLastExclusive);
+        }
+
         // For each pitch segment, render its X interval as alpha-batched runs.
         foreach (var (segX0, segX1, pitch) in segments)
         {
@@ -1092,67 +1103,99 @@ internal sealed partial class PanelOverlayRenderer
             bool hasTopFrac = topCoverage > 1e-3 && firstFull > lane.Y;
             bool hasBottomFrac = bottomCoverage > 1e-3 && lastFullExclusive < lane.Bottom;
 
-            int segWidth = segX1 - segX0;
-            Span<double> segAlphaFactors = new double[segWidth];
-            Span<byte> segAlphaBytes = new byte[segWidth];
-            for (int i = 0; i < segWidth; i++)
+            // Split the segment into the constant-alpha head (before the
+            // taper tail; batched directly from the baseAf runs) and the
+            // per-column tail (at most ~4 px at 60 fps for a 60 ms window).
+            int headEnd = Math.Min(segX1, Math.Max(segX0, taperTailX));
+
+            // ---- Head: batch by baseAf runs (each is one alpha byte). ----
+            int x = segX0;
+            while (x < headEnd)
             {
-                int x = segX0 + i;
                 double baseAf = baseAlphas[x - lane.X];
-                double af = baseAf;
-                if (taper)
+                int runEnd = x + 1;
+                while (runEnd < headEnd && baseAlphas[runEnd - lane.X] == baseAf)
+                    runEnd++;
+                byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * baseAf), 0, 255);
+                if (_performance.Enabled) _performance.RibbonColumnsEvaluated += runEnd - x;
+                if (alphaByte != 0)
                 {
-                    double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
-                    if (sample < note.StartSample) sample = note.StartSample;
-                    else if (sample > note.EndSample) sample = note.EndSample;
-                    af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
-                }
-                segAlphaFactors[i] = af;
-                segAlphaBytes[i] = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
-                if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
-            }
-            // Batch by alpha byte
-            int runStart = 0;
-            byte prevAlpha = segAlphaBytes[0];
-            for (int i = 1; i <= segWidth; i++)
-            {
-                bool flush = i == segWidth || segAlphaBytes[i] != prevAlpha;
-                if (flush)
-                {
-                    int runLeft = segX0 + runStart;
-                    int runRight = segX0 + i;
-                    if (prevAlpha != 0)
+                    OverlayColor src = fill.WithAlpha(alphaByte);
+                    if (lastFullExclusive > firstFull)
                     {
-                        if (lastFullExclusive > firstFull)
+                        for (int y = firstFull; y < lastFullExclusive; y++)
+                            for (int px = x; px < runEnd; px++)
+                                BlendPixel(frame, px, y, src);
+                        if (_performance.Enabled)
+                            _performance.RibbonPixelsBlended += (long)(runEnd - x) * (lastFullExclusive - firstFull);
+                    }
+                    if (hasTopFrac)
+                    {
+                        byte aTop = (byte)Math.Clamp(Math.Round(fill.A * baseAf * topCoverage), 0, 255);
+                        if (aTop != 0)
                         {
-                            OverlayColor src = fill.WithAlpha(prevAlpha);
-                            for (int y = firstFull; y < lastFullExclusive; y++)
-                                for (int x = runLeft; x < runRight; x++)
-                                    BlendPixel(frame, x, y, src);
-                            if (_performance.Enabled) _performance.RibbonPixelsBlended += (long)(runRight - runLeft) * (lastFullExclusive - firstFull);
-                        }
-                        if (hasTopFrac)
-                        {
-                            int y = firstFull - 1;
-                            for (int x = runLeft; x < runRight; x++)
+                            OverlayColor srcTop = fill.WithAlpha(aTop);
+                            int yTopRow = firstFull - 1;
+                            for (int px = x; px < runEnd; px++)
                             {
-                                double af = segAlphaFactors[x - segX0];
-                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
-                                if (a != 0) { BlendPixel(frame, x, y, fill.WithAlpha(a)); if (_performance.Enabled) _performance.RibbonPixelsBlended++; }
-                            }
-                        }
-                        if (hasBottomFrac)
-                        {
-                            int y = lastFullExclusive;
-                            for (int x = runLeft; x < runRight; x++)
-                            {
-                                double af = segAlphaFactors[x - segX0];
-                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
-                                if (a != 0) { BlendPixel(frame, x, y, fill.WithAlpha(a)); if (_performance.Enabled) _performance.RibbonPixelsBlended++; }
+                                BlendPixel(frame, px, yTopRow, srcTop);
+                                if (_performance.Enabled) _performance.RibbonPixelsBlended++;
                             }
                         }
                     }
-                    if (i < segWidth) { runStart = i; prevAlpha = segAlphaBytes[i]; }
+                    if (hasBottomFrac)
+                    {
+                        byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * baseAf * bottomCoverage), 0, 255);
+                        if (aBottom != 0)
+                        {
+                            OverlayColor srcBottom = fill.WithAlpha(aBottom);
+                            int yBottomRow = lastFullExclusive;
+                            for (int px = x; px < runEnd; px++)
+                            {
+                                BlendPixel(frame, px, yBottomRow, srcBottom);
+                                if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                            }
+                        }
+                    }
+                }
+                x = runEnd;
+            }
+
+            // ---- Tail: per-column with exact taper. ----
+            for (; x < segX1; x++)
+            {
+                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+                if (sample < note.StartSample) sample = note.StartSample;
+                else if (sample > note.EndSample) sample = note.EndSample;
+                double af = baseAlphas[x - lane.X]
+                    * (taper ? Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1) : 1.0);
+                byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
+                if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+                if (alphaByte == 0) continue;
+                if (lastFullExclusive > firstFull)
+                {
+                    OverlayColor src = fill.WithAlpha(alphaByte);
+                    for (int y = firstFull; y < lastFullExclusive; y++)
+                        BlendPixel(frame, x, y, src);
+                    if (_performance.Enabled) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
+                }
+                if (hasTopFrac)
+                {
+                    byte aTop = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
+                    if (aTop != 0)
+                    {
+                        BlendPixel(frame, x, firstFull - 1, fill.WithAlpha(aTop));
+                        if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                    }
+                }
+                if (hasBottomFrac)
+                {
+                    byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
+                    if (aBottom != 0)
+                    {
+                        BlendPixel(frame, x, lastFullExclusive, fill.WithAlpha(aBottom));
+                        if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                    }
                 }
             }
         }

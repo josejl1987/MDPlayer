@@ -663,11 +663,23 @@ internal sealed partial class PanelOverlayRenderer
             return;
         }
 
-        // Slow path: alpha blending per pixel.
+        // Constant-alpha bulk path: precompute the blend terms once and write
+        // rows directly. Identical integer equation to BlendPixel
+        // ((src*a + dst*(255-a) + 127)/255) without per-pixel call overhead.
+        int alpha = color.A;
+        int inverse = 255 - alpha;
+        int sr = color.R * alpha, sg = color.G * alpha, sb = color.B * alpha;
+        int stride = Width * 4;
         for (int y = top; y < bottom; y++)
         {
-            for (int x = left; x < right; x++)
-                BlendPixel(frame, x, y, color);
+            int offset = y * stride + left * 4;
+            for (int x = left; x < right; x++, offset += 4)
+            {
+                frame[offset] = (byte)((sr + frame[offset] * inverse + 127) / 255);
+                frame[offset + 1] = (byte)((sg + frame[offset + 1] * inverse + 127) / 255);
+                frame[offset + 2] = (byte)((sb + frame[offset + 2] * inverse + 127) / 255);
+                frame[offset + 3] = 255;
+            }
         }
     }
 
