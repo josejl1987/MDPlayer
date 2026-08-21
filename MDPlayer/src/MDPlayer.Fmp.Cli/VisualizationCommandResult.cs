@@ -92,6 +92,12 @@ internal sealed record VisualizationStageMetrics
     public double StaticLayerSeconds { get; init; }
     public double TextSeconds { get; init; }
     public double PianoRollSeconds { get; init; }
+    public double PitchGridSeconds { get; init; }
+    public double RibbonSeconds { get; init; }
+    public double RibbonDecorationSeconds { get; init; }
+    public long RibbonColumnsEvaluated { get; init; }
+    public long RibbonPixelsBlended { get; init; }
+    public long PitchSegmentsVisited { get; init; }
     public double WaveformSeconds { get; init; }
     public long FullRedraws { get; init; }
     public long PartialRedraws { get; init; }
@@ -307,6 +313,12 @@ internal static class VisualizationResultBuilder
             StaticLayerSeconds = m?.Renderer?.StaticLayerSeconds ?? 0,
             TextSeconds = m?.Renderer?.TextSeconds ?? 0,
             PianoRollSeconds = m?.Renderer?.PianoRollSeconds ?? 0,
+            PitchGridSeconds = m?.Renderer?.PitchGridSeconds ?? 0,
+            RibbonSeconds = m?.Renderer?.RibbonSeconds ?? 0,
+            RibbonDecorationSeconds = m?.Renderer?.RibbonDecorationSeconds ?? 0,
+            RibbonColumnsEvaluated = m?.Renderer?.RibbonColumnsEvaluated ?? 0,
+            RibbonPixelsBlended = m?.Renderer?.RibbonPixelsBlended ?? 0,
+            PitchSegmentsVisited = m?.Renderer?.PitchSegmentsVisited ?? 0,
             WaveformSeconds = m?.Renderer?.WaveformSeconds ?? 0,
             FullRedraws = m?.Renderer?.FullRedraws ?? 0,
             PartialRedraws = m?.Renderer?.PartialRedraws ?? 0,

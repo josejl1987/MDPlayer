@@ -31,6 +31,12 @@ internal sealed class RenderPerformanceMetrics
     public long StaticLayerTicks { get; set; }
     public long TextTicks { get; set; }
     public long PianoRollTicks { get; set; }
+    public long PitchGridTicks { get; set; }
+    public long RibbonTicks { get; set; }
+    public long RibbonDecorationTicks { get; set; }
+    public long RibbonColumnsEvaluated { get; set; }
+    public long RibbonPixelsBlended { get; set; }
+    public long PitchSegmentsVisited { get; set; }
     public long WaveformTicks { get; set; }
     public long AllocatedBytes { get; private set; }
 
@@ -62,6 +68,12 @@ internal sealed class RenderPerformanceMetrics
         StaticLayerTicks = 0;
         TextTicks = 0;
         PianoRollTicks = 0;
+        PitchGridTicks = 0;
+        RibbonTicks = 0;
+        RibbonDecorationTicks = 0;
+        RibbonColumnsEvaluated = 0;
+        RibbonPixelsBlended = 0;
+        PitchSegmentsVisited = 0;
         WaveformTicks = 0;
         AllocatedBytes = 0;
     }
@@ -74,11 +86,12 @@ internal sealed class RenderPerformanceMetrics
     public RenderPerformanceSnapshot Snapshot(int frameWidth, int frameHeight)
         => new(Seconds(RenderTicks), Seconds(DynamicTicks), Seconds(FrameStateTicks),
             Seconds(CompositingTicks), Seconds(LayoutTicks), Seconds(StaticLayerTicks), Seconds(TextTicks),
-            Seconds(PianoRollTicks), Seconds(WaveformTicks),
+            Seconds(PianoRollTicks), Seconds(PitchGridTicks), Seconds(RibbonTicks),
+            Seconds(RibbonDecorationTicks), Seconds(WaveformTicks),
             Frames, FullRedraws, PartialRedraws, UnchangedFrames,
             RenderedPixels, AvoidedPixels, SurfaceCopies, FullFrameCopies,
             ScopeCopies, CopiedBytes, SourceCursorAdvances, PianoRollCursorAdvances,
-            VisibleNotesVisited,
+            VisibleNotesVisited, RibbonColumnsEvaluated, RibbonPixelsBlended, PitchSegmentsVisited,
             checked((long)frameWidth * frameHeight),
             AllocatedBytes, Process.GetCurrentProcess().PeakWorkingSet64);
 
@@ -94,6 +107,9 @@ internal sealed record RenderPerformanceSnapshot(
     double StaticLayerSeconds,
     double TextSeconds,
     double PianoRollSeconds,
+    double PitchGridSeconds,
+    double RibbonSeconds,
+    double RibbonDecorationSeconds,
     double WaveformSeconds,
     long Frames,
     long FullRedraws,
@@ -108,6 +124,9 @@ internal sealed record RenderPerformanceSnapshot(
     long SourceCursorAdvances,
     long PianoRollCursorAdvances,
     long VisibleNotesVisited,
+    long RibbonColumnsEvaluated,
+    long RibbonPixelsBlended,
+    long PitchSegmentsVisited,
     long FramePixels,
     long AllocatedBytes = 0,
     long PeakWorkingSetBytes = 0)

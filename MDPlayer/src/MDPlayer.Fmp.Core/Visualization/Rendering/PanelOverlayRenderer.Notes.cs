@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Fmp.Core.Visualization.Rendering;
 
 // Note/ribbon methods remain adjacent to their primitives until the next
@@ -252,6 +254,7 @@ internal sealed partial class PanelOverlayRenderer
             minMidi, maxMidi, ribbonHeight, opOpacity, flashAmount, active, energy,
             playheadX, windowStart, windowSamples / lane.Width);
 
+        long decoStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         // Onset cap (§8.5): a bright, opaque, accent-bordered bar at the note
         // start, enlarged for the first ~110 ms. Retriggers get a double cap
         // (│▌) so repeated attacks on the same pitch remain visible. Caps are
@@ -427,6 +430,8 @@ internal sealed partial class PanelOverlayRenderer
                     DrawChevron(frame, playheadX, lane.Bottom - 1, false, accent.Lighten(0.5), lane);
             }
         }
+        if (_performance.Enabled)
+            _performance.RibbonDecorationTicks += Stopwatch.GetTimestamp() - decoStart;
     }
 
     /// <summary>Draws the active pitch anchor and its compact contact flare.</summary>
@@ -716,6 +721,7 @@ internal sealed partial class PanelOverlayRenderer
 
         for (int x = firstColumn; x <= lastColumn; x++)
         {
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
             double alphaFactor = 1.0;
             if (x == firstX - 1)
                 alphaFactor = leftCoverage;
@@ -752,10 +758,12 @@ internal sealed partial class PanelOverlayRenderer
             if (alphaFactor <= 0)
                 continue;
 
+            int prevSegment = pitchSegment;
             long samplePosition = (long)Math.Round(sample);
             double centreY = MidiToY(
                 PitchContour.PitchAtSampleMonotonic(note, samplePosition, _samplesPerFrame, ref pitchSegment),
                 minMidi, maxMidi, lane);
+            if (_performance.Enabled && pitchSegment != prevSegment) _performance.PitchSegmentsVisited++;
             OverlayColor columnFill = fill;
             if (active)
             {
@@ -824,10 +832,12 @@ internal sealed partial class PanelOverlayRenderer
         // visible temporal/release ramp remains a sequence of short bands.
         int bodyFirst = Math.Max(lane.X, firstX);
         int bodyLastExclusive = Math.Min(lane.Right, lastXExclusive);
+        if (_performance.Enabled && bodyFirst < bodyLastExclusive) _performance.PitchSegmentsVisited++;
         int runStart = bodyFirst;
         int previousBucket = -1;
         for (int x = bodyFirst; x <= bodyLastExclusive; x++)
         {
+            if (_performance.Enabled && x < bodyLastExclusive) _performance.RibbonColumnsEvaluated++;
             double alphaFactor = 1.0;
             if (x < bodyLastExclusive)
             {
@@ -909,11 +919,17 @@ internal sealed partial class PanelOverlayRenderer
         byte alpha = (byte)Math.Clamp(Math.Round(fill.A * alphaFactor), 0, 255);
         if (alpha == 0)
             return;
-        OverlayColor opaque = new(
-            (byte)((fill.R * alpha + 15 * (255 - alpha) + 127) / 255),
-            (byte)((fill.G * alpha + 17 * (255 - alpha) + 127) / 255),
-            (byte)((fill.B * alpha + 25 * (255 - alpha) + 127) / 255));
-        FillRectOpaque(frame, left, right, top, bottom, opaque);
+        // Exact: blend constant-alpha run over the actual destination pixels
+        // so grid lines / black-key bands / waveform remain visible through
+        // translucent ribbons. This is still a contiguous row-major run.
+        OverlayColor src = fill.WithAlpha(alpha);
+        for (int y = top; y < bottom; y++)
+        {
+            for (int x = left; x < right; x++)
+                BlendPixel(frame, x, y, src);
+        }
+        if (_performance.Enabled)
+            _performance.RibbonPixelsBlended += (long)(right - left) * (bottom - top);
     }
 
     private void DrawFlatEdgeColumn(
@@ -925,8 +941,11 @@ internal sealed partial class PanelOverlayRenderer
         double coverage)
     {
         byte alpha = (byte)Math.Clamp(Math.Round(fill.A * NormalRibbonOpacity * coverage), 0, 255);
+        if (alpha == 0) return;
         for (int y = top; y < bottom; y++)
             BlendFlatPixel(frame, x, y, fill, alpha);
+        if (_performance.Enabled)
+            _performance.RibbonPixelsBlended += bottom - top;
     }
 
     private void BlendFlatPixel(
@@ -985,7 +1004,10 @@ internal sealed partial class PanelOverlayRenderer
         // Top fractional edge: coverage of the row just before firstFull.
         double topCoverage = firstFull - top;
         if (topCoverage > 1e-3 && firstFull > clipTop)
+        {
             BlendScaled(frame, x, firstFull - 1, color, alphaFactor * topCoverage);
+            if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+        }
 
         // Fully covered interior rows.
         if (lastFullExclusive > firstFull)
@@ -1001,6 +1023,7 @@ internal sealed partial class PanelOverlayRenderer
                     frame[offset + 2] = color.B;
                     frame[offset + 3] = 255;
                 }
+                if (_performance.Enabled) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
             }
             else
             {
@@ -1008,13 +1031,17 @@ internal sealed partial class PanelOverlayRenderer
                 OverlayColor rowColor = color.WithAlpha(alpha);
                 for (int y = firstFull; y < lastFullExclusive; y++)
                     BlendPixel(frame, x, y, rowColor);
+                if (_performance.Enabled && alpha != 0) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
             }
         }
 
         // Bottom fractional edge: coverage of the row at lastFullExclusive.
         double bottomCoverage = bottom - lastFullExclusive;
         if (bottomCoverage > 1e-3 && lastFullExclusive < clipBottom)
+        {
             BlendScaled(frame, x, lastFullExclusive, color, alphaFactor * bottomCoverage);
+            if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+        }
     }
 
     private void BlendScaled(Span<byte> frame, int x, int y, OverlayColor color, double alphaFactor)

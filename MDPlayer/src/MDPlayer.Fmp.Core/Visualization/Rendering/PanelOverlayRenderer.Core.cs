@@ -1056,42 +1056,78 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 switch (panel.TrackKind)
                 {
                     case VisualizationTrackKind.Pitched:
-                        long pitchedStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        long pitchedGridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                         (double Min, double Max) pitchedRange = GetPitchRange(panel, currentSample);
                         DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false, pitchedRange);
+                        if (_performance.Enabled)
+                        {
+                            long gridTicks = Stopwatch.GetTimestamp() - pitchedGridStart;
+                            _performance.PitchGridTicks += gridTicks;
+                            _performance.PianoRollTicks += gridTicks;
+                        }
                         if (drawSemantic)
                         {
+                            long pitchedRibbonStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                             if (panel.Prepared.UsesSsgModes)
                                 DrawSsgPanel(destination, panel, currentSample, pitchedRange);
                             else
                                 DrawPitchedPanel(destination, panel, currentSample, false, pitchedRange);
+                            if (_performance.Enabled)
+                            {
+                                long ribbonTicks = Stopwatch.GetTimestamp() - pitchedRibbonStart;
+                                _performance.RibbonTicks += ribbonTicks;
+                                _performance.PianoRollTicks += ribbonTicks;
+                            }
                         }
-                        if (_performance.Enabled)
-                            _performance.PianoRollTicks += Stopwatch.GetTimestamp() - pitchedStart;
                         break;
                     case VisualizationTrackKind.FmOperatorGroup:
-                        long fmStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        long fmGridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                         (double Min, double Max) fmRange = GetPitchRange(panel, currentSample);
                         DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, true, fmRange);
+                        if (_performance.Enabled)
+                        {
+                            long gridTicks = Stopwatch.GetTimestamp() - fmGridStart;
+                            _performance.PitchGridTicks += gridTicks;
+                            _performance.PianoRollTicks += gridTicks;
+                        }
                         if (drawSemantic)
                         {
+                            long fmRibbonStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                             DrawPitchedPanel(destination, panel, currentSample, true, fmRange);
                             DrawFm3OperatorRibbons(destination, panel, currentSample, fmRange);
+                            if (_performance.Enabled)
+                            {
+                                long ribbonTicks = Stopwatch.GetTimestamp() - fmRibbonStart;
+                                _performance.RibbonTicks += ribbonTicks;
+                                _performance.PianoRollTicks += ribbonTicks;
+                            }
                         }
-                        if (_performance.Enabled)
-                            _performance.PianoRollTicks += Stopwatch.GetTimestamp() - fmStart;
                         break;
                     case VisualizationTrackKind.WaveTable:
-                        long wavetableStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        long wtGridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                         (double Min, double Max) wavetableRange = GetPitchRange(panel, currentSample);
                         DrawPitchGrid(destination, panel, _cameras[panel.Index], currentSample, false, wavetableRange);
+                        if (_performance.Enabled)
+                        {
+                            long gridTicks = Stopwatch.GetTimestamp() - wtGridStart;
+                            _performance.PitchGridTicks += gridTicks;
+                            _performance.PianoRollTicks += gridTicks;
+                        }
                         if (drawSemantic)
                         {
+                            long wtRibbonStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                             DrawPitchedPanel(destination, panel, currentSample, false, wavetableRange);
+                            if (_performance.Enabled)
+                            {
+                                long ribbonTicks = Stopwatch.GetTimestamp() - wtRibbonStart;
+                                _performance.RibbonTicks += ribbonTicks;
+                                _performance.PianoRollTicks += ribbonTicks;
+                            }
+                            long wtStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
                             DrawWavetablePanel(destination, panel, currentSample);
+                            if (_performance.Enabled)
+                                _performance.WaveformTicks += Stopwatch.GetTimestamp() - wtStart;
                         }
-                        if (_performance.Enabled)
-                            _performance.WaveformTicks += Stopwatch.GetTimestamp() - wavetableStart;
                         break;
                     case VisualizationTrackKind.Sample:
                         long sampleStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
