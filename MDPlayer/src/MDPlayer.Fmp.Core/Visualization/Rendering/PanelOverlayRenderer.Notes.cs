@@ -827,26 +827,29 @@ internal sealed partial class PanelOverlayRenderer
         if (lastFullExclusive <= firstFull)
             return;
 
-        // Quantize only the opacity of a flat body into small, deterministic
-        // runs. Opaque row fills keep the raster hot path contiguous; the
-        // visible temporal/release ramp remains a sequence of short bands.
+        // Exact run-based rasterization for flat ribbons: Y is constant, so
+        // the whole body is a set of horizontal runs where the blended alpha
+        // byte is constant. This preserves grid lines and black-key bands
+        // through translucent ribbons and matches the per-column reference
+        // exactly, including vertical fractional edges.
         int bodyFirst = Math.Max(lane.X, firstX);
         int bodyLastExclusive = Math.Min(lane.Right, lastXExclusive);
         if (_performance.Enabled && bodyFirst < bodyLastExclusive) _performance.PitchSegmentsVisited++;
-        int runStart = bodyFirst;
-        int previousBucket = -1;
-        for (int x = bodyFirst; x <= bodyLastExclusive; x++)
+        // Precompute per-column alphaFactor for the body to allow exact
+        // batching by the final alpha byte (256 levels, not 32).
+        if (bodyFirst < bodyLastExclusive)
         {
-            if (_performance.Enabled && x < bodyLastExclusive) _performance.RibbonColumnsEvaluated++;
-            double alphaFactor = 1.0;
-            if (x < bodyLastExclusive)
+            int width = bodyLastExclusive - bodyFirst;
+            Span<double> alphaFactors = width <= 1024 ? stackalloc double[width] : new double[width];
+            Span<byte> alphaBytes = width <= 1024 ? stackalloc byte[width] : new byte[width];
+            for (int i = 0; i < width; i++)
             {
+                int x = bodyFirst + i;
                 double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
                 if (sample < note.StartSample)
                     sample = note.StartSample;
                 else if (sample > note.EndSample)
                     sample = note.EndSample;
-
                 double temporalOpacity;
                 if (Math.Abs(x - playheadX) <= 2)
                     temporalOpacity = 1.0;
@@ -857,52 +860,125 @@ internal sealed partial class PanelOverlayRenderer
                     double ageSeconds = Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate);
                     temporalOpacity = 0.70 - 0.35 * Math.Clamp(ageSeconds / 0.25, 0, 1);
                 }
-
-                alphaFactor = NormalRibbonOpacity * temporalOpacity;
+                double af = NormalRibbonOpacity * temporalOpacity;
                 if (taper)
-                    alphaFactor *= Math.Clamp(
-                        (note.EndSample - sample) / (double)_taperSamples,
-                        0,
-                        1);
+                    af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+                alphaFactors[i] = af;
+                alphaBytes[i] = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
+                if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
             }
-
-            int bucket = Math.Clamp((int)Math.Round(alphaFactor * 32), 0, 32);
-            if (previousBucket < 0)
-                previousBucket = bucket;
-            else if (bucket != previousBucket)
+            // Batch by exact alpha byte for interior rows; fractional top/bottom
+            // rows are handled per-column with coverage to stay pixel-identical.
+            double topCoverage = firstFull - top;
+            double bottomCoverage = bottom - lastFullExclusive;
+            bool hasTopFrac = topCoverage > 1e-3 && firstFull > lane.Y;
+            bool hasBottomFrac = bottomCoverage > 1e-3 && lastFullExclusive < lane.Bottom;
+            int runStart = 0;
+            byte prevAlpha = alphaBytes[0];
+            double prevAf = alphaFactors[0];
+            for (int i = 1; i <= width; i++)
             {
-                FillFlatOpaqueBand(
-                    frame,
-                    fill,
-                    runStart,
-                    x,
-                    firstFull,
-                    lastFullExclusive,
-                    previousBucket / 32.0);
-                runStart = x;
-                previousBucket = bucket;
+                bool flush = i == width || alphaBytes[i] != prevAlpha;
+                if (flush)
+                {
+                    int runLeft = bodyFirst + runStart;
+                    int runRight = bodyFirst + i;
+                    if (prevAlpha != 0)
+                    {
+                        // Interior rows: constant alpha for the whole run (row-major).
+                        if (lastFullExclusive > firstFull)
+                        {
+                            OverlayColor src = fill.WithAlpha(prevAlpha);
+                            for (int y = firstFull; y < lastFullExclusive; y++)
+                            {
+                                for (int x = runLeft; x < runRight; x++)
+                                    BlendPixel(frame, x, y, src);
+                            }
+                            if (_performance.Enabled)
+                                _performance.RibbonPixelsBlended += (long)(runRight - runLeft) * (lastFullExclusive - firstFull);
+                        }
+                        // Top fractional row: per-column exact with coverage.
+                        if (hasTopFrac)
+                        {
+                            int y = firstFull - 1;
+                            for (int x = runLeft; x < runRight; x++)
+                            {
+                                double af = alphaFactors[x - bodyFirst];
+                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
+                                if (a != 0)
+                                {
+                                    BlendPixel(frame, x, y, fill.WithAlpha(a));
+                                    if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                                }
+                            }
+                        }
+                        // Bottom fractional row.
+                        if (hasBottomFrac)
+                        {
+                            int y = lastFullExclusive;
+                            for (int x = runLeft; x < runRight; x++)
+                            {
+                                double af = alphaFactors[x - bodyFirst];
+                                byte a = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
+                                if (a != 0)
+                                {
+                                    BlendPixel(frame, x, y, fill.WithAlpha(a));
+                                    if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                                }
+                            }
+                        }
+                    }
+                    if (i < width)
+                    {
+                        runStart = i;
+                        prevAlpha = alphaBytes[i];
+                        prevAf = alphaFactors[i];
+                    }
+                }
             }
         }
 
-        if (runStart < bodyLastExclusive && previousBucket >= 0)
-        {
-            FillFlatOpaqueBand(
-                frame,
-                fill,
-                runStart,
-                bodyLastExclusive,
-                firstFull,
-                lastFullExclusive,
-                previousBucket / 32.0);
-        }
-
-        // Keep the two fractional horizontal edge columns antialiased. They
-        // are at most two narrow columns per note and do not affect the bulk
-        // rasterization budget.
+        // Fractional horizontal edge columns: antialiased and with exact
+        // temporal/taper opacity, so a note starting/ending mid-pixel
+        // blends correctly through the grid.
         if (firstX > lane.X && leftCoverage > 1e-3)
-            DrawFlatEdgeColumn(frame, fill, firstX - 1, firstFull, lastFullExclusive, leftCoverage);
+        {
+            int x = firstX - 1;
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            if (sample < note.StartSample) sample = note.StartSample;
+            else if (sample > note.EndSample) sample = note.EndSample;
+            double temporalOpacity;
+            if (Math.Abs(x - playheadX) <= 2) temporalOpacity = 1.0;
+            else if (sample > currentSample) temporalOpacity = 0.35;
+            else
+            {
+                double age = Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate);
+                temporalOpacity = 0.70 - 0.35 * Math.Clamp(age / 0.25, 0, 1);
+            }
+            double af = leftCoverage * NormalRibbonOpacity * temporalOpacity;
+            if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+            FillColumnFractional(frame, x, top, bottom, fill, af, lane.Y, lane.Bottom);
+        }
         if (lastXExclusive < lane.Right && rightCoverage > 1e-3)
-            DrawFlatEdgeColumn(frame, fill, lastXExclusive, firstFull, lastFullExclusive, rightCoverage);
+        {
+            int x = lastXExclusive;
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            if (sample < note.StartSample) sample = note.StartSample;
+            else if (sample > note.EndSample) sample = note.EndSample;
+            double temporalOpacity;
+            if (Math.Abs(x - playheadX) <= 2) temporalOpacity = 1.0;
+            else if (sample > currentSample) temporalOpacity = 0.35;
+            else
+            {
+                double age = Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate);
+                temporalOpacity = 0.70 - 0.35 * Math.Clamp(age / 0.25, 0, 1);
+            }
+            double af = rightCoverage * NormalRibbonOpacity * temporalOpacity;
+            if (taper) af *= Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+            FillColumnFractional(frame, x, top, bottom, fill, af, lane.Y, lane.Bottom);
+        }
     }
 
     private void FillFlatOpaqueBand(
