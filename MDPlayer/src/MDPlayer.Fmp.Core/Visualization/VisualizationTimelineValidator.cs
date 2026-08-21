@@ -111,7 +111,37 @@ internal static class VisualizationTimelineValidator
                     && !waveforms.ContainsKey(hit.AssetId)))
                 throw new JsonException("Invalid aggregate hit event.");
         }
+        ValidatePhysicalVoiceMonophony(timeline.Notes ?? []);
     }
+
+    private static void ValidatePhysicalVoiceMonophony(IReadOnlyList<NoteEvent> notes)
+    {
+        foreach (IGrouping<string, NoteEvent> voice in notes
+            .GroupBy(PhysicalVoiceKey, StringComparer.Ordinal))
+        {
+            NoteEvent[] ordered = voice
+                .OrderBy(note => note.StartSample)
+                .ThenBy(note => note.EndSample)
+                .ToArray();
+            for (int index = 1; index < ordered.Length; index++)
+            {
+                NoteEvent previous = ordered[index - 1];
+                NoteEvent next = ordered[index];
+                if (next.StartSample < previous.EndSample)
+                {
+                    throw new JsonException(
+                        $"Physical voice '{PhysicalVoiceKey(next)}' has overlapping notes: " +
+                        $"{previous.StartSample}-{previous.EndSample} and " +
+                        $"{next.StartSample}-{next.EndSample}.");
+                }
+            }
+        }
+    }
+
+    private static string PhysicalVoiceKey(NoteEvent note) =>
+        note.Domain is SourceDomainKey domain
+            ? "domain:" + domain
+            : "channel:" + note.ChannelId;
 
     private static void EnsureFiniteRange(float value, float minimum, float maximum, string name)
     {

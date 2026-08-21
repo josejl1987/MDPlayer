@@ -123,30 +123,27 @@ public sealed class MainWindowViewModelTests
     [AvaloniaFact]
     public async Task SelectingSameComposition_DoesNotSchedulePreviewRefresh()
     {
-        // The GUI currently exposes exactly one composition (Diagnostic) and
         // CompositionOptionViewModel is a value record, so assigning the
         // already-selected composition is a no-op and must NOT schedule a
-        // preview refresh. (When a second composition kind exists this becomes
-        // a change test again; today it pins the no-op contract. The previous
-        // version "passed" only because WaitForPreviewRefreshAsync refreshes
-        // unconditionally, masking the no-op.)
+        // preview refresh. This remains true when the GUI default is Performance.
         Harness h = Harness.Create();
         await h.OpenAsync();
         try
         {
             h.ResetCalls();
-            h.VM.Settings.Basic.SelectedComposition = h.Compositions[0];
+            CompositionOptionViewModel selected = h.VM.Settings.Basic.SelectedComposition!;
+            h.VM.Settings.Basic.SelectedComposition = selected;
 
             // No debounce tick fires for a no-op assignment.
             await Task.Delay(400);
             Assert.Equal(0, h.PlanCalls);
             Assert.Equal(0, h.FrameCalls);
 
-            // An explicit refresh still renders the (single) composition.
+            // An explicit refresh still renders the selected composition.
             await h.VM.RefreshPreviewManuallyAsync();
             Assert.Equal(1, h.PlanCalls);
             Assert.Equal(1, h.FrameCalls);
-            Assert.Equal(h.Compositions[0].Value, h.LastRequest!.Composition);
+            Assert.Equal(selected.Value, h.LastRequest!.Composition);
         }
         finally
         {

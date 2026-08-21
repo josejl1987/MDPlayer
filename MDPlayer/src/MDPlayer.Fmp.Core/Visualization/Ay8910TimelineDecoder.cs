@@ -2,11 +2,11 @@ namespace Fmp.Core.Visualization;
 
 /// <summary>
 /// Decodes the three tone generators and the shared noise activity of an
-/// AY-3-8910-compatible PSG. Noise activity becomes percussion triggers,
-/// emitted EDGE-driven (one trigger per inactive → active transition — INV1),
-/// never per register write. Only tone-enabled voices with a representable
-/// musical pitch create conventional pitched notes (INV5: tone-disabled or
-/// ultrasonic periods are silent, never notes).
+/// AY-3-8910-compatible PSG. Tone-enabled voices create conventional pitched
+/// notes when their gate and pitch are audible; noise is retained separately as
+/// NoiseStateEvent metadata and never creates a melodic note or rhythm attack.
+/// Envelope-selected volume is an audible gate even when the direct nibble is
+/// zero, and control writes do not speculate note retriggers.
 /// </summary>
 internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
 {
@@ -43,7 +43,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
 
         int address = write.Address & 0x0F;
         _registers[address] = (byte)(write.Data & 0xFF);
-        if (address is <= 5 or 7 or >= 8 and <= 10)
+        if (address is <= 5 or 7 or >= 8 and <= 10 or >= 11 and <= 13)
         {
             for (int channel = 0; channel < 3; channel++)
                 Reconcile(channel, write.SamplePosition);
@@ -67,6 +67,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
     private void Reconcile(int channel, long sample)
     {
         bool toneEnabled = (_registers[7] & (1 << channel)) == 0;
+        bool noiseEnabled = (_registers[7] & (1 << (channel + 3))) == 0;
         int volumeRegister = _registers[8 + channel];
         int volume = volumeRegister & 0x0F;
         bool envelopeEnabled = (volumeRegister & 0x10) != 0;
@@ -94,11 +95,15 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
             string id = $"ay8910:{_device.Id.Instance}:tone:{channel}";
             _timeline.AddInstrument(new InstrumentDefinition(
                 id, "psg", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
+            VisualizationNoteMode mode = envelopeEnabled
+                ? noiseEnabled ? VisualizationNoteMode.SsgEnvelopeToneNoise : VisualizationNoteMode.SsgEnvelopeTone
+                : noiseEnabled ? VisualizationNoteMode.SsgToneNoise : VisualizationNoteMode.SsgTone;
             _notes[channel] = new MutableNote(
                 new VoiceId(_device.Id, VoiceKind.Psg, channel),
                 sample,
                 pitch,
-                id);
+                id,
+                mode);
         }
         else
         {
@@ -106,22 +111,31 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
         }
     }
 
-    /// <summary>
-    /// Emits the shared noise channel as a percussion trigger, EDGE-driven (INV1):
-    /// a trigger is emitted only on an inactive → active transition of the audible
-    /// noise state, never on every register write while the state stays active.
-    /// PSG drivers rewrite the mixer/volume registers every frame; per-write
-    /// emission turned that update stream into a machine-gun of identical kicks
-    /// (≈ 60 Hz), while the actual rhythm part is the set of volume onsets. The
-    /// AY-3-8910 exposes no separate envelope-restart signal for the noise channel
-    /// in this decode path (reg 13 envelope writes are not tracked), and the
-    /// register trace of the Gradius II fixture shows the volume genuinely returns
-    /// to 0 between hits, so the volume edge is the complete trigger model.
+    /// Emits the shared noise channel as unpitched metadata, edge-driven:
+    /// a state is emitted only on an inactive → active transition, never on
+    /// every register write while the state stays active. PSG drivers rewrite
+    /// mixer/volume registers every frame, so per-write emission would turn
+    /// that update stream into repeated speculative attacks. Envelope-selected
+    /// volume is treated as audible even when its direct nibble is zero.
     private void ReconcileNoise(long sample)
     {
-        bool noiseEnabled = (_registers[7] & 0x38) != 0x38;
-        bool audible = noiseEnabled && _registers[8..11]
-            .Any(value => (value & 0x10) != 0 || (value & 0x0F) > 0);
+        bool audible = false;
+        float level = 0;
+        for (int channel = 0; channel < 3; channel++)
+        {
+            bool noiseEnabled = (_registers[7] & (1 << (channel + 3))) == 0;
+            int volumeRegister = _registers[8 + channel];
+            bool channelAudible = noiseEnabled
+                && ((volumeRegister & 0x10) != 0 || (volumeRegister & 0x0F) > 0);
+            if (!channelAudible)
+                continue;
+            audible = true;
+            float channelLevel = (volumeRegister & 0x10) != 0
+                ? 1.0f
+                : (volumeRegister & 0x0F) / 15.0f;
+            level = Math.Max(level, channelLevel);
+        }
+
         if (!audible)
         {
             _noiseActive = false;
@@ -131,16 +145,14 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
             return;
         _noiseActive = true;
 
-        int volume = _registers[8..11]
-            .Select(value => value & 0x0F)
-            .DefaultIfEmpty()
-            .Max();
-        _timeline.AddRhythm(new RhythmEvent(
-            "noise",
+        _timeline.AddNoiseState(new NoiseStateEvent(
             new VoiceId(_device.Id, VoiceKind.Noise, 0).ToString(),
             sample,
-            volume / 15.0f,
-            0));
+            checked(sample + 1),
+            null,
+            null,
+            level,
+            NoiseMode.HardwareDefined));
     }
 
     private Pitch DecodePitch(int channel)
@@ -168,7 +180,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
             note.InitialMidiNote,
             note.InitialFrequencyHz,
             note.InstrumentId,
-            VisualizationNoteMode.SsgTone,
+            note.Mode,
             false,
             note.Pitch);
     }
@@ -180,13 +192,19 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
 
     private sealed class MutableNote
     {
-        public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId)
+        public MutableNote(
+            VoiceId voice,
+            long startSample,
+            Pitch pitch,
+            string instrumentId,
+            VisualizationNoteMode mode)
         {
             Voice = voice;
             StartSample = startSample;
             InitialFrequencyHz = pitch.FrequencyHz;
             InitialMidiNote = pitch.MidiNote;
             InstrumentId = instrumentId;
+            Mode = mode;
         }
 
         public VoiceId Voice { get; }
@@ -194,6 +212,7 @@ internal sealed class Ay8910TimelineDecoder : IChipTimelineDecoder
         public double InitialFrequencyHz { get; }
         public double InitialMidiNote { get; }
         public string InstrumentId { get; }
+        public VisualizationNoteMode Mode { get; }
         public List<PitchChange> Pitch { get; } = [];
 
         public void AddPitch(long sample, Pitch pitch)

@@ -19,7 +19,7 @@ public sealed class Ppz8TimelineDecoderTests
         new(sample, new DeviceId(ChipType.Ppz8, 0), port, address, data);
 
     [Fact]
-    public void Fnum8000_UsesSourceRateAndDoesNotInventMidiRootPitch()
+    public void Fnum8000_UsesUnitPlaybackRateAndDoesNotInventMidiRootPitch()
     {
         var (decoder, builder) = NewDecoder();
         decoder.Process(W(0, 21, 0, 16_000)); // source sample rate
@@ -30,13 +30,20 @@ public sealed class Ppz8TimelineDecoderTests
 
         VisualizationTimeline timeline = builder.Build(2_000);
         Ppz8Event eventValue = Assert.Single(timeline.Ppz8);
-        Assert.Equal(16_000.0, eventValue.FrequencyHz, precision: 6);
+        Assert.Equal(0, eventValue.Bank);
+        Assert.Equal(0, eventValue.SampleNumber);
+        Assert.Equal(0x8000, eventValue.PlaybackFnum);
+        Assert.Equal(1.0, eventValue.PlaybackRate, precision: 12);
+        Assert.Equal(16_000, eventValue.SourceSampleRate);
         Assert.Null(eventValue.MidiNote);
-        Assert.Null(Assert.Single(timeline.SamplePlayback).MidiPitch);
+        SamplePlaybackEvent playback = Assert.Single(timeline.SamplePlayback);
+        Assert.Equal(Assert.Single(timeline.Samples).Id, playback.SampleId);
+        Assert.Null(playback.MidiPitch);
+        Assert.Equal(1.0, playback.PlaybackRate, precision: 12);
     }
 
     [Fact]
-    public void Fnum4000_HalvesEffectiveSourceRate()
+    public void Fnum4000_HalvesPlaybackRateWithoutInventingAcousticFrequency()
     {
         var (decoder, builder) = NewDecoder();
         decoder.Process(W(0, 21, 0, 16_000));
@@ -46,7 +53,26 @@ public sealed class Ppz8TimelineDecoderTests
         decoder.Complete(2_000);
 
         Ppz8Event eventValue = Assert.Single(builder.Build(2_000).Ppz8);
-        Assert.Equal(8_000.0, eventValue.FrequencyHz, precision: 6);
+        Assert.Equal(0x4000, eventValue.PlaybackFnum);
+        Assert.Equal(0.5, eventValue.PlaybackRate, precision: 12);
+        Assert.Equal(16_000, eventValue.SourceSampleRate);
+        Assert.Null(eventValue.MidiNote);
+    }
+
+    [Fact]
+    public void Fnum10000_DoublesPlaybackRate()
+    {
+        var (decoder, builder) = NewDecoder();
+        decoder.Process(W(0, 21, 0, 16_000));
+        decoder.Process(W(0, 11, 0, 0x10000));
+        decoder.Process(W(0, 1, 0, 0));
+        decoder.Process(W(1_000, 2, 0, 0));
+        decoder.Complete(2_000);
+
+        Ppz8Event eventValue = Assert.Single(builder.Build(2_000).Ppz8);
+        Assert.Equal(0x10000, eventValue.PlaybackFnum);
+        Assert.Equal(2.0, eventValue.PlaybackRate, precision: 12);
+        Assert.Equal(16_000, eventValue.SourceSampleRate);
         Assert.Null(eventValue.MidiNote);
     }
 }

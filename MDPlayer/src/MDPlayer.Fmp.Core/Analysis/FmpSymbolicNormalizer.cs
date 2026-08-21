@@ -189,25 +189,8 @@ internal static class FmpSymbolicNormalizer
     {
         var result = new Dictionary<string, ExternalAnalysisNotes>(StringComparer.Ordinal);
 
-        string ppz8Channel = voices.Values
-            .Where(voice => voice.Kind == VoiceKind.Pcm
-                && voice.Id.Device.Type == ChipType.Ppz8
-                && string.Equals(voice.Id.Name, "ppz8", StringComparison.Ordinal))
-            .Select(voice => voice.Id.ToString())
-            .FirstOrDefault() ?? "ppz8.0";
-        var ppz8Notes = (timeline.Ppz8 ?? Array.Empty<Ppz8Event>())
-            .Select((value, index) => ExternalNote(
-                $"{ppz8Channel}:{value.StartSample}:sample:{index}",
-                value.StartSample,
-                value.EndSample,
-                value.MidiNote,
-                false))
-            .Where(note => note is not null)
-            .Cast<AnalysisNote>()
-            .ToArray();
-        if (ppz8Notes.Length > 0)
-            result[ppz8Channel] = new ExternalAnalysisNotes("ppz8", ppz8Notes);
-
+        // PPZ8 playback has an explicit source-rate ratio but no trustworthy
+        // sample root pitch. Do not promote it into absolute musical notes.
         string adpcmChannel = voices.Values
             .Where(voice => voice.Kind == VoiceKind.Adpcm
                 && string.Equals(voice.Id.Name, "adpcm-b", StringComparison.Ordinal))

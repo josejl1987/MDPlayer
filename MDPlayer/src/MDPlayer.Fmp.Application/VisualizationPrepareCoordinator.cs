@@ -90,6 +90,15 @@ internal static class VisualizationPrepareCoordinator
             masterSamples = Math.Max(
                 0,
                 timeline.EndSample - timeline.StartSample);
+            if (request.Composition == CompositionKind.Performance)
+            {
+                // The native trail renderer plays the master WAV itself, so on
+                // the seeded reuse path the WAV's actual PCM length is the
+                // authoritative render duration, not the event span.
+                masterSamples = TryResolveMasterWavSamples(
+                    workspace.MasterAudioPath, Math.Max(1, timeline.SampleRate))
+                    ?? masterSamples;
+            }
             sampleRate = timeline.SampleRate;
             masterAudioProduced =
                 File.Exists(workspace.MasterAudioPath);
@@ -281,31 +290,88 @@ internal static class VisualizationPrepareCoordinator
     {
         VisualizationTimeline semanticTimeline = timeline.Timeline;
 
-        // ---- Scope / stem generation ----
-        // Capture renders the full stem set the backend can produce so the raw
-        // reusable assets (isolated stems + master) are independent of any one
-        // composition. The request-specific projection to the resolved layout
-        // (filtering, ordering, master fallback expansion) happens in
-        // <see cref="BuildSource"/> so later layout changes do not reuse a scope
-        // result that was baked to the first composition.
+        // Performance consumes the semantic timeline directly. Do not render or
+        // probe scope WAVs, Corrscope, Python, or per-channel stems for this
+        // composition. Keep a scope result in the immutable prepared-source
+        // shape so downstream frame-count/alignment logic stays shared without
+        // exposing a fake scope channel — but make the rendered master WAV the
+        // authoritative duration source: its actual PCM sample count defines
+        // both the video frame count and the timeline end, so notes contact
+        // the playhead at exactly the sample where the audio plays them.
         VisualizationScopeArtifacts scopeArtifacts;
-        try
+        if (request.Composition == CompositionKind.Performance)
         {
-            scopeArtifacts = VisualizationScopeCoordinator.Render(
-                resolution.Backend.Id,
-                resolution.Input,
-                workspace,
-                request,
-                runtime,
-                semanticTimeline.Devices,
-                semanticTimeline.Voices,
-                Math.Max(1, semanticTimeline.EndSample - semanticTimeline.StartSample),
-                preparedFmpTrack,
-                scopesRequired: true);
+            // Master audio is a hard requirement for Performance: it is the
+            // authoritative render duration and the composer's audio source.
+            // Playback-capture backends already wrote it; FMP-class inputs
+            // synthesize it here — master stem ONLY (no isolated stems, no
+            // Corrscope/Python), mirroring the scope path's "off" mode. Without
+            // this, published capture bundles reference a master.wav that was
+            // never rendered and export-time reuse fails validation.
+            if (!File.Exists(workspace.MasterAudioPath)
+                && preparedFmpTrack is not null)
+            {
+                try
+                {
+                    VisualizationScopeCoordinator.RenderMasterAudioOnly(
+                        request, workspace, preparedFmpTrack);
+                }
+                catch (VisualizationScopeException ex)
+                {
+                    throw new VisualizationExecutionException(
+                        $"Performance composition could not render master audio: {ex.Message}",
+                        ex.ExitCode);
+                }
+            }
+
+            long eventSpan = Math.Max(1, semanticTimeline.EndSample - semanticTimeline.StartSample);
+            long? wavSamples = TryResolveMasterWavSamples(
+                workspace.MasterAudioPath, Math.Max(1, semanticTimeline.SampleRate));
+            long samples = Math.Max(1, wavSamples
+                ?? (timeline.MasterSamples > 0 ? timeline.MasterSamples : eventSpan));
+            var result = new ScopeRenderer.ScopeResult
+            {
+                Success = true,
+                InputPath = resolution.Input.FullName,
+                OutputDir = workspace.ScopeDir,
+                MasterSamples = samples,
+                SampleRate = Math.Max(1, semanticTimeline.SampleRate),
+                CompletionReason = wavSamples is not null
+                    ? "performance_master_audio"
+                    : "performance_timeline_fallback",
+            };
+            scopeArtifacts = new VisualizationScopeArtifacts(
+                new StemPlan(
+                    Supported: true,
+                    Support: ScopeSupport.None,
+                    Strategy: StemStrategy.None,
+                    SynthesizerInstances: 0,
+                    OutputStreams: 0,
+                    Reason: "Performance composition does not use scope assets"),
+                result,
+                Enabled: false,
+                HasIsolatedStems: false);
         }
-        catch (VisualizationScopeException)
+        else
         {
-            throw;
+            try
+            {
+                scopeArtifacts = VisualizationScopeCoordinator.Render(
+                    resolution.Backend.Id,
+                    resolution.Input,
+                    workspace,
+                    request,
+                    runtime,
+                    semanticTimeline.Devices,
+                    semanticTimeline.Voices,
+                    Math.Max(1, semanticTimeline.EndSample - semanticTimeline.StartSample),
+                    preparedFmpTrack,
+                    scopesRequired: true);
+            }
+            catch (VisualizationScopeException)
+            {
+                throw;
+            }
         }
 
         return new PreparedCapture(
@@ -313,6 +379,33 @@ internal static class VisualizationPrepareCoordinator
             scopeArtifacts,
             timeline.BackendId,
             timeline.MasterAudioPath);
+    }
+
+    /// <summary>
+    /// Reads the actual PCM sample count of the rendered master WAV. Returns
+    /// null when the file is missing or unreadable so callers can fall back to
+    /// the semantic timeline span. A WAV whose header rate differs from the
+    /// timeline clock is rescaled defensively; every backend writes PCM16
+    /// stereo, which is exactly what <see cref="SeekablePcm16WaveFile"/> parses.
+    /// </summary>
+    internal static long? TryResolveMasterWavSamples(string? masterAudioPath, int targetSampleRate)
+    {
+        if (string.IsNullOrWhiteSpace(masterAudioPath)
+            || targetSampleRate <= 0
+            || !File.Exists(masterAudioPath))
+        {
+            return null;
+        }
+
+        using SeekablePcm16WaveFile? wav = SeekablePcm16WaveFile.TryOpen(masterAudioPath);
+        if (wav is null || wav.TotalSamples <= 0)
+            return null;
+        if (wav.SampleRate == targetSampleRate)
+            return wav.TotalSamples;
+        return (long)decimal.Round(
+            (decimal)wav.TotalSamples * targetSampleRate / wav.SampleRate,
+            0,
+            MidpointRounding.AwayFromZero);
     }
 
     /// <summary>
@@ -369,13 +462,17 @@ internal static class VisualizationPrepareCoordinator
             capture.Timeline, projectedScope.MasterSamples);
 
         // ---- Energy analysis ----
-        // Frame count must reflect the *actual* fractional frame rate
-        // (e.g. 60000/1001 ≈ 59.94), not the bare numerator. Using the
-        // numerator alone inflates the frame count ~1,001x and can exhaust
-        // memory building the energy arrays.
-        double fps = output.FpsNumerator / (double)output.FpsDenominator;
-        int totalFrames = checked((int)Math.Ceiling(
-            projectedScope.MasterSamples * fps / projectedScope.SampleRate));
+        // Frame count must come from the canonical FrameSampleClock so it
+        // matches PanelOverlayRenderer.TotalFrames exactly — including the
+        // *actual* fractional frame rate (e.g. 60000/1001 ≈ 59.94). Using the
+        // bare numerator inflates the frame count ~1,001x and can exhaust
+        // memory building the energy arrays; a double-based ceiling can drift
+        // ±1 frame against the renderer.
+        int totalFrames = checked((int)FrameSampleClock.FrameCount(
+            projectedScope.MasterSamples,
+            projectedScope.SampleRate,
+            output.FpsNumerator,
+            output.FpsDenominator));
         ChannelEnergyEnvelope[] energy = ChannelEnergyAnalyzer.Analyze(
             projectedScope.Stems.Where(stem => stem.Success)
                 .Select(stem => (stem.Name, stem.WavPath)).ToArray(),

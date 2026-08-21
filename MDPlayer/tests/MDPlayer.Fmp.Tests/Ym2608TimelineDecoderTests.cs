@@ -194,18 +194,75 @@ public sealed class Ym2608TimelineDecoderTests
     }
 
     [Fact]
-    public void SsgNoiseOnly_CreatesUnpitchedNoiseNote()
+    public void SsgNoiseOnly_EmitsNoiseMetadataAndNoMelodicNote()
     {
         var decoder = new Ym2608TimelineDecoder();
         decoder.ApplyYm2608(0, 0, 0x07, 0x37, 10);
         decoder.ApplyYm2608(0, 0, 0x08, 0x0F, 20);
         decoder.ApplyYm2608(0, 0, 0x08, 0x00, 300);
 
-        var note = Assert.Single(decoder.Complete(400, 44_100, "test").Notes);
-        Assert.Equal(VisualizationNoteMode.SsgNoise, note.Mode);
-        Assert.Equal(-1.0, note.InitialMidiNote);
-        Assert.Empty(note.Pitch);
-        Assert.Equal("ssg:noise", note.InstrumentId);
+        VisualizationTimeline timeline = decoder.Complete(400, 44_100, "test");
+        Assert.Empty(timeline.Notes);
+        NoiseStateEvent noise = Assert.Single(timeline.NoiseStates);
+        Assert.Equal("ym2608.0.ssg.1", noise.VoiceId);
+        Assert.Equal(1.0f, noise.Level, 3);
+        Assert.Empty(timeline.Rhythm);
+    }
+
+    [Fact]
+    public void SsgToneAndNoise_KeepOnePitchedNoteAndNoiseMetadata()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        decoder.ApplyYm2608(0, 0, 0x07, 0x30, 10);
+        decoder.ApplyYm2608(0, 0, 0x00, 0x58, 20);
+        decoder.ApplyYm2608(0, 0, 0x01, 0x01, 20);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x0F, 30);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x0A, 100);
+
+        VisualizationTimeline timeline = decoder.Complete(400, 44_100, "test");
+        NoteEvent note = Assert.Single(timeline.Notes);
+        Assert.Equal(VisualizationNoteMode.SsgToneNoise, note.Mode);
+        Assert.Single(timeline.NoiseStates);
+    }
+
+    [Fact]
+    public void SsgEnvelopeAndVolumeWrites_DoNotRetriggerActiveTone()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        decoder.ApplyYm2608(0, 0, 0x07, 0x3E, 10);
+        decoder.ApplyYm2608(0, 0, 0x00, 0x58, 20);
+        decoder.ApplyYm2608(0, 0, 0x01, 0x01, 20);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x08, 30);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x0A, 100);
+        decoder.ApplyYm2608(0, 0, 0x0B, 0x20, 150);
+        decoder.ApplyYm2608(0, 0, 0x0C, 0x01, 160);
+        decoder.ApplyYm2608(0, 0, 0x0D, 0x09, 170);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x10, 180);
+        decoder.ApplyYm2608(0, 0, 0x0D, 0x0F, 190);
+
+        VisualizationTimeline timeline = decoder.Complete(400, 44_100, "test");
+        NoteEvent note = Assert.Single(timeline.Notes);
+        Assert.Equal(30, note.StartSample);
+        Assert.Equal(400, note.EndSample);
+    }
+
+    [Fact]
+    public void SsgVolumeZeroAndMixerDisabled_AreSilent()
+    {
+        var decoder = new Ym2608TimelineDecoder();
+        decoder.ApplyYm2608(0, 0, 0x07, 0x3E, 10);
+        decoder.ApplyYm2608(0, 0, 0x00, 0x58, 20);
+        decoder.ApplyYm2608(0, 0, 0x01, 0x01, 20);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x0F, 30);
+        decoder.ApplyYm2608(0, 0, 0x08, 0x00, 100);
+        decoder.ApplyYm2608(0, 0, 0x07, 0x3F, 200);
+
+        VisualizationTimeline timeline = decoder.Complete(400, 44_100, "test");
+        NoteEvent note = Assert.Single(timeline.Notes);
+        Assert.Equal(30, note.StartSample);
+        Assert.Equal(100, note.EndSample);
+        Assert.DoesNotContain(timeline.Notes, candidate => candidate.StartSample >= 200);
+        Assert.Empty(timeline.NoiseStates);
     }
 
     [Fact]

@@ -58,6 +58,7 @@ public sealed class ReviewTests
         Assert.Equal("song-2", ReviewGenerator.Slug("Song (2)"));
         Assert.Equal("café-été", ReviewGenerator.Slug("Café_été"));
         Assert.Equal("diagnostic", ReviewGenerator.CompositionName(CompositionKind.Diagnostic));
+        Assert.Equal("performance", ReviewGenerator.CompositionName(CompositionKind.Performance));
     }
 
     [Fact]
@@ -127,8 +128,8 @@ public sealed class ReviewTests
         Assert.True(File.Exists(Path.Combine(output, "contact-sheets", "overview-720p-2.png")));
         using Image<Rgba32> image = Image.Load<Rgba32>(
             Path.Combine(output, "contact-sheets", "overview-720p-2.png"));
-        // One composition remains, so each overview row is a single tile.
-        Assert.Equal(480, image.Width);
+        // Each overview row contains one tile per supported composition.
+        Assert.Equal(480 * Enum.GetValues<CompositionKind>().Length, image.Width);
         Assert.Equal(328, image.Height);
     }
 

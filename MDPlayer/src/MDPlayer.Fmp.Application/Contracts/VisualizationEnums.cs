@@ -1,15 +1,21 @@
 namespace Fmp.Application.Contracts;
 
 /// <summary>
-/// The public publishing composition. Currently exactly one: Diagnostic
-/// (technical inspection output: a semantic channel grid). Future layouts can
-/// be added back as additional values; the request contract carries the
-/// composition explicitly and never auto-resolves it.
+/// The public publishing composition. The request carries the composition
+/// explicitly and never auto-resolves it.
 /// </summary>
 public enum CompositionKind
 {
     /// <summary>Technical inspection output: a semantic channel grid.</summary>
     Diagnostic,
+
+    /// <summary>
+    /// Native performance visualization: the semantic timeline rendered
+    /// in-process (note ribbons, rhythm lane, PCM events) on a balanced
+    /// active-panel layout. Previously named <c>MidiTrail</c>; that spelling
+    /// remains accepted as a CLI/JSON compatibility alias.
+    /// </summary>
+    Performance,
 }
 
 /// <summary>Output quality profile. Quality selects resolution/fps/encoding, never the composition.</summary>

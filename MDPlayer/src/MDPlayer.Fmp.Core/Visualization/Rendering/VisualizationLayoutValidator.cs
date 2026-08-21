@@ -15,8 +15,18 @@ internal static class VisualizationLayoutValidator
 
         int minimumPanelWidth = 300;
         int minimumScopeHeight = layout.Height >= 720 ? 56 : Math.Max(24, (int)Math.Round(56 * layout.Height / 720.0));
-        int minimumPitchedLaneHeight = layout.Height >= 720 ? 72 : Math.Max(32, (int)Math.Round(72 * layout.Height / 720.0));
-        int minimumPercussionRowHeight = layout.Height >= 720 ? 14 : Math.Max(8, (int)Math.Round(14 * layout.Height / 720.0));
+        // Semantic minimums depend on the grammar. Grid panels share height
+        // with a header and (historically) a scope, so they need generous
+        // pitch lanes. Performance lanes are dedicated full-width ribbons —
+        // the whole band is pitch content — so a much smaller floor keeps
+        // many-channel songs renderable on small canvases.
+        bool lanes = layout.Variant == VisualizationLayoutVariant.PerformanceLanes;
+        int minimumPitchedLaneHeight = lanes
+            ? Math.Max(8, (int)Math.Round(12.0 * layout.Height / 1080.0))
+            : layout.Height >= 720 ? 72 : Math.Max(32, (int)Math.Round(72 * layout.Height / 720.0));
+        int minimumPercussionRowHeight = lanes
+            ? Math.Max(3, (int)Math.Round(6.0 * layout.Height / 1080.0))
+            : layout.Height >= 720 ? 14 : Math.Max(8, (int)Math.Round(14 * layout.Height / 720.0));
 
         if (layout.PanelWidth < minimumPanelWidth)
             throw new ArgumentException(
@@ -46,7 +56,7 @@ internal static class VisualizationLayoutValidator
                     panel.Schema == PanelPresentationSchema.FmOperatorGroup).Height < minimumPitchedLaneHeight)
                 throw new ArgumentException(
                     $"Panel {panel.Label} has too little pitch-lane height; "
-                    + $"at least {minimumPitchedLaneHeight}px is required. Reduce scopes or channels.", nameof(layout));
+                    + $"at least {minimumPitchedLaneHeight}px is required. Reduce channels or increase the output height.", nameof(layout));
 
             if (panel.Schema == PanelPresentationSchema.PercussionRows && panel.Rows.Count > 0
                 && timeline.Height / panel.Rows.Count < minimumPercussionRowHeight)

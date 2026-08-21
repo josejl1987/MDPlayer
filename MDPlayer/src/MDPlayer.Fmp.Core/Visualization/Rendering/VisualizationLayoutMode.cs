@@ -7,4 +7,5 @@ namespace Fmp.Core.Visualization.Rendering;
 internal enum VisualizationLayoutMode
 {
     Diagnostic,
+    Performance,
 }

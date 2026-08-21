@@ -117,7 +117,8 @@ internal sealed class OverlayLayout
         // capability decision) wins over the variant-derived default so a
         // density fallback can hand the space to the remaining content.
         HasScopes = showScopes ?? true;
-        HasRoll = showRoll ?? (variant == VisualizationLayoutVariant.DiagnosticGrid);
+        HasRoll = showRoll ?? (variant is VisualizationLayoutVariant.DiagnosticGrid
+            or VisualizationLayoutVariant.PerformanceLanes);
 
         // Reserve the top and bottom metadata bands. The bands scale
         // proportionally with the canvas height, clamped to sensible minimums,
@@ -142,7 +143,8 @@ internal sealed class OverlayLayout
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the metadata bands and panel grid.");
         if (gridHeight % RowCount != 0)
             throw new ArgumentException($"Grid height ({gridHeight}) must be divisible by {RowCount}.", nameof(height));
-        if (width < 480 && variant == VisualizationLayoutVariant.DiagnosticGrid)
+        if (width < 480 && variant is VisualizationLayoutVariant.DiagnosticGrid
+            or VisualizationLayoutVariant.PerformanceLanes)
             throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be at least 480 pixels.");
         if (width < 240)
             throw new ArgumentOutOfRangeException(nameof(width), "Overlay width must be at least 240 pixels.");
@@ -179,6 +181,12 @@ internal sealed class OverlayLayout
         int maxHeaderForScope = PanelHeight - 2 * minimumScopeHeight;
         PanelHeaderHeight = Math.Clamp(PanelHeaderHeight, 12, Math.Max(12, maxHeaderForScope));
         PanelHeaderHeight = Math.Min(PanelHeaderHeight, 40);
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            // Lanes have no header chrome: the full band is the roll and the
+            // channel label lives in the left pitch gutter instead.
+            PanelHeaderHeight = 0;
+        }
 
         int availableContentHeight = PanelHeight - PanelHeaderHeight;
         int defaultScopeHeight = (int)Math.Round(
@@ -186,7 +194,7 @@ internal sealed class OverlayLayout
         if (scopeHeightOverride is null && scopeRatioOverride is not null)
             defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * scopeRatioOverride.Value));
 
-        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
+        if (UsesIntegratedRoll)
         {
             // DiagnosticGrid has one shared body below the header. Any legacy
             // timeline override describes the old stacked geometry and would
@@ -237,7 +245,7 @@ internal sealed class OverlayLayout
             }
         }
 
-        bool integratedScope = Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll;
+        bool integratedScope = UsesIntegratedRoll;
         int occupiedPanelHeight = PanelHeaderHeight
             + (integratedScope ? TimelineHeight : ScopeHeight + DividerHeight + TimelineHeight);
         if (ScopeHeight < 0 || TimelineHeight < 0 || occupiedPanelHeight > PanelHeight)
@@ -304,6 +312,15 @@ internal sealed class OverlayLayout
     public bool HasScopes { get; }
     public bool HasRoll { get; }
 
+    /// <summary>
+    /// True when the roll occupies the panel body directly (header above,
+    /// pitch gutter carved out of the left edge) instead of a stacked
+    /// scope/divider/timeline column. Both the diagnostic grid and the
+    /// performance lanes share this integrated grammar.
+    /// </summary>
+    public bool UsesIntegratedRoll => HasRoll && (Variant == VisualizationLayoutVariant.DiagnosticGrid
+        || Variant == VisualizationLayoutVariant.PerformanceLanes);
+
     public OverlayRect TopBarRect => new(0, 0, Width, TopBarHeight);
 
     public OverlayRect BottomBarRect => new(0, Height - BottomBarHeight, Width, BottomBarHeight);
@@ -350,6 +367,13 @@ internal sealed class OverlayLayout
     public OverlayRect GetHeaderRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            // Lanes carry no header band; the label lives in the pitch gutter
+            // (see HeaderSlots). A zero-height header also disables every
+            // dynamic header draw via the existing Height <= 0 guards.
+            return new OverlayRect(panel.X, panel.Y, panel.Width, 0);
+        }
         int height = Math.Min(PanelHeaderHeight, panel.Height);
         return new OverlayRect(panel.X, panel.Y, panel.Width, height);
     }
@@ -357,7 +381,7 @@ internal sealed class OverlayLayout
     public OverlayRect GetScopeRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
+        if (UsesIntegratedRoll)
         {
             OverlayRect body = GetTimelineRect(panelIndex);
             int gutter = Math.Min(PitchLabelWidth, body.Width);
@@ -383,6 +407,23 @@ internal sealed class OverlayLayout
         const int leftInset = 10;
         const int rightInset = 10;
 
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            // The lane label is a compact caption at the top of the pitch
+            // gutter: left-aligned, clear of the right-aligned pitch/rhythm
+            // labels that share the same column. State/patch slots collapse —
+            // lanes render no live header text.
+            OverlayRect timeline = GetTimelineRect(panelIndex);
+            int gutter = Math.Min(PitchLabelWidth, Math.Max(0, timeline.Width));
+            var name = new OverlayRect(
+                timeline.X + PitchLabelInsetLeft,
+                timeline.Y + 1,
+                Math.Max(0, gutter - PitchLabelInsetLeft - PitchLabelInsetRight),
+                Math.Min(12, Math.Max(0, timeline.Height)));
+            var empty = new OverlayRect(name.X, name.Y, 0, 0);
+            return new PanelHeaderLayout(name, empty, empty);
+        }
+
         int usableLeft = header.X + accentBar + leftInset;
         int rightLimit = header.Right - rightInset;
         int usable = Math.Max(0, rightLimit - usableLeft);
@@ -404,7 +445,7 @@ internal sealed class OverlayLayout
     public OverlayRect GetTimelineRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
-        if (Variant == VisualizationLayoutVariant.DiagnosticGrid && HasRoll)
+        if (UsesIntegratedRoll)
             return new OverlayRect(panel.X, panel.Y + PanelHeaderHeight, panel.Width, TimelineHeight);
         int y = ScopePosition == VisualizationScopePosition.Bottom
             ? panel.Y + PanelHeaderHeight + DividerHeight
@@ -452,17 +493,9 @@ internal sealed class OverlayLayout
     }
 
     public static long FrameToSample(long frameIndex, int sampleRate, int fpsNumerator, int fpsDenominator)
-    {
-        if (frameIndex < 0)
-            throw new ArgumentOutOfRangeException(nameof(frameIndex));
-        if (sampleRate <= 0)
-            throw new ArgumentOutOfRangeException(nameof(sampleRate));
-        if (fpsNumerator <= 0 || fpsDenominator <= 0)
-            throw new ArgumentOutOfRangeException(nameof(fpsNumerator));
-
-        decimal sample = (decimal)frameIndex * sampleRate * fpsDenominator / fpsNumerator;
-        return (long)decimal.Round(sample, 0, MidpointRounding.AwayFromZero);
-    }
+        // Canonical clock lives in FrameSampleClock; this forwarder keeps the
+        // historical call sites stable.
+        => FrameSampleClock.SampleAtFrame(frameIndex, sampleRate, fpsNumerator, fpsDenominator);
 
     private static int ClampBand(int value, int min, int max)
         => Math.Clamp(value, min, max);

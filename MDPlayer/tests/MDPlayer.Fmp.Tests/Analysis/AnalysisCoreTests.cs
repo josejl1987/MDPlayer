@@ -38,8 +38,8 @@ public sealed class AnalysisCoreTests
             EndSample = 2_000,
             Ppz8 =
             [
-                new Ppz8Event(0, 100, 600, 0, 4, 440, 69, 1, 0, false),
-                new Ppz8Event(1, 700, 900, 0, 5, null, null, 1, 0, false),
+                new Ppz8Event(0, 100, 600, 0, 4, 0x8000, 1.0, 16_000, null, 1, 0, false),
+                new Ppz8Event(1, 700, 900, 0, 5, null, 1.0, 16_000, null, 1, 0, false),
             ],
             AdpcmB =
             [new AdpcmBEvent(1_000, 1_400, 0, 1, 2, null, 1, 0, false)],
@@ -49,9 +49,7 @@ public sealed class AnalysisCoreTests
 
         AnalysisInput input = FmpSymbolicNormalizer.Normalize(timeline);
 
-        AnalysisChannel ppz8 = Assert.Single(input.Channels, channel => channel.Kind == "ppz8");
-        Assert.Contains(ppz8.Notes, note => note.IsPitched && note.PitchClass == 9);
-        Assert.Contains(ppz8.Notes, note => !note.IsPitched && note.PitchClass == -1);
+        Assert.DoesNotContain(input.Channels, channel => channel.Kind == "ppz8");
         Assert.Contains(input.Channels, channel => channel.Kind == "adpcm");
         AnalysisChannel rhythm = Assert.Single(input.Channels, channel => channel.Kind == "rhythm");
         Assert.All(rhythm.Notes, note => Assert.False(note.IsPitched));

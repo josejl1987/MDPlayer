@@ -30,8 +30,43 @@ internal static class VisualizationLayoutBuilder
         return mode switch
         {
             VisualizationLayoutMode.Diagnostic => BuildDiagnostic(timeline, settings),
+            VisualizationLayoutMode.Performance => BuildPerformance(timeline, settings),
             _ => throw new ArgumentOutOfRangeException(nameof(mode)),
         };
+    }
+
+    private static ResolvedVisualizationLayout BuildPerformance(
+        VisualizationTimeline timeline,
+        VisualizationLayoutSettings settings)
+    {
+        VisualizationTopology topology = VisualizationTopologyBuilder.Build(
+            timeline,
+            settings.Channels,
+            settings.GroupBy);
+        topology = ApplyTrackFiltering(topology, settings);
+
+        // The resolver is the single construction authority for lane geometry
+        // and capabilities; the builder layers content validation on top.
+        // Performance uses full-width horizontal lanes on one common time
+        // axis: every lane shares the same playhead X, so rhythmic
+        // relationships read across channels.
+        ResolvedVisualizationLayout layout = VisualizationLayoutResolver.ComposePerformance(
+            settings.Width,
+            settings.Height,
+            settings.PastSeconds,
+            settings.FutureSeconds,
+            VisualizationLayoutMode.Performance,
+            topology,
+            settings.ScopePosition,
+            settings.ScopeHeight,
+            settings.TimelineHeight,
+            settings.RollZoom,
+            settings.ScopeRatio);
+
+        if (VisualizationContentAvailability.HasRenderableContent(timeline))
+            VisualizationLayoutValidator.Validate(layout.Geometry, topology);
+
+        return layout;
     }
 
     private static ResolvedVisualizationLayout BuildDiagnostic(

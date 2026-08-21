@@ -29,6 +29,62 @@ public sealed class CanonicalRenderRequestTests
     }
 
     [Fact]
+    public void CompositionPerformance_IsCanonical_AndMiditrailIsAcceptedAlias()
+    {
+        Assert.Equal(
+            CompositionKind.Performance,
+            RenderCommandParser.ParseCore(["song.vgz", "--composition", "performance"]).Request.Composition);
+        Assert.Equal(
+            CompositionKind.Performance,
+            RenderCommandParser.ParseCore(["song.vgz", "--composition", "miditrail"]).Request.Composition);
+        Assert.Throws<ArgumentException>(
+            () => RenderCommandParser.ParseCore(["song.vgz", "--composition", "unknown"]));
+    }
+
+    [Fact]
+    public void RequestJson_PerformanceWritesCanonical_AndReadsLegacyMiditrail()
+    {
+        string json = VisualizationRequestSerializer.Serialize(new VisualizationRequest
+        {
+            InputPath = "song.vgz",
+            OutputPath = "out.mp4",
+            Composition = CompositionKind.Performance,
+        });
+        Assert.Contains("\"Performance\"", json);
+        Assert.DoesNotContain("MidiTrail", json);
+
+        // Legacy project files written before the rename keep loading.
+        Assert.Equal(
+            CompositionKind.Performance,
+            VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4","composition":"MidiTrail"}""").Composition);
+        Assert.Equal(
+            CompositionKind.Performance,
+            VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4","composition":"miditrail"}""").Composition);
+        Assert.Equal(
+            CompositionKind.Diagnostic,
+            VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4"}""").Composition);
+    }
+
+    [Fact]
+    public void RequestJson_LegacyNumericCompositionStillReads()
+    {
+        Assert.Equal(
+            CompositionKind.Performance,
+            VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4","composition":1}""").Composition);
+        Assert.Equal(
+            CompositionKind.Diagnostic,
+            VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4","composition":0}""").Composition);
+        Assert.Throws<VisualizationRequestException>(
+            () => VisualizationRequestSerializer.Deserialize(
+                """{"schemaVersion":1,"inputPath":"song.vgz","outputPath":"out.mp4","composition":7}"""));
+    }
+
+    [Fact]
     public void RequestJsonSeed_IsOverriddenByCommandLine()
     {
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-request-{Guid.NewGuid():N}.json");

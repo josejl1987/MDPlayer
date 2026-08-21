@@ -18,14 +18,22 @@ internal sealed class MidiTrack
     {
         _events = new List<MidiEventBase>();
         _packedEvents = new List<PackedMidiEvent>();
+        Name = string.Empty;
+        SourceVoiceId = string.Empty;
+        Endpoint = new MidiEndpoint(0, 0);
     }
 
     internal MidiTrack(int initialEventCapacity)
     {
         _packedEvents = new List<PackedMidiEvent>(Math.Max(0, initialEventCapacity));
+        Name = string.Empty;
+        SourceVoiceId = string.Empty;
+        Endpoint = new MidiEndpoint(0, 0);
     }
 
     public required string Name { get; init; }
+
+    public string SourceVoiceId { get; init; } = string.Empty;
 
     public required MidiEndpoint Endpoint { get; init; }
 

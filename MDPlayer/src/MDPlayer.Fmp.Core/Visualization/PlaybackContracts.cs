@@ -247,7 +247,7 @@ internal readonly record struct TimedChipWrite(
             throw new ArgumentOutOfRangeException(nameof(Port));
         if (Address < 0)
             throw new ArgumentOutOfRangeException(nameof(Address));
-        if (Data is < 0 or > 0xFFFF)
+        if (Data < 0 || (Device.Type != ChipType.Ppz8 && Data > 0xFFFF))
             throw new ArgumentOutOfRangeException(nameof(Data));
         return this;
     }

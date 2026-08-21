@@ -24,6 +24,17 @@ internal sealed class MidiOptions : BatchRenderSettings
     /// <summary>Optional raw endpoint/pitch-state report.</summary>
     public string PitchReport { get; set; }
 
+    /// <summary>
+    /// When true, emit one SMF file per semantic source voice (FM1..FM6, SSG,
+    /// DAC/sample, rhythm) instead of a single all-channel file. <see cref="Output"/>
+    /// is then treated as a directory. Every channel file shares the same global
+    /// transport (division, 120 BPM tempo at tick 0, lead-in, total duration) as
+    /// the all-channel source, so consumers that tile or diff per-voice files see
+    /// one common time base. This is a standalone transcription feature; the
+    /// visualization pipeline never consumes MIDI.
+    /// </summary>
+    public bool Channels { get; set; }
+
     public TextWriter OutputWriter { get; set; } = Console.Out;
 }
 
@@ -35,7 +46,7 @@ internal static class MidiOptionsParser
         var reader = new ArgumentReader(args ?? Array.Empty<string>());
         while (reader.HasMore)
         {
-            if (reader.TryReadOption(out string name, out _))
+            if (reader.TryReadOption(out string name, out string value))
             {
                 if (RenderOptionsParser.TryParse(ref reader, name, result))
                     continue;
@@ -47,6 +58,7 @@ internal static class MidiOptionsParser
                     case "--ppq": result.Ppq = reader.ReadInt(name); break;
                     case "--timing-report": result.TimingReport = reader.RequireValue(name); break;
                     case "--pitch-report": result.PitchReport = reader.RequireValue(name); break;
+                    case "--channels" when value == null: result.Channels = true; break;
                     default: throw new ArgumentException($"unknown option '{name}'");
                 }
             }

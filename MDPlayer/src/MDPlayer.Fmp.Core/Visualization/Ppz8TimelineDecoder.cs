@@ -92,7 +92,9 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
                     write.SamplePosition,
                     state.SampleNumber,
                     _currentBank,
-                    state.FrequencyHz,
+                    state.PlaybackFnum,
+                    state.PlaybackRate,
+                    state.SourceSampleRate,
                     state.MidiNote,
                     state.Volume,
                     state.Pan,
@@ -103,24 +105,47 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
                 break;
             case 7: // channel volume, 0..15
                 state.Volume = Math.Clamp(write.Data, 0, 15) / 15f;
-                state.Current?.Update(state.FrequencyHz, state.MidiNote, state.Volume, state.Pan);
+                state.Current?.Update(
+                    state.PlaybackFnum,
+                    state.PlaybackRate,
+                    state.SourceSampleRate,
+                    state.MidiNote,
+                    state.Volume,
+                    state.Pan);
                 break;
             case 11: // playback FNUM (fixed-point ratio, 0x8000 = source rate)
-                state.FrequencyFnum = write.Data;
-                state.FrequencyHz = DecodeFrequency(state.FrequencyFnum, state.BaseFrequencyHz);
+                state.PlaybackFnum = write.Data;
+                state.PlaybackRate = DecodePlaybackRate(state.PlaybackFnum);
                 state.MidiNote = null; // sample root pitch is not known here.
-                state.Current?.Update(state.FrequencyHz, null, state.Volume, state.Pan);
+                state.Current?.Update(
+                    state.PlaybackFnum,
+                    state.PlaybackRate,
+                    state.SourceSampleRate,
+                    state.MidiNote,
+                    state.Volume,
+                    state.Pan);
                 break;
             case 19: // pan, represented by the driver's signed control value
                 state.Pan = DecodePan(write.Data);
-                state.Current?.Update(state.FrequencyHz, state.MidiNote, state.Volume, state.Pan);
+                state.Current?.Update(
+                    state.PlaybackFnum,
+                    state.PlaybackRate,
+                    state.SourceSampleRate,
+                    state.MidiNote,
+                    state.Volume,
+                    state.Pan);
                 break;
-            case 21: // source/sample base frequency
+            case 21: // source sample rate, kept separate from playback FNUM
                 if (write.Data > 0)
                 {
-                    state.BaseFrequencyHz = write.Data;
-                    if (state.FrequencyFnum is int fnum)
-                        state.FrequencyHz = DecodeFrequency(fnum, state.BaseFrequencyHz);
+                    state.SourceSampleRate = write.Data;
+                    state.Current?.Update(
+                        state.PlaybackFnum,
+                        state.PlaybackRate,
+                        state.SourceSampleRate,
+                        state.MidiNote,
+                        state.Volume,
+                        state.Pan);
                 }
                 break;
             case 22: // source/bank selector used by some FMP builds
@@ -167,7 +192,9 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
                 endSample,
                 current.Bank,
                 current.SampleNumber,
-                current.FrequencyHz,
+                current.PlaybackFnum,
+                current.PlaybackRate,
+                current.SourceSampleRate,
                 current.MidiNote,
                 current.Volume,
                 current.Pan,
@@ -176,10 +203,11 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
         state.Current = null;
     }
 
-    private static double? DecodeFrequency(int fnum, int baseFrequencyHz)
-        => fnum > 0 && baseFrequencyHz > 0
-            ? baseFrequencyHz * (fnum / 32768.0)
-            : null;
+    private static int? ClampNullable(int value)
+        => value is >= 0 and <= byte.MaxValue ? value : null;
+
+    private static double DecodePlaybackRate(int? fnum)
+        => fnum is > 0 ? fnum.Value / 32768.0 : 1.0;
 
     private static float DecodePan(int value)
     {
@@ -193,12 +221,12 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
     private sealed class State
     {
         public int? SampleNumber { get; set; }
-        public double? FrequencyHz { get; set; }
-        public int? FrequencyFnum { get; set; }
+        public int? PlaybackFnum { get; set; }
+        public double PlaybackRate { get; set; } = 1.0;
+        public int? SourceSampleRate { get; set; } = 16_000;
         public double? MidiNote { get; set; }
         public float Volume { get; set; } = 1;
         public float Pan { get; set; }
-        public int BaseFrequencyHz { get; set; } = 16_000;
         public MutableEvent Current { get; set; }
     }
 
@@ -209,7 +237,9 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
             long startSample,
             int? sampleNumber,
             int? bank,
-            double? frequencyHz,
+            int? playbackFnum,
+            double playbackRate,
+            int? sourceSampleRate,
             double? midiNote,
             float volume,
             float pan,
@@ -219,7 +249,9 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
             StartSample = startSample;
             SampleNumber = sampleNumber;
             Bank = bank;
-            FrequencyHz = frequencyHz;
+            PlaybackFnum = playbackFnum;
+            PlaybackRate = playbackRate;
+            SourceSampleRate = sourceSampleRate;
             MidiNote = midiNote;
             Volume = volume;
             Pan = pan;
@@ -230,15 +262,25 @@ internal sealed class Ppz8TimelineDecoder : IChipTimelineDecoder
         public long StartSample { get; }
         public int? SampleNumber { get; }
         public int? Bank { get; }
-        public double? FrequencyHz { get; private set; }
+        public int? PlaybackFnum { get; private set; }
+        public double PlaybackRate { get; private set; }
+        public int? SourceSampleRate { get; private set; }
         public double? MidiNote { get; private set; }
         public float Volume { get; private set; }
         public float Pan { get; private set; }
         public bool IsRetrigger { get; }
 
-        public void Update(double? frequencyHz, double? midiNote, float volume, float pan)
+        public void Update(
+            int? playbackFnum,
+            double playbackRate,
+            int? sourceSampleRate,
+            double? midiNote,
+            float volume,
+            float pan)
         {
-            FrequencyHz = frequencyHz;
+            PlaybackFnum = playbackFnum;
+            PlaybackRate = playbackRate;
+            SourceSampleRate = sourceSampleRate;
             MidiNote = midiNote;
             Volume = volume;
             Pan = pan;

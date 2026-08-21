@@ -24,6 +24,7 @@ internal sealed class Ym2608TimelineDecoder
     private readonly bool[] _ssgNoiseActive = new bool[3];
     private readonly List<MutableNote> _notes = [];
     private readonly List<RhythmEvent> _rhythm = [];
+    private readonly List<NoiseStateEvent> _noiseStates = [];
     private readonly List<AdpcmBEvent> _adpcmB = [];
     private readonly List<DriverTimingEvent> _timing = [];
     private MutableAdpcmB _adpcmCurrent;
@@ -173,6 +174,10 @@ internal sealed class Ym2608TimelineDecoder
                 .ToArray(),
             Samples = samples,
             SamplePlayback = samplePlayback,
+            NoiseStates = _noiseStates
+                .OrderBy(value => value.StartSample)
+                .ThenBy(value => value.VoiceId, StringComparer.Ordinal)
+                .ToArray(),
             Timing = _timing
                 .OrderBy(value => value.SamplePosition)
                 .ToArray(),
@@ -556,50 +561,51 @@ internal sealed class Ym2608TimelineDecoder
             int volume = volumeRegister & 0x0F;
             bool envelopeEnabled = (volumeRegister & 0x10) != 0;
             int period = _registers[channel * 2] | ((_registers[channel * 2 + 1] & 0x0F) << 8);
-
-            bool audible = (toneEnabled || noiseEnabled)
-                && (envelopeEnabled || volume > 0)
-                && (!toneEnabled || period > 0);
+            bool toneAudible = toneEnabled && period > 0;
+            bool noiseAudible = noiseEnabled;
+            bool levelAudible = envelopeEnabled || volume > 0;
+            bool audible = (toneAudible || noiseAudible) && levelAudible;
 
             if (!audible)
             {
                 CloseNote(ref _ssgNotes[channel], samplePosition);
+                _ssgNoiseActive[channel] = false;
                 continue;
             }
 
-            VisualizationNoteMode mode = GetSsgMode(toneEnabled, noiseEnabled, envelopeEnabled);
+            VisualizationNoteMode mode = GetSsgMode(toneAudible, noiseAudible, envelopeEnabled);
             string instrumentId = GetSsgInstrumentId(mode, envelopeShape);
             GetOrAddSsgInstrument(instrumentId);
-            if (!toneEnabled)
+
+            if (noiseAudible && !_ssgNoiseActive[channel])
             {
-                // Pure SSG noise has no pitch. Preserve it as an unpitched
-                // activity event, never as a melodic NoteEvent.
-                if (noiseEnabled && audible && !_ssgNoiseActive[channel])
-                {
-                    _timeline.AddNoiseState(new NoiseStateEvent(
-                        $"ym2608.0.ssg.{channel + 1}",
-                        samplePosition,
-                        checked(samplePosition + 1),
-                        null,
-                        null,
-                        envelopeEnabled ? 1.0f : volume / 15.0f,
-                        NoiseMode.HardwareDefined));
-                }
-                _ssgNoiseActive[channel] = noiseEnabled && audible;
+                _noiseStates.Add(new NoiseStateEvent(
+                    $"ym2608.0.ssg.{channel + 1}",
+                    samplePosition,
+                    checked(samplePosition + 1),
+                    null,
+                    null,
+                    envelopeEnabled ? 1.0f : volume / 15.0f,
+                    NoiseMode.HardwareDefined));
+            }
+            _ssgNoiseActive[channel] = noiseAudible;
+
+            if (!toneAudible)
+            {
                 CloseNote(ref _ssgNotes[channel], samplePosition);
                 continue;
             }
-            _ssgNoiseActive[channel] = false;
+
             Pitch pitch = DecodeSsgPitch(period);
-
-            MutableNote? active = _ssgNotes[channel];
-            bool modeChanged = active == null
-                || active.Mode != mode
-                || !string.Equals(active.InstrumentId, instrumentId, StringComparison.Ordinal);
-
-            if (modeChanged)
+            if (!IsValidInitialPitch(pitch))
             {
                 CloseNote(ref _ssgNotes[channel], samplePosition);
+                continue;
+            }
+
+            MutableNote? active = _ssgNotes[channel];
+            if (active == null)
+            {
                 var note = new MutableNote(
                     $"ym2608.0.ssg.{channel + 1}",
                     samplePosition,
@@ -610,13 +616,12 @@ internal sealed class Ym2608TimelineDecoder
                     false);
                 _notes.Add(note);
                 _ssgNotes[channel] = note;
-                _ssgPrevVolume[channel] = volume;
-                continue;
             }
-
-            _ssgPrevVolume[channel] = volume;
-            if (toneEnabled)
+            else
+            {
                 active.AddPitch(samplePosition, pitch.FrequencyHz, pitch.MidiNote);
+            }
+            _ssgPrevVolume[channel] = volume;
         }
     }
 

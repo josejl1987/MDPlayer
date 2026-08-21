@@ -18,7 +18,6 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
     private readonly PendingFrequency?[] _pendingFrequency = new PendingFrequency?[5];
     private TimelineBuilder _timeline;
     private DeviceDescriptor _device;
-    private long _plateauSamples;
     private int _selectedRegister;
     private int _keyMask;
     private bool _completed;
@@ -34,7 +33,6 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
 
         _device = device;
         _timeline = timeline;
-        _plateauSamples = Math.Max(1, (long)Math.Round(timeline.SampleRate * 0.010));
         _timeline.AddDevice(device);
         for (int channel = 0; channel < _waveRam.Length; channel++)
             _waveRam[channel] = new byte[32];
@@ -157,10 +155,11 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
         Pitch pitch = DecodePitch(channel);
         bool active = (_keyMask & (1 << channel)) != 0
             && _volume[channel] > 0
-            // INV5 source classifier: a tone-disabled / ultrasonic / initialization
-            // period (<= 0, or decoding above the audible ceiling) is not a
-            // representable musical pitch and never becomes a note (aligned with
-            // the AY8910 tone gate).
+            // INV5 source classifier: period 0 disables the tone oscillator;
+            // periods 1..8 are the SCC's very-low/initialization range and
+            // must not become representable musical notes.
+            // Higher decoded frequencies are also rejected by the shared
+            // MIDI-domain ceiling below.
             && ChipPitchDomain.IsRepresentable(pitch.FrequencyHz, pitch.MidiNote);
         if (!active)
         {
@@ -210,6 +209,9 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
     private Pitch DecodePitch(int channel)
     {
         int period = _frequency[channel];
+        // Period 0 disables the oscillator; periods 1..8 are explicitly
+        // treated as very-low/initialization values. For every enabled
+        // register, preserve the physical SCC oscillator equation.
         if (period <= 8)
             return Pitch.Unpitched;
         return Pitch.FromFrequency(_device.ClockHz / (32.0 * (period + 1)));
@@ -251,85 +253,29 @@ internal sealed class K051649TimelineDecoder : IChipTimelineDecoder
     /// </summary>
     private readonly record struct PendingFrequency(long SamplePosition);
 
-    private readonly record struct PendingPlateau(
-        long SamplePosition,
-        int RoundedMidiNote,
-        Pitch Pitch);
 
     private sealed class MutableNote
     {
-        private PendingPlateau? _candidate;
-
         public MutableNote(VoiceId voice, long startSample, Pitch pitch, string instrumentId)
         {
             Voice = voice;
             StartSample = startSample;
             InitialPitch = pitch;
-            Pitch = pitch;
-            StableMidiNote = (int)Math.Round(pitch.MidiNote);
+            CurrentPitch = pitch;
             InstrumentId = instrumentId;
         }
 
         public VoiceId Voice { get; }
         public long StartSample { get; }
         public Pitch InitialPitch { get; }
-        public Pitch Pitch { get; private set; }
-        public int StableMidiNote { get; private set; }
+        public Pitch CurrentPitch { get; private set; }
         public string InstrumentId { get; }
 
-        public bool TryCommitPending(
-            long sample, long minimumSamples, out PendingPlateau plateau)
+        public void AddPitch(long sample, Pitch pitch)
         {
-            plateau = default;
-            if (_candidate is not PendingPlateau candidate
-                || sample - candidate.SamplePosition < minimumSamples)
-                return false;
-            StableMidiNote = candidate.RoundedMidiNote;
-            plateau = candidate;
-            _candidate = null;
-            return true;
-        }
-
-        public bool TryPromotePlateau(
-            long sample, Pitch pitch, long minimumSamples, out PendingPlateau plateau)
-        {
-            plateau = default;
-            if (!ChipPitchDomain.IsRepresentable(pitch.FrequencyHz, pitch.MidiNote))
-                return false;
-
-            int rounded = (int)Math.Round(pitch.MidiNote);
-            if (rounded == StableMidiNote)
-            {
-                _candidate = null;
-                AddPitch(sample, pitch);
-                return false;
-            }
-
-            if (_candidate is not PendingPlateau candidate || candidate.RoundedMidiNote != rounded)
-            {
-                _candidate = new PendingPlateau(sample, rounded, pitch);
-                AddPitch(sample, pitch);
-                return false;
-            }
-
-            AddPitch(sample, pitch);
-            if (sample - candidate.SamplePosition < minimumSamples)
-                return false;
-
-            StableMidiNote = rounded;
-            plateau = candidate;
-            _candidate = null;
-            return true;
-        }
-
-        public void RemovePitchChangesFrom(long sample) =>
-            PitchChanges.RemoveAll(change => change.SamplePosition >= sample);
-
-        private void AddPitch(long sample, Pitch pitch)
-        {
-            if (Math.Abs(Pitch.MidiNote - pitch.MidiNote) >= 0.0001)
+            if (Math.Abs(CurrentPitch.MidiNote - pitch.MidiNote) >= 0.0001)
                 PitchChanges.Add(new PitchChange(sample, pitch.FrequencyHz, pitch.MidiNote));
-            Pitch = pitch;
+            CurrentPitch = pitch;
         }
 
         public List<PitchChange> PitchChanges { get; } = [];

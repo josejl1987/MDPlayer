@@ -95,7 +95,10 @@ internal static class VisualizationPlanBuilder
         IReadOnlyList<ValidationIssue> issues,
         VisualizationLayoutVariant variant)
     {
-        if (variant == VisualizationLayoutVariant.DiagnosticGrid)
+        // DiagnosticGrid and the performance lanes are both intended grammars,
+        // never fallbacks — lanes are the native Performance composition shape.
+        if (variant is VisualizationLayoutVariant.DiagnosticGrid
+            or VisualizationLayoutVariant.PerformanceLanes)
             return issues;
 
         var appended = new List<ValidationIssue>(issues.Count + 1);

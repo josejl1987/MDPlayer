@@ -421,7 +421,12 @@ public sealed class ReviewGenerator
         return builder.ToString().Trim('-') is { Length: > 0 } result ? result : "file";
     }
 
-    internal static string CompositionName(CompositionKind composition) => "diagnostic";
+    internal static string CompositionName(CompositionKind composition) => composition switch
+    {
+        CompositionKind.Diagnostic => "diagnostic",
+        CompositionKind.Performance => "performance",
+        _ => throw new ArgumentOutOfRangeException(nameof(composition)),
+    };
 
     private static void PrepareOutputDirectory(string output, bool keepExisting)
     {

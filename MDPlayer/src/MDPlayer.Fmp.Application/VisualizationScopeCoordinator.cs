@@ -71,6 +71,34 @@ internal static class VisualizationScopeCoordinator
         return new VisualizationScopeArtifacts(plan, result, scopesRequired, isolated);
     }
 
+    /// <summary>
+    /// Renders ONLY the master WAV into the workspace audio directory for
+    /// compositions that consume no scope assets (Performance). Uses FMP
+    /// parallel synthesis restricted to the master stem — no isolated stems,
+    /// no Corrscope/Python, fully in-process. Returns the rendered sample
+    /// count so callers can anchor the render duration to actual audio.
+    /// </summary>
+    public static long RenderMasterAudioOnly(
+        VisualizationRequest request,
+        VisualizationWorkspace workspace,
+        PreparedTrack preparedFmpTrack)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(workspace);
+        ArgumentNullException.ThrowIfNull(preparedFmpTrack);
+
+        var plan = new StemPlan(
+            Supported: true,
+            Support: ScopeSupport.None,
+            Strategy: StemStrategy.FmpParallelSynthesis,
+            SynthesizerInstances: 0,
+            OutputStreams: 0,
+            Reason: "performance master audio only");
+        VisualizationScopeArtifacts artifacts =
+            RenderFmp(plan, preparedFmpTrack, request, workspace, scopesRequired: false);
+        return artifacts.Result.MasterSamples;
+    }
+
     public static VisualizationScopeArtifacts Render(
         string backendId,
         FileInfo input,

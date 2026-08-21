@@ -61,6 +61,9 @@ public sealed class MidiTranscriberFidelityTests
         Assert.Single(conductor, c => c.Event is SetTempoEvent);
         var tempo = conductor.Select(c => c.Event).OfType<SetTempoEvent>().Single();
         Assert.Equal(0, conductor.First(c => c.Event is SetTempoEvent).Tick);
+        Assert.All(
+            conductor.Where(c => c.Event is SetTempoEvent),
+            c => Assert.Equal(0, c.Tick));
         Assert.Equal(500_000, tempo.MicrosecondsPerQuarterNote); // 120 BPM
         Assert.DoesNotContain(conductor, c => c.Event is TimeSignatureEvent);
         Assert.DoesNotContain(conductor, c => c.Event is MarkerEvent);
@@ -311,7 +314,7 @@ public sealed class MidiTranscriberFidelityTests
     public void SameTickAttackCollisions_CountedInDiagnostics()
     {
         MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
-            Note("0", 0, Sr, 60.0),
+            Note("0", 0, 0, 60.0),
             Note("0", 0, Sr, 62.0)));
         Assert.Equal(1, result.Diagnostics.SameTickAttackCollisions);
     }
@@ -394,4 +397,52 @@ public sealed class MidiTranscriberFidelityTests
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
         Assert.Contains(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
     }
+    [Fact]
+    public void TonalPcmParallelViews_ShareIdentityAndEmitOneAttack()
+    {
+        var builder = new TimelineBuilder(Sr);
+        builder.AddNote(
+            new VoiceId(new DeviceId(ChipType.SnesDsp, 0), VoiceKind.PcmVoice, 0),
+            0,
+            Sr,
+            60.0,
+            0,
+            "sample",
+            VisualizationNoteMode.Pcm,
+            false,
+            Array.Empty<PitchChange>());
+
+        VisualizationTimeline built = builder.Build(Sr);
+        NoteEvent note = Assert.Single(built.Notes);
+        SamplePlaybackEvent sample = Assert.Single(built.SamplePlayback);
+        Assert.NotNull(note.SourceAttackId);
+        Assert.Equal(note.SourceAttackId, sample.SourceAttackId);
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(built);
+        Assert.Equal(0, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(1, Track(result.Bytes, 1).Count(e => e.Event is NoteOnEvent));
+    }
+
+    [Fact]
+    public void UnownedSamplePlayback_EmitsOneAttack()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr, "sample-dac", null, 1.0, 1.0f, 0, false, false)
+                {
+                    SourceAttackId = "attack:dac",
+                },
+            ],
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(1, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(1, Track(result.Bytes, 1).Count(e => e.Event is NoteOnEvent));
+    }
+
 }

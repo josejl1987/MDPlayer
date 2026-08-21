@@ -32,8 +32,8 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
         ArgumentNullException.ThrowIfNull(request);
         var arguments = new List<string> { "render", request.InputPath };
 
-        // Composition. Diagnostic is the only composition and the request
-        // default, so compact output omits it; FullyResolved always emits it.
+        // Composition. Diagnostic is the schema-v1 default, so compact output
+        // omits it; non-default compositions and FullyResolved output emit it.
         AddIf(arguments, "--composition", CompositionName(request.Composition), mode,
             request.Composition != CompositionKind.Diagnostic);
 
@@ -115,6 +115,7 @@ public sealed class VisualizationCommandFormatter : IVisualizationCommandFormatt
     internal static string CompositionName(CompositionKind composition) => composition switch
     {
         CompositionKind.Diagnostic => "diagnostic",
+        CompositionKind.Performance => "performance",
         _ => throw new ArgumentOutOfRangeException(nameof(composition)),
     };
 

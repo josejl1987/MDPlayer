@@ -5,11 +5,10 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Unit tests for the AY-3-8910 decoder's voice-state model (INV4/INV5):
-/// tone channels only produce notes for representable musical pitches
-/// (tone-enabled, volume &gt; 0, audible period — never ultrasonic init states),
-/// and the shared noise channel is a percussion source emitted EDGE-driven:
-/// one trigger per inactive → active transition, never per register write.
+/// Unit tests for the AY-3-8910 decoder's source-fidelity voice-state model:
+/// tone-enabled voices produce pitched notes, while shared noise is emitted only
+/// as unpitched NoiseStateEvent metadata. Register writes must not speculate
+/// melodic attacks.
 /// </summary>
 public sealed class Ay8910TimelineDecoderTests
 {
@@ -108,47 +107,114 @@ public sealed class Ay8910TimelineDecoderTests
     }
 
     [Fact]
-    public void Noise_EdgeDriven_SingleTriggerPerTransition()
+    public void Tone_VolumeChangeDoesNotRetrigger()
     {
-        // INV4: the noise channel emits ONE trigger per inactive → active
-        // transition. While the state stays active, volume/mixer/period rewrites
-        // (the PSG driver's per-frame update stream) must not re-trigger.
         var (decoder, timeline) = NewDecoder();
-        decoder.Process(W(0, 7, MixerNoiseOnly));
-        decoder.Process(W(0, 8, 0x03));   // ch A volume 3 → active → trigger #1
-        decoder.Process(W(100, 8, 0x05)); // volume change while active → no new trigger
-        decoder.Process(W(200, 6, 10));   // noise period rewrite while active → no new trigger
-        decoder.Process(W(300, 8, 0x00)); // volume 0 → inactive
-        decoder.Process(W(400, 8, 0x04)); // volume up → trigger #2
-        decoder.Complete(10_000);
+        WritePeriod(decoder, 0, 200);
+        decoder.Process(W(0, 7, MixerToneOnly));
+        decoder.Process(W(0, 8, 0x08));
+        decoder.Process(W(500, 8, 0x0A));
+        decoder.Complete(1_000);
 
-        var rhythm = timeline.Build(10_000).Rhythm;
-        Assert.Equal(2, rhythm.Count);
-        Assert.Equal(0, rhythm[0].SamplePosition);
-        Assert.Equal(400, rhythm[1].SamplePosition);
-        Assert.Equal(3 / 15.0f, rhythm[0].Strength, 3);
+        NoteEvent note = Assert.Single(timeline.Build(1_000).Notes);
+        Assert.Equal(0, note.StartSample);
+        Assert.Equal(1_000, note.EndSample);
     }
 
     [Fact]
-    public void Noise_AllVolumesZero_NoTrigger()
+    public void TonePeriodChangeWhileGateOpen_AddsPitchChangeWithoutRetrigger()
+    {
+        var (decoder, timeline) = NewDecoder();
+        WritePeriod(decoder, 0, 200);
+        decoder.Process(W(0, 7, MixerToneOnly));
+        decoder.Process(W(0, 8, 0x0F));
+        WritePeriod(decoder, 0, 240, 500);
+        decoder.Process(W(900, 8, 0x00));
+        decoder.Complete(1_000);
+
+        NoteEvent note = Assert.Single(timeline.Build(1_000).Notes);
+        PitchChange change = Assert.Single(note.Pitch);
+        Assert.Equal(500, change.SamplePosition);
+        Assert.NotEqual(note.InitialMidiNote, change.MidiNote);
+    }
+
+
+    [Fact]
+    public void Tone_EnvelopeEnabledZeroDirectVolumeRemainsAudible()
+    {
+        var (decoder, timeline) = NewDecoder();
+        WritePeriod(decoder, 0, 200);
+        decoder.Process(W(0, 7, MixerToneOnly));
+        decoder.Process(W(0, 8, 0x10));
+        decoder.Process(W(100, 11, 0x20));
+        decoder.Process(W(200, 12, 0x01));
+        decoder.Process(W(300, 13, 0x09));
+        decoder.Complete(1_000);
+
+        NoteEvent note = Assert.Single(timeline.Build(1_000).Notes);
+        Assert.Equal(0, note.StartSample);
+        Assert.Equal(1_000, note.EndSample);
+        Assert.Equal(VisualizationNoteMode.SsgEnvelopeTone, note.Mode);
+    }
+
+    [Fact]
+    public void ToneAndNoise_CreateOnePitchedNoteAndNoiseMetadata()
+    {
+        var (decoder, timeline) = NewDecoder();
+        WritePeriod(decoder, 0, 200);
+        decoder.Process(W(0, 7, 0x30)); // tone A and noise A enabled
+        decoder.Process(W(0, 8, 0x0F));
+        decoder.Complete(1_000);
+
+        NoteEvent note = Assert.Single(timeline.Build(1_000).Notes);
+        Assert.Equal(VisualizationNoteMode.SsgToneNoise, note.Mode);
+        Assert.Single(timeline.Build(1_000).NoiseStates);
+        Assert.Empty(timeline.Build(1_000).Rhythm);
+    }
+
+    [Fact]
+    public void NoiseOnly_EmitsNoiseMetadataAndNoMelodicNote()
+    {
+        var (decoder, timeline) = NewDecoder();
+        decoder.Process(W(0, 7, MixerNoiseOnly));
+        decoder.Process(W(0, 8, 0x03));
+        decoder.Process(W(100, 8, 0x05));
+        decoder.Process(W(200, 8, 0x00));
+        decoder.Process(W(300, 8, 0x04));
+        decoder.Complete(1_000);
+
+        VisualizationTimeline result = timeline.Build(1_000);
+        Assert.Empty(result.Notes);
+        Assert.Equal(2, result.NoiseStates.Length);
+        Assert.Empty(result.Rhythm);
+        Assert.Equal(3 / 15.0f, result.NoiseStates[0].Level, 3);
+    }
+
+    [Fact]
+    public void Noise_EnvelopeEnabledZeroDirectVolumeEmitsFullLevelMetadata()
+    {
+        var (decoder, timeline) = NewDecoder();
+        decoder.Process(W(0, 7, MixerNoiseOnly));
+        decoder.Process(W(0, 8, 0x10));
+        decoder.Complete(1_000);
+
+        NoiseStateEvent noise = Assert.Single(timeline.Build(1_000).NoiseStates);
+        Assert.Equal(1.0f, noise.Level);
+        Assert.Empty(timeline.Build(1_000).Notes);
+    }
+
+    [Fact]
+    public void Noise_VolumeZeroAndMixerDisabledAreSilent()
     {
         var (decoder, timeline) = NewDecoder();
         decoder.Process(W(0, 7, MixerNoiseOnly));
         decoder.Process(W(0, 8, 0x00));
-        decoder.Process(W(100, 9, 0x00));
-        decoder.Complete(10_000);
+        decoder.Process(W(100, 7, MixerToneOnly));
+        decoder.Process(W(100, 8, 0x0F));
+        decoder.Complete(1_000);
 
-        Assert.Empty(timeline.Build(10_000).Rhythm);
-    }
-
-    [Fact]
-    public void Noise_MixerDisabled_NoTrigger()
-    {
-        var (decoder, timeline) = NewDecoder();
-        decoder.Process(W(0, 7, MixerToneOnly)); // noise bits all set → disabled
-        decoder.Process(W(0, 8, 0x0F));
-        decoder.Complete(10_000);
-
-        Assert.Empty(timeline.Build(10_000).Rhythm);
+        VisualizationTimeline result = timeline.Build(1_000);
+        Assert.Empty(result.Notes);
+        Assert.Empty(result.NoiseStates);
     }
 }

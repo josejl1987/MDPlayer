@@ -39,6 +39,10 @@ internal sealed record NoteEvent(
     IReadOnlyList<PitchChange> Pitch)
 {
     public SourceDomainKey? Domain { get; init; }
+
+    [JsonPropertyName("sourceAttackId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceAttackId { get; init; }
 }
 
 internal sealed record RhythmEvent(
@@ -51,19 +55,34 @@ internal sealed record RhythmEvent(
     string InstrumentId = "")
 {
     public SourceDomainKey? Domain { get; init; }
+
+    [JsonPropertyName("sourceAttackId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceAttackId { get; init; }
 }
 
+/// <summary>
+/// PPZ8 sample playback preserves the driver's fixed-point FNUM and source
+/// sample rate independently; neither is an acoustic frequency estimate.
+/// </summary>
 internal sealed record Ppz8Event(
     int Channel,
     long StartSample,
     long EndSample,
     int? Bank,
     int? SampleNumber,
-    double? FrequencyHz,
+    int? PlaybackFnum,
+    double PlaybackRate,
+    int? SourceSampleRate,
     double? MidiNote,
     float Volume,
     float Pan,
-    bool IsRetrigger);
+    bool IsRetrigger)
+{
+    [JsonPropertyName("sourceAttackId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceAttackId { get; init; }
+}
 
 internal sealed record AdpcmBEvent(
     long StartSample,
@@ -83,6 +102,7 @@ internal sealed record WaveformDefinition(
     int SourceLength,
     float[] Preview,
     string DisplayName);
+
 
 internal sealed record WaveformChangeEvent(
     string VoiceId,
@@ -131,7 +151,12 @@ internal sealed record SamplePlaybackEvent(
     float Gain,
     float Pan,
     bool Retrigger,
-    bool Looping);
+    bool Looping)
+{
+    [JsonPropertyName("sourceAttackId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceAttackId { get; init; }
+}
 
 /// <summary>Authoritative S-DSP voice-state transition retained for SPC panels.</summary>
 internal sealed record SpcVoiceStateEvent(

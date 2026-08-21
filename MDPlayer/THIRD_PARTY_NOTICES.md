@@ -69,12 +69,21 @@ This project uses or references the following third-party software.
 - **Source:** https://github.com/dotnet/runtime
 - **Usage:** The project targets .NET 8.0+.
 
-## MIDITrail (design reference)
+## MIDITrail
 
 - **Licence:** BSD-3-Clause
-- **Source:** https://github.com/AzraelK/MIDITrail
-- **Usage:** Design reference only. No MIDITrail source code is included in
-  this repository. See `docs/visualization-references.md` for details.
+- **Source:** https://github.com/wdmss/MIDITrail-Windows and https://github.com/wdmss/MIDITrail-macOS
+- **Pinned releases:** Windows 1.4.1 and macOS 2.1.0.
+- **Usage:** The vendored scene/object and graphics-abstraction sources under
+  `third_party/miditrail/upstream/` are used as the visual-behavior reference
+  for the embedded renderer. MIDITrail's application shell, MIDI I/O,
+  synthesizer, realtime player and platform UI are not reused. Provenance,
+  archive hashes and the imported component list are in
+  `third_party/miditrail/UPSTREAM.md`; the full BSD text is in
+  `third_party/miditrail/LICENSE`.
+- **Resources:** No MIDITrail artwork, fonts, soundfonts or other binary
+  resources are redistributed by this import. Any future resource addition
+  requires a separate license audit.
 
 ## Kiva (design reference)
 

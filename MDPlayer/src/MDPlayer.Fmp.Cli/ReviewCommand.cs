@@ -100,7 +100,10 @@ public static class ReviewCommand
     private static CompositionKind ParseComposition(string raw) => raw.Trim().ToLowerInvariant() switch
     {
         "diagnostic" => CompositionKind.Diagnostic,
-        _ => throw new ArgumentException("unknown composition (expected diagnostic)"),
+        // Canonical spelling; "miditrail" remains accepted for existing scripts.
+        "performance" => CompositionKind.Performance,
+        "miditrail" => CompositionKind.Performance,
+        _ => throw new ArgumentException("unknown composition (expected diagnostic or performance)"),
     };
 
     private static string ParseResolution(string raw) => raw.Trim().ToLowerInvariant() switch

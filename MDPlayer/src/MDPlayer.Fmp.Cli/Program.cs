@@ -70,7 +70,7 @@ public class Program
         Console.WriteLine();
         Console.WriteLine("Render options:");
         Console.WriteLine("  -o, --output PATH          Output video path");
-        Console.WriteLine("  --composition diagnostic       Composition (default: diagnostic)");
+        Console.WriteLine("  --composition diagnostic|performance  Composition (default: diagnostic; 'miditrail' accepted as alias)");
         Console.WriteLine("  --quality draft|standard|final  Render quality profile (default: standard)");
         Console.WriteLine("  --width PIXELS             Video width (default: 1920)");
         Console.WriteLine("  --height PIXELS            Video height (default: 1080)");
@@ -138,7 +138,7 @@ public class Program
         Console.WriteLine("  --corpus DIR               Real-file corpus (or MDPLAYER_REVIEW_CORPUS)");
         Console.WriteLine("  --output DIR               Review artifact directory");
         Console.WriteLine("  --file TEXT --chip NAME --moment NAME");
-        Console.WriteLine("  --composition diagnostic");
+        Console.WriteLine("  --composition diagnostic|performance");
         Console.WriteLine("  --resolution 720p|1080p   --keep-existing");
         Console.WriteLine("  --allow-missing-chips");
         Console.WriteLine();

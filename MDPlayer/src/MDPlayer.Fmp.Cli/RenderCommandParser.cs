@@ -455,6 +455,9 @@ internal static class RenderCommandParser
     internal static CompositionKind ParseComposition(string raw) => raw?.Trim().ToLowerInvariant() switch
     {
         "diagnostic" => CompositionKind.Diagnostic,
+        // Canonical spelling; "miditrail" remains accepted for existing scripts.
+        "performance" => CompositionKind.Performance,
+        "miditrail" => CompositionKind.Performance,
         _ => throw new ArgumentException($"unknown composition '{raw}'"),
     };
 

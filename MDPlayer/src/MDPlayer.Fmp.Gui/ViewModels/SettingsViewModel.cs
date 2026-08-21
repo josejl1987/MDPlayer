@@ -36,6 +36,7 @@ public sealed class SettingsViewModel
     private static string Describe(CompositionKind kind) => kind switch
     {
         CompositionKind.Diagnostic => "Channel-focused semantic visualization",
+        CompositionKind.Performance => "Native performance visualization (notes, rhythm, PCM)",
         _ => "Semantic visualization",
     };
 

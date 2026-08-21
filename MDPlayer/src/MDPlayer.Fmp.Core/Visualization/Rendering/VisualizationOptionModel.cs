@@ -169,6 +169,7 @@ internal static class VisualizationLayoutNames
     public static string ToCliName(VisualizationLayoutMode mode) => mode switch
     {
         VisualizationLayoutMode.Diagnostic => "diagnostic",
+        VisualizationLayoutMode.Performance => "performance",
         _ => throw new ArgumentOutOfRangeException(nameof(mode)),
     };
 
@@ -177,6 +178,7 @@ internal static class VisualizationLayoutNames
         VisualizationLayoutVariant.DiagnosticGrid => "diagnostic-grid",
         VisualizationLayoutVariant.DiagnosticOverview => "diagnostic-overview",
         VisualizationLayoutVariant.DeviceOverview => "device-overview",
+        VisualizationLayoutVariant.PerformanceLanes => "performance-lanes",
         _ => throw new ArgumentOutOfRangeException(nameof(variant)),
     };
 }

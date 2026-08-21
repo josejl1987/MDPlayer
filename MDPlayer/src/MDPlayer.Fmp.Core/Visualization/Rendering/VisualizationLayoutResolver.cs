@@ -69,8 +69,27 @@ internal static class VisualizationLayoutResolver
         double? scopeRatioOverride)
     {
         ArgumentNullException.ThrowIfNull(topology);
+        if (mode == VisualizationLayoutMode.Performance)
+        {
+            // Performance lanes: one full-width band per panel on a shared
+            // time axis. Single construction authority shared with the layout
+            // builder; rows always follow the topology panel count.
+            return ComposePerformance(
+                width,
+                height,
+                pastSeconds,
+                futureSeconds,
+                mode,
+                topology,
+                scopePosition,
+                scopeHeightOverride,
+                timelineHeightOverride,
+                rollZoom,
+                scopeRatioOverride);
+        }
+
         if (mode != VisualizationLayoutMode.Diagnostic)
-            throw new ArgumentOutOfRangeException(nameof(mode), "Only the diagnostic composition is supported.");
+            throw new ArgumentOutOfRangeException(nameof(mode), "Unsupported visualization composition.");
 
         int gridHeight = GridHeight(height);
 
@@ -118,7 +137,7 @@ internal static class VisualizationLayoutResolver
 
     /// <summary>Extracts density and capability flags for a resolved geometry.</summary>
     internal static (VisualizationLayoutDensity Density, VisualizationLayoutCapabilities Capabilities)
-        Decide(int panelWidth, int panelHeight, int scopeHeight, bool rollPossible)
+        Decide(int panelWidth, int panelHeight, int scopeHeight, bool rollPossible, bool scopesPossible = true)
     {
         // Device/aggregate panels can never present the full diagnostic
         // grammar; they cap at the minimal density regardless of panel size.
@@ -135,7 +154,7 @@ internal static class VisualizationLayoutResolver
         if (panelWidth >= FullMinWidth && panelHeight >= FullMinHeight)
         {
             return (VisualizationLayoutDensity.Full, new VisualizationLayoutCapabilities(
-                ShowScopes: true,
+                ShowScopes: scopesPossible,
                 ShowRoll: true,
                 ShowPitchLabels: true,
                 ShowDetailedHeaders: true,
@@ -147,8 +166,8 @@ internal static class VisualizationLayoutResolver
             // Compact keeps scopes (when at least a minimum scope height can be
             // allocated) and the roll, but drops the detailed/semantic text.
             return (VisualizationLayoutDensity.Compact, new VisualizationLayoutCapabilities(
-                ShowScopes: scopeHeight >= 32,
-                ShowRoll: rollPossible,
+                ShowScopes: scopesPossible && scopeHeight >= 32,
+                ShowRoll: true,
                 ShowPitchLabels: false,
                 ShowDetailedHeaders: false,
                 ShowInstrumentText: false));
@@ -167,6 +186,57 @@ internal static class VisualizationLayoutResolver
     }
 
     // ---- composition helpers ---------------------------------------------
+
+    internal static ResolvedVisualizationLayout ComposePerformance(
+        int width,
+        int height,
+        double pastSeconds,
+        double futureSeconds,
+        VisualizationLayoutMode mode,
+        VisualizationTopology topology,
+        VisualizationScopePosition scopePosition,
+        int? scopeHeightOverride,
+        int? timelineHeightOverride,
+        double rollZoom,
+        double? scopeRatioOverride)
+    {
+        // One full-width lane per panel; rows always follow the topology so a
+        // stale caller-supplied panel count can never skew the band height.
+        var grid = new ResolvedPanelGrid(
+            Columns: 1,
+            Rows: Math.Max(1, topology.Panels.Count));
+        var geometry = new OverlayLayout(
+            width,
+            height,
+            pastSeconds,
+            futureSeconds,
+            topology.Panels.Count,
+            mode,
+            grid.Columns,
+            grid.Rows,
+            VisualizationLayoutVariant.PerformanceLanes,
+            scopeHeightOverride,
+            timelineHeightOverride,
+            rollZoom,
+            scopeRatioOverride,
+            scopePosition,
+            showScopes: false,
+            showRoll: true);
+        (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
+            Decide(
+                geometry.PanelWidth,
+                geometry.PanelHeight,
+                geometry.ScopeHeight,
+                rollPossible: true,
+                scopesPossible: false);
+        return new ResolvedVisualizationLayout(
+            mode,
+            VisualizationLayoutVariant.PerformanceLanes,
+            topology,
+            geometry,
+            density,
+            caps);
+    }
 
     private static ResolvedVisualizationLayout ComposeFull(
         int width, int height, double pastSeconds, double futureSeconds,

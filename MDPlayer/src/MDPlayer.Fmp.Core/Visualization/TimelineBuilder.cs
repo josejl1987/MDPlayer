@@ -19,6 +19,8 @@ internal sealed class TimelineBuilder
     private readonly Dictionary<string, string> _lastWaveformByVoice = new(StringComparer.Ordinal);
     private readonly List<SamplePlaybackEvent> _samplePlayback = [];
     private readonly HashSet<SamplePlaybackEvent> _samplePlaybackSeen = [];
+    private readonly HashSet<string> _sourceAttackIdsSeen = new(StringComparer.Ordinal);
+    private long _nextSourceAttackOrdinal;
     private readonly List<SpcVoiceStateEvent> _spcVoiceStates = [];
     private readonly List<NoiseStateEvent> _noiseStates = [];
     private readonly HashSet<NoiseStateEvent> _noiseStatesSeen = [];
@@ -100,9 +102,11 @@ internal sealed class TimelineBuilder
         if (IsPcmKind(voice.Kind) && !HasTonalPitch(initialMidiNote, initialFrequencyHz, pitch))
         {
             AddGenericPcmPlayback(
-                voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger, sampleId);
+                voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger,
+                NextSourceAttackId(), sampleId);
             return;
         }
+        string sourceAttackId = NextSourceAttackId();
         _notes.Add(new NoteEvent(
             voice.ToString(),
             startSample,
@@ -115,9 +119,11 @@ internal sealed class TimelineBuilder
             pitch ?? Array.Empty<PitchChange>())
         {
             Domain = new SourceDomainKey(voice.Device, voice.Kind, voice.Index),
+            SourceAttackId = sourceAttackId,
         });
         AddGenericPcmPlayback(
-            voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger, sampleId);
+            voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger,
+            sourceAttackId, sampleId);
     }
 
     public void AddNote(NoteEvent note)
@@ -133,25 +139,32 @@ internal sealed class TimelineBuilder
                 null, 1.0f, NoiseMode.HardwareDefined));
             return;
         }
+        string sourceAttackId = note.SourceAttackId ?? NextSourceAttackId();
+        note = note with { SourceAttackId = sourceAttackId };
+        RememberSourceAttackId(sourceAttackId);
         if (voice != null && IsPcmKind(voice.Kind)
             && !HasTonalPitch(note.InitialMidiNote, note.InitialFrequencyHz, note.Pitch))
         {
             AddGenericPcmPlayback(
                 note.ChannelId, note.StartSample, note.EndSample,
-                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger);
+                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId);
             return;
         }
         _notes.Add(note);
         if (voice != null)
         {
             AddGenericPcmPlayback(note.ChannelId, note.StartSample, note.EndSample,
-                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger);
+                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId);
         }
-    }
 
+    }
     public void AddRhythm(RhythmEvent rhythm)
     {
         ArgumentNullException.ThrowIfNull(rhythm);
+        if (rhythm.SourceAttackId is null)
+            rhythm = rhythm with { SourceAttackId = NextSourceAttackId() };
+        else
+            RememberSourceAttackId(rhythm.SourceAttackId);
         if (rhythm.Domain is null)
         {
             VoiceDescriptor voiceDescriptor = _voices.Values.FirstOrDefault(value =>
@@ -179,6 +192,9 @@ internal sealed class TimelineBuilder
     public void AddPpz8(Ppz8Event value, string sampleId = null, string voiceId = null)
     {
         ArgumentNullException.ThrowIfNull(value);
+        string sourceAttackId = value.SourceAttackId ?? NextSourceAttackId();
+        RememberSourceAttackId(sourceAttackId);
+        value = value with { SourceAttackId = sourceAttackId };
         _ppz8.Add(value);
         sampleId ??= PpzSampleId(value.Bank, value.SampleNumber);
         if (!_samples.ContainsKey(sampleId))
@@ -191,8 +207,11 @@ internal sealed class TimelineBuilder
         }
         AddSamplePlayback(new SamplePlaybackEvent(
             voiceId ?? "ppz8.0", value.StartSample, value.EndSample, sampleId, value.MidiNote,
-            1.0, Math.Clamp(value.Volume, 0, 1), Math.Clamp(value.Pan, -1, 1),
-            value.IsRetrigger, false));
+            value.PlaybackRate, Math.Clamp(value.Volume, 0, 1), Math.Clamp(value.Pan, -1, 1),
+            value.IsRetrigger, false)
+        {
+            SourceAttackId = sourceAttackId,
+        });
     }
 
     public void AddAdpcmB(AdpcmBEvent value)
@@ -209,8 +228,12 @@ internal sealed class TimelineBuilder
                 : null,
             value.DeltaN > 0 ? value.DeltaN / 0x10000d : 1.0,
             Math.Clamp(value.Level, 0, 1), Math.Clamp(value.Pan, -1, 1),
-            value.IsRetrigger, false));
+            value.IsRetrigger, false)
+        {
+            SourceAttackId = NextSourceAttackId(),
+        });
     }
+
 
     public void AddWaveform(WaveformDefinition value)
     {
@@ -251,6 +274,12 @@ internal sealed class TimelineBuilder
     public void AddSamplePlayback(SamplePlaybackEvent value)
     {
         ArgumentNullException.ThrowIfNull(value);
+        if (value.SourceAttackId is null && _samplePlaybackSeen.Contains(value))
+            return;
+        if (value.SourceAttackId is null)
+            value = value with { SourceAttackId = NextSourceAttackId() };
+        else
+            RememberSourceAttackId(value.SourceAttackId);
         if (!_samplePlaybackSeen.Add(value))
             return;
         _samplePlayback.Add(value);
@@ -675,6 +704,7 @@ internal sealed class TimelineBuilder
         double midiPitch,
         string instrumentId,
         bool retrigger,
+        string sourceAttackId,
         string sampleId = null)
     {
         VoiceDescriptor voice = _voices.Values.FirstOrDefault(value =>
@@ -712,7 +742,10 @@ internal sealed class TimelineBuilder
             1.0f,
             0,
             retrigger,
-            looping));
+            looping)
+        {
+            SourceAttackId = sourceAttackId,
+        });
     }
 
     private static bool IsPcmKind(VoiceKind kind) =>
@@ -790,6 +823,23 @@ internal sealed class TimelineBuilder
             InstrumentId = note.InstrumentId ?? "",
             Pitch = pitch,
         };
+    }
+
+    private string NextSourceAttackId()
+    {
+        string id;
+        do
+        {
+            id = $"attack:{_nextSourceAttackOrdinal++:X8}";
+        }
+        while (!_sourceAttackIdsSeen.Add(id));
+        return id;
+    }
+
+    private void RememberSourceAttackId(string id)
+    {
+        if (!string.IsNullOrWhiteSpace(id))
+            _sourceAttackIdsSeen.Add(id);
     }
 
     private static string StableToken(string value)

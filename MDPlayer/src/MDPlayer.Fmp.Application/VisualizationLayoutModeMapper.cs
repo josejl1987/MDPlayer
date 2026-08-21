@@ -9,6 +9,7 @@ internal static class VisualizationLayoutModeMapper
         CompositionKind composition) => composition switch
     {
         CompositionKind.Diagnostic => VisualizationLayoutMode.Diagnostic,
+        CompositionKind.Performance => VisualizationLayoutMode.Performance,
         _ => throw new ArgumentOutOfRangeException(nameof(composition)),
     };
 }

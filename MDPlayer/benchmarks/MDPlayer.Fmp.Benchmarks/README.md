@@ -11,19 +11,26 @@ configuration, and environment receipts.
 The harness does not invent a baseline: until a reproducible frozen baseline is
 provided, comparison is `baseline-unavailable` and no speedup claim is made.
 
-`--corpus-receipts [fixture]` runs the tracked raw corpus through the
-same fresh-capture -> transcriber pipeline. It independently decodes each SMF
-and compares every authoritative source event: `NoteEvent`, `RhythmEvent`, and
-sample-only `SamplePlaybackEvent` (currently YM2612 DAC). It checks physical
-endpoint, exact onset/release ticks, emitted identity/base note, effective pitch,
-all interior pitch-state bends, and deterministic bytes. PCM ownership is
-exclusive: a sample view must not also appear as a native rhythm hit. The
-receipt reports source/decoded sample counts, exact ownership collisions, and
-source/decoded duplicate `(voice,tick,sampleId)` attacks. It also checks the
-unique source-attack universe, fixed transport and metadata absence. Counts
-alone do not make a receipt pass.
-`--corpus-receipts --midi-scale N` times the transcriber over N and 2N generated
-source events.
+`--corpus-receipts [fixture]` emits one strict v3 receipt per selected input
+from the ten real source paths: 02 Stranger, 05 Twilight Express, 10 First
+Attack, 18 USA Ken, 20 Ninja Yashiki, 21 Master Ninja, 26 Robotnik, 28
+Smoking Head, 32 Arctic Wind, and 53 Triumphal Arch. Inputs are existing
+tracked or untracked repository files; the command never adds copyrighted
+fixtures. Capture is always fresh and follows `TimelineCaptureService ->
+MidiTranscriber`.
+
+The receipt's local serialized-SMF decoder reads absolute meta-event ticks and
+raw status/data bytes independently of DryWetMidi. `decoderConformance` records
+MIDI Port Prefix, channel, NoteOn/NoteOff, PitchBend, RPN bend range, Bank
+Select, tempo, and permitted track-name/EndOfTrack details. It counts forbidden
+time-signature, key-signature, marker, cue, lyrics, text, sequencer-specific,
+and SMPTE events. `smfTranscriptionConformance` compares note/rhythm/sample
+views against explicit `SourceAttackId` ownership, including duplicate/missing
+audible attacks, exact tick/pitch/trajectory/identity mismatches, physical
+voice overlaps, fixed transport, and deterministic bytes. Strict pass requires
+all requested mismatches and forbidden metadata to be zero, exactly one tempo
+at tick 0 with value 500000, equal unique source and decoded attacks, no
+physical overlaps, and byte determinism. Receipt files remain gitignored.
 
 Standalone Phase 2 modes:
 

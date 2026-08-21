@@ -23,9 +23,14 @@ public static class VisualizationRequestSerializer
     {
         ArgumentNullException.ThrowIfNull(json);
         VisualizationRequest? request;
+        bool hasComposition;
         try
         {
-            request = JsonSerializer.Deserialize<VisualizationRequest>(json, RequestJson.Options);
+            using JsonDocument document = JsonDocument.Parse(json);
+            hasComposition = document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.EnumerateObject().Any(property =>
+                    string.Equals(property.Name, "composition", StringComparison.OrdinalIgnoreCase));
+            request = document.Deserialize<VisualizationRequest>(RequestJson.Options);
         }
         catch (JsonException ex)
         {
@@ -40,6 +45,13 @@ public static class VisualizationRequestSerializer
             throw new VisualizationRequestException(
                 $"Request schema {request.SchemaVersion} is newer than this build supports ({MaxSchemaVersion}).");
         }
+
+        // Composition was added to the schema-v1 request contract after
+        // existing files were written. Preserve their established meaning
+        // explicitly rather than relying on the enum's underlying zero value.
+        if (!hasComposition)
+            request = request with { Composition = CompositionKind.Diagnostic };
+
         return request;
     }
 
@@ -76,9 +88,62 @@ public static class RequestJson
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
-        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+        Converters =
+        {
+            // Registered before the global string-enum converter so the
+            // composition rename keeps legacy payloads readable.
+            new CompositionKindJsonConverter(),
+            new System.Text.Json.Serialization.JsonStringEnumConverter(),
+        },
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never,
     };
+}
+
+/// <summary>
+/// String converter for <see cref="CompositionKind"/> that survives the
+/// MidiTrail→Performance rename: serialization always writes the canonical
+/// name ("Diagnostic"/"Performance"), while deserialization still accepts the
+/// legacy "MidiTrail"/"miditrail" spellings found in existing project files
+/// and request JSON.
+/// </summary>
+public sealed class CompositionKindJsonConverter : System.Text.Json.Serialization.JsonConverter<CompositionKind>
+{
+    public override CompositionKind Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        // Legacy request files written before the string-enum contract used
+        // numeric enum values (0 = Diagnostic, 1 = MidiTrail→Performance).
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            if (!reader.TryGetInt32(out int numeric)
+                || numeric is < 0 or > 1)
+            {
+                throw new JsonException($"unknown numeric composition '{reader.GetDecimal()}'");
+            }
+            return numeric == 0 ? CompositionKind.Diagnostic : CompositionKind.Performance;
+        }
+
+        string? raw = reader.GetString();
+        return raw?.Trim().ToLowerInvariant() switch
+        {
+            "diagnostic" => CompositionKind.Diagnostic,
+            "performance" or "miditrail" => CompositionKind.Performance,
+            _ => throw new JsonException($"unknown composition '{raw}'"),
+        };
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        CompositionKind value,
+        JsonSerializerOptions options)
+        => writer.WriteStringValue(value switch
+        {
+            CompositionKind.Diagnostic => "Diagnostic",
+            CompositionKind.Performance => "Performance",
+            _ => value.ToString(),
+        });
 }
 
 /// <summary>Thrown for request JSON/schema problems.</summary>

@@ -19,6 +19,7 @@ public sealed class Ym2612DacTimelineTests
         Assert.Equal("ym2612.0.pcm.dac", dac.VoiceId);
         Assert.Equal(0, dac.StartSample);
         Assert.Equal(24, dac.EndSample);
+        Assert.NotNull(dac.SourceAttackId);
         Assert.NotNull(dac.SampleId);
 
         SampleDefinition sample = Assert.Single(timeline.Samples);

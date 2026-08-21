@@ -1431,6 +1431,9 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             InputPath = inputPath,
             OutputPath = Path.Combine(outputDir, "visualization.mp4"),
+            // New GUI projects explicitly start with Performance. Persisted
+            // schema-v1 requests remain Diagnostic when composition is absent.
+            Composition = CompositionKind.Performance,
             Playback = new PlaybackSettings
             {
                 OpnaBackend = ResolvePersistedOpnaBackend(),

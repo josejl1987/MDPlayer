@@ -73,6 +73,14 @@ public sealed class OverlayLayoutTests
     }
 
     [Fact]
+    public void DefaultGrid_UsesBalancedPublishingShapes()
+    {
+        Assert.Equal((3, 2), (OverlayLayout.DefaultGrid(6).Columns, OverlayLayout.DefaultGrid(6).Rows));
+        Assert.Equal((3, 2), (OverlayLayout.DefaultGrid(5).Columns, OverlayLayout.DefaultGrid(5).Rows));
+        Assert.Equal((2, 2), (OverlayLayout.DefaultGrid(4).Columns, OverlayLayout.DefaultGrid(4).Rows));
+    }
+
+    [Fact]
     public void LargePcmTopologyFitsAdaptiveGrid()
     {
         var layout = new OverlayLayout(1920, 1080, 0.75, 2.25, panelCount: 32);

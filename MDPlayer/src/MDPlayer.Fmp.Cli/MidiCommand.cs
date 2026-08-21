@@ -64,6 +64,9 @@ internal static class MidiCommand
         // tuning normalization, quantization or structural pass belongs here.
         MidiTranscriptionResult result = new MidiTranscriber(options.Ppq).Transcribe(timeline);
 
+        if (options.Channels)
+            return WriteChannels(options, timeline, result);
+
         Directory.CreateDirectory(
             Path.GetDirectoryName(Path.GetFullPath(options.Output)) ?? ".");
         Stopwatch fileWatch = Stopwatch.StartNew();
@@ -86,6 +89,40 @@ internal static class MidiCommand
             WriteRawPitchReport(options.PitchReport, result);
 
         return 0;
+    }
+
+    private static int WriteChannels(
+        MidiOptions options,
+        VisualizationTimeline timeline,
+        MidiTranscriptionResult ignored)
+    {
+        TextWriter output = options.OutputWriter ?? Console.Out;
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, options.Ppq);
+
+        string outputDir = Path.GetFullPath(options.Output);
+        Directory.CreateDirectory(outputDir);
+
+        foreach (MidiTrailChannelExport channel in result.Channels)
+        {
+            string safe = SanitizeFileSegment(channel.SourceVoiceId);
+            string path = Path.Combine(outputDir, safe + ".mid");
+            File.WriteAllBytes(path, channel.Bytes);
+            output.WriteLine($"channel {channel.SourceVoiceId,-24} -> {path} ({channel.Bytes.Length} bytes; end tick {channel.EndTick})");
+        }
+
+        output.WriteLine($"wrote {result.Channels.Count} per-channel .mid files to {outputDir}");
+        output.WriteLine($"transport parity: fixed 120 BPM; ppq: {options.Ppq}; common end tick: {result.TotalEndTick}");
+        output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
+        output.WriteLine($"events: notes={result.Channels.Count}; sampling from single transcript");
+        return 0;
+    }
+
+    private static string SanitizeFileSegment(string value)
+    {
+        foreach (char c in Path.GetInvalidFileNameChars())
+            value = value.Replace(c, '-');
+        // Keep domain:/channel: prefixes readable (e.g. domain-FM1).
+        return value.Replace(':', '-').Trim('-');
     }
 
     private static void WriteRawPitchReport(string path, MidiTranscriptionResult export)

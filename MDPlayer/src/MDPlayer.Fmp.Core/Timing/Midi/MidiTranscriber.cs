@@ -16,7 +16,8 @@ internal sealed record MidiTranscriptionDiagnostics(
     int NativeRhythmHitCount,
     int SamplePlaybackCount,
     int SameTickAttackCollisions,
-    int OneTickNotes);
+    int OneTickNotes,
+    int UniqueAudibleAttackCount);
 
 /// <summary>
 /// Raw source-timeline -> SMF transcription. No BPM/grid inference, tuning
@@ -51,10 +52,12 @@ internal sealed class MidiTranscriber
             throw new InvalidOperationException("Timeline end precedes timeline start.");
         IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
         IReadOnlyList<RhythmEvent> rhythm = timeline.Rhythm ?? Array.Empty<RhythmEvent>();
-        IReadOnlyList<SamplePlaybackEvent> samples =
-            (timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>())
-                .Where(IsRawSamplePlayback)
-                .ToArray();
+        ValidatePhysicalVoiceMonophony(notes);
+        int uniqueAudibleAttackCount = CountUniqueAudibleAttacks(
+            notes,
+            rhythm,
+            timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>(),
+            out IReadOnlyList<SamplePlaybackEvent> samples);
         IndexedNote[] indexed = notes
             .Select((note, index) => new IndexedNote(note, index, VoiceId(note)))
             .ToArray();
@@ -83,6 +86,7 @@ internal sealed class MidiTranscriber
             var track = new MidiTrack
             {
                 Name = VoiceName(voiceNotes[0].Note),
+                SourceVoiceId = voiceNotes[0].Voice,
                 Endpoint = endpoint,
             };
             var plan = new List<Planned>(1 + voiceNotes.Sum(n => 3 + (n.Note.Pitch?.Count ?? 0)))
@@ -97,8 +101,10 @@ internal sealed class MidiTranscriber
                 ValidateNote(timeline, note);
                 double initialPitch = InitialPitch(note);
                 int baseNote = BaseNote(initialPitch);
-                long onTick = ToTick(timeline, note.StartSample);
-                long offTick = ToTick(timeline, note.EndSample);
+                long onTick = MidiTransportClock.SampleToTick(
+                    timeline.StartSample, note.StartSample, timeline.SampleRate, _ppq);
+                long offTick = MidiTransportClock.SampleToTick(
+                    timeline.StartSample, note.EndSample, timeline.SampleRate, _ppq);
                 if (offTick <= onTick)
                 {
                     offTick = checked(onTick + 1);
@@ -123,7 +129,8 @@ internal sealed class MidiTranscriber
                         throw new InvalidOperationException(
                             $"Non-finite pitch on '{VoiceName(note)}' at sample {change.SamplePosition}.");
 
-                    long tick = ToTick(timeline, change.SamplePosition);
+                    long tick = MidiTransportClock.SampleToTick(
+                        timeline.StartSample, change.SamplePosition, timeline.SampleRate, _ppq);
                     plan.Add(new Planned(tick, change.SamplePosition, source.SourceIndex, 1, ++pitchOrder,
                         new MidiPitchBendEvent(tick, trackIndex, endpoint.Channel,
                             EncodeBend(change.MidiNote - baseNote, bendRange))));
@@ -154,6 +161,7 @@ internal sealed class MidiTranscriber
             var track = new MidiTrack
             {
                 Name = "Sample " + sampleEvents[0].Event.VoiceId,
+                SourceVoiceId = sampleEvents[0].Event.VoiceId,
                 Endpoint = endpoint,
             };
             var plan = new List<Planned>(sampleEvents.Length * 4);
@@ -166,8 +174,10 @@ internal sealed class MidiTranscriber
                 SamplePlaybackEvent sample = source.Event;
                 ValidateSample(timeline, sample);
                 DacNoteAssignment identity = sampleAssignments[sample.SampleId];
-                long onTick = ToTick(timeline, sample.StartSample);
-                long offTick = ToTick(timeline, sample.EndSample);
+                long onTick = MidiTransportClock.SampleToTick(
+                    timeline.StartSample, sample.StartSample, timeline.SampleRate, _ppq);
+                long offTick = MidiTransportClock.SampleToTick(
+                    timeline.StartSample, sample.EndSample, timeline.SampleRate, _ppq);
                 if (offTick <= onTick)
                 {
                     offTick = checked(onTick + 1);
@@ -197,6 +207,17 @@ internal sealed class MidiTranscriber
         if (rhythm.Count > 0)
             tracks.Add(BuildRhythmTrack(timeline, rhythm, tracks.Count));
 
+        int serializedNoteOnCount = tracks
+            .SelectMany(track => track.Events)
+            .OfType<MidiNoteEvent>()
+            .Count(note => note.NoteOn);
+        if (serializedNoteOnCount != uniqueAudibleAttackCount)
+        {
+            throw new InvalidOperationException(
+                $"MIDI attack conservation failed: source attacks={uniqueAudibleAttackCount}, " +
+                $"serialized NoteOn events={serializedNoteOnCount}.");
+        }
+
         var tempo = new MidiTempoEvent(0, TransportMicrosecondsPerQuarter) { SourceOrder = 0 };
         byte[] bytes = new MidiFileWriter(_ppq).Write(new MidiEventBase[] { tempo }, tracks);
         return new MidiTranscriptionResult
@@ -204,12 +225,90 @@ internal sealed class MidiTranscriber
             Bytes = bytes,
             Tracks = tracks,
             Diagnostics = new MidiTranscriptionDiagnostics(
-                notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes),
+                notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes,
+                uniqueAudibleAttackCount),
         };
     }
 
-    private static bool IsRawSamplePlayback(SamplePlaybackEvent sample) =>
-        string.Equals(sample.VoiceId, "ym2612.0.pcm.dac", StringComparison.Ordinal);
+
+    private static void ValidatePhysicalVoiceMonophony(IReadOnlyList<NoteEvent> notes)
+    {
+        foreach (IGrouping<string, NoteEvent> voice in notes
+            .GroupBy(PhysicalVoiceKey, StringComparer.Ordinal))
+        {
+            NoteEvent[] ordered = voice
+                .OrderBy(note => note.StartSample)
+                .ThenBy(note => note.EndSample)
+                .ToArray();
+            for (int index = 1; index < ordered.Length; index++)
+            {
+                NoteEvent previous = ordered[index - 1];
+                NoteEvent next = ordered[index];
+                if (next.StartSample < previous.EndSample)
+                {
+                    throw new InvalidOperationException(
+                        $"Physical voice '{PhysicalVoiceKey(next)}' has overlapping notes: " +
+                        $"{previous.StartSample}-{previous.EndSample} and " +
+                        $"{next.StartSample}-{next.EndSample}.");
+                }
+            }
+        }
+    }
+
+    private static int CountUniqueAudibleAttacks(
+        IReadOnlyList<NoteEvent> notes,
+        IReadOnlyList<RhythmEvent> rhythm,
+        IReadOnlyList<SamplePlaybackEvent> allSamples,
+        out IReadOnlyList<SamplePlaybackEvent> samples)
+    {
+        ValidateDuplicateAttackIds("Note", notes.Select(note => note.SourceAttackId));
+        ValidateDuplicateAttackIds("Rhythm", rhythm.Select(hit => hit.SourceAttackId));
+        ValidateDuplicateAttackIds("SamplePlayback", allSamples.Select(sample => sample.SourceAttackId));
+
+        HashSet<string> noteAttackIds = notes
+            .Select(note => note.SourceAttackId)
+            .Where(id => id is not null)
+            .ToHashSet(StringComparer.Ordinal);
+        samples = allSamples
+            .Where(sample => sample.SourceAttackId is null
+                || !noteAttackIds.Contains(sample.SourceAttackId))
+            .ToArray();
+
+        var attacks = new HashSet<AttackKey>();
+        for (int index = 0; index < notes.Count; index++)
+            attacks.Add(AttackKey.For("Note", notes[index].SourceAttackId, index));
+        for (int index = 0; index < rhythm.Count; index++)
+            attacks.Add(AttackKey.For("Rhythm", rhythm[index].SourceAttackId, index));
+        for (int index = 0; index < samples.Count; index++)
+            attacks.Add(AttackKey.For("SamplePlayback", samples[index].SourceAttackId, index));
+        return attacks.Count;
+    }
+
+    private static void ValidateDuplicateAttackIds(
+        string family,
+        IEnumerable<string?> attackIds)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string? attackId in attackIds)
+        {
+            if (attackId is not null && !seen.Add(attackId))
+            {
+                throw new InvalidOperationException(
+                    $"Duplicate {family} SourceAttackId '{attackId}'.");
+            }
+        }
+    }
+
+    private static string PhysicalVoiceKey(NoteEvent note) =>
+        note.Domain is SourceDomainKey domain
+            ? "domain:" + domain
+            : "channel:" + note.ChannelId;
+
+    private readonly record struct AttackKey(string Family, string? AttackId, int LocalIndex)
+    {
+        public static AttackKey For(string family, string? attackId, int localIndex) =>
+            new(family, attackId, attackId is null ? localIndex : -1);
+    }
 
     private static Dictionary<string, DacNoteAssignment> SampleAssignments(
         IReadOnlyList<SamplePlaybackEvent> samples)
@@ -275,13 +374,15 @@ internal sealed class MidiTranscriber
         var track = new MidiTrack
         {
             Name = "Native Rhythm",
+            SourceVoiceId = "rhythm",
             Endpoint = new MidiEndpoint(0, PercussionChannel),
         };
         var plan = new List<Planned>(rhythm.Count * 2);
         for (int index = 0; index < rhythm.Count; index++)
         {
             RhythmEvent hit = rhythm[index];
-            long tick = ToTick(timeline, hit.SamplePosition);
+            long tick = MidiTransportClock.SampleToTick(
+                timeline.StartSample, hit.SamplePosition, timeline.SampleRate, _ppq);
             int note = GeneralMidiDrumMapper.TryMap(hit, out int mapped)
                 ? mapped
                 : UnknownNativeDrumNote; // preserve the attack; do not invent a role.
@@ -300,7 +401,8 @@ internal sealed class MidiTranscriber
         var seen = new HashSet<(string Voice, long Tick)>();
         int collisions = 0;
         foreach (IndexedNote note in notes)
-            if (!seen.Add((note.Voice, ToTick(timeline, note.Note.StartSample))))
+            if (!seen.Add((note.Voice, MidiTransportClock.SampleToTick(
+                    timeline.StartSample, note.Note.StartSample, timeline.SampleRate, _ppq))))
                 collisions++;
         return collisions;
     }
@@ -378,14 +480,6 @@ internal sealed class MidiTranscriber
         return Math.Clamp((int)Math.Round(scaled, MidpointRounding.AwayFromZero), -8192, 8191);
     }
 
-    private long ToTick(VisualizationTimeline timeline, long sample)
-    {
-        long delta = checked(sample - timeline.StartSample);
-        if (delta < 0)
-            throw new InvalidOperationException($"Source sample {sample} precedes timeline start {timeline.StartSample}.");
-        decimal ticks = (decimal)delta * (2m * _ppq) / timeline.SampleRate; // 120 BPM = 2 quarters/sec.
-        return decimal.ToInt64(decimal.Round(ticks, 0, MidpointRounding.AwayFromZero));
-    }
 
     private static MidiEndpoint MelodicEndpoint(int voiceIndex)
     {

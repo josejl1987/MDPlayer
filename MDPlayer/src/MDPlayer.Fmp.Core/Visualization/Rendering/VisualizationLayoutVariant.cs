@@ -29,4 +29,13 @@ internal enum VisualizationLayoutVariant
     /// aggregate waveform and a current activity indicator.
     /// </summary>
     DeviceOverview,
+
+    /// <summary>
+    /// Performance lanes: every panel becomes one full-width horizontal band
+    /// sharing a single common time axis (identical playhead X in every lane),
+    /// with no header chrome — the channel label lives in the left gutter and
+    /// lane boundaries are thin separators. Used by the native Performance
+    /// composition so rhythmic relationships read across channels.
+    /// </summary>
+    PerformanceLanes,
 }
