@@ -890,12 +890,7 @@ internal sealed partial class PanelOverlayRenderer
                         // Interior rows: constant alpha for the whole run (row-major).
                         if (lastFullExclusive > firstFull)
                         {
-                            OverlayColor src = fill.WithAlpha(prevAlpha);
-                            for (int y = firstFull; y < lastFullExclusive; y++)
-                            {
-                                for (int x = runLeft; x < runRight; x++)
-                                    BlendPixel(frame, x, y, src);
-                            }
+                            BlendRunRect(frame, runLeft, runRight, firstFull, lastFullExclusive, fill, prevAlpha);
                             if (_performance.Enabled)
                                 _performance.RibbonPixelsBlended += (long)(runRight - runLeft) * (lastFullExclusive - firstFull);
                         }
@@ -1120,12 +1115,9 @@ internal sealed partial class PanelOverlayRenderer
                 if (_performance.Enabled) _performance.RibbonColumnsEvaluated += runEnd - x;
                 if (alphaByte != 0)
                 {
-                    OverlayColor src = fill.WithAlpha(alphaByte);
                     if (lastFullExclusive > firstFull)
                     {
-                        for (int y = firstFull; y < lastFullExclusive; y++)
-                            for (int px = x; px < runEnd; px++)
-                                BlendPixel(frame, px, y, src);
+                        BlendRunRect(frame, x, runEnd, firstFull, lastFullExclusive, fill, alphaByte);
                         if (_performance.Enabled)
                             _performance.RibbonPixelsBlended += (long)(runEnd - x) * (lastFullExclusive - firstFull);
                     }
@@ -1174,9 +1166,7 @@ internal sealed partial class PanelOverlayRenderer
                 if (alphaByte == 0) continue;
                 if (lastFullExclusive > firstFull)
                 {
-                    OverlayColor src = fill.WithAlpha(alphaByte);
-                    for (int y = firstFull; y < lastFullExclusive; y++)
-                        BlendPixel(frame, x, y, src);
+                    BlendRunRect(frame, x, x + 1, firstFull, lastFullExclusive, fill, alphaByte);
                     if (_performance.Enabled) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
                 }
                 if (hasTopFrac)
@@ -1264,12 +1254,7 @@ internal sealed partial class PanelOverlayRenderer
         // Exact: blend constant-alpha run over the actual destination pixels
         // so grid lines / black-key bands / waveform remain visible through
         // translucent ribbons. This is still a contiguous row-major run.
-        OverlayColor src = fill.WithAlpha(alpha);
-        for (int y = top; y < bottom; y++)
-        {
-            for (int x = left; x < right; x++)
-                BlendPixel(frame, x, y, src);
-        }
+        BlendRunRect(frame, left, right, top, bottom, fill, alpha);
         if (_performance.Enabled)
             _performance.RibbonPixelsBlended += (long)(right - left) * (bottom - top);
     }

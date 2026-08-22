@@ -221,6 +221,10 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly RenderPerformanceMetrics _performance;
     private SequentialRenderState? _activeSequentialState;
     internal bool TestDisableZohRuns { get; set; }
+
+    /// <summary>Test seam exposing the private FillRect for equivalence tests.</summary>
+    internal void RenderFillRectForTest(Span<byte> frame, int left, int top, int width, int height, OverlayColor color)
+        => FillRect(frame, new OverlayRect(left, top, width, height), color);
     private readonly double[][] _laneBaseAlphas;
     private readonly long[] _laneBaseAlphaSamples;
     private readonly long[] _laneBaseAlphaWindowStarts;
@@ -1799,12 +1803,71 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private static void BlendScopeRow(
         ReadOnlySpan<byte> source, Span<byte> destination, int alphaScale)
     {
+        // Row-level fast paths: waveform masks are overwhelmingly either
+        // fully transparent (background) or fully opaque (line pixels).
+        // Detecting those rows collapses them to a fill or a copy without
+        // per-pixel branching.
+        byte firstA = source[3];
+        bool uniformAlpha = true;
+        for (int i = 3; i < source.Length; i += 4)
+        {
+            if (source[i] != firstA) { uniformAlpha = false; break; }
+        }
+        if (uniformAlpha && firstA == 0 && alphaScale <= 65536)
+        {
+            // Fully transparent row: destination RGB untouched, alpha forced
+            // opaque. Write the alpha plane directly.
+            for (int offset = 3; offset < destination.Length; offset += 4)
+                destination[offset] = 255;
+            return;
+        }
+        if (uniformAlpha && firstA >= 255)
+        {
+            if (alphaScale >= 65536)
+            {
+                source.CopyTo(destination);
+                for (int offset = 3; offset < destination.Length; offset += 4)
+                    destination[offset] = 255;
+                return;
+            }
+            BlendScopeRowCore(source, destination, alphaScale);
+            return;
+        }
+        if (uniformAlpha)
+        {
+            // Uniform partial alpha: blend terms constant per channel.
+            int alpha = (firstA * alphaScale + 127) / 255;
+            if (alpha >= 65536) { source.CopyTo(destination); return; }
+            if (alpha <= 0)
+            {
+                for (int offset = 3; offset < destination.Length; offset += 4)
+                    destination[offset] = 255;
+                return;
+            }
+            for (int offset = 0; offset < source.Length; offset += 4)
+            {
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    int diff = source[offset + channel] - destination[offset + channel];
+                    destination[offset + channel] = (byte)(
+                        destination[offset + channel] + ((diff * alpha + 32768) >> 16));
+                }
+                destination[offset + 3] = 255;
+            }
+            return;
+        }
+        BlendScopeRowCore(source, destination, alphaScale);
+    }
+
+    /// <summary>Per-pixel fallback; identical to the original implementation.</summary>
+    private static void BlendScopeRowCore(
+        ReadOnlySpan<byte> source, Span<byte> destination, int alphaScale)
+    {
         for (int offset = 0; offset < source.Length; offset += 4)
         {
             int alpha = (source[offset + 3] * alphaScale + 127) / 255;
             if (alpha >= 65536)
             {
-                // Fully opaque pixel: raw copy (same bytes as the fast path).
                 destination[offset] = source[offset];
                 destination[offset + 1] = source[offset + 1];
                 destination[offset + 2] = source[offset + 2];
@@ -2263,19 +2326,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         Span<byte> gridTarget;
         byte[] scratch = null;
         bool willCache = canCacheLane;
-        // Constant-fold the translucent black-key band: inside the lane the
-        // grid always lands on the uniform static TimelineBackground, so
-        // blending per pixel re-computes one constant millions of times.
-        // Resolve it here once and fill opaquely — identical integer
-        // equation to BlendPixel, evaluated a single time.
-        OverlayColor bandSrc = BlackKeyBand;
-        int bA = bandSrc.A, bInv = 255 - bA;
-        OverlayColor under = TimelineBackground;
-        OverlayColor opaqueBand = new(
-            (byte)((bandSrc.R * bA + under.R * bInv + 127) / 255),
-            (byte)((bandSrc.G * bA + under.G * bInv + 127) / 255),
-            (byte)((bandSrc.B * bA + under.B * bInv + 127) / 255),
-            255);
         if (willCache)
         {
             byte[] cache = _laneGridCache[panelIndex];
@@ -2307,7 +2357,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 int top = Math.Min(yTop, yBottom);
                 int bottom = Math.Max(yTop, yBottom);
                 if (BlackPitchClasses.Contains(Mod(midi, 12)))
-                    FillRectOpaque(gridTarget, lane.X, lane.Right, top, bottom, opaqueBand);
+                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
 
                 if (Mod(midi, 12) == 0)
                 {

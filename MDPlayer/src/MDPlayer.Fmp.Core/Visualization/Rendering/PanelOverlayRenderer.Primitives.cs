@@ -663,22 +663,169 @@ internal sealed partial class PanelOverlayRenderer
             return;
         }
 
-        // Constant-alpha bulk path: precompute the blend terms once and write
-        // rows directly. Identical integer equation to BlendPixel
-        // ((src*a + dst*(255-a) + 127)/255) without per-pixel call overhead.
-        int alpha = color.A;
-        int inverse = 255 - alpha;
-        int sr = color.R * alpha, sg = color.G * alpha, sb = color.B * alpha;
+        // Uniform-destination fast path: when the rect already holds one
+        // identical pixel everywhere (static background OR an all-zero scope
+        // hole), BlendPixel is a pure function of (src, that pixel) — evaluate
+        // it once and fill opaquely with the result. Byte-exact by
+        // determinism; vector compare makes the check nearly free.
         int stride = Width * 4;
+        {
+            int o0 = top * stride + left * 4;
+            byte pr = frame[o0], pg = frame[o0 + 1], pb = frame[o0 + 2], pa = frame[o0 + 3];
+            if (right - left > 4 && bottom - top > 1)
+            {
+                bool uniform = true;
+                for (int y = top; y < bottom && uniform; y++)
+                {
+                    int off = y * stride + left * 4;
+                    uniform = SimdRowOps.AllPixelsEqual(frame.Slice(off, (right - left) * 4), pr, pg, pb, pa);
+                }
+                if (uniform)
+                {
+                    // One-pixel reference blend, mirroring BlendPixel exactly.
+                    byte er = pr, eg = pg, eb = pb, ea;
+                    if (color.A == 255)
+                    {
+                        er = color.R; eg = color.G; eb = color.B; ea = 255;
+                    }
+                    else if (color.A > 0)
+                    {
+                        if (pa == 255)
+                        {
+                            int inv = 255 - color.A;
+                            er = (byte)((color.R * color.A + pr * inv + 127) / 255);
+                            eg = (byte)((color.G * color.A + pg * inv + 127) / 255);
+                            eb = (byte)((color.B * color.A + pb * inv + 127) / 255);
+                            ea = 255;
+                        }
+                        else
+                        {
+                            int outputAlpha = color.A + (pa * (255 - color.A) + 127) / 255;
+                            if (outputAlpha == 0) { er = eg = eb = ea = 0; }
+                            else
+                            {
+                                int df = (pa * (255 - color.A) + 127) / 255;
+                                er = (byte)Math.Clamp((color.R * color.A + pr * df + outputAlpha / 2) / outputAlpha, 0, 255);
+                                eg = (byte)Math.Clamp((color.G * color.A + pg * df + outputAlpha / 2) / outputAlpha, 0, 255);
+                                eb = (byte)Math.Clamp((color.B * color.A + pb * df + outputAlpha / 2) / outputAlpha, 0, 255);
+                                ea = (byte)outputAlpha;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        ea = pa;
+                    }
+                    if (ea == 255)
+                        FillRectOpaque(frame, left, right, top, bottom, new OverlayColor(er, eg, eb, 255));
+                    else
+                    {
+                        uint packed = er | ((uint)eg << 8) | ((uint)eb << 16) | ((uint)ea << 24);
+                        int rowBytes = (right - left) * 4;
+                        for (int y = top; y < bottom; y++)
+                        {
+                            int off = y * stride + left * 4;
+                            SimdRowOps.FillUInt32(frame.Slice(off, rowBytes), packed);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        int sa = color.A;
+        if (sa == 0)
+            return;
+        int sInv = 255 - sa;
         for (int y = top; y < bottom; y++)
         {
             int offset = y * stride + left * 4;
             for (int x = left; x < right; x++, offset += 4)
             {
-                frame[offset] = (byte)((sr + frame[offset] * inverse + 127) / 255);
-                frame[offset + 1] = (byte)((sg + frame[offset + 1] * inverse + 127) / 255);
-                frame[offset + 2] = (byte)((sb + frame[offset + 2] * inverse + 127) / 255);
-                frame[offset + 3] = 255;
+                int destinationAlpha = frame[offset + 3];
+                if (destinationAlpha == 255)
+                {
+                    frame[offset] = (byte)((color.R * sa + frame[offset] * sInv + 127) / 255);
+                    frame[offset + 1] = (byte)((color.G * sa + frame[offset + 1] * sInv + 127) / 255);
+                    frame[offset + 2] = (byte)((color.B * sa + frame[offset + 2] * sInv + 127) / 255);
+                }
+                else
+                {
+                    int outputAlpha = sa + (destinationAlpha * sInv + 127) / 255;
+                    if (outputAlpha == 0)
+                    {
+                        frame[offset] = frame[offset + 1] = frame[offset + 2] = frame[offset + 3] = 0;
+                    }
+                    else
+                    {
+                        int destinationFactor = (destinationAlpha * sInv + 127) / 255;
+                        frame[offset] = (byte)Math.Clamp(
+                            (color.R * sa + frame[offset] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 1] = (byte)Math.Clamp(
+                            (color.G * sa + frame[offset + 1] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 2] = (byte)Math.Clamp(
+                            (color.B * sa + frame[offset + 2] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 3] = (byte)outputAlpha;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Blends a constant-color, constant-alpha rectangle over the destination
+    /// replicating <see cref="BlendPixel"/> exactly (opaque fast path plus the
+    /// straight-alpha general branch), writing rows directly with no
+    /// per-pixel call overhead. Used by the ribbon run rasterizers.
+    /// </summary>
+    private void BlendRunRect(
+        Span<byte> frame,
+        int left,
+        int right,
+        int top,
+        int bottom,
+        OverlayColor color,
+        int alpha)
+    {
+        if (right <= left || bottom <= top || alpha <= 0)
+            return;
+        if (alpha >= 255)
+        {
+            FillRectOpaque(frame, left, right, top, bottom, color);
+            return;
+        }
+        int stride = Width * 4;
+        int sInv = 255 - alpha;
+        for (int y = top; y < bottom; y++)
+        {
+            int offset = y * stride + left * 4;
+            for (int x = left; x < right; x++, offset += 4)
+            {
+                int destinationAlpha = frame[offset + 3];
+                if (destinationAlpha == 255)
+                {
+                    frame[offset] = (byte)((color.R * alpha + frame[offset] * sInv + 127) / 255);
+                    frame[offset + 1] = (byte)((color.G * alpha + frame[offset + 1] * sInv + 127) / 255);
+                    frame[offset + 2] = (byte)((color.B * alpha + frame[offset + 2] * sInv + 127) / 255);
+                }
+                else
+                {
+                    int outputAlpha = alpha + (destinationAlpha * sInv + 127) / 255;
+                    if (outputAlpha == 0)
+                    {
+                        frame[offset] = frame[offset + 1] = frame[offset + 2] = frame[offset + 3] = 0;
+                    }
+                    else
+                    {
+                        int destinationFactor = (destinationAlpha * sInv + 127) / 255;
+                        frame[offset] = (byte)Math.Clamp(
+                            (color.R * alpha + frame[offset] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 1] = (byte)Math.Clamp(
+                            (color.G * alpha + frame[offset + 1] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 2] = (byte)Math.Clamp(
+                            (color.B * alpha + frame[offset + 2] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
+                        frame[offset + 3] = (byte)outputAlpha;
+                    }
+                }
             }
         }
     }
