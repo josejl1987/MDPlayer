@@ -93,6 +93,8 @@ internal sealed record VisualizationStageMetrics
     public double TextSeconds { get; init; }
     public double PianoRollSeconds { get; init; }
     public double PitchGridSeconds { get; init; }
+    public double PitchBandSeconds { get; init; }
+    public double GridLineSeconds { get; init; }
     public double RibbonSeconds { get; init; }
     public double RibbonDecorationSeconds { get; init; }
     public long RibbonColumnsEvaluated { get; init; }
@@ -314,6 +316,8 @@ internal static class VisualizationResultBuilder
             TextSeconds = m?.Renderer?.TextSeconds ?? 0,
             PianoRollSeconds = m?.Renderer?.PianoRollSeconds ?? 0,
             PitchGridSeconds = m?.Renderer?.PitchGridSeconds ?? 0,
+            PitchBandSeconds = m?.Renderer?.PitchBandSeconds ?? 0,
+            GridLineSeconds = m?.Renderer?.GridLineSeconds ?? 0,
             RibbonSeconds = m?.Renderer?.RibbonSeconds ?? 0,
             RibbonDecorationSeconds = m?.Renderer?.RibbonDecorationSeconds ?? 0,
             RibbonColumnsEvaluated = m?.Renderer?.RibbonColumnsEvaluated ?? 0,

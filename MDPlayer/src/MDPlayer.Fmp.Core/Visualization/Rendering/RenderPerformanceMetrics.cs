@@ -32,6 +32,8 @@ internal sealed class RenderPerformanceMetrics
     public long TextTicks { get; set; }
     public long PianoRollTicks { get; set; }
     public long PitchGridTicks { get; set; }
+    public long PitchBandTicks { get; set; }
+    public long GridLineTicks { get; set; }
     public long RibbonTicks { get; set; }
     public long RibbonDecorationTicks { get; set; }
     public long RibbonColumnsEvaluated { get; set; }
@@ -69,6 +71,8 @@ internal sealed class RenderPerformanceMetrics
         TextTicks = 0;
         PianoRollTicks = 0;
         PitchGridTicks = 0;
+        PitchBandTicks = 0;
+        GridLineTicks = 0;
         RibbonTicks = 0;
         RibbonDecorationTicks = 0;
         RibbonColumnsEvaluated = 0;
@@ -86,7 +90,8 @@ internal sealed class RenderPerformanceMetrics
     public RenderPerformanceSnapshot Snapshot(int frameWidth, int frameHeight)
         => new(Seconds(RenderTicks), Seconds(DynamicTicks), Seconds(FrameStateTicks),
             Seconds(CompositingTicks), Seconds(LayoutTicks), Seconds(StaticLayerTicks), Seconds(TextTicks),
-            Seconds(PianoRollTicks), Seconds(PitchGridTicks), Seconds(RibbonTicks),
+            Seconds(PianoRollTicks), Seconds(PitchGridTicks), Seconds(PitchBandTicks),
+            Seconds(GridLineTicks), Seconds(RibbonTicks),
             Seconds(RibbonDecorationTicks), Seconds(WaveformTicks),
             Frames, FullRedraws, PartialRedraws, UnchangedFrames,
             RenderedPixels, AvoidedPixels, SurfaceCopies, FullFrameCopies,
@@ -108,6 +113,8 @@ internal sealed record RenderPerformanceSnapshot(
     double TextSeconds,
     double PianoRollSeconds,
     double PitchGridSeconds,
+    double PitchBandSeconds,
+    double GridLineSeconds,
     double RibbonSeconds,
     double RibbonDecorationSeconds,
     double WaveformSeconds,

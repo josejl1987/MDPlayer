@@ -2350,35 +2350,60 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             gridTarget = frame;
         }
         {
+            // Two timed passes: bands (the bulk pixel work) and lines/labels.
+            // Integrated lanes draw the grid over the live scope waveform, so
+            // every band pixel is a genuine translucent blend over varying
+            // content — measured as the dominant pitched-lane cost. The bands
+            // are omitted there; non-integrated lanes keep them (uniform
+            // static background => single packed fill).
+            long bandStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            if (!_layout.UsesIntegratedRoll)
+            {
+                for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
+                {
+                    if (!BlackPitchClasses.Contains(Mod(midi, 12)))
+                        continue;
+                    int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
+                    int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
+                    int top = Math.Min(yTop, yBottom);
+                    int bottom = Math.Max(yTop, yBottom);
+                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
+                }
+            }
+            if (_performance.Enabled)
+            {
+                long bandTicks = Stopwatch.GetTimestamp() - bandStart;
+                _performance.PitchBandTicks += bandTicks;
+                _performance.PitchGridTicks += bandTicks;
+            }
+            long lineStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
             for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
             {
-                int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
-                int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
-                int top = Math.Min(yTop, yBottom);
-                int bottom = Math.Max(yTop, yBottom);
-                if (BlackPitchClasses.Contains(Mod(midi, 12)))
-                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
-
-                if (Mod(midi, 12) == 0)
+                if (Mod(midi, 12) != 0)
+                    continue;
+                DrawHorizontalLine(gridTarget, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
+                // §20.1: use the precomputed label — no per-frame string formatting.
+                int octaveIndex = midi / 12 - 1;
+                // Clamp for relative/unusual pitch models (e.g. SPC relative
+                // semitones) that can produce midi=0 or negative values.
+                if ((uint)octaveIndex < COctaveLabels.Length)
                 {
-                    DrawHorizontalLine(gridTarget, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
-                    // §20.1: use the precomputed label — no per-frame string formatting.
-                    int octaveIndex = midi / 12 - 1;
-                    // Clamp for relative/unusual pitch models (e.g. SPC relative
-                    // semitones) that can produce midi=0 or negative values.
-                    if ((uint)octaveIndex < COctaveLabels.Length)
-                    {
-                        string label = COctaveLabels[octaveIndex];
-                        int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
-                        // Pitch labels are dynamic and must remain inside the
-                        // lane that will be restored by a sequential session.
-                        // Without this guard a bottom-edge glyph can spill into
-                        // the next panel header and leave stale pixels after a
-                        // seek or frame transition.
-                        if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
-                            DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
-                    }
+                    string label = COctaveLabels[octaveIndex];
+                    int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
+                    // Pitch labels are dynamic and must remain inside the
+                    // lane that will be restored by a sequential session.
+                    // Without this guard a bottom-edge glyph can spill into
+                    // the next panel header and leave stale pixels after a
+                    // seek or frame transition.
+                    if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
+                        DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
                 }
+            }
+            if (_performance.Enabled)
+            {
+                long lineTicks = Stopwatch.GetTimestamp() - lineStart;
+                _performance.GridLineTicks += lineTicks;
+                _performance.PitchGridTicks += lineTicks;
             }
         }
         if (willCache)
