@@ -2180,6 +2180,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // scope is the signal portion of the roll. Notes and lane chrome
             // drawn afterward remain visible over the hole.
             ClearRect(frame, scope);
+            if (!lanes)
+                StrokeRect(frame, scope, Border.WithAlpha(180), 1);
             FillRect(
                 frame,
                 new OverlayRect(
