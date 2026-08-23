@@ -60,7 +60,11 @@ internal static class MidiCommand
             $"{timeline.Timing.Length} timing events, sample rate {timeline.SampleRate}");
 
         MusicalTimeMapBuildResult? timing = options.MusicalGrid
-            ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions())
+            ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+            {
+                EnableStructuralGridSelection = false,
+                EnableLegacyHierarchyInference = false,
+            })
             : null;
         MidiTranscriptionResult result = timing is null
             ? new MidiTranscriber(options.Ppq).Transcribe(timeline)

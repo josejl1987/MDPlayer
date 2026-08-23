@@ -102,6 +102,74 @@ internal static class SymbolicTempoInference
         return phases;
     }
 
+    private static MetricalTiming InferEllisDbnTiming(
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence,
+        double fallbackBpm,
+        long fallbackPhaseSample,
+        double fallbackScore,
+        double? fallbackAlternativeBpm,
+        double? fallbackAlternativeScore,
+        IReadOnlyList<DbnTempoHypothesis> tempoHypotheses)
+    {
+        DbnMetricalResult? decoded = DbnMetricalDecoder.Decode(
+            tempoHypotheses,
+            BuildBeatFeatureStreams(timeline, percussionEvidence),
+            timeline.SampleRate,
+            timeline.StartSample,
+            Math.Max(timeline.EndSample, timeline.StartSample + 1),
+            (timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
+                .Select(marker => marker.SamplePosition)
+                .ToArray());
+        if (decoded is null)
+        {
+            double fallbackBeat = timeline.SampleRate * 60.0 / Math.Max(1.0, fallbackBpm);
+            return new MetricalTiming(
+                fallbackBeat / 4.0,
+                fallbackPhaseSample,
+                0,
+                4,
+                fallbackBeat,
+                fallbackPhaseSample,
+                fallbackScore,
+                0,
+                null,
+                null,
+                null,
+                fallbackAlternativeBpm,
+                fallbackAlternativeScore);
+        }
+
+        DbnMetricalCandidate selected = decoded.Selected;
+        double beatDuration = timeline.SampleRate * 60.0 /
+            Math.Max(1.0, selected.Tempo.Bpm);
+        Meter? meter = decoded.MeterResolved ? selected.Meter : null;
+        int? downbeatPhase = decoded.DownbeatResolved ? selected.DownbeatPhase : null;
+        long? downbeatSample = decoded.DownbeatResolved ? selected.DownbeatSample : null;
+        double? alternativeBpm = decoded.Alternative is { } alternative
+            && IsMetricalFamilyRatio(alternative.Tempo.Bpm / selected.Tempo.Bpm)
+            ? alternative.Tempo.Bpm
+            : fallbackAlternativeBpm;
+        double? alternativeScore = decoded.Alternative is { } metricalAlternative
+            && alternativeBpm == metricalAlternative.Tempo.Bpm
+            ? metricalAlternative.Score
+            : fallbackAlternativeScore;
+        return new MetricalTiming(
+            beatDuration / 4.0,
+            selected.Tempo.PhaseSample,
+            decoded.MeterResolved ? decoded.MeterConfidence : 0,
+            4,
+            beatDuration,
+            selected.Tempo.PhaseSample,
+            selected.Score,
+            decoded.MeterResolved ? decoded.MeterConfidence : 0,
+            meter,
+            downbeatPhase,
+            downbeatSample,
+            alternativeBpm,
+            alternativeScore);
+    }
+
     /// <summary>Relative tie epsilon for phase-selection comparisons (TI-HOIST).
     /// The hoisted factoring (<c>normalized[i] - phaseQuarters</c> vs the original
     /// <c>(samples[i] - phaseSamples) / spq</c>) moves last-ulp rounding, and the
@@ -275,9 +343,18 @@ internal static class SymbolicTempoInference
                 fallbackPhaseSample,
                 fallbackAlternativeScore ?? 0));
         }
-        MetricalTiming hierarchy = InferMetricalTiming(
-            timeline, hierarchyOnsets, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
-            fallbackAlternativeBpm, fallbackAlternativeScore, tempoHypotheses);
+        if (tempoHypotheses.All(candidate => Math.Abs(candidate.Bpm - fallbackBpm) > 0.01))
+        {
+            tempoHypotheses.Add(new DbnTempoHypothesis(
+                fallbackBpm, fallbackPhaseSample, fallbackScore));
+        }
+        MetricalTiming hierarchy = options.EnableLegacyHierarchyInference
+            ? InferMetricalTiming(
+                timeline, hierarchyOnsets, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
+                fallbackAlternativeBpm, fallbackAlternativeScore, tempoHypotheses)
+            : InferEllisDbnTiming(
+                timeline, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
+                fallbackAlternativeBpm, fallbackAlternativeScore, tempoHypotheses);
         double bestBpm = hierarchy.BeatDuration > 0
             ? timeline.SampleRate * 60.0 / hierarchy.BeatDuration
             : fallbackBpm;

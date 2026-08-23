@@ -44,4 +44,18 @@ internal sealed class MusicalTimeMapOptions
 
     /// <summary>When true, throw instead of guessing phase/tempo on insufficient evidence.</summary>
     public bool StrictTiming { get; init; }
+
+    /// <summary>
+    /// Runs the repeated-content structural grid pass after symbolic timing. MIDI
+    /// export already has Ellis/DBN timing and can disable this quadratic analysis
+    /// for large timelines without changing source-time or pitch semantics.
+    /// </summary>
+    public bool EnableStructuralGridSelection { get; init; } = true;
+
+    /// <summary>
+    /// Keeps the pre-Ellis symbolic hierarchy available for compatibility tests
+    /// and diagnostics. Production musical export uses the bounded Ellis/DBN
+    /// path instead; the legacy hierarchy has a quadratic candidate scorer.
+    /// </summary>
+    public bool EnableLegacyHierarchyInference { get; init; } = true;
 }

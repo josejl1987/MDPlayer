@@ -31,7 +31,11 @@ public sealed class MidiExportService
             byte[] bytes;
             MidiTranscriptionResult? coreResult = null;
             MusicalTimeMapBuildResult? timing = request.TimingMode == MidiExportTimingMode.MusicalTimeMap
-                ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions())
+                ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+                {
+                    EnableStructuralGridSelection = false,
+                    EnableLegacyHierarchyInference = false,
+                })
                 : null;
             MidiTranscriptionResult Transcribe() => timing is null
                 ? new MidiTranscriber(request.Ppq).Transcribe(timeline)

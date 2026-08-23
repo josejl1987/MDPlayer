@@ -360,13 +360,33 @@ internal static class DbnMetricalDecoder
         double tolerance)
     {
         double best = 0;
-        foreach ((long onset, double strength) in onsets)
+        int first = LowerBound(onsets, sample - tolerance);
+        for (int index = first;
+             index < onsets.Count && onsets[index].Sample <= sample + tolerance;
+             index++)
         {
+            (long onset, double strength) = onsets[index];
             long distance = Math.Abs(onset - sample);
-            if (distance <= tolerance)
-                best = Math.Max(best, strength * Math.Exp(-distance * distance / (2 * tolerance * tolerance)));
+            best = Math.Max(best, strength * Math.Exp(-distance * distance / (2 * tolerance * tolerance)));
         }
         return best;
+    }
+
+    private static int LowerBound(
+        IReadOnlyList<(long Sample, double Strength)> onsets,
+        double sample)
+    {
+        int low = 0;
+        int high = onsets.Count;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (onsets[middle].Sample < sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
     }
 
     private static double LogObservation(double observation) => Math.Log(observation);

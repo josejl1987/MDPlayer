@@ -338,17 +338,36 @@ internal static class EllisBeatTracker
         foreach (BeatFeatureStream stream in streams)
         {
             double nearest = 0;
-            foreach ((long onset, double strength) in stream.Onsets)
+            int first = LowerBound(stream.Onsets, sample - tolerance);
+            for (int index = first;
+                 index < stream.Onsets.Count && stream.Onsets[index].Sample <= sample + tolerance;
+                 index++)
             {
+                (long onset, double strength) = stream.Onsets[index];
                 long distance = Math.Abs(onset - sample);
-                if (distance > tolerance)
-                    continue;
                 nearest = Math.Max(nearest, strength * Math.Exp(-distance * distance / (2 * tolerance * tolerance)));
             }
             total += stream.Weight * nearest;
             weight += stream.Weight;
         }
         return weight > 0 ? total / (total + weight) : 0;
+    }
+
+    private static int LowerBound(
+        IReadOnlyList<(long Sample, double Strength)> onsets,
+        double sample)
+    {
+        int low = 0;
+        int high = onsets.Count;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (onsets[middle].Sample < sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
     }
 
     private static bool IsHalfDouble(double left, double right)
