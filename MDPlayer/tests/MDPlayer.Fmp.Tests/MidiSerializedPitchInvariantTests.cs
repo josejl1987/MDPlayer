@@ -38,6 +38,7 @@ public sealed class MidiSerializedPitchInvariantTests
         };
 
         MidiTranscriptionResult export = new MidiTranscriber(Ppq).Transcribe(timeline);
+        IndependentMidiPitchValidator.Validate(timeline, export, Ppq);
         IReadOnlyList<TimedEvent> events = ReadMergedEvents(export.Bytes);
 
         Assert.Single(events.Where(e => e.Event is SetTempoEvent));
