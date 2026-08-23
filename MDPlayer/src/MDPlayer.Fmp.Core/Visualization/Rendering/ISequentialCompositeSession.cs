@@ -15,3 +15,27 @@ internal interface ISequentialCompositeSession
         ReadOnlySpan<byte> scopeGrid,
         Span<byte> destination);
 }
+
+/// <summary>
+/// Optional pipelined extension: the session retains up to <see cref="MaxInFlight"/>
+/// frames and publishes them after their GPU readback completes. This lets the
+/// render thread keep the GPU busy (draw N+1 while readback of N is in flight)
+/// instead of blocking on every frame. CPU sessions return <c>false</c> for
+/// <see cref="SupportsDeferred"/> and are used synchronously.
+/// </summary>
+internal interface IDeferredCompletionSession : ISequentialCompositeSession
+{
+    bool SupportsDeferred => true;
+
+    int MaxInFlight { get; }
+
+    int PendingCount { get; }
+
+    void Submit(SinglePassComposer.FrameSlot slot, long frameIndex, SinglePassComposer.PipelineMetrics metrics);
+
+    bool TryDequeueCompleted(SinglePassComposer.PipelineMetrics metrics, out SinglePassComposer.FrameSlot slot);
+
+    SinglePassComposer.FrameSlot WaitForOldest(SinglePassComposer.PipelineMetrics metrics);
+
+    void CompleteAll(SinglePassComposer.PipelineMetrics metrics);
+}

@@ -31,6 +31,14 @@ internal sealed class GpuSkiaContext : IDisposable
     private readonly GRContext _grContext;
     private readonly SKSurface _surface;
     private readonly SKImageInfo _frameInfo;
+    private readonly int _tex;
+    private readonly int _fbo;
+    private readonly GRBackendRenderTarget _backendRT;
+    private readonly int[] _pbos;
+    private readonly IntPtr[] _fences;
+    private int _nextPboSlot;
+    private const int PboSlotCount = 4;
+    private int _surfaceFbo;
 
     public GpuSkiaContext(int width, int height)
     {
@@ -100,16 +108,84 @@ internal sealed class GpuSkiaContext : IDisposable
                     "returned null (Ganesh could not attach to the OpenGL " +
                     "context).");
 
-            SKSurface surface = SKSurface.Create(
-                grContext, budgeted: false, _frameInfo, 0, GRSurfaceOrigin.TopLeft);
+            // Custom FBO + PBO ring for async readback. Using an explicit FBO lets
+            // BeginAsyncReadback know exactly which framebuffer to read from,
+            // avoiding the fragile “query currently bound FBO” dance that produced
+            // black frames with Skia-managed FBOs.
+            SKSurface surface = null;
+            int tex = 0;
+            int fbo = 0;
+            GRBackendRenderTarget backendRT = null;
+            int[] pbos = null;
+            IntPtr[] fences = null;
+            bool useAsync = Environment.GetEnvironmentVariable("MDPLAYER_GPU_ASYNC") != "0";
+            if (useAsync)
+            {
+                try
+                {
+                    tex = GL.GenTexture();
+                    GL.BindTexture(TextureTarget.Texture2D, tex);
+                    GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba8, width, height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
+                    GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+                    GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+                    GL.BindTexture(TextureTarget.Texture2D, 0);
+
+                    fbo = GL.GenFramebuffer();
+                    GL.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+                    GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, tex, 0);
+                    var status = GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                    GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                    if (status != FramebufferErrorCode.FramebufferComplete)
+                        throw new InvalidOperationException($"FBO incomplete: {status}");
+
+                    var fbInfo = new GRGlFramebufferInfo((uint)fbo, 0x8058);
+                    backendRT = new GRBackendRenderTarget(width, height, 0, 0, fbInfo);
+                    surface = SKSurface.Create(grContext, backendRT, GRSurfaceOrigin.TopLeft, SKColorType.Rgba8888);
+                    if (surface is null)
+                        throw new InvalidOperationException("SKSurface.Create with wrapped FBO returned null");
+
+                    pbos = new int[PboSlotCount];
+                    fences = new IntPtr[PboSlotCount];
+                    GL.GenBuffers(PboSlotCount, pbos);
+                    int bytes = _frameInfo.BytesSize;
+                    for (int i = 0; i < PboSlotCount; i++)
+                    {
+                        GL.BindBuffer(BufferTarget.PixelPackBuffer, pbos[i]);
+                        GL.BufferData(BufferTarget.PixelPackBuffer, bytes, IntPtr.Zero, BufferUsageHint.StreamRead);
+                    }
+                    GL.BindBuffer(BufferTarget.PixelPackBuffer, 0);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"warning: GPU async FBO/PBO setup failed, falling back to sync: {ex.Message}");
+                    if (surface != null) { try { surface.Dispose(); } catch { } surface = null; }
+                    if (backendRT != null) { try { backendRT.Dispose(); } catch { } backendRT = null; }
+                    if (fbo != 0) { try { GL.DeleteFramebuffer(fbo); } catch { } fbo = 0; }
+                    if (tex != 0) { try { GL.DeleteTexture(tex); } catch { } tex = 0; }
+                    if (pbos != null) { try { GL.DeleteBuffers(pbos.Length, pbos); } catch { } }
+                    pbos = null;
+                    fences = null;
+                }
+            }
+
             if (surface is null)
-                throw new InvalidOperationException(
-                    "GPU renderer initialization failed: SKSurface.Create " +
-                    "returned null for the GPU-backed frame surface.");
+            {
+                surface = SKSurface.Create(
+                    grContext, budgeted: false, _frameInfo, 0, GRSurfaceOrigin.TopLeft);
+                if (surface is null)
+                    throw new InvalidOperationException(
+                        "GPU renderer initialization failed: SKSurface.Create " +
+                        "returned null for the GPU-backed frame surface.");
+            }
 
             _glInterface = glInterface;
             _grContext = grContext;
             _surface = surface;
+            _tex = tex;
+            _fbo = fbo;
+            _backendRT = backendRT;
+            _pbos = pbos;
+            _fences = fences;
         }
         catch
         {
@@ -175,6 +251,9 @@ internal sealed class GpuSkiaContext : IDisposable
     {
         _window.MakeCurrent();
         _surface.Canvas.Clear(clearColor);
+        GL.GetInteger(GetPName.DrawFramebufferBinding, out _surfaceFbo);
+        if (_surfaceFbo == 0)
+            GL.GetInteger(GetPName.FramebufferBinding, out _surfaceFbo);
     }
 
     /// <summary>Submits the current frame's draw commands to the GPU.</summary>
@@ -228,6 +307,113 @@ internal sealed class GpuSkiaContext : IDisposable
         }
     }
 
+    public bool HasAsyncReadback => _pbos != null;
+
+    /// <summary>
+    /// Flushes Skia, submits without CPU wait, and issues an async PBO readback.
+    /// Returns the PBO slot whose fence will signal when the copy is complete.
+    /// The caller must later call <see cref="TryCompleteAsyncReadback"/>.
+    /// </summary>
+    public int BeginAsyncReadback()
+    {
+        if (!HasAsyncReadback)
+            throw new InvalidOperationException("Async readback not available on this context");
+
+        _surface.Canvas.Flush();
+        _grContext.Submit(false);
+
+        int slot = _nextPboSlot;
+        _nextPboSlot = (_nextPboSlot + 1) % _pbos.Length;
+
+        if (_fences[slot] != IntPtr.Zero)
+        {
+            GL.ClientWaitSync(_fences[slot], ClientWaitSyncFlags.SyncFlushCommandsBit, 1_000_000_000);
+            GL.DeleteSync(_fences[slot]);
+            _fences[slot] = IntPtr.Zero;
+        }
+
+        int fbo = _fbo != 0 ? _fbo : _surfaceFbo;
+        if (fbo == 0)
+        {
+            GL.GetInteger(GetPName.DrawFramebufferBinding, out fbo);
+            if (fbo == 0)
+                GL.GetInteger(GetPName.FramebufferBinding, out fbo);
+        }
+        
+        if (fbo == 0)
+            throw new InvalidOperationException("Cannot determine surface FBO for async readback");
+        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, fbo);
+        GL.BindBuffer(BufferTarget.PixelPackBuffer, _pbos[slot]);
+        GL.ReadPixels(0, 0, _frameInfo.Width, _frameInfo.Height, PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
+        GL.BindBuffer(BufferTarget.PixelPackBuffer, 0);
+        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, 0);
+        _fences[slot] = GL.FenceSync(SyncCondition.SyncGpuCommandsComplete, WaitSyncFlags.None);
+        return slot;
+    }
+
+    /// <summary>
+    /// Attempts to complete the async readback for <paramref name="slot"/> into
+    /// <paramref name="destination"/>. When <paramref name="block"/> is false
+    /// the call returns immediately if the fence has not yet signaled.
+    /// Makes the GL context current for the duration — callers (the pipeline's
+    /// drain step) run outside the render call, where the context is detached.
+    /// </summary>
+    public unsafe bool TryCompleteAsyncReadback(int slot, Span<byte> destination, bool block)
+    {
+        if (!HasAsyncReadback)
+            return false;
+        if ((uint)slot >= (uint)_fences.Length)
+            return false;
+        IntPtr fence = _fences[slot];
+        if (fence == IntPtr.Zero)
+            return false;
+        if (destination.Length < _frameInfo.BytesSize)
+            throw new ArgumentException($"Destination requires at least {_frameInfo.BytesSize} bytes.", nameof(destination));
+
+        _window.MakeCurrent();
+        try
+        {
+            ulong timeout = block ? 1_000_000_000UL : 0UL;
+            var status = (int)GL.ClientWaitSync(fence, ClientWaitSyncFlags.SyncFlushCommandsBit, timeout);
+            const int TimeoutExpired = 0x911B;
+            const int WaitFailed = 0x911D;
+            if (status == TimeoutExpired || status == WaitFailed)
+                return false;
+
+            GL.DeleteSync(fence);
+            _fences[slot] = IntPtr.Zero;
+
+            GL.BindBuffer(BufferTarget.PixelPackBuffer, _pbos[slot]);
+            IntPtr mapped = GL.MapBufferRange(BufferTarget.PixelPackBuffer, IntPtr.Zero, _frameInfo.BytesSize, BufferAccessMask.MapReadBit);
+            if (mapped == IntPtr.Zero)
+            {
+                GL.BindBuffer(BufferTarget.PixelPackBuffer, 0);
+                Console.Error.WriteLine($"[async] TryComplete slot={slot} map failed");
+                return false;
+            }
+
+            // The wrapped FBO is declared GRSurfaceOrigin.TopLeft, so Skia
+            // compensates for GL's bottom-up framebuffer during rendering and
+            // raw rows are already top-down — a straight copy matches
+            // SKSurface.ReadPixels byte-for-byte.
+            int rowBytes = _frameInfo.RowBytes;
+            int height = _frameInfo.Height;
+            fixed (byte* dstPtr = destination)
+            {
+                byte* srcPtr = (byte*)mapped.ToPointer();
+                System.Buffer.MemoryCopy(srcPtr, dstPtr, _frameInfo.BytesSize, _frameInfo.BytesSize);
+            }
+
+            GL.UnmapBuffer(BufferTarget.PixelPackBuffer);
+            GL.BindBuffer(BufferTarget.PixelPackBuffer, 0);
+            return true;
+        }
+        finally
+        {
+            _window.Context.MakeNoneCurrent();
+        }
+    }
+
     /// <summary>Ensures the GL context is current before texture uploads.</summary>
     public void MakeCurrent() => _window.MakeCurrent();
 
@@ -276,6 +462,32 @@ internal sealed class GpuSkiaContext : IDisposable
                 // The context may already be gone; disposal is best-effort.
             }
             _surface.Dispose();
+        }
+        _backendRT?.Dispose();
+        if (_fbo != 0)
+        {
+            try { _window.MakeCurrent(); GL.DeleteFramebuffer(_fbo); } catch { }
+        }
+        if (_tex != 0)
+        {
+            try { _window.MakeCurrent(); GL.DeleteTexture(_tex); } catch { }
+        }
+        if (_pbos != null)
+        {
+            try
+            {
+                _window.MakeCurrent();
+                for (int i = 0; i < _pbos.Length; i++)
+                {
+                    if (_fences != null && _fences[i] != IntPtr.Zero)
+                    {
+                        try { GL.DeleteSync(_fences[i]); } catch { }
+                        _fences[i] = IntPtr.Zero;
+                    }
+                }
+                GL.DeleteBuffers(_pbos.Length, _pbos);
+            }
+            catch { }
         }
         _grContext?.Dispose();
         _glInterface?.Dispose();

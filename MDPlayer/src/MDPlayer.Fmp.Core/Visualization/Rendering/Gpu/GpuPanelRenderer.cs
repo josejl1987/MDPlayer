@@ -352,6 +352,119 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
         }
     }
 
+    internal void RenderForPipelinedSlot(SinglePassComposer.FrameSlot slot, long frameIndex, bool scopeFramesAreOpaque, out int pboSlot)
+    {
+        pboSlot = -1;
+        ValidateFrame(frameIndex, slot.Frame);
+        if (!slot.Grid.AsSpan().IsEmpty && slot.Grid.Length < ScopeFrameByteCount)
+            throw new ArgumentException($"Scope grid requires at least {ScopeFrameByteCount} bytes.", nameof(slot));
+
+        lock (_gate)
+        {
+            long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+            if (_performance.Enabled)
+                _performance.Frames++;
+
+            long currentSample = Math.Min(
+                _timeline.EndSample,
+                _timeline.StartSample + FrameSampleClock.SampleAtFrame(
+                    frameIndex, _timeline.SampleRate, FpsNumerator, FpsDenominator));
+
+            try
+            {
+                long drawStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+
+                if (BenchmarkMode == GpuBenchmarkMode.ClearOnlyReadback)
+                {
+                    _context.BeginFrame(ToSk(CanvasBackground));
+                }
+                else
+                {
+                    _context.BeginFrame(ToSk(CanvasBackground));
+                    EnsureChromeCache();
+                    if (_chromeImage is not null)
+                        Canvas.DrawImage(_chromeImage, 0, 0);
+                    else
+                        DrawChrome();
+
+                    long gridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                    DrawTimeGrid(currentSample);
+                    if (_performance.Enabled)
+                        _performance.GridLineTicks += Stopwatch.GetTimestamp() - gridStart;
+
+                    DrawPlayheads();
+
+                    if (slot.HasGrid && slot.Grid.Length >= ScopeFrameByteCount && BenchmarkMode != GpuBenchmarkMode.FullNoScopes)
+                    {
+                        long scopeStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        PlaceScopeRows(slot.Grid, scopeFramesAreOpaque);
+                        if (_performance.Enabled)
+                            _performance.ScopeUploadTicks += Stopwatch.GetTimestamp() - scopeStart;
+                    }
+
+                    long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                    DrawDynamicPanels(currentSample);
+                    if (_performance.Enabled)
+                        _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
+
+                    long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                    DrawClock(currentSample);
+                    DrawLoopLabel(frameIndex);
+                    DrawProgress(currentSample);
+                    if (_performance.Enabled)
+                        _performance.TextTicks += Stopwatch.GetTimestamp() - textStart;
+                }
+
+                if (_performance.Enabled)
+                    _performance.GpuDrawTicks += Stopwatch.GetTimestamp() - drawStart;
+
+                long flushStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                if (BenchmarkMode == GpuBenchmarkMode.DrawOnlySyncFlush)
+                {
+                    _context.FlushSync();
+                    if (_performance.Enabled)
+                        _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
+                    // Sync benchmark skips readback.
+                    return;
+                }
+                else
+                {
+                    // Pipelined async readback: enqueue without blocking.
+                    if (_context.HasAsyncReadback)
+                    {
+                        pboSlot = _context.BeginAsyncReadback();
+                    }
+                    else
+                    {
+                        _context.Flush();
+                        if (_performance.Enabled)
+                            _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
+                        long readStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                        _context.ReadPixels(slot.Frame);
+                        if (_performance.Enabled)
+                            _performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - readStart;
+                        return;
+                    }
+                    if (_performance.Enabled)
+                        _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
+                }
+            }
+            finally
+            {
+                _context.ReleaseCurrent();
+            }
+
+            if (_performance.Enabled)
+            {
+                _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
+                _performance.FullRedraws++;
+                _performance.RenderedPixels += (long)Width * Height;
+                _performance.FinishFrame(allocatedBefore);
+            }
+        }
+    }
+
     public void WriteStaticFrame(Span<byte> destination)
     {
         // The GPU path never caches a static layer; the "static" export is a
@@ -630,11 +743,13 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
     // so every sequential frame is a full redraw of the same pipeline.
     // ------------------------------------------------------------------
 
-    private sealed class GpuSequentialSession : ISequentialCompositeSession
+    private sealed class GpuSequentialSession : IDeferredCompletionSession
     {
         private readonly GpuPanelRenderer _renderer;
         private readonly bool _scopeFramesAreOpaque;
         private bool _initialized;
+        private readonly Queue<(SinglePassComposer.FrameSlot Slot, int PboSlot)> _pending = new();
+        private const int MaxInFlightConst = 3;
 
         public GpuSequentialSession(GpuPanelRenderer renderer, bool scopeFramesAreOpaque)
         {
@@ -642,11 +757,12 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
             _scopeFramesAreOpaque = scopeFramesAreOpaque;
         }
 
+        public int MaxInFlight => _renderer._context.HasAsyncReadback ? MaxInFlightConst : 0;
+
+        public int PendingCount => _pending.Count;
+
         public void Initialize(Span<byte> destination)
         {
-            // Validation only. Frame 0 is rendered by the first RenderNext call
-            // through the normal pipeline; rendering here would be discarded
-            // (the initialized slot returns to the free pool unwritten).
             if (destination.Length < _renderer.FrameByteCount)
                 throw new ArgumentException(
                     $"Destination requires at least {_renderer.FrameByteCount} bytes.",
@@ -661,7 +777,89 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
         {
             if (!_initialized)
                 throw new InvalidOperationException("The sequential session must be initialized first.");
+            // Non-pipelined path (single-frame preview / tests / benchmark modes):
+            // keep the original synchronous contract.
             _renderer.RenderCompositeFrame(frameIndex, scopeGrid, destination, _scopeFramesAreOpaque);
+        }
+
+        public void Submit(SinglePassComposer.FrameSlot slot, long frameIndex, SinglePassComposer.PipelineMetrics metrics)
+        {
+            if (!_initialized)
+                throw new InvalidOperationException("The sequential session must be initialized first.");
+            if (!_renderer._context.HasAsyncReadback || MaxInFlight == 0)
+            {
+                long stageStart = Stopwatch.GetTimestamp();
+                _renderer.RenderCompositeFrame(frameIndex, slot.Grid, slot.Frame, _scopeFramesAreOpaque);
+                if (metrics != null) metrics.OverlayTicks += Stopwatch.GetTimestamp() - stageStart;
+                _pending.Enqueue((slot, -1));
+                return;
+            }
+
+            long drawStart = Stopwatch.GetTimestamp();
+            _renderer.RenderForPipelinedSlot(slot, frameIndex, _scopeFramesAreOpaque, out int pboSlot);
+            if (metrics != null) metrics.OverlayTicks += Stopwatch.GetTimestamp() - drawStart;
+            _pending.Enqueue((slot, pboSlot));
+        }
+
+        public bool TryDequeueCompleted(SinglePassComposer.PipelineMetrics metrics, out SinglePassComposer.FrameSlot slot)
+        {
+            slot = null;
+            if (_pending.Count == 0)
+                return false;
+            var (peekSlot, pboSlot) = _pending.Peek();
+            if (pboSlot == -1)
+            {
+                _pending.Dequeue();
+                slot = peekSlot;
+                return true;
+            }
+            long t0 = metrics != null && _renderer._performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            bool ok = _renderer._context.TryCompleteAsyncReadback(pboSlot, peekSlot.Frame, block: false);
+            if (ok)
+            {
+                if (metrics != null && _renderer._performance.Enabled)
+                    _renderer._performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - t0;
+                _pending.Dequeue();
+                slot = peekSlot;
+                return true;
+            }
+            return false;
+        }
+
+        public SinglePassComposer.FrameSlot WaitForOldest(SinglePassComposer.PipelineMetrics metrics)
+        {
+            if (_pending.Count == 0)
+                throw new InvalidOperationException("No pending frames");
+            var (peekSlot, pboSlot) = _pending.Peek();
+            if (pboSlot == -1)
+            {
+                _pending.Dequeue();
+                return peekSlot;
+            }
+            long t0 = metrics != null && _renderer._performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            _renderer._context.TryCompleteAsyncReadback(pboSlot, peekSlot.Frame, block: true);
+            if (metrics != null && _renderer._performance.Enabled)
+                _renderer._performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - t0;
+            _pending.Dequeue();
+            return peekSlot;
+        }
+
+        public void CompleteAll(SinglePassComposer.PipelineMetrics metrics)
+        {
+            while (_pending.Count > 0)
+            {
+                var (peekSlot, pboSlot) = _pending.Peek();
+                if (pboSlot == -1)
+                {
+                    _pending.Dequeue();
+                    continue;
+                }
+                long t0 = metrics != null && _renderer._performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                _renderer._context.TryCompleteAsyncReadback(pboSlot, peekSlot.Frame, block: true);
+                if (metrics != null && _renderer._performance.Enabled)
+                    _renderer._performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - t0;
+                _pending.Dequeue();
+            }
         }
     }
 }

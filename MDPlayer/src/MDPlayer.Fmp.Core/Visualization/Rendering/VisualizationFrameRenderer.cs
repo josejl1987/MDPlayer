@@ -197,7 +197,7 @@ internal sealed class VisualizationFrameRenderer : IDisposable
         _overlay.Dispose();
     }
 
-    internal sealed class SequentialSession
+    internal sealed class SequentialSession : ISequentialCompositeSession, IDeferredCompletionSession
     {
         private readonly VisualizationFrameRenderer _owner;
         private readonly ISequentialCompositeSession _overlay;
@@ -210,13 +210,18 @@ internal sealed class VisualizationFrameRenderer : IDisposable
             _overlay = overlay;
         }
 
-        internal void Initialize(Span<byte> destination)
+        public void Initialize(Span<byte> destination)
             => _overlay.Initialize(destination);
+
+        public void RenderNext(
+            long frameIndex,
+            ReadOnlySpan<byte> scopeGrid,
+            Span<byte> destination) => RenderNextInternal(frameIndex, scopeGrid, destination);
 
         internal void RenderNext(long frameIndex, Span<byte> destination)
             => RenderNext(frameIndex, ReadOnlySpan<byte>.Empty, destination);
 
-        internal void RenderNext(
+        internal void RenderNextInternal(
             long frameIndex,
             ReadOnlySpan<byte> scopeGrid,
             Span<byte> destination)
@@ -240,6 +245,42 @@ internal sealed class VisualizationFrameRenderer : IDisposable
             }
 
             _overlay.RenderNext(frameIndex, scopeGrid, destination);
+        }
+
+        public int MaxInFlight => (_overlay as IDeferredCompletionSession)?.MaxInFlight ?? 0;
+        public int PendingCount => (_overlay as IDeferredCompletionSession)?.PendingCount ?? 0;
+
+        public void Submit(SinglePassComposer.FrameSlot slot, long frameIndex, SinglePassComposer.PipelineMetrics metrics)
+        {
+            if (_overlay is IDeferredCompletionSession deferred && deferred.MaxInFlight > 0)
+                deferred.Submit(slot, frameIndex, metrics);
+            else
+            {
+                long t0 = metrics != null ? Stopwatch.GetTimestamp() : 0;
+                _overlay.RenderNext(frameIndex, slot.HasGrid ? slot.Grid : ReadOnlySpan<byte>.Empty, slot.Frame);
+                if (metrics != null) metrics.OverlayTicks += Stopwatch.GetTimestamp() - t0;
+            }
+        }
+
+        public bool TryDequeueCompleted(SinglePassComposer.PipelineMetrics metrics, out SinglePassComposer.FrameSlot slot)
+        {
+            slot = null;
+            if (_overlay is IDeferredCompletionSession deferred)
+                return deferred.TryDequeueCompleted(metrics, out slot);
+            return false;
+        }
+
+        public SinglePassComposer.FrameSlot WaitForOldest(SinglePassComposer.PipelineMetrics metrics)
+        {
+            if (_overlay is IDeferredCompletionSession deferred)
+                return deferred.WaitForOldest(metrics);
+            throw new InvalidOperationException("No pending frames");
+        }
+
+        public void CompleteAll(SinglePassComposer.PipelineMetrics metrics)
+        {
+            if (_overlay is IDeferredCompletionSession deferred)
+                deferred.CompleteAll(metrics);
         }
     }
 }

@@ -262,7 +262,8 @@ internal sealed class SinglePassComposer
                     slot => session.Initialize(slot.Frame),
                     includeQueueWaitInCorrscopeMetrics: true,
                     cancellationToken,
-                    abortProducer: () => { try { corrProcess.Kill(entireProcessTree: true); } catch { } });
+                    abortProducer: () => { try { corrProcess.Kill(entireProcessTree: true); } catch { } },
+                    deferredSession: session);
                 LastMetrics = pipelineMetrics with { Renderer = overlayRenderer.Performance };
                 ffmpeg.StandardInput.Close();
 
@@ -435,7 +436,8 @@ internal sealed class SinglePassComposer
                     slot => session.Initialize(slot.Frame),
                     includeQueueWaitInCorrscopeMetrics: false,
                     CancellationToken.None,
-                    abortProducer: null);
+                    abortProducer: null,
+                    deferredSession: session);
                 LastMetrics = pipelineMetrics with { Renderer = overlayRenderer.Performance };
             }
             finally
@@ -617,7 +619,8 @@ internal sealed class SinglePassComposer
                     includeQueueWaitInCorrscopeMetrics: false,
                     cancellationToken,
                     abortProducer: null,
-                    progress);
+                    progress,
+                    deferredSession: session);
                 LastMetrics = pipelineMetrics with
                 {
                     Renderer = frameRenderer.Performance,
@@ -803,7 +806,8 @@ internal sealed class SinglePassComposer
         bool includeQueueWaitInCorrscopeMetrics,
         CancellationToken cancellationToken,
         Action abortProducer,
-        Action<float>? progress = null)
+        Action<float>? progress = null,
+        ISequentialCompositeSession deferredSession = null)
     {
         int slotCount = queueCapacity * 2;
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -876,66 +880,118 @@ internal sealed class SinglePassComposer
             }, CancellationToken.None);
 
             // Stage 2: render (dedicated task): ready -> RenderNext -> renderReady.
+            // When the session supports deferred completion (GPU PBO ring), keep
+            // N frames in flight: draw N+1 while readback of N is in flight.
+            var deferred = deferredSession as IDeferredCompletionSession;
+            bool useDeferred = deferred != null && deferred.MaxInFlight > 0;
             renderer = Task.Run(() =>
             {
                 try
                 {
-                    for (long index = 0; index < totalFrames; index++)
+                    if (useDeferred)
                     {
-                        // Check the token on every render iteration, not only when
-                        // blocked in Take: once the producer has published every
-                        // frame, Take returns immediately without examining the
-                        // token, so without this check a cancellation would be
-                        // ignored for the entire remainder of the pipeline.
-                        try
+                        for (long index = 0; index < totalFrames; index++)
                         {
                             linkedCancellation.Token.ThrowIfCancellationRequested();
                             long waitStart = Stopwatch.GetTimestamp();
                             FrameSlot slot;
-                            try
-                            {
-                                slot = ready.Take(linkedCancellation.Token);
-                            }
-                            catch (Exception error)
-                            {
-                                renderError = error;
-                                break;
-                            }
+                            try { slot = ready.Take(linkedCancellation.Token); }
+                            catch (Exception error) { renderError = error; break; }
                             metrics.RenderBlockingTicks += Stopwatch.GetTimestamp() - waitStart;
                             metrics.ReadyMaxDepth = Math.Max(metrics.ReadyMaxDepth, ready.Count);
-                            bool published = false;
+                            bool submitted = false;
                             try
                             {
-                                renderFrame(slot, index, metrics);
-                                renderReady.Add(slot, linkedCancellation.Token);
-                                published = true;
+                                deferred.Submit(slot, index, metrics);
+                                submitted = true;
+                                while (deferred.TryDequeueCompleted(metrics, out var completed))
+                                    renderReady.Add(completed, linkedCancellation.Token);
+                                while (deferred.PendingCount > deferred.MaxInFlight)
+                                {
+                                    var completed = deferred.WaitForOldest(metrics);
+                                    renderReady.Add(completed, linkedCancellation.Token);
+                                }
                             }
                             catch (Exception error)
                             {
                                 renderError = error;
                                 linkedCancellation.Cancel();
-                            }
-                            finally
-                            {
-                                if (!published)
+                                if (!submitted)
                                     free.Add(slot, CancellationToken.None);
                             }
-
-                            if (renderError != null)
-                                break;
+                            if (renderError != null) break;
+                        }
+                        try
+                        {
+                            while (deferred.PendingCount > 0)
+                            {
+                                linkedCancellation.Token.ThrowIfCancellationRequested();
+                                var completed = deferred.WaitForOldest(metrics);
+                                renderReady.Add(completed, linkedCancellation.Token);
+                            }
                         }
                         catch (Exception error)
                         {
-                            // A cancellation raised by the scope-fill failure must not
-                            // escape before the stages are joined; that join
-                            // rethrows the root cause (e.g. frame-boundary drift).
                             renderError = error;
-                            break;
+                            linkedCancellation.Cancel();
+                        }
+                    }
+                    else
+                    {
+                        for (long index = 0; index < totalFrames; index++)
+                        {
+                            try
+                            {
+                                linkedCancellation.Token.ThrowIfCancellationRequested();
+                                long waitStart = Stopwatch.GetTimestamp();
+                                FrameSlot slot;
+                                try { slot = ready.Take(linkedCancellation.Token); }
+                                catch (Exception error) { renderError = error; break; }
+                                metrics.RenderBlockingTicks += Stopwatch.GetTimestamp() - waitStart;
+                                metrics.ReadyMaxDepth = Math.Max(metrics.ReadyMaxDepth, ready.Count);
+                                bool published = false;
+                                try
+                                {
+                                    renderFrame(slot, index, metrics);
+                                    renderReady.Add(slot, linkedCancellation.Token);
+                                    published = true;
+                                }
+                                catch (Exception error)
+                                {
+                                    renderError = error;
+                                    linkedCancellation.Cancel();
+                                }
+                                finally
+                                {
+                                    if (!published)
+                                        free.Add(slot, CancellationToken.None);
+                                }
+                                if (renderError != null) break;
+                            }
+                            catch (Exception error)
+                            {
+                                renderError = error;
+                                break;
+                            }
                         }
                     }
                 }
                 finally
                 {
+                    if (useDeferred)
+                    {
+                        try { deferred.CompleteAll(metrics); } catch { }
+                        while (deferred.PendingCount > 0)
+                        {
+                            try
+                            {
+                                var s = deferred.WaitForOldest(metrics);
+                                if (renderError == null) renderReady.Add(s, CancellationToken.None);
+                                else free.Add(s, CancellationToken.None);
+                            }
+                            catch { break; }
+                        }
+                    }
                     renderReady.CompleteAdding();
                 }
             }, CancellationToken.None);
