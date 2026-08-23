@@ -111,6 +111,8 @@ public sealed class MidiExportService
         };
         if (performance is not null)
             lines.AddRange(performance.ToHumanReadable());
+        lines.AddRange(diagnostics.BendRangeDiagnostics
+            .Select(warning => "pitch-diagnostic: " + warning));
         return lines;
     }
 

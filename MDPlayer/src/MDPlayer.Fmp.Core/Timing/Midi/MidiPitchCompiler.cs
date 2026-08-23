@@ -1,5 +1,14 @@
 namespace Fmp.Core.Midi;
 
+internal enum MidiBendRangeClassification
+{
+    Zero,
+    Ordinary,
+    Wide,
+    VeryWide,
+    StrictCompatibilityFailure,
+}
+
 /// <summary>Exact, receiver-compatible pitch math for the MIDI compiler.</summary>
 internal static class MidiPitchCompiler
 {
@@ -55,6 +64,20 @@ internal static class MidiPitchCompiler
         return checked((int)Math.Ceiling(maximum));
     }
 
+    public static MidiBendRangeClassification ClassifyBendRange(int bendRange)
+    {
+        if (bendRange < 0)
+            throw new ArgumentOutOfRangeException(nameof(bendRange));
+        return bendRange switch
+        {
+            0 => MidiBendRangeClassification.Zero,
+            <= 12 => MidiBendRangeClassification.Ordinary,
+            <= 48 => MidiBendRangeClassification.Wide,
+            <= 96 => MidiBendRangeClassification.VeryWide,
+            _ => MidiBendRangeClassification.StrictCompatibilityFailure,
+        };
+    }
+
     /// <summary>
     /// Encodes a signed internal bend value. MIDI's positive side has 8191
     /// steps while its negative side has 8192; the writer adds the 8192 center.
@@ -79,6 +102,30 @@ internal static class MidiPitchCompiler
             (int)Math.Round(scaled, MidpointRounding.AwayFromZero),
             -8192,
             8191);
+    }
+
+    /// <summary>Encodes the receiver-visible unsigned 14-bit Pitch Bend value.</summary>
+    public static int EncodeUnsigned14(double deltaSemitones, int bendRange) =>
+        EncodeSignedBend(deltaSemitones, bendRange) + 8192;
+
+    /// <summary>Decodes the receiver-visible unsigned 14-bit Pitch Bend value.</summary>
+    public static int DecodeUnsigned14(int unsignedValue)
+    {
+        if (unsignedValue is < 0 or > 16383)
+            throw new ArgumentOutOfRangeException(nameof(unsignedValue));
+        return unsignedValue - 8192;
+    }
+
+    /// <summary>Reconstructs the source-relative pitch from an unsigned bend.</summary>
+    public static double DecodePitch(int baseNote, int unsignedValue, int bendRange)
+    {
+        if (baseNote is < 0 or > 127)
+            throw new ArgumentOutOfRangeException(nameof(baseNote));
+        if (bendRange is < 0 or > 127)
+            throw new ArgumentOutOfRangeException(nameof(bendRange));
+        int signed = DecodeUnsigned14(unsignedValue);
+        double denominator = signed < 0 ? 8192.0 : 8191.0;
+        return baseNote + signed / denominator * bendRange;
     }
 
     private static double Excursion(double minimum, double maximum, int baseNote) =>

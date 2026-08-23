@@ -31,7 +31,8 @@ public sealed class MidiTranscriberFidelityTests
 
     private static NoteEvent Note(
         string voice, long start, long end, double midiNote,
-        IReadOnlyList<PitchChange>? pitch = null, bool retrigger = false)
+        IReadOnlyList<PitchChange>? pitch = null, bool retrigger = false,
+        string instrument = "test")
     {
         var note = new NoteEvent(
             ChannelId: "voice-" + voice,
@@ -39,7 +40,7 @@ public sealed class MidiTranscriberFidelityTests
             EndSample: end,
             InitialFrequencyHz: 0,
             InitialMidiNote: midiNote,
-            InstrumentId: "test",
+            InstrumentId: instrument,
             Mode: VisualizationNoteMode.Fm,
             IsRetrigger: retrigger,
             Pitch: pitch ?? Array.Empty<PitchChange>());
@@ -111,10 +112,11 @@ public sealed class MidiTranscriberFidelityTests
 
         var atAttack = voice.Where(e => e.Tick == 0).ToList();
         var channel = atAttack.Where(e => e.Event is ControlChangeEvent or PitchBendEvent or NoteOnEvent).ToList();
-        // RPN bend range (5 CCs) then the attack bend then the note-on.
-        Assert.Equal(7, channel.Count);
-        Assert.IsType<PitchBendEvent>(channel[5].Event);
-        Assert.IsType<NoteOnEvent>(channel[6].Event);
+        // RPN bend range (6 CCs, including Data Entry LSB) then the attack bend
+        // then the note-on.
+        Assert.Equal(8, channel.Count);
+        Assert.IsType<PitchBendEvent>(channel[6].Event);
+        Assert.IsType<NoteOnEvent>(channel[7].Event);
     }
 
     [Fact]
@@ -143,6 +145,30 @@ public sealed class MidiTranscriberFidelityTests
         Assert.Equal(2, channel.Count);
         Assert.IsType<NoteOffEvent>(channel[0].Event);
         Assert.IsType<NoteOnEvent>(channel[1].Event);
+    }
+
+    [Fact]
+    public void InstrumentChange_UsesProgramChangeInsideTheSameDomainTrack()
+    {
+        long boundary = Sr / 2;
+        byte[] bytes = Transcriber.Transcribe(Timeline(
+            Note("0", 0, boundary, 60.0, instrument: "a"),
+            Note("0", boundary, boundary + Sr, 62.0, instrument: "b"))).Bytes;
+
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(bytes, 1);
+        ProgramChangeEvent[] programs = voice
+            .Select(entry => entry.Event)
+            .OfType<ProgramChangeEvent>()
+            .ToArray();
+        Assert.Equal(2, programs.Length);
+        Assert.Equal(new[] { 0L, (long)Ppq }, voice
+            .Where(entry => entry.Event is ProgramChangeEvent)
+            .Select(entry => entry.Tick));
+
+        var boundaryEvents = voice.Where(entry => entry.Tick == Ppq).ToArray();
+        Assert.IsType<NoteOffEvent>(boundaryEvents[0].Event);
+        Assert.IsType<ProgramChangeEvent>(boundaryEvents[1].Event);
+        Assert.IsType<NoteOnEvent>(boundaryEvents[2].Event);
     }
 
     [Fact]

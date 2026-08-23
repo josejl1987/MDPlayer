@@ -494,6 +494,7 @@ internal sealed class MidiFileWriter
         WriteControlChange(stream, delta, evt.Channel, 101, 0);
         WriteControlChange(stream, 0, evt.Channel, 100, 0);
         WriteControlChange(stream, 0, evt.Channel, 6, value);
+        WriteControlChange(stream, 0, evt.Channel, 38, 0);
         WriteControlChange(stream, 0, evt.Channel, 101, 127);
         WriteControlChange(stream, 0, evt.Channel, 100, 127);
     }
@@ -821,14 +822,15 @@ internal sealed class MidiFileWriter
     private static void AppendBendRange(TrackChunk chunk, MidiBendRangeEvent range, long delta)
     {
         int value = range.Semitones & 0x7F;
-        // RPN pitch-bend range (semitones): select RPN 0, data entry MSB, then the
-        // null RPN (CC101/CC100 = 127) to unselect. A Data Entry (CC6) write after
-        // the null RPN is redundant — no RPN is selected, so it is omitted.
+        // RPN pitch-bend range (semitones): select RPN 0, write both data-entry
+        // bytes, then null the RPN (CC101/CC100 = 127) to prevent later Data Entry
+        // messages from changing channel sensitivity.
         // Only the first generated CC carries the source delta.
         var channel = Channel(range.Channel);
         AddControlChange(chunk, channel, 101, 0, ref delta);
         AddControlChange(chunk, channel, 100, 0, ref delta);
         AddControlChange(chunk, channel, 6, value, ref delta);
+        AddControlChange(chunk, channel, 38, 0, ref delta);
         AddControlChange(chunk, channel, 101, 127, ref delta);
         AddControlChange(chunk, channel, 100, 127, ref delta);
     }

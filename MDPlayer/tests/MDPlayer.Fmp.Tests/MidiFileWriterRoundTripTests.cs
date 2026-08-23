@@ -130,10 +130,10 @@ public sealed class MidiFileWriterRoundTripTests
 
         var chunk = LastMusicalChunk(bytes);
         var ccs = chunk.Events.OfType<ControlChangeEvent>().ToList();
-        Assert.Equal(5, ccs.Count);
-        int[] expectedControl = { 101, 100, 6, 101, 100 };
-        int[] expectedValue = { 0, 0, 2, 127, 127 };
-        for (int i = 0; i < 5; i++)
+        Assert.Equal(6, ccs.Count);
+        int[] expectedControl = { 101, 100, 6, 38, 101, 100 };
+        int[] expectedValue = { 0, 0, 2, 0, 127, 127 };
+        for (int i = 0; i < 6; i++)
         {
             Assert.Equal((SevenBitNumber)expectedControl[i], ccs[i].ControlNumber);
             Assert.Equal((SevenBitNumber)expectedValue[i], ccs[i].ControlValue);
@@ -141,7 +141,7 @@ public sealed class MidiFileWriterRoundTripTests
         }
         // First generated CC carries the source delta; the rest are delta 0.
         Assert.Equal(0, ccs[0].DeltaTime);
-        for (int i = 1; i < 5; i++)
+        for (int i = 1; i < 6; i++)
             Assert.Equal(0, ccs[i].DeltaTime);
     }
 

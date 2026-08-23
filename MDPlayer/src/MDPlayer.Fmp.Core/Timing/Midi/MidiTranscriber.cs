@@ -17,7 +17,12 @@ internal sealed record MidiTranscriptionDiagnostics(
     int SamplePlaybackCount,
     int SameTickAttackCollisions,
     int OneTickNotes,
-    int UniqueAudibleAttackCount);
+    int UniqueAudibleAttackCount,
+    IReadOnlyList<string>? BendRangeDiagnostics = null)
+{
+    public IReadOnlyList<string> BendRangeDiagnostics { get; init; } =
+        BendRangeDiagnostics ?? Array.Empty<string>();
+}
 
 /// <summary>
 /// Raw source-timeline -> SMF transcription. No BPM/grid inference, tuning
@@ -90,6 +95,7 @@ internal sealed class MidiTranscriber
                 .Select(source => PlanNote(timeline, source, ref oneTickNotes))
                 .ToArray();
             int bendRange = BendRange(notePlans);
+            Dictionary<string, int> instrumentPrograms = InstrumentPrograms(voiceNotes);
             MidiVoiceDomain domain = CreateVoiceDomain(
                 voiceNotes[0].Note.Domain,
                 VoiceKind.Aggregate,
@@ -116,9 +122,21 @@ internal sealed class MidiTranscriber
                     new MidiBendRangeEvent(0, trackIndex, endpoint.Channel, bendRange)));
             }
 
+            string? previousInstrument = null;
             foreach (PlannedNote source in notePlans)
             {
                 NoteEvent note = source.Note;
+                string instrument = source.PitchNote.InstrumentId;
+                if (!string.Equals(previousInstrument, instrument, StringComparison.Ordinal))
+                {
+                    plan.Add(new Planned(source.OnTick, note.StartSample, source.SourceIndex, 1, -1,
+                        new MidiProgramEvent(
+                            source.OnTick,
+                            trackIndex,
+                            endpoint.Channel,
+                            instrumentPrograms[instrument])));
+                    previousInstrument = instrument;
+                }
                 if (bendRange > 0)
                 {
                     int previousBend = MidiPitchCompiler.EncodeSignedBend(
@@ -253,7 +271,16 @@ internal sealed class MidiTranscriber
             Tracks = tracks,
             Diagnostics = new MidiTranscriptionDiagnostics(
                 notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes,
-                uniqueAudibleAttackCount),
+                uniqueAudibleAttackCount,
+                domainsByEndpoint.Values
+                    .Where(domain => MidiPitchCompiler.ClassifyBendRange(domain.BendRange)
+                        is not MidiBendRangeClassification.Zero
+                        and not MidiBendRangeClassification.Ordinary)
+                    .OrderBy(domain => domain.Source.ToString(), StringComparer.Ordinal)
+                    .Select(domain =>
+                        $"{domain.Source}: bend-range={domain.BendRange}; "
+                        + $"classification={MidiPitchCompiler.ClassifyBendRange(domain.BendRange)}")
+                    .ToArray()),
         };
     }
 
@@ -354,6 +381,22 @@ internal sealed class MidiTranscriber
             assignments.Add(sampleId, mapper.Map(ordinal));
         }
         return assignments;
+    }
+
+    private static Dictionary<string, int> InstrumentPrograms(
+        IReadOnlyList<IndexedNote> notes)
+    {
+        string[] instruments = notes
+            .Select(note => note.PitchNote.InstrumentId)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        if (instruments.Length > 128)
+            throw new InvalidOperationException(
+                $"Source domain contains {instruments.Length} instruments; MIDI supports 128 programs.");
+        return instruments
+            .Select((value, index) => (value, index))
+            .ToDictionary(pair => pair.value, pair => pair.index, StringComparer.Ordinal);
     }
 
     private static int SampleBendRange(
