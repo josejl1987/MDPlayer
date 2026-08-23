@@ -257,9 +257,26 @@ internal static class SymbolicTempoInference
             roleTempoResolved = true;
         }
         Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline, percussionEvidence);
+        var tempoHypotheses = searchedCandidates
+            .Where(candidate => candidate.Bpm > 0 && double.IsFinite(candidate.Bpm))
+            .Select(candidate => new DbnTempoHypothesis(
+                candidate.Bpm, candidate.PhaseSample, candidate.Score))
+            .ToList();
+        if (tempoHypotheses.Count == 0)
+            tempoHypotheses.Add(new DbnTempoHypothesis(
+                fallbackBpm, fallbackPhaseSample, fallbackScore));
+        if (fallbackAlternativeBpm is double alternativeBpm
+            && alternativeBpm > 0
+            && tempoHypotheses.All(candidate => Math.Abs(candidate.Bpm - alternativeBpm) > 0.01))
+        {
+            tempoHypotheses.Add(new DbnTempoHypothesis(
+                alternativeBpm,
+                fallbackPhaseSample,
+                fallbackAlternativeScore ?? 0));
+        }
         MetricalTiming hierarchy = InferMetricalTiming(
             timeline, hierarchyOnsets, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
-            fallbackAlternativeBpm, fallbackAlternativeScore);
+            fallbackAlternativeBpm, fallbackAlternativeScore, tempoHypotheses);
         double bestBpm = hierarchy.BeatDuration > 0
             ? timeline.SampleRate * 60.0 / hierarchy.BeatDuration
             : fallbackBpm;
@@ -532,7 +549,8 @@ internal static class SymbolicTempoInference
         long fallbackPhaseSample,
         double fallbackScore,
         double? fallbackAlternativeBpm,
-        double? fallbackAlternativeScore)
+        double? fallbackAlternativeScore,
+        IReadOnlyList<DbnTempoHypothesis> tempoHypotheses)
     {
         double fallbackBeat = timeline.SampleRate * 60.0 / Math.Max(1.0, fallbackBpm);
         double fallbackTatum = fallbackBeat / 4.0;
@@ -629,6 +647,42 @@ internal static class SymbolicTempoInference
             alternativeBpm = timeline.SampleRate * 60.0 /
                 (tatum.Duration * alternativeLevel.TatumsPerBeat);
             alternativeScore = alternativeLevel.Score;
+        }
+
+        DbnMetricalResult? decoded = DbnMetricalDecoder.Decode(
+            tempoHypotheses,
+            BuildBeatFeatureStreams(timeline, percussionEvidence),
+            timeline.SampleRate,
+            timeline.StartSample,
+            Math.Max(timeline.EndSample, timeline.StartSample + 1),
+            (timeline.LoopMarkers ?? Array.Empty<LoopMarker>())
+                .Select(marker => marker.SamplePosition)
+                .ToArray());
+        if (decoded is not null)
+        {
+            if (decoded.MeterResolved)
+            {
+                meter = decoded.Selected.Meter;
+                metricalConfidence = decoded.MeterConfidence;
+                downbeatPhase = decoded.DownbeatResolved
+                    ? decoded.Selected.DownbeatPhase : null;
+                downbeatSample = decoded.DownbeatResolved
+                    ? decoded.Selected.DownbeatSample : null;
+                alternativeBpm = decoded.Alternative is { } metricalAlternative
+                    && IsMetricalFamilyRatio(
+                        metricalAlternative.Tempo.Bpm / decoded.Selected.Tempo.Bpm)
+                    ? metricalAlternative.Tempo.Bpm
+                    : alternativeBpm;
+                alternativeScore = decoded.Alternative?.Score ?? alternativeScore;
+            }
+            else
+            {
+                // A meter candidate that does not clear the DBN margin is not
+                // promoted by the older phase-only meter scorer.
+                meter = null;
+                downbeatPhase = null;
+                downbeatSample = null;
+            }
         }
 
         return new MetricalTiming(
