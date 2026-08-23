@@ -98,7 +98,10 @@ def essentia_tempo(timeline: dict[str, Any], hop_length: int) -> float | None:
     return float(bpm) if math.isfinite(float(bpm)) and float(bpm) > 0 else None
 
 
-def mdplayer_tempo(mdplayer: Path, timeline: Path) -> tuple[float | None, str]:
+def mdplayer_tempo(
+    mdplayer: Path,
+    timeline: Path,
+) -> tuple[float | None, str, bool | None]:
     with tempfile.TemporaryDirectory(prefix="mdplayer-midi-diff-") as directory:
         output = Path(directory) / "comparison.mid"
         completed = subprocess.run(
@@ -118,11 +121,16 @@ def mdplayer_tempo(mdplayer: Path, timeline: Path) -> tuple[float | None, str]:
         )
     text = completed.stdout + "\n" + completed.stderr
     match = re.search(r"tempo: ([0-9]+(?:\.[0-9]+)?) BPM", text)
+    resolved = re.search(r"tempo-resolved: (True|False)", text)
     if completed.returncode != 0:
-        return None, f"MDPlayer failed with exit {completed.returncode}: {text.strip()}"
+        return None, f"MDPlayer failed with exit {completed.returncode}: {text.strip()}", None
     if match is None:
-        return None, "MDPlayer completed without a musical tempo line"
-    return float(match.group(1)), "ok"
+        return None, "MDPlayer completed without a musical tempo line", None
+    return (
+        float(match.group(1)),
+        "ok",
+        resolved is not None and resolved.group(1) == "True",
+    )
 
 
 def dyadic_distance(left: float | None, right: float | None) -> float | None:
@@ -148,9 +156,10 @@ def main() -> int:
         "hopLength": args.hop_length,
     }
 
-    md_bpm, md_status = mdplayer_tempo(args.mdplayer, args.timeline)
+    md_bpm, md_status, md_resolved = mdplayer_tempo(args.mdplayer, args.timeline)
     report["mdplayerBpm"] = md_bpm
     report["mdplayerStatus"] = md_status
+    report["mdplayerTempoResolved"] = md_resolved
 
     try:
         report["librosaBpm"] = librosa_tempo(timeline, args.hop_length)
