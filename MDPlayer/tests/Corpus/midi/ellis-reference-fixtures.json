@@ -1,0 +1,32 @@
+{
+  "reference": "librosa.beat.beat_track 0.11.0, bpm fixed, tightness 100, trim false",
+  "fixtures": [
+    {
+      "name": "periodic-120",
+      "sampleRate": 100,
+      "hopSamples": 1,
+      "frameCount": 320,
+      "bpm": 120,
+      "onsets": [[3, 1.0], [53, 1.0], [103, 1.0], [153, 1.0], [203, 1.0], [253, 1.0], [303, 1.0]],
+      "expectedFrames": [3, 53, 103, 153, 203, 253, 303]
+    },
+    {
+      "name": "jittered-111",
+      "sampleRate": 100,
+      "hopSamples": 1,
+      "frameCount": 360,
+      "bpm": 111,
+      "onsets": [[4, 1.0], [58, 1.0], [112, 1.0], [166, 1.0], [220, 1.0], [274, 1.0], [328, 1.0], [31, 0.25], [85, 0.25], [139, 0.25], [193, 0.25], [247, 0.25], [301, 0.25], [355, 0.25]],
+      "expectedFrames": [4, 58, 112, 166, 220, 274, 317, 359]
+    },
+    {
+      "name": "sparse-60",
+      "sampleRate": 100,
+      "hopSamples": 1,
+      "frameCount": 420,
+      "bpm": 60,
+      "onsets": [[7, 1.5], [107, 1.5], [207, 1.5], [307, 1.5], [407, 1.5], [57, 0.3], [157, 0.3], [257, 0.3], [357, 0.3]],
+      "expectedFrames": [7, 107, 207, 307, 407]
+    }
+  ]
+}

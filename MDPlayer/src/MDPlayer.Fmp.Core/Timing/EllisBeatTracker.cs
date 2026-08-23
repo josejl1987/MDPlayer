@@ -25,9 +25,15 @@ internal sealed record EllisBeatTrackingResult(
 /// <summary>Cached symbolic onset envelope and its normalized autocorrelation.</summary>
 internal sealed record OnsetEnvelope(
     string Name,
+    double[] Values,
     double[] Correlation,
     int HopSamples,
     double Weight);
+
+internal sealed record EllisReferenceBeatPath(
+    IReadOnlyList<int> Frames,
+    double[] LocalScore,
+    double CumulativeScore);
 
 internal readonly record struct TempoAgreement(
     double Score,
@@ -48,7 +54,6 @@ internal static class EllisBeatTracker
 {
     private const double MinBpm = 40.0;
     private const double MaxBpm = 240.0;
-    private const double LogIntervalSigma = 0.16;
     private const int MaxTempoSeedsPerStream = 5;
     private const int MaxCandidates = 12;
 
@@ -98,20 +103,13 @@ internal static class EllisBeatTracker
             if (agreement.Score <= 0)
                 continue;
 
-            EllisBeatCandidate? bestPhase = null;
-            foreach (long phase in PhaseCandidates(active, bpm, sampleRate, startSample))
-            {
-                BeatPath path = DecodeBeatPath(active, bpm, phase, sampleRate, startSample, endSample);
-                double score = 0.65 * agreement.Score + 0.35 * path.Score;
-                if (bestPhase is null || score > bestPhase.Score)
-                {
-                    bestPhase = new EllisBeatCandidate(
-                        bpm, phase, score, path.Score, path.Samples,
-                        agreement.AgreeingStreams, agreement.ActiveStreams);
-                }
-            }
-            if (bestPhase is not null)
-                candidates.Add(bestPhase);
+            BeatPath path = DecodeBeatPath(
+                envelopes, bpm, sampleRate, startSample, endSample);
+            double score = 0.65 * agreement.Score + 0.35 * path.Score;
+            long phase = path.Samples.Count > 0 ? path.Samples[0] : startSample;
+            candidates.Add(new EllisBeatCandidate(
+                bpm, phase, score, path.Score, path.Samples,
+                agreement.AgreeingStreams, agreement.ActiveStreams));
         }
 
         if (candidates.Count == 0)
@@ -172,7 +170,7 @@ internal static class EllisBeatTracker
         var correlation = new double[maximumLag + 1];
         correlation[0] = 1.0;
         if (totalEnergy <= 1e-12)
-            return new OnsetEnvelope(stream.Name, correlation, hopSamples, stream.Weight);
+            return new OnsetEnvelope(stream.Name, values, correlation, hopSamples, stream.Weight);
 
         for (int lag = 1; lag <= maximumLag; lag++)
         {
@@ -192,7 +190,7 @@ internal static class EllisBeatTracker
                 : 0;
             correlation[lag] = Math.Clamp((normalized + 1.0) / 2.0, 0, 1);
         }
-        return new OnsetEnvelope(stream.Name, correlation, hopSamples, stream.Weight);
+        return new OnsetEnvelope(stream.Name, values, correlation, hopSamples, stream.Weight);
     }
 
     private static double[] InduceTempoSeeds(
@@ -289,149 +287,187 @@ internal static class EllisBeatTracker
         return best;
     }
 
-    private static IEnumerable<long> PhaseCandidates(
-        IReadOnlyList<BeatFeatureStream> streams,
-        double bpm,
-        int sampleRate,
-        long startSample)
-    {
-        double samplesPerBeat = sampleRate * 60.0 / bpm;
-        long phaseStep = Math.Max(1, (long)Math.Round(samplesPerBeat / 16.0));
-        var bins = new Dictionary<long, double>();
-        foreach (BeatFeatureStream stream in streams)
-        {
-            foreach ((long sample, double strength) in stream.Onsets)
-            {
-                double relative = (sample - startSample) / samplesPerBeat;
-                double residue = relative - Math.Floor(relative);
-                long bin = (long)Math.Round(residue * samplesPerBeat / phaseStep) * phaseStep;
-                bins[bin] = bins.GetValueOrDefault(bin) + stream.Weight * strength;
-            }
-        }
-
-        yield return startSample;
-        foreach (long bin in bins.OrderByDescending(pair => pair.Value).Take(8).Select(pair => pair.Key))
-        {
-            long phase = startSample + bin;
-            while (phase > startSample + samplesPerBeat)
-                phase -= (long)Math.Round(samplesPerBeat);
-            yield return phase;
-        }
-    }
-
     private static BeatPath DecodeBeatPath(
-        IReadOnlyList<BeatFeatureStream> streams,
+        IReadOnlyList<OnsetEnvelope> envelopes,
         double bpm,
-        long phase,
         int sampleRate,
         long startSample,
         long endSample)
     {
-        double samplesPerBeat = sampleRate * 60.0 / bpm;
-        long step = Math.Max(1, (long)Math.Round(samplesPerBeat / 8.0));
-        long firstBeat = (long)Math.Floor((startSample - phase) / samplesPerBeat) - 1;
-        int count = Math.Max(2, (int)Math.Ceiling((endSample - (phase + firstBeat * samplesPerBeat)) / samplesPerBeat) + 1);
-        const int offsetCount = 5;
-        double[,] scores = new double[count, offsetCount];
-        int[,] predecessors = new int[count, offsetCount];
-        for (int beat = 0; beat < count; beat++)
+        if (envelopes.Count == 0)
+            return new BeatPath(0, Array.Empty<long>());
+
+        EllisReferenceBeatPath[] paths = envelopes
+            .Select(envelope => TrackFixedTempo(
+                envelope.Values, bpm, sampleRate, envelope.HopSamples, trim: false))
+            .ToArray();
+        double totalWeight = envelopes.Sum(envelope => envelope.Weight);
+        double score = totalWeight > 0
+            ? paths.Zip(envelopes, (path, envelope) => path.Frames.Count == 0
+                    ? 0
+                    : envelope.Weight * PathStrength(path.LocalScore, path.Frames))
+                .Sum() / totalWeight
+            : 0;
+        int bestIndex = Enumerable.Range(0, paths.Length)
+            .OrderByDescending(index => paths[index].CumulativeScore * envelopes[index].Weight)
+            .First();
+        long[] samples = paths[bestIndex].Frames
+            .Select(frame => startSample + (long)frame * envelopes[bestIndex].HopSamples)
+            .Where(sample => sample >= startSample && sample <= endSample)
+            .ToArray();
+        return new BeatPath(Math.Clamp(score / (1.0 + score), 0, 1), samples);
+    }
+
+    /// <summary>
+    /// Runs the frame-indexed Ellis dynamic program for a fixed tempo. This is
+    /// intentionally exposed to the test assembly so persisted librosa fixtures
+    /// can compare the beat frame sequence, not just the selected BPM.
+    /// </summary>
+    internal static EllisReferenceBeatPath TrackFixedTempo(
+        IReadOnlyList<double> onsetEnvelope,
+        double bpm,
+        int sampleRate,
+        int hopSamples,
+        bool trim = false)
+    {
+        ArgumentNullException.ThrowIfNull(onsetEnvelope);
+        if (sampleRate <= 0 || hopSamples <= 0 || bpm <= 0 || onsetEnvelope.Count < 2)
+            throw new ArgumentOutOfRangeException();
+
+        int framesPerBeat = Math.Max(1, (int)Math.Round(
+            sampleRate / (double)hopSamples * 60.0 / bpm,
+            MidpointRounding.ToEven));
+        double[] localScore = BuildLocalScore(onsetEnvelope, framesPerBeat);
+        (int[] backlink, double[] cumulative) = RunEllisDynamicProgram(
+            localScore, framesPerBeat, tightness: 100.0);
+        int tail = LastBeat(cumulative);
+        var frames = new List<int>();
+        for (int frame = tail; frame >= 0; frame = backlink[frame])
         {
-            for (int offset = 0; offset < offsetCount; offset++)
+            frames.Add(frame);
+            if (backlink[frame] < 0)
+                break;
+        }
+        frames.Reverse();
+        if (trim)
+            TrimWeakEdges(frames, localScore);
+        return new EllisReferenceBeatPath(frames, localScore, cumulative[tail]);
+    }
+
+    private static double[] BuildLocalScore(
+        IReadOnlyList<double> onsetEnvelope,
+        int framesPerBeat)
+    {
+        double mean = onsetEnvelope.Average();
+        double variance = onsetEnvelope.Count > 1
+            ? onsetEnvelope.Sum(value => (value - mean) * (value - mean))
+                / (onsetEnvelope.Count - 1)
+            : 0;
+        double scale = Math.Sqrt(variance);
+        var normalized = onsetEnvelope
+            .Select(value => scale > 1e-12 ? value / scale : value)
+            .ToArray();
+        var local = new double[normalized.Length];
+        for (int frame = 0; frame < normalized.Length; frame++)
+        {
+            for (int offset = -framesPerBeat; offset <= framesPerBeat; offset++)
             {
-                long sample = (long)Math.Round(phase + (firstBeat + beat) * samplesPerBeat)
-                    + (offset - 2) * step;
-                double observation = ObservationAt(streams, sample, samplesPerBeat);
-                scores[beat, offset] = observation;
-                predecessors[beat, offset] = -1;
-                if (beat == 0)
+                int source = frame - offset;
+                if (source < 0 || source >= normalized.Length)
                     continue;
-                double best = double.NegativeInfinity;
-                for (int previous = 0; previous < offsetCount; previous++)
+                double window = Math.Exp(-0.5 * Math.Pow(
+                    offset * 32.0 / framesPerBeat, 2));
+                local[frame] += window * normalized[source];
+            }
+        }
+        return local;
+    }
+
+    private static (int[] Backlink, double[] Cumulative) RunEllisDynamicProgram(
+        double[] localScore,
+        int framesPerBeat,
+        double tightness)
+    {
+        var backlink = Enumerable.Repeat(-1, localScore.Length).ToArray();
+        var cumulative = new double[localScore.Length];
+        double threshold = 0.01 * localScore.Max();
+        bool firstBeat = true;
+        for (int frame = 0; frame < localScore.Length; frame++)
+        {
+            double bestScore = double.NegativeInfinity;
+            int beatLocation = -1;
+            int first = frame - (int)Math.Round(framesPerBeat / 2.0);
+            int lastExclusive = frame - 2 * framesPerBeat - 1;
+            for (int location = first; location > lastExclusive; location--)
+            {
+                if (location < 0)
+                    break;
+                double interval = frame - location;
+                double score = cumulative[location]
+                    - tightness * Math.Pow(Math.Log(interval) - Math.Log(framesPerBeat), 2);
+                if (score > bestScore)
                 {
-                    long previousSample = (long)Math.Round(phase + (firstBeat + beat - 1) * samplesPerBeat)
-                        + (previous - 2) * step;
-                    double interval = sample - previousSample;
-                    double logRatio = Math.Log(Math.Max(1, interval) / samplesPerBeat);
-                    double transition = -logRatio * logRatio / (2 * LogIntervalSigma * LogIntervalSigma);
-                    double value = scores[beat - 1, previous] + transition;
-                    if (value > best)
-                    {
-                        best = value;
-                        predecessors[beat, offset] = previous;
-                    }
+                    bestScore = score;
+                    beatLocation = location;
                 }
-                scores[beat, offset] += best;
             }
-        }
 
-        int finalOffset = 0;
-        for (int offset = 1; offset < offsetCount; offset++)
-        {
-            if (scores[count - 1, offset] > scores[count - 1, finalOffset])
-                finalOffset = offset;
+            cumulative[frame] = beatLocation >= 0
+                ? localScore[frame] + bestScore
+                : localScore[frame];
+            backlink[frame] = firstBeat && localScore[frame] < threshold
+                ? -1
+                : beatLocation;
+            firstBeat = false;
         }
-
-        var samples = new long[count];
-        int current = finalOffset;
-        double observationTotal = 0;
-        int observationCount = 0;
-        for (int beat = count - 1; beat >= 0; beat--)
-        {
-            long sample = (long)Math.Round(phase + (firstBeat + beat) * samplesPerBeat)
-                + (current - 2) * step;
-            samples[beat] = sample;
-            if (sample >= startSample && sample <= endSample)
-            {
-                observationTotal += ObservationAt(streams, sample, samplesPerBeat);
-                observationCount++;
-            }
-            current = beat > 0 ? predecessors[beat, current] : current;
-        }
-        double averageObservation = observationCount > 0 ? observationTotal / observationCount : 0;
-        return new BeatPath(Math.Clamp(averageObservation, 0, 1), samples);
+        return (backlink, cumulative);
     }
 
-    private static double ObservationAt(
-        IReadOnlyList<BeatFeatureStream> streams,
-        long sample,
-        double samplesPerBeat)
+    private static int LastBeat(IReadOnlyList<double> cumulative)
     {
-        double total = 0;
-        double weight = 0;
-        double tolerance = Math.Max(1, samplesPerBeat * 0.18);
-        foreach (BeatFeatureStream stream in streams)
+        var maxima = new List<int>();
+        for (int index = 0; index < cumulative.Count; index++)
         {
-            double nearest = 0;
-            int first = LowerBound(stream.Onsets, sample - tolerance);
-            for (int index = first;
-                 index < stream.Onsets.Count && stream.Onsets[index].Sample <= sample + tolerance;
-                 index++)
-            {
-                (long onset, double strength) = stream.Onsets[index];
-                long distance = Math.Abs(onset - sample);
-                nearest = Math.Max(nearest, strength * Math.Exp(-distance * distance / (2 * tolerance * tolerance)));
-            }
-            total += stream.Weight * nearest;
-            weight += stream.Weight;
+            bool left = index == 0 || cumulative[index] >= cumulative[index - 1];
+            bool right = index == cumulative.Count - 1
+                || cumulative[index] >= cumulative[index + 1];
+            if (left && right)
+                maxima.Add(index);
         }
-        return weight > 0 ? total / (total + weight) : 0;
+        if (maxima.Count == 0)
+        {
+            int best = 0;
+            for (int index = 1; index < cumulative.Count; index++)
+                if (cumulative[index] > cumulative[best])
+                    best = index;
+            return best;
+        }
+        double[] values = maxima.Select(index => cumulative[index]).OrderBy(value => value).ToArray();
+        double threshold = 0.5 * values[values.Length / 2];
+        for (int index = maxima.Count - 1; index >= 0; index--)
+            if (cumulative[maxima[index]] >= threshold)
+                return maxima[index];
+        return maxima[^1];
     }
 
-    private static int LowerBound(
-        IReadOnlyList<(long Sample, double Strength)> onsets,
-        double sample)
+    private static void TrimWeakEdges(List<int> frames, IReadOnlyList<double> localScore)
     {
-        int low = 0;
-        int high = onsets.Count;
-        while (low < high)
-        {
-            int middle = low + (high - low) / 2;
-            if (onsets[middle].Sample < sample)
-                low = middle + 1;
-            else
-                high = middle;
-        }
-        return low;
+        if (frames.Count == 0)
+            return;
+        double[] beatScores = frames.Select(frame => localScore[frame]).ToArray();
+        double rms = Math.Sqrt(beatScores.Select(value => value * value).Average());
+        double threshold = 0.5 * rms;
+        while (frames.Count > 0 && localScore[frames[0]] <= threshold)
+            frames.RemoveAt(0);
+        while (frames.Count > 0 && localScore[frames[^1]] <= threshold)
+            frames.RemoveAt(frames.Count - 1);
+    }
+
+    private static double PathStrength(IReadOnlyList<double> localScore, IReadOnlyList<int> frames)
+    {
+        if (frames.Count == 0)
+            return 0;
+        return frames.Average(frame => Math.Max(0, localScore[frame]));
     }
 
     private static bool IsHalfDouble(double left, double right)

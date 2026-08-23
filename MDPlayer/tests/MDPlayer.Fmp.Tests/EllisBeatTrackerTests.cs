@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Fmp.Core.Timing;
 using Xunit;
 
@@ -5,6 +6,35 @@ namespace MDPlayer.Fmp.Tests;
 
 public sealed class EllisBeatTrackerTests
 {
+    [Fact]
+    public void FixedTempoPath_MatchesPersistedLibrosaReferenceFrames()
+    {
+        string path = Path.Combine(
+            AppContext.BaseDirectory, "testfixtures", "midi", "ellis-reference-fixtures.json");
+        Assert.True(File.Exists(path), $"Ellis reference fixture is missing: {path}");
+
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+        Assert.Contains("librosa.beat.beat_track", document.RootElement
+            .GetProperty("reference").GetString(), StringComparison.Ordinal);
+        foreach (JsonElement fixture in document.RootElement.GetProperty("fixtures").EnumerateArray())
+        {
+            int frameCount = fixture.GetProperty("frameCount").GetInt32();
+            var envelope = new double[frameCount];
+            foreach (JsonElement onset in fixture.GetProperty("onsets").EnumerateArray())
+                envelope[onset[0].GetInt32()] = onset[1].GetDouble();
+
+            EllisReferenceBeatPath result = EllisBeatTracker.TrackFixedTempo(
+                envelope,
+                fixture.GetProperty("bpm").GetDouble(),
+                fixture.GetProperty("sampleRate").GetInt32(),
+                fixture.GetProperty("hopSamples").GetInt32());
+            int[] expected = fixture.GetProperty("expectedFrames")
+                .EnumerateArray().Select(value => value.GetInt32()).ToArray();
+
+            Assert.Equal(expected, result.Frames);
+        }
+    }
+
     [Fact]
     public void TempoInduction_RetainsHalfDoubleFamilyInsteadOfApplyingARepair()
     {

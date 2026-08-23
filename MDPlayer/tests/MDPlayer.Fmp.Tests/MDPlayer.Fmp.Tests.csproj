@@ -39,6 +39,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\midi\adversarial-manifest.json</Link>
     </Content>
+    <Content Include="..\Corpus\midi\ellis-reference-fixtures.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\midi\ellis-reference-fixtures.json</Link>
+    </Content>
     <!-- A real tracked repo fixture for the in-process preview smoke test. -->
     <Content Include="..\..\..\21 Master Ninja.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
