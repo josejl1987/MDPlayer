@@ -48,6 +48,11 @@ public sealed class MidiAdversarialCorpusTests
             }
             else if (status == "unresolved")
             {
+                Assert.True(
+                    entry.TryGetProperty("reviewNotes", out JsonElement notes)
+                    && notes.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(notes.GetString()),
+                    $"Unresolved fixture {source} must record the evidence for abstention.");
                 Assert.True(entry.GetProperty("allowUnresolvedTempo").GetBoolean(),
                     $"Unresolved fixture {source} must explicitly allow unresolved tempo.");
                 Assert.True(entry.GetProperty("allowUnresolvedMeter").GetBoolean(),

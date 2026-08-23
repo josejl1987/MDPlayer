@@ -1,6 +1,6 @@
 {
   "$schemaVersion": 1,
-  "purpose": "Semantic MIDI export corpus. Expected musical labels are deliberately null until manually reviewed from the source file.",
+  "purpose": "Semantic MIDI export corpus. Entries with insufficient independent evidence are explicitly unresolved; labels are never guessed.",
   "entries": [
     {
       "source": "21 Master Ninja.vgz",
@@ -9,7 +9,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "Exact symbolic capture and the librosa reference disagree on tempo; dense FM evidence does not establish a unique meter or downbeat."
     },
     {
       "source": "120 Smash Up.spc",
@@ -18,7 +19,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The native SPC capture is unavailable and the persisted timeline has a half/double tempo disagreement with the librosa reference; meter and downbeat remain unproven."
     },
     {
       "source": "02 Stranger ~ Wandering Swordsman.vgz",
@@ -27,7 +29,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The available capture contains only sparse onset evidence, insufficient to assert tempo, meter, or downbeat."
     },
     {
       "source": "05 - Twilight Express.vgz",
@@ -36,7 +39,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The exact source capture passes pitch/time checks, but symbolic and librosa tempo estimates disagree and no independent meter/downbeat consensus exists."
     },
     {
       "source": "18 U.S.A. (Ken) I.vgz",
@@ -45,7 +49,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "Native rhythm evidence is present, but the symbolic and librosa tempo estimates disagree; no unique musical grid is asserted."
     },
     {
       "source": "20 Ninja Yashiki ~ Their Secrets Die With Them.vgz",
@@ -54,7 +59,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The exact capture retains an explicit 56/112 half/double tempo family; the implementation abstains from selecting a unique tempo, meter, or downbeat."
     },
     {
       "source": "28 - Smoking Head.vgz",
@@ -63,7 +69,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The exact capture retains an explicit 120/240 double-time tempo family; the implementation abstains from selecting a unique tempo, meter, or downbeat."
     },
     {
       "source": "26 - Robotnik.vgz",
@@ -72,7 +79,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "The short DAC-heavy source produces conflicting symbolic and librosa tempo evidence; meter and downbeat are withheld."
     },
     {
       "source": "32 Arctic Wind.vgz",
@@ -81,7 +89,8 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "pending"
+      "reviewStatus": "unresolved",
+      "reviewNotes": "Tempo-change and restart evidence require a segmented musical review; the available independent references do not prove a single grid or downbeat."
     }
   ]
 }

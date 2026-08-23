@@ -902,7 +902,7 @@ def run_tempo_differential(cli: Path, timeline: Path) -> dict[str, Any]:
 
 
 def review_error(entry: dict[str, Any], result: dict[str, Any]) -> str | None:
-    """Check reviewed sidecar labels without inventing labels for pending files."""
+    """Check asserted sidecar labels without inventing labels for abstentions."""
 
     if entry.get("reviewStatus") != "reviewed" or result.get("status") != "passed":
         return None
@@ -971,7 +971,11 @@ def main() -> int:
         result["reviewStatus"] = entry.get("reviewStatus", "pending")
         results.append(result)
 
-    pending = sum(result["reviewStatus"] != "reviewed" for result in results)
+    pending = sum(
+        result["reviewStatus"] not in {"reviewed", "unresolved"}
+        for result in results
+    )
+    unresolved = sum(result["reviewStatus"] == "unresolved" for result in results)
     failed = sum(result["status"] != "passed" for result in results)
     report = {
         "manifest": str(args.manifest),
@@ -981,6 +985,7 @@ def main() -> int:
             "passed": len(results) - failed,
             "failedOrBlocked": failed,
             "pendingReview": pending,
+            "explicitlyUnresolved": unresolved,
         },
     }
     print(json.dumps(report, indent=2, sort_keys=True))

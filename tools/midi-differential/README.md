@@ -37,5 +37,6 @@ ownership, RPN state, and SMF ordering. It returns a nonzero status for export
 or round-trip failures. Add `--differential` to run the optional librosa and
 Essentia reference trackers against every exact captured timeline; disagreements
 are recorded as alarms and do not become guessed labels. Use
-`--require-reviewed` only after human sidecars have filled the expected musical
-labels.
+`--require-reviewed` after every entry has either asserted reviewed labels or an
+explicitly reviewed unresolved status with evidence notes; unreviewed `pending`
+entries still fail that gate.

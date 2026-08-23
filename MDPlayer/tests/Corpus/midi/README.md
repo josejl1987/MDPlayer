@@ -4,11 +4,10 @@
 checks. The source files are repository fixtures copied into the test output by
 the test project; the manifest does not duplicate binary media.
 
-The `featuresToReview` labels are review prompts, not asserted facts. A corpus
-entry may only move from `pending` to `reviewed` after a human has inspected the
-source timeline and filled each expected field or explicitly accepted that
-dimension as unresolved with its corresponding `allowUnresolved*` gate. A
-reviewed entry may instead be explicitly marked `unresolved` only when all
+The `featuresToReview` labels are review prompts, not asserted facts. `pending`
+means that the entry has not been reviewed and is rejected by
+`--require-reviewed`. A reviewed entry may assert expected fields, or it may be
+explicitly marked `unresolved` with a non-empty evidence note when all
 corresponding `allowUnresolved*` gates are true. Null expectations intentionally
 keep the harness from turning an unverified guess into a golden test.
 
