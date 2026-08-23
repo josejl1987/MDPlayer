@@ -30,7 +30,8 @@ internal static class MidiFixtureResolver
         string? current = Directory.Exists(path) ? Path.GetFullPath(path) : Path.GetDirectoryName(Path.GetFullPath(path));
         for (int depth = 0; depth < 10 && current is not null; depth++)
         {
-            if (File.Exists(Path.Combine(current, ".git", "HEAD")) || Directory.Exists(Path.Combine(current, ".git")))
+            string gitPath = Path.Combine(current, ".git");
+            if (File.Exists(gitPath) || Directory.Exists(gitPath))
                 return current;
             current = Directory.GetParent(current)?.FullName;
         }

@@ -244,7 +244,11 @@ public sealed class PercussionEvidenceBuilderTests
         };
 
         MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
-            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference },
+            new MusicalTimeMapOptions
+            {
+                Source = TimingSource.SymbolicInference,
+                EnableStructuralGridSelection = true,
+            },
             out IReadOnlyList<PercussiveOnset> exposed);
 
         Assert.NotEmpty(exposed);
@@ -284,7 +288,11 @@ public sealed class PercussionEvidenceBuilderTests
         };
 
         MusicalTimeMapBuildResult build = MusicalTimeMapBuilder.Build(timeline,
-            new MusicalTimeMapOptions { Source = TimingSource.SymbolicInference });
+            new MusicalTimeMapOptions
+            {
+                Source = TimingSource.SymbolicInference,
+                EnableStructuralGridSelection = true,
+            });
 
         // Unified stream: 16 native kicks + 16 classified transients coexist in
         // the one evidence collection, all unknown-role by design.
