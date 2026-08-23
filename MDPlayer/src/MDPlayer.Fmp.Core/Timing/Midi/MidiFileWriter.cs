@@ -155,6 +155,8 @@ internal sealed class MidiFileWriter
         ArgumentNullException.ThrowIfNull(conductor);
         ArgumentNullException.ThrowIfNull(tracks);
 
+        if (tracks.Any(track => track.VoiceDomain is not null))
+            MidiConductor.Validate(conductor);
         ValidateVoiceDomains(tracks);
 
         bool allTracksPacked = true;

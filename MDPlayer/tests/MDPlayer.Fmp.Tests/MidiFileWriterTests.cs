@@ -1,4 +1,5 @@
 using Fmp.Core.Midi;
+using Fmp.Core.Visualization;
 using Melanchall.DryWetMidi.Core;
 using Xunit;
 
@@ -87,6 +88,27 @@ public sealed class MidiFileWriterTests
         var ex = Assert.Throws<InvalidOperationException>(
             () => new MidiFileWriter(Ppq).Write(EmptyConductor(), tracks));
         Assert.Contains("endpoint", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Write_ProductionDomainRejectsDelayedTempo()
+    {
+        var source = new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0);
+        var domain = new MidiVoiceDomain(source, channel: 0, bendRangeSemitones: 0);
+        var track = new MidiTrack
+        {
+            Name = "domain",
+            SourceVoiceId = domain.SourceVoiceId,
+            Endpoint = new MidiEndpoint(0, 0),
+            VoiceDomain = domain,
+            ChannelProgram = new MidiChannelProgram(domain.SourceVoiceId, 0, 0),
+        };
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            new MidiFileWriter(Ppq).Write(
+                new MidiEventBase[] { new MidiTempoEvent(1, 500_000) }, new[] { track }));
+
+        Assert.Contains("tick 0", error.Message);
     }
 
     [Fact]

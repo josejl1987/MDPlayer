@@ -107,11 +107,7 @@ internal static class MidiTrailChannelExporter
     /// </summary>
     private static byte[] BuildChannelFile(int ppq, long totalEndTick, IReadOnlyList<MidiTrack> voiceTracks)
     {
-        var conductor = new List<MidiEventBase>
-        {
-            new MidiTempoEvent(0, MidiTranscriber.TransportMicrosecondsPerQuarter) { SourceOrder = 0 },
-            new MidiMetaTextEvent(totalEndTick, 0x06, "End") { SourceOrder = 1 },
-        };
+        IReadOnlyList<MidiEventBase> conductor = MidiConductor.FixedTransport(totalEndTick);
         return new MidiFileWriter(ppq).Write(conductor, voiceTracks);
     }
 

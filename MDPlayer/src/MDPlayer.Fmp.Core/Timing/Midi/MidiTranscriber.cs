@@ -245,8 +245,8 @@ internal sealed class MidiTranscriber
                 $"serialized NoteOn events={serializedNoteOnCount}.");
         }
 
-        var tempo = new MidiTempoEvent(0, TransportMicrosecondsPerQuarter) { SourceOrder = 0 };
-        byte[] bytes = new MidiFileWriter(_ppq).Write(new MidiEventBase[] { tempo }, tracks);
+        IReadOnlyList<MidiEventBase> conductor = MidiConductor.FixedTransport();
+        byte[] bytes = new MidiFileWriter(_ppq).Write(conductor, tracks);
         return new MidiTranscriptionResult
         {
             Bytes = bytes,
