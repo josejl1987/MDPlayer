@@ -20,6 +20,13 @@ internal sealed record EllisBeatTrackingResult(
     EllisBeatCandidate? Alternative,
     IReadOnlyList<EllisBeatCandidate> Candidates);
 
+/// <summary>Cached symbolic onset envelope and its normalized autocorrelation.</summary>
+internal sealed record OnsetEnvelope(
+    string Name,
+    double[] Correlation,
+    int HopSamples,
+    double Weight);
+
 /// <summary>
 /// A small symbolic adaptation of Ellis's offline beat tracker.
 ///
@@ -58,7 +65,10 @@ internal static class EllisBeatTracker
         if (active.Length == 0)
             return null;
 
-        double[] seeds = InduceTempoSeeds(active, sampleRate);
+        OnsetEnvelope[] envelopes = active
+            .Select(stream => BuildOnsetEnvelope(stream, sampleRate, startSample, endSample))
+            .ToArray();
+        double[] seeds = InduceTempoSeeds(envelopes, sampleRate);
         if (seeds.Length == 0)
             return null;
 
@@ -77,7 +87,7 @@ internal static class EllisBeatTracker
         foreach (int bpmBin in candidateBpms)
         {
             double bpm = bpmBin / 2.0;
-            double tempoScore = AutocorrelationAgreement(active, bpm, sampleRate);
+            double tempoScore = AutocorrelationAgreement(envelopes, bpm, sampleRate);
             if (tempoScore <= 0)
                 continue;
 
@@ -105,21 +115,84 @@ internal static class EllisBeatTracker
             .Take(MaxCandidates)
             .ToList();
         EllisBeatCandidate selected = candidates[0];
+        // Only a metrical-family competitor belongs in the ambiguity channel.
+        // An unrelated lower-scoring tempo remains in Candidates for DBN
+        // evaluation, but must not make a musically resolved tempo appear
+        // ambiguous merely because the search retained several hypotheses.
         EllisBeatCandidate? alternative = candidates
             .Where(candidate => IsHalfDouble(candidate.Bpm, selected.Bpm))
             .OrderByDescending(candidate => candidate.Score)
             .FirstOrDefault();
-        alternative ??= candidates.Skip(1).FirstOrDefault();
 
         return new EllisBeatTrackingResult(selected, alternative, candidates);
     }
 
+    private static OnsetEnvelope BuildOnsetEnvelope(
+        BeatFeatureStream stream,
+        int sampleRate,
+        long startSample,
+        long endSample)
+    {
+        int hopSamples = Math.Max(1, sampleRate / 100);
+        int frameCount = (int)Math.Clamp(
+            Math.Ceiling((endSample - startSample) / (double)hopSamples) + 1,
+            2,
+            250_000);
+        var values = new double[frameCount];
+        foreach ((long sample, double strength) in stream.Onsets)
+        {
+            int frame = (int)Math.Clamp(
+                Math.Round((sample - startSample) / (double)hopSamples,
+                    MidpointRounding.AwayFromZero),
+                0,
+                frameCount - 1);
+            values[frame] = Math.Min(4.0, values[frame] + strength);
+        }
+
+        double mean = values.Average();
+        var centered = new double[values.Length];
+        double totalEnergy = 0;
+        for (int index = 0; index < values.Length; index++)
+        {
+            centered[index] = values[index] - mean;
+            totalEnergy += centered[index] * centered[index];
+        }
+
+        int maximumLag = Math.Min(
+            values.Length - 1,
+            (int)Math.Ceiling(sampleRate * 60.0 / MinBpm / hopSamples));
+        var correlation = new double[maximumLag + 1];
+        correlation[0] = 1.0;
+        if (totalEnergy <= 1e-12)
+            return new OnsetEnvelope(stream.Name, correlation, hopSamples, stream.Weight);
+
+        for (int lag = 1; lag <= maximumLag; lag++)
+        {
+            double covariance = 0;
+            double leftEnergy = 0;
+            double rightEnergy = 0;
+            for (int index = 0; index < centered.Length - lag; index++)
+            {
+                double left = centered[index];
+                double right = centered[index + lag];
+                covariance += left * right;
+                leftEnergy += left * left;
+                rightEnergy += right * right;
+            }
+            double normalized = leftEnergy > 1e-12 && rightEnergy > 1e-12
+                ? covariance / Math.Sqrt(leftEnergy * rightEnergy)
+                : 0;
+            correlation[lag] = Math.Clamp((normalized + 1.0) / 2.0, 0, 1);
+        }
+        return new OnsetEnvelope(stream.Name, correlation, hopSamples, stream.Weight);
+    }
+
     private static double[] InduceTempoSeeds(
-        IReadOnlyList<BeatFeatureStream> streams,
+        IReadOnlyList<OnsetEnvelope> streams,
         int sampleRate)
     {
         var histogram = new Dictionary<int, double>();
-        foreach (BeatFeatureStream stream in streams)
+        foreach (OnsetEnvelope stream in streams)
         {
             Dictionary<int, double> local = BuildAutocorrelationHistogram(stream, sampleRate);
             foreach (int bin in LocalPeakBins(local).OrderByDescending(bin => local[bin]).Take(MaxTempoSeedsPerStream))
@@ -135,31 +208,23 @@ internal static class EllisBeatTracker
     }
 
     private static Dictionary<int, double> BuildAutocorrelationHistogram(
-        BeatFeatureStream stream,
+        OnsetEnvelope stream,
         int sampleRate)
     {
         var histogram = new Dictionary<int, double>();
-        IReadOnlyList<(long Sample, double Strength)> onsets = stream.Onsets;
-        int limit = Math.Min(onsets.Count, 160);
-        for (int left = 0; left < limit; left++)
+        int minimumLag = Math.Max(1, (int)Math.Floor(
+            sampleRate * 60.0 / MaxBpm / stream.HopSamples));
+        int maximumLag = Math.Min(
+            stream.Correlation.Length - 1,
+            (int)Math.Ceiling(sampleRate * 60.0 / MinBpm / stream.HopSamples));
+        for (int lag = minimumLag; lag <= maximumLag; lag++)
         {
-            int rightLimit = Math.Min(limit, left + 33);
-            for (int right = left + 1; right < rightLimit; right++)
-            {
-                long interval = onsets[right].Sample - onsets[left].Sample;
-                if (interval <= 0)
-                    continue;
-                for (int beats = 1; beats <= 4; beats++)
-                {
-                    double bpm = 60.0 * sampleRate * beats / interval;
-                    if (bpm < MinBpm || bpm > MaxBpm)
-                        continue;
-                    int bin = (int)Math.Round(bpm * 2.0);
-                    double vote = Math.Sqrt(Math.Max(0.01, onsets[left].Strength * onsets[right].Strength))
-                        / Math.Sqrt(beats);
-                    histogram[bin] = histogram.GetValueOrDefault(bin) + vote;
-                }
-            }
+            double score = stream.Correlation[lag];
+            if (score <= 0.5 + 1e-9)
+                continue;
+            double bpm = 60.0 * sampleRate / (lag * (double)stream.HopSamples);
+            int bin = (int)Math.Round(bpm * 2.0);
+            histogram[bin] = Math.Max(histogram.GetValueOrDefault(bin), score);
         }
         return histogram;
     }
@@ -177,14 +242,14 @@ internal static class EllisBeatTracker
     }
 
     private static double AutocorrelationAgreement(
-        IReadOnlyList<BeatFeatureStream> streams,
+        IReadOnlyList<OnsetEnvelope> streams,
         double bpm,
         int sampleRate)
     {
         double weightedScore = 0;
         double totalWeight = 0;
         int agreeingStreams = 0;
-        foreach (BeatFeatureStream stream in streams)
+        foreach (OnsetEnvelope stream in streams)
         {
             double score = StreamPeriodicity(stream, bpm, sampleRate);
             weightedScore += stream.Weight * score;
@@ -198,31 +263,17 @@ internal static class EllisBeatTracker
         return 0.70 * weightedScore / totalWeight + 0.30 * agreement;
     }
 
-    private static double StreamPeriodicity(BeatFeatureStream stream, double bpm, int sampleRate)
+    private static double StreamPeriodicity(OnsetEnvelope stream, double bpm, int sampleRate)
     {
-        double samplesPerBeat = sampleRate * 60.0 / bpm;
-        IReadOnlyList<(long Sample, double Strength)> onsets = stream.Onsets;
-        double fit = 0;
-        double total = 0;
-        int limit = Math.Min(onsets.Count, 160);
-        for (int left = 0; left < limit; left++)
-        {
-            int rightLimit = Math.Min(limit, left + 33);
-            for (int right = left + 1; right < rightLimit; right++)
-            {
-                double interval = onsets[right].Sample - onsets[left].Sample;
-                double pairWeight = Math.Sqrt(Math.Max(0.01, onsets[left].Strength * onsets[right].Strength));
-                double best = 0;
-                for (int beats = 1; beats <= 4; beats++)
-                {
-                    double logRatio = Math.Log(interval / (samplesPerBeat * beats));
-                    best = Math.Max(best, Math.Exp(-logRatio * logRatio / (2 * 0.10 * 0.10)));
-                }
-                fit += pairWeight * best;
-                total += pairWeight;
-            }
-        }
-        return total > 0 ? fit / total : 0;
+        int center = (int)Math.Round(sampleRate * 60.0 / bpm / stream.HopSamples);
+        if (center <= 0 || center >= stream.Correlation.Length)
+            return 0.5;
+        int first = Math.Max(1, center - 2);
+        int last = Math.Min(stream.Correlation.Length - 1, center + 2);
+        double best = 0.5;
+        for (int lag = first; lag <= last; lag++)
+            best = Math.Max(best, stream.Correlation[lag]);
+        return best;
     }
 
     private static IEnumerable<long> PhaseCandidates(

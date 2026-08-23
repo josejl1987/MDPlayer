@@ -144,6 +144,7 @@ public sealed class MetricalHierarchyInferenceTests
         {
             Source = TimingSource.SymbolicInference,
             Meter = null,
+            EnableLegacyHierarchyInference = true,
         });
 
     private static VisualizationTimeline Timeline(

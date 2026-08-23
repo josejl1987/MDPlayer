@@ -66,4 +66,30 @@ public sealed class EllisBeatTrackerTests
         Assert.Equal(0, source[0]);
         Assert.Equal(31 * beat, source[^1]);
     }
+
+    [Fact]
+    public void NonMetricalSecondCandidate_DoesNotBecomeTempoAmbiguity()
+    {
+        const int sampleRate = 48_000;
+        long beat = sampleRate / 2;
+        EllisBeatTrackingResult result = Assert.IsType<EllisBeatTrackingResult>(EllisBeatTracker.Track(
+            new[]
+            {
+                new BeatFeatureStream(
+                    "pulse",
+                    Enumerable.Range(0, 64)
+                        .Select(index => (Sample: index * beat, Strength: 1.0))
+                        .ToArray(),
+                    1.0),
+            },
+            sampleRate,
+            0,
+            64 * beat));
+
+        Assert.All(
+            result.Candidates.Skip(1).Where(candidate =>
+                Math.Abs(candidate.Bpm / result.Selected.Bpm - 0.5) >= 0.01
+                && Math.Abs(candidate.Bpm / result.Selected.Bpm - 2.0) >= 0.01),
+            candidate => Assert.NotEqual(candidate.Bpm, result.Alternative?.Bpm));
+    }
 }

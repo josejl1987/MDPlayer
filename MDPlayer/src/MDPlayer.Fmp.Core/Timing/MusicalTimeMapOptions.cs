@@ -48,9 +48,11 @@ internal sealed class MusicalTimeMapOptions
     /// <summary>
     /// Runs the repeated-content structural grid pass after symbolic timing. MIDI
     /// export already has Ellis/DBN timing and can disable this quadratic analysis
-    /// for large timelines without changing source-time or pitch semantics.
+    /// for large timelines without changing source-time or pitch semantics. It is
+    /// opt-in so a new caller cannot accidentally put the legacy structural
+    /// scorer on the playable export path.
     /// </summary>
-    public bool EnableStructuralGridSelection { get; init; } = true;
+    public bool EnableStructuralGridSelection { get; init; }
 
     /// <summary>
     /// Keeps the pre-Ellis symbolic hierarchy available for compatibility tests
