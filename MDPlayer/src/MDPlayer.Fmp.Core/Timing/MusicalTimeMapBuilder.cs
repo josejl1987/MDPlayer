@@ -112,7 +112,9 @@ internal static class MusicalTimeMapBuilder
             MusicalTimeMapBuildResult initial = instrumentTempoSearch
                 ? SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, percussionEvidence, out tempoCounters)
                 : SymbolicTempoInference.Build(timeline, options, beatOffsetQuarter, percussionEvidence);
-            return MusicalStructureAnalyzer.SelectGrid(initial, timeline, percussionEvidence);
+            return options.EnableStructuralGridSelection
+                ? MusicalStructureAnalyzer.SelectGrid(initial, timeline, percussionEvidence)
+                : initial;
         }
 
         // Deterministic source application:
