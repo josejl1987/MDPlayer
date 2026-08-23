@@ -62,10 +62,17 @@ internal static class MidiCommand
         MusicalTimeMapBuildResult? timing = options.MusicalGrid
             ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
             {
+                FixedBpm = options.FixedBpm,
+                Meter = options.Meter,
+                BeatOffsetSamples = options.BeatOffsetSamples,
+                StrictTiming = options.StrictTiming,
                 EnableStructuralGridSelection = false,
                 EnableLegacyHierarchyInference = false,
             })
             : null;
+        if (options.Channels && timing is not null)
+            throw new InvalidOperationException(
+                "--channels cannot be combined with --musical-grid or musical timing overrides.");
         MidiTranscriptionResult result = timing is null
             ? new MidiTranscriber(options.Ppq).Transcribe(timeline)
             : new MidiTranscriber(options.Ppq, timing.Map).Transcribe(timeline);
@@ -82,7 +89,11 @@ internal static class MidiCommand
         output.WriteLine($"wrote {System.IO.Path.GetFullPath(options.Output)} ({result.Bytes.Length} bytes)");
         output.WriteLine(timing is null
             ? $"midi mode: raw-fidelity; transport: 120 BPM; ppq: {options.Ppq}"
-            : $"midi mode: musical-time-map; tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; ppq: {options.Ppq}");
+            : $"midi mode: musical-time-map; tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; "
+                + $"tempo-resolved: {timing.Diagnostics.GridSelection?.TempoResolved ?? !timing.Diagnostics.TempoAmbiguous}; "
+                + $"meter: {timing.Map.Meter?.ToString() ?? "unresolved"}; "
+                + $"meter-resolved: {timing.Diagnostics.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}; "
+                + $"downbeat-resolved: {timing.Map.FirstDownbeatQuarter is not null}; ppq: {options.Ppq}");
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +

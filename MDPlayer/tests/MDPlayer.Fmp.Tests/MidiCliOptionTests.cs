@@ -1,16 +1,12 @@
 using Fmp.Cli;
+using Fmp.Core.Timing;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// MIDI export option surface. --ppq (default 960, MIDI-valid 1..32767) and the
-/// explicit musical-grid mode are the transport controls; the musical vocabulary
-/// (tempo source, BPM,
-/// meter, downbeat, beat offset, quantization, pitch bend, velocity, track
-/// layout, pitch normalization) is gone and every removed option must be
-/// rejected as unknown so stale scripts fail loudly instead of silently
-/// degrading fidelity.
+/// MIDI export option surface. Raw transport remains the default, while explicit
+/// musical overrides opt into the source-time-preserving musical map.
 /// </summary>
 public sealed class MidiCliOptionTests
 {
@@ -30,6 +26,23 @@ public sealed class MidiCliOptionTests
     {
         MidiOptions o = Parse("--musical-grid", "--output", "out.mid", Input);
         Assert.True(o.MusicalGrid);
+    }
+
+    [Fact]
+    public void MusicalOverrides_AreAcceptedAndEnableGridMode()
+    {
+        MidiOptions o = Parse(
+            "--bpm", "112",
+            "--meter", "4/4",
+            "--beat-offset", "-22050",
+            "--strict-timing",
+            "--output", "out.mid", Input);
+
+        Assert.True(o.MusicalGrid);
+        Assert.Equal(112, o.FixedBpm);
+        Assert.Equal(new Meter(4, 4), o.Meter);
+        Assert.Equal(-22050, o.BeatOffsetSamples);
+        Assert.True(o.StrictTiming);
     }
 
     [Theory]
@@ -65,11 +78,7 @@ public sealed class MidiCliOptionTests
 
     [Theory]
     [InlineData("--tempo-source")]
-    [InlineData("--bpm")]
-    [InlineData("--meter")]
     [InlineData("--first-downbeat-sample")]
-    [InlineData("--beat-offset-samples")]
-    [InlineData("--strict-timing")]
     [InlineData("--quantize")]
     [InlineData("--no-pitch-bend")]
     [InlineData("--bend-range")]
@@ -86,8 +95,6 @@ public sealed class MidiCliOptionTests
 
     [Theory]
     [InlineData("--tempo-source", "auto")]
-    [InlineData("--bpm", "120")]
-    [InlineData("--meter", "4/4")]
     [InlineData("--quantize", "1/8")]
     [InlineData("--track-layout", "physical")]
     [InlineData("--pitch-normalization", "fidelity")]

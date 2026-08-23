@@ -33,6 +33,10 @@ public sealed class MidiExportService
             MusicalTimeMapBuildResult? timing = request.TimingMode == MidiExportTimingMode.MusicalTimeMap
                 ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
                 {
+                    FixedBpm = request.FixedBpm,
+                    Meter = ParseMeter(request.Meter),
+                    BeatOffsetSamples = request.BeatOffsetSamples,
+                    StrictTiming = request.StrictTiming,
                     EnableStructuralGridSelection = false,
                     EnableLegacyHierarchyInference = false,
                 })
@@ -149,5 +153,22 @@ public sealed class MidiExportService
             throw new ArgumentException($"PPQ must be positive and at most 32767 (MIDI-valid division), got {request.Ppq}");
         if (!Enum.IsDefined(request.TimingMode))
             throw new ArgumentException($"Unknown MIDI timing mode: {request.TimingMode}");
+        if (request.FixedBpm is double bpm && (!double.IsFinite(bpm) || bpm <= 0))
+            throw new ArgumentException("Fixed BPM must be finite and positive.");
+        _ = ParseMeter(request.Meter);
+        if (request.TimingMode == MidiExportTimingMode.RawSourceTime
+            && (request.FixedBpm is not null || request.Meter is not null
+                || request.BeatOffsetSamples is not null || request.StrictTiming))
+            throw new ArgumentException("Musical timing overrides require MusicalTimeMap timing mode.");
+    }
+
+    private static Meter? ParseMeter(string? value)
+    {
+        if (value is null)
+            return null;
+        Meter? meter = Meter.TryParse(value);
+        if (meter is null || (meter.Denominator & (meter.Denominator - 1)) != 0)
+            throw new ArgumentException($"Invalid meter '{value}'. Use numerator/denominator with a power-of-two denominator.");
+        return meter;
     }
 }

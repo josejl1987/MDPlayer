@@ -1,3 +1,5 @@
+using Fmp.Core.Timing;
+
 namespace Fmp.Cli;
 
 /// <summary>The maximum MIDI-valid division (ticks per quarter note).</summary>
@@ -19,6 +21,18 @@ internal sealed class MidiOptions : BatchRenderSettings
     public int Ppq { get; set; } = 960;
 
     public bool MusicalGrid { get; set; }
+
+    /// <summary>Explicit musical tempo override; implies musical-grid mode.</summary>
+    public double? FixedBpm { get; set; }
+
+    /// <summary>Explicit time-signature override; implies musical-grid mode.</summary>
+    public Meter? Meter { get; set; }
+
+    /// <summary>Signed source-sample phase override; implies musical-grid mode.</summary>
+    public long? BeatOffsetSamples { get; set; }
+
+    /// <summary>Fail when the requested musical timing cannot be resolved.</summary>
+    public bool StrictTiming { get; set; }
 
     /// <summary>Optional raw source-time fidelity report.</summary>
     public string TimingReport { get; set; }
@@ -59,6 +73,23 @@ internal static class MidiOptionsParser
                     case "-o": result.Output = reader.RequireValue(name); break;
                     case "--ppq": result.Ppq = reader.ReadInt(name); break;
                     case "--musical-grid" when value == null: result.MusicalGrid = true; break;
+                    case "--bpm":
+                        result.FixedBpm = reader.ReadDouble(name);
+                        result.MusicalGrid = true;
+                        break;
+                    case "--meter":
+                        result.Meter = ParseMeter(reader.RequireValue(name), name);
+                        result.MusicalGrid = true;
+                        break;
+                    case "--beat-offset":
+                    case "--beat-offset-samples":
+                        result.BeatOffsetSamples = reader.ReadLong(name);
+                        result.MusicalGrid = true;
+                        break;
+                    case "--strict-timing" when value == null:
+                        result.StrictTiming = true;
+                        result.MusicalGrid = true;
+                        break;
                     case "--timing-report": result.TimingReport = reader.RequireValue(name); break;
                     case "--pitch-report": result.PitchReport = reader.RequireValue(name); break;
                     case "--channels" when value == null: result.Channels = true; break;
@@ -79,10 +110,20 @@ internal static class MidiOptionsParser
             throw new ArgumentException("--ppq must be positive");
         if (result.Ppq > MidiOptionsLimits.MaxPpq)
             throw new ArgumentException($"--ppq must not exceed {MidiOptionsLimits.MaxPpq} (MIDI-valid division)");
+        if (result.FixedBpm is <= 0)
+            throw new ArgumentException("--bpm must be positive");
         if (string.IsNullOrWhiteSpace(result.Output))
             throw new ArgumentException("--output (or -o) is required");
         if (string.IsNullOrWhiteSpace(result.Timeline) && string.IsNullOrWhiteSpace(result.Input))
             throw new ArgumentException("specify an input track or --timeline PATH");
         return result;
+    }
+
+    private static Meter ParseMeter(string value, string option)
+    {
+        Meter? meter = Meter.TryParse(value);
+        if (meter is null || (meter.Denominator & (meter.Denominator - 1)) != 0)
+            throw new ArgumentException($"invalid meter for {option}: '{value}'");
+        return meter;
     }
 }

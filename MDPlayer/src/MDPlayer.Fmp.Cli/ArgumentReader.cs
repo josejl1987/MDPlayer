@@ -141,4 +141,13 @@ internal ref struct ArgumentReader
             throw new ArgumentException($"invalid numeric value for {option}: '{raw}'");
         return value;
     }
+
+    /// <summary>Reads a signed 64-bit integer option with invariant parsing.</summary>
+    public long ReadLong(string option)
+    {
+        string raw = RequireValue(option);
+        if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long value))
+            throw new ArgumentException($"invalid integer value for {option}: '{raw}'");
+        return value;
+    }
 }

@@ -10,9 +10,8 @@ namespace MDPlayer.Fmp.Tests;
 /// <summary>
 /// Verifies the public GUI-facing <see cref="MidiExportService"/> (Application
 /// layer) which turns a persisted timeline into Format 1 MIDI bytes without
-/// shelling to the CLI. The contract is raw fidelity: a fixed 120 BPM transport,
-/// no tempo/meter/quantization/voice-projection options, and a report that
-/// surfaces source-relative timing verbatim.
+/// shelling to the CLI. Raw fidelity remains the default, while explicit musical
+/// timing overrides use the same source-time-preserving map as the CLI.
 /// </summary>
 public sealed class MidiExportServiceTests
 {
@@ -44,12 +43,13 @@ public sealed class MidiExportServiceTests
     }
 
     [Fact]
-    public void RequestContract_ContainsOnlyRawTranscriptionOptions()
+    public void RequestContract_ContainsRawAndExplicitMusicalTimingOptions()
     {
-        // The musical vocabulary is not part of the contract. Anything beyond
-        // PPQ + receipt hooks must be a compile error, enforced here by
-        // reflection so a reintroduced option fails this test.
-        string[] allowed = { "Ppq", "EnablePerformanceReceipts", "PerformanceFixture", "TimingMode" };
+        string[] allowed =
+        {
+            "Ppq", "EnablePerformanceReceipts", "PerformanceFixture", "TimingMode",
+            "FixedBpm", "Meter", "BeatOffsetSamples", "StrictTiming",
+        };
         string[] actual = typeof(MidiExportRequest)
             .GetProperties()
             .Select(p => p.Name)
@@ -163,6 +163,35 @@ public sealed class MidiExportServiceTests
         double expectedSeconds = timeline.Notes[1].StartSample / (double)timeline.SampleRate;
         double actualSeconds = noteOnTick * tempo.MicrosecondsPerQuarterNote / 1_000_000.0 / 960.0;
         Assert.InRange(Math.Abs(expectedSeconds - actualSeconds), 0, 1.0 / 90.0 / 960.0 / 2.0 + 1e-9);
+    }
+
+    [Fact]
+    public void MusicalTimingOverrides_UseExplicitMapInputs()
+    {
+        string path = WriteTimeline(BuildTimeline(withBeats: false));
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(path,
+            new MidiExportRequest
+            {
+                TimingMode = MidiExportTimingMode.MusicalTimeMap,
+                FixedBpm = 112,
+                Meter = "4/4",
+                BeatOffsetSamples = 0,
+            });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Contains(result.Report, line => line.Contains("tempo: 112"));
+        Assert.Contains(result.Report, line => line.Contains("meter: 4/4"));
+    }
+
+    [Fact]
+    public void RawTiming_RejectsMusicalOverridesInsteadOfIgnoringThem()
+    {
+        string path = WriteTimeline(BuildTimeline());
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(path,
+            new MidiExportRequest { FixedBpm = 112 });
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("MusicalTimeMap", result.Error, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -19,6 +19,18 @@ public sealed class MidiExportRequest
     /// <summary>Chooses raw source transport or the inferred/validated musical time map.</summary>
     public MidiExportTimingMode TimingMode { get; init; } = MidiExportTimingMode.RawSourceTime;
 
+    /// <summary>Optional fixed musical tempo override in beats per minute.</summary>
+    public double? FixedBpm { get; init; }
+
+    /// <summary>Optional meter override expressed as <c>numerator/denominator</c>.</summary>
+    public string? Meter { get; init; }
+
+    /// <summary>Optional signed source-sample beat-phase override.</summary>
+    public long? BeatOffsetSamples { get; init; }
+
+    /// <summary>Reject unresolved musical timing instead of emitting an inferred fallback.</summary>
+    public bool StrictTiming { get; init; }
+
     /// <summary>Opt-in allocation/wall-clock receipt for the transcription stage.</summary>
     public bool EnablePerformanceReceipts { get; init; }
 
