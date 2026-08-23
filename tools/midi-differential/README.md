@@ -31,6 +31,8 @@ python3 tools/midi-differential/run_corpus.py \
 ```
 
 The runner validates that every successful result is an SMF, reports decoder
-fallbacks explicitly, and returns a nonzero status for export failures. Use
-`--require-reviewed` only after human sidecars have filled the expected musical
-labels.
+fallbacks explicitly, retains the exact capture with `midi --timeline-out`, and
+independently checks serialized note pitch, note/rhythm/sample timing, channel
+ownership, RPN state, and SMF ordering. It returns a nonzero status for export
+or round-trip failures. Use `--require-reviewed` only after human sidecars have
+filled the expected musical labels.

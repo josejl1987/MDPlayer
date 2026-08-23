@@ -64,7 +64,7 @@ def event_rank(kind: str, controller: int | None = None) -> int:
     return 6
 
 
-def validate_smf(data: bytes) -> dict[str, int]:
+def validate_smf(data: bytes) -> dict[str, Any]:
     """Parse and validate the serialized SMF independently of .NET code."""
 
     if data[:4] != b"MThd":
@@ -80,6 +80,8 @@ def validate_smf(data: bytes) -> dict[str, int]:
 
     endpoint_owners: dict[tuple[int, int], int] = {}
     track_events: list[list[dict[str, int | str | None]]] = []
+    track_names: list[str | None] = []
+    tempo_events: list[tuple[int, int]] = []
     tempo_at_zero = False
     total_channel_events = 0
     total_pitch_bends = 0
@@ -95,6 +97,7 @@ def validate_smf(data: bytes) -> dict[str, int]:
         port = 0
         running = 0
         ended = False
+        track_name: str | None = None
         events: list[dict[str, int | str | None]] = []
         while position < end:
             delta, position = read_vlq(data, position, end)
@@ -121,7 +124,11 @@ def validate_smf(data: bytes) -> dict[str, int]:
                     raise SmfError("meta event exceeds track")
                 if meta == 0x21 and length_value == 1:
                     port = data[position]
+                elif meta == 0x03:
+                    track_name = data[position:meta_end].decode("utf-8", errors="replace")
                 elif meta == 0x51 and length_value == 3:
+                    if track_index == 0:
+                        tempo_events.append((tick, int.from_bytes(data[position:meta_end], "big")))
                     if track_index == 0 and tick == 0:
                         tempo_at_zero = True
                     events.append({"tick": tick, "kind": "tempo", "channel": None})
@@ -193,6 +200,7 @@ def validate_smf(data: bytes) -> dict[str, int]:
         if not ended:
             raise SmfError(f"track {track_index} is missing final End of Track")
         track_events.append(events)
+        track_names.append(track_name)
 
     if not tempo_at_zero:
         raise SmfError("conductor has no tempo at tick zero")
@@ -260,7 +268,409 @@ def validate_smf(data: bytes) -> dict[str, int]:
         "tracks": track_count,
         "channelEvents": total_channel_events,
         "pitchBends": total_pitch_bends,
+        "_division": division,
+        "_trackEvents": track_events,
+        "_trackNames": track_names,
+        "_tempoEvents": tempo_events,
     }
+
+
+def source_pitch_points(note: dict[str, Any]) -> list[tuple[int, float]]:
+    start = int(note["startSample"])
+    end = int(note["endSample"])
+    points: list[tuple[int, float]] = [(start, float(note["initialMidiNote"]))]
+    for change in note.get("pitch") or []:
+        sample = int(change["sample"])
+        if sample < start or sample >= end:
+            continue
+        point = (sample, float(change["midiNote"]))
+        if points[-1][0] == sample:
+            points[-1] = point
+        else:
+            points.append(point)
+    return points
+
+
+def round_away_from_zero(value: float) -> int:
+    return int(value + 0.5) if value >= 0 else int(value - 0.5)
+
+
+def relative_serialized_tick(base_tick: float, phase: float) -> int:
+    """Model SampleToTick(sample)-SampleToTick(start) including map phase."""
+
+    return round_away_from_zero(base_tick + phase) - round_away_from_zero(phase)
+
+
+def source_tick(
+    sample: int,
+    timeline: dict[str, Any],
+    tempo_events: list[tuple[int, int]],
+    ppq: int,
+) -> float:
+    """Invert the serialized tempo map for source-relative seconds."""
+
+    start = int(timeline.get("startSample", 0))
+    sample_rate = float(timeline["sampleRate"])
+    target_seconds = (sample - start) / sample_rate
+    ordered = sorted(tempo_events)
+    if not ordered or ordered[0][0] != 0:
+        raise SmfError("cannot validate source timing without a tick-zero tempo")
+
+    elapsed = 0.0
+    previous_tick, previous_tempo = ordered[0]
+    for tick, tempo in ordered[1:]:
+        if tempo <= 0 or tick < previous_tick:
+            raise SmfError("serialized tempo map is invalid")
+        segment_seconds = (tick - previous_tick) * previous_tempo / 1_000_000.0 / ppq
+        if target_seconds <= elapsed + segment_seconds:
+            return previous_tick + (target_seconds - elapsed) / (
+                previous_tempo / 1_000_000.0 / ppq)
+        elapsed += segment_seconds
+        previous_tick, previous_tempo = tick, tempo
+    if previous_tempo <= 0:
+        raise SmfError("serialized tempo map contains a non-positive tempo")
+    return previous_tick + (target_seconds - elapsed) / (
+        previous_tempo / 1_000_000.0 / ppq)
+
+
+def validate_source_pitch(
+    smf: dict[str, Any],
+    timeline: dict[str, Any],
+    phase_tick_origin: float | None = None,
+) -> dict[str, int | float]:
+    """Reconstruct real-note pitch from serialized channel state independently."""
+
+    ppq = int(smf["_division"])
+    track_events: list[list[dict[str, Any]]] = smf["_trackEvents"]
+    track_names: list[str | None] = smf["_trackNames"]
+    tempo_events: list[tuple[int, int]] = smf["_tempoEvents"]
+    notes = timeline.get("notes") or []
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for note in notes:
+        if isinstance(note, dict) and note.get("voiceId") is not None:
+            groups[str(note["voiceId"])].append(note)
+
+    def group_for_track(name: str | None) -> tuple[str | None, list[dict[str, Any]] | None]:
+        if name is None:
+            return None, None
+        if name in groups:
+            return name, groups[name]
+        key = name.removeprefix("domain:")
+        return (key, groups[key]) if key in groups else (None, None)
+
+    note_on_events = {
+        track_index: [event for event in events if event["kind"] == "note_on"]
+        for track_index, events in enumerate(track_events)
+        if track_index != 0
+    }
+    note_track_counts: dict[int, int] = {
+        track_index: len(events)
+        for track_index, events in note_on_events.items()
+    }
+    group_track_candidates: dict[str, list[int]] = {}
+    for key, group in groups.items():
+        named = [
+            track_index for track_index, name in enumerate(track_names)
+            if track_index != 0 and group_for_track(name)[0] == key
+        ]
+        if named:
+            group_track_candidates[key] = named
+        else:
+            group_track_candidates[key] = [
+                track_index for track_index, count in note_track_counts.items()
+                if count == len(group)
+            ]
+
+    # The serialized conductor carries tempo but not the inferred fractional
+    # phase used before source-relative tick subtraction. Infer that phase from
+    # the serialized NoteOn/source-start pairs, then use it for every pitch
+    # checkpoint. Without this, a source point near a half-tick boundary can be
+    # assigned to the adjacent tick even though the compiler correctly folded it
+    # using the map's phase.
+    phase_pairs: list[tuple[float, int]] = []
+    for key, group in groups.items():
+        candidates = group_track_candidates[key]
+        if len(candidates) != 1:
+            continue
+        note_ons = note_on_events[candidates[0]]
+        for note, event in zip(group, note_ons):
+            phase_pairs.append((
+                source_tick(int(note["startSample"]), timeline, tempo_events, ppq),
+                int(event["tick"]),
+            ))
+    if phase_tick_origin is not None:
+        phase = phase_tick_origin
+    elif phase_pairs:
+        lower, upper = -0.499999999, 0.499999999
+        for base, actual in phase_pairs:
+            lower = max(lower, actual - 0.5 - base)
+            upper = min(upper, actual + 0.5 - base)
+        if lower < upper:
+            phase = (lower + upper) / 2.0
+        else:
+            # Tempo values are serialized as integer microseconds, so a
+            # perfectly common phase interval can be empty by a few ulps over
+            # long files. Evaluate all interval boundaries and choose the
+            # least-error candidate rather than hiding that mismatch.
+            candidates = {-0.499999999, 0.0, 0.499999999}
+            for base, actual in phase_pairs:
+                candidates.add(max(-0.499999999, min(0.499999999, actual - 0.5 - base)))
+                candidates.add(max(-0.499999999, min(0.499999999, actual + 0.5 - base)))
+            phase = min(
+                candidates,
+                key=lambda candidate: (
+                    sum(abs(relative_serialized_tick(base, candidate) - actual)
+                        for base, actual in phase_pairs),
+                    abs(candidate),
+                ),
+            )
+    else:
+        phase = 0.0
+
+    checked_notes = 0
+    checked_points = 0
+    maximum_error = 0.0
+    assignments: dict[int, str] = {}
+    used_tracks: set[int] = set()
+    for key, group in sorted(groups.items()):
+        candidates = [
+            track_index for track_index in group_track_candidates[key]
+            if track_index not in used_tracks
+        ]
+        if not candidates:
+            continue
+
+        def candidate_score(track_index: int) -> tuple[int, float, int]:
+            errors = [
+                abs(relative_serialized_tick(
+                    source_tick(int(note["startSample"]), timeline, tempo_events, ppq),
+                    phase) - int(event["tick"]))
+                for note, event in zip(group, note_on_events[track_index])
+            ]
+            matched = sum(error <= 1 for error in errors)
+            total = sum(errors)
+            return matched, -total, -track_index
+
+        track_index = max(candidates, key=candidate_score)
+        assignments[track_index] = key
+        used_tracks.add(track_index)
+
+    matched_groups: set[str] = set()
+    for track_index, group_key in sorted(assignments.items()):
+        group = groups[group_key]
+        if not group:
+            continue
+        matched_groups.add(str(group_key))
+        events = track_events[track_index]
+        rpn_msb, rpn_lsb = 127, 127
+        bend_range = 0
+        bend = 0
+        active_note: dict[str, Any] | None = None
+        active_base = 0
+        active_start_tick = 0
+        source_index = 0
+        observed: dict[int, float] = {}
+
+        def decoded_pitch() -> float:
+            denominator = 8192.0 if bend < 0 else 8191.0
+            return active_base + bend / denominator * bend_range
+
+        def validate_note(note: dict[str, Any]) -> None:
+            nonlocal checked_points, maximum_error
+            end_tick = round_away_from_zero(
+                relative_serialized_tick(
+                    source_tick(int(note["endSample"]), timeline, tempo_events, ppq), phase))
+            actual_ticks = sorted(observed)
+            if not actual_ticks:
+                raise SmfError(f"track {track_index} has no serialized pitch state")
+            # The compiler folds all source changes that quantize to one MIDI
+            # tick, so the independent oracle must apply the same observable
+            # last-state rule before comparing pitch.
+            expected_by_tick: dict[int, tuple[int, float]] = {}
+            for sample, expected_pitch in source_pitch_points(note):
+                expected_tick = round_away_from_zero(
+                    relative_serialized_tick(
+                        source_tick(sample, timeline, tempo_events, ppq), phase))
+                expected_by_tick[expected_tick] = (sample, expected_pitch)
+            for expected_tick, (sample, expected_pitch) in sorted(expected_by_tick.items()):
+                if expected_tick >= end_tick:
+                    continue
+                candidates = [tick for tick in actual_ticks if tick <= expected_tick]
+                if not candidates:
+                    raise SmfError(
+                        f"track {track_index} has no pitch state at source sample {sample}")
+                actual = observed[candidates[-1]]
+                delta = expected_pitch - active_base
+                step = 0.0 if bend_range == 0 else bend_range / (
+                    8192.0 if delta < 0 else 8191.0)
+                error = abs(actual - expected_pitch)
+                maximum_error = max(maximum_error, error)
+                checked_points += 1
+                if error > step + 1e-8:
+                    raise SmfError(
+                        f"track {track_index} pitch error {error:.9f} exceeds "
+                        f"quantization step {step:.9f} at source sample {sample} "
+                        f"(expected {expected_pitch:.9f}, actual {actual:.9f}, "
+                        f"tick {expected_tick}, note start {note['startSample']}, "
+                        f"base {active_base}, range {bend_range})")
+
+        for event in events:
+            kind = event["kind"]
+            channel = event.get("channel")
+            if channel is None:
+                continue
+            if kind == "control":
+                controller = int(event["controller"])
+                value = int(event["data2"])
+                if controller == 101:
+                    rpn_msb = value
+                elif controller == 100:
+                    rpn_lsb = value
+                elif controller == 6 and (rpn_msb, rpn_lsb) == (0, 0):
+                    bend_range = value
+                continue
+            if kind == "pitch_bend":
+                unsigned = int(event["data2"]) * 128 + int(event["data1"])
+                bend = unsigned - 8192
+                if active_note is not None:
+                    observed[int(event["tick"])] = decoded_pitch()
+                continue
+            if kind == "note_on":
+                if active_note is not None:
+                    raise SmfError(f"track {track_index} has overlapping serialized notes")
+                if source_index >= len(group):
+                    raise SmfError(f"track {track_index} has too many serialized NoteOns")
+                active_note = group[source_index]
+                source_index += 1
+                active_base = int(event["data1"])
+                expected_tick = relative_serialized_tick(
+                    source_tick(int(active_note["startSample"]), timeline, tempo_events, ppq),
+                    phase)
+                active_start_tick = int(event["tick"])
+                if abs(int(event["tick"]) - expected_tick) > 1:
+                    raise SmfError(
+                        f"track {track_index} NoteOn tick {event['tick']} differs from "
+                        f"source tick {expected_tick}")
+                observed[int(event["tick"])] = decoded_pitch()
+                continue
+            if kind == "note_off" and active_note is not None:
+                expected_end_tick = relative_serialized_tick(
+                    source_tick(int(active_note["endSample"]), timeline, tempo_events, ppq),
+                    phase)
+                if expected_end_tick <= active_start_tick:
+                    expected_end_tick = active_start_tick + 1
+                if int(event["tick"]) != expected_end_tick:
+                    raise SmfError(
+                        f"track {track_index} NoteOff tick {event['tick']} differs from "
+                        f"source tick {expected_end_tick} for note start "
+                        f"{active_note['startSample']}")
+                validate_note(active_note)
+                active_note = None
+                observed.clear()
+
+        if active_note is not None:
+            validate_note(active_note)
+        if source_index != len(group):
+            raise SmfError(
+                f"track {track_index} serialized {source_index} notes, expected {len(group)}")
+        checked_notes += source_index
+
+    expected_groups = {str(note["voiceId"]) for note in notes if isinstance(note, dict)}
+    if expected_groups - matched_groups:
+        missing = ", ".join(sorted(expected_groups - matched_groups))
+        raise SmfError(f"source pitch groups missing from SMF tracks: {missing}")
+    return {
+        "pitchNotes": checked_notes,
+        "pitchCheckpoints": checked_points,
+        "maxPitchError": maximum_error,
+    }
+
+
+def validate_source_event_timing(
+    smf: dict[str, Any],
+    timeline: dict[str, Any],
+    phase_tick_origin: float | None,
+) -> dict[str, int]:
+    """Check note, native-rhythm, and sample event ticks against source time."""
+
+    ppq = int(smf["_division"])
+    tempo_events: list[tuple[int, int]] = smf["_tempoEvents"]
+    track_events: list[list[dict[str, Any]]] = smf["_trackEvents"]
+    track_names: list[str | None] = smf["_trackNames"]
+    phase = 0.0 if phase_tick_origin is None else phase_tick_origin
+    checked = 0
+
+    rhythm = timeline.get("rhythm") or []
+    rhythm_tracks = [
+        index for index, name in enumerate(track_names)
+        if name == "Native Rhythm"
+    ]
+    if rhythm:
+        if len(rhythm_tracks) != 1:
+            raise SmfError("source rhythm events have no unique Native Rhythm track")
+        onsets = [
+            event for event in track_events[rhythm_tracks[0]]
+            if event["kind"] == "note_on"
+        ]
+        if len(onsets) != len(rhythm):
+            raise SmfError(
+                f"serialized rhythm attacks {len(onsets)} differ from source {len(rhythm)}")
+        for source, event in zip(rhythm, onsets):
+            expected = relative_serialized_tick(
+                source_tick(int(source["samplePosition"]), timeline, tempo_events, ppq),
+                phase)
+            if int(event["tick"]) != expected:
+                raise SmfError(
+                    f"rhythm event tick {event['tick']} differs from source tick {expected}")
+            checked += 1
+
+    samples = timeline.get("samplePlayback") or []
+    note_attack_ids = {
+        str(note["sourceAttackId"])
+        for note in timeline.get("notes") or []
+        if isinstance(note, dict) and note.get("sourceAttackId") is not None
+    }
+    samples = [
+        sample for sample in samples
+        if not isinstance(sample, dict)
+        or sample.get("sourceAttackId") is None
+        or str(sample["sourceAttackId"]) not in note_attack_ids
+    ]
+    sample_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for sample in samples:
+        if isinstance(sample, dict) and sample.get("voiceId") is not None:
+            sample_groups[str(sample["voiceId"])].append(sample)
+    for track_index, name in enumerate(track_names):
+        if not name or not name.startswith("Sample "):
+            continue
+        voice = name.removeprefix("Sample ")
+        group = sample_groups.get(voice)
+        if group is None:
+            continue
+        events = track_events[track_index]
+        onsets = [event for event in events if event["kind"] == "note_on"]
+        offsets = [event for event in events if event["kind"] == "note_off"]
+        if len(onsets) != len(group) or len(offsets) != len(group):
+            raise SmfError(
+                f"sample track {name} event count does not match source voice {voice}")
+        for source, onset, offset in zip(group, onsets, offsets):
+            expected_on = relative_serialized_tick(
+                source_tick(int(source["startSample"]), timeline, tempo_events, ppq),
+                phase)
+            expected_off = relative_serialized_tick(
+                source_tick(int(source["endSample"]), timeline, tempo_events, ppq),
+                phase)
+            if expected_off <= expected_on:
+                expected_off = expected_on + 1
+            if int(onset["tick"]) != expected_on or int(offset["tick"]) != expected_off:
+                raise SmfError(
+                    f"sample track {name} timing differs from source "
+                    f"({onset['tick']}/{offset['tick']} versus "
+                    f"{expected_on}/{expected_off})")
+            checked += 1
+    if samples and not any(name and name.startswith("Sample ") for name in track_names):
+        raise SmfError("source sample playback has no Sample track")
+    return {"timingEvents": checked}
 
 
 def run_export(
@@ -271,6 +681,7 @@ def run_export(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="mdplayer-midi-corpus-") as directory:
         output = Path(directory) / "export.mid"
+        captured_timeline = Path(directory) / "captured-timeline.json"
         if source is not None:
             command = [str(cli), "midi", str(source)]
             capture = "source"
@@ -279,7 +690,11 @@ def run_export(
             capture = "timeline"
         else:
             return {"status": "blocked", "error": "no source or timeline"}
-        command += ["--output", str(output), "--musical-grid"]
+        command += [
+            "--output", str(output),
+            "--timeline-out", str(captured_timeline),
+            "--musical-grid",
+        ]
         try:
             completed = subprocess.run(
                 command,
@@ -305,6 +720,31 @@ def run_export(
             smf = validate_smf(data)
         except SmfError as error:
             return {"status": "failed", "capture": capture, "error": f"invalid SMF: {error}"}
+        public_smf = {
+            key: value for key, value in smf.items() if not key.startswith("_")
+        }
+        pitch: dict[str, int | float] | None = None
+        timing: dict[str, int] | None = None
+        validation_timeline = captured_timeline if captured_timeline.exists() else timeline
+        if validation_timeline is not None and validation_timeline.exists():
+            try:
+                timeline_data = json.loads(validation_timeline.read_text(encoding="utf-8"))
+                phase_match = re.search(
+                    r"source-quarter-at-start: ([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)",
+                    text,
+                )
+                phase_tick_origin = (
+                    float(phase_match.group(1)) * int(smf["_division"])
+                    if phase_match is not None else None
+                )
+                pitch = validate_source_pitch(smf, timeline_data, phase_tick_origin)
+                timing = validate_source_event_timing(smf, timeline_data, phase_tick_origin)
+            except (OSError, ValueError, KeyError, TypeError, SmfError) as error:
+                return {
+                    "status": "failed",
+                    "capture": capture,
+                    "error": f"source pitch round trip failed: {error}",
+                }
         tempo = re.search(r"tempo: ([0-9]+(?:\.[0-9]+)?) BPM", text)
         notes = re.search(r"events: notes=([0-9]+)", text)
         resolution = re.search(
@@ -316,7 +756,9 @@ def run_export(
             "status": "passed",
             "capture": capture,
             "bytes": output.stat().st_size,
-            "smf": smf,
+            "smf": public_smf,
+            "pitch": pitch,
+            "timing": timing,
             "tempo": float(tempo.group(1)) if tempo else None,
             "notes": int(notes.group(1)) if notes else None,
             "tempoResolved": resolution.group(1) == "True" if resolution else None,
