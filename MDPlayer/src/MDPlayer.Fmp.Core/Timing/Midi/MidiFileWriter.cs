@@ -38,6 +38,13 @@ internal sealed class MidiTrack
     public required MidiEndpoint Endpoint { get; init; }
 
     /// <summary>
+    /// The source voice/channel-state domain that owns this track's pitch state.
+    /// Compatibility tracks may leave this unset; production transcription sets it
+    /// before serialization.
+    /// </summary>
+    internal MidiVoiceDomain? VoiceDomain { get; set; }
+
+    /// <summary>
     /// Compatibility view. Production export keeps this null and materializes
     /// rich records only when an inspector explicitly asks for them.
     /// </summary>
@@ -121,6 +128,8 @@ internal sealed class MidiFileWriter
         ArgumentNullException.ThrowIfNull(conductor);
         ArgumentNullException.ThrowIfNull(tracks);
 
+        ValidateVoiceDomains(tracks);
+
         bool allTracksPacked = true;
         for (int index = 0; index < tracks.Count; index++)
         {
@@ -165,6 +174,70 @@ internal sealed class MidiFileWriter
         using var stream = new MemoryStream();
         file.Write(stream, MidiFileFormat.MultiTrack, new WritingSettings());
         return stream.ToArray();
+    }
+
+    private static void ValidateVoiceDomains(IReadOnlyList<MidiTrack> tracks)
+    {
+        var domainsByEndpoint = new Dictionary<MidiEndpoint, MidiVoiceDomain>();
+        foreach (MidiTrack track in tracks)
+        {
+            if (track.VoiceDomain is not MidiVoiceDomain domain)
+                continue;
+
+            MidiEndpoint domainEndpoint = new(domain.Port, domain.Channel);
+            if (track.Endpoint != domainEndpoint)
+                throw new InvalidOperationException(
+                    $"MIDI track '{track.Name}' endpoint does not match its voice domain.");
+            if (domainsByEndpoint.TryGetValue(track.Endpoint, out MidiVoiceDomain existing))
+                existing.EnsureCompatible(domain);
+            else
+                domainsByEndpoint.Add(track.Endpoint, domain);
+
+            int rangeEvents = 0;
+            int pitchBends = 0;
+            int? emittedRange = null;
+            if (track.UsesPackedEvents)
+            {
+                foreach (PackedMidiEvent evt in track.PackedEvents)
+                {
+                    if (evt.Kind == PackedMidiEventKind.BendRange)
+                    {
+                        rangeEvents++;
+                        emittedRange = evt.A;
+                    }
+                    else if (evt.Kind == PackedMidiEventKind.PitchBend)
+                    {
+                        pitchBends++;
+                    }
+                }
+            }
+            else
+            {
+                foreach (MidiEventBase evt in track.Events)
+                {
+                    if (evt is MidiBendRangeEvent bendRangeEvent)
+                    {
+                        rangeEvents++;
+                        emittedRange = bendRangeEvent.Semitones;
+                    }
+                    else if (evt is MidiPitchBendEvent)
+                    {
+                        pitchBends++;
+                    }
+                }
+            }
+
+            if (rangeEvents > 1)
+                throw new InvalidOperationException(
+                    $"MIDI voice domain '{domain.Source}' emits pitch-bend sensitivity more than once.");
+            if (emittedRange is int configuredRange && configuredRange != domain.BendRange)
+                throw new InvalidOperationException(
+                    $"MIDI voice domain '{domain.Source}' emitted bend range {configuredRange}, "
+                    + $"expected {domain.BendRange}.");
+            if (pitchBends > 0 && rangeEvents != 1)
+                throw new InvalidOperationException(
+                    $"MIDI voice domain '{domain.Source}' emits pitch bends without one RPN range setup.");
+        }
     }
 
     /// <summary>

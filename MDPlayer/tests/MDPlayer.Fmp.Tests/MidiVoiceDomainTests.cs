@@ -7,7 +7,7 @@ namespace MDPlayer.Fmp.Tests;
 public sealed class MidiVoiceDomainTests
 {
     [Fact]
-    public void DistinctEndpointsAndBendsRemainCompatible()
+    public void DifferentSourcesCannotShareOneChannelStateDomain()
     {
         var first = new MidiVoiceDomain(
             new SourceDomainKey(new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0),
@@ -16,9 +16,9 @@ public sealed class MidiVoiceDomainTests
             new SourceDomainKey(new DeviceId(ChipType.Ym2608, 1), VoiceKind.Fm, 0),
             channel: 0, bendRangeSemitones: 24);
 
-        // Compatibility is intentionally scoped to one source domain. Distinct
-        // device endpoints may carry different bend policies without sharing state.
-        Assert.NotEqual(first.Source, second.Source);
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+            () => first.EnsureCompatible(second));
+        Assert.Contains("Conflicting MIDI voice-domain ownership", error.Message);
     }
 
     [Fact]

@@ -20,11 +20,14 @@ internal readonly record struct MidiVoiceDomain(
 
     public SourceDomainKey Source => new(Device, VoiceFamily, SourceIndex);
 
+    /// <summary>The single pitch-bend sensitivity used by this channel-state domain.</summary>
+    public int BendRange => BendRangeSemitones;
+
     public void EnsureCompatible(MidiVoiceDomain other)
     {
-        if (Source != other.Source || Port != other.Port || Channel != other.Channel)
+        if (Port != other.Port || Channel != other.Channel)
             return;
-        if (Program != other.Program || Bank != other.Bank
+        if (Source != other.Source || Program != other.Program || Bank != other.Bank
             || BendRangeSemitones != other.BendRangeSemitones)
             throw new InvalidOperationException(
                 $"Conflicting MIDI voice-domain ownership for '{Source}': "

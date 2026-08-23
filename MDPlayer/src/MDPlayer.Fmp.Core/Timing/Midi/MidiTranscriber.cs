@@ -69,6 +69,7 @@ internal sealed class MidiTranscriber
         int collisions = CountSameTickAttacks(timeline, indexed);
         int oneTickNotes = 0;
         var tracks = new List<MidiTrack>();
+        var domainsByEndpoint = new Dictionary<MidiEndpoint, MidiVoiceDomain>();
 
         IGrouping<string, IndexedNote>[] voices = indexed
             .GroupBy(n => n.Voice, StringComparer.Ordinal)
@@ -82,63 +83,51 @@ internal sealed class MidiTranscriber
                 .ToArray();
             MidiEndpoint endpoint = MelodicEndpoint(voiceIndex);
             int trackIndex = tracks.Count;
-            int bendRange = BendRange(voiceNotes);
+            PlannedNote[] notePlans = voiceNotes
+                .Select(source => PlanNote(timeline, source, ref oneTickNotes))
+                .ToArray();
+            int bendRange = BendRange(notePlans);
+            MidiVoiceDomain domain = CreateVoiceDomain(
+                voiceNotes[0].Note.Domain,
+                VoiceKind.Aggregate,
+                voiceIndex,
+                endpoint,
+                bendRange);
+            RegisterDomain(domainsByEndpoint, domain);
             var track = new MidiTrack
             {
                 Name = VoiceName(voiceNotes[0].Note),
                 SourceVoiceId = voiceNotes[0].Voice,
                 Endpoint = endpoint,
+                VoiceDomain = domain,
             };
-            var plan = new List<Planned>(1 + voiceNotes.Sum(n => 3 + (n.Note.Pitch?.Count ?? 0)))
+            var plan = new List<Planned>(1 + notePlans.Sum(n => 3 + n.PitchStates.Count))
             {
                 new(0, long.MinValue, int.MinValue, -1, 0,
                     new MidiBendRangeEvent(0, trackIndex, endpoint.Channel, bendRange)),
             };
 
-            foreach (IndexedNote source in voiceNotes)
+            foreach (PlannedNote source in notePlans)
             {
                 NoteEvent note = source.Note;
-                ValidateNote(timeline, note);
-                double initialPitch = InitialPitch(note);
-                int baseNote = BaseNote(initialPitch);
-                long onTick = MidiTransportClock.SampleToTick(
-                    timeline.StartSample, note.StartSample, timeline.SampleRate, _ppq);
-                long offTick = MidiTransportClock.SampleToTick(
-                    timeline.StartSample, note.EndSample, timeline.SampleRate, _ppq);
-                if (offTick <= onTick)
+                plan.Add(new Planned(source.OnTick, note.StartSample, source.SourceIndex, 1, 0,
+                    new MidiPitchBendEvent(source.OnTick, trackIndex, endpoint.Channel,
+                        EncodeBend(source.PitchStates[0].Pitch - source.BaseNote, bendRange))));
+                plan.Add(new Planned(source.OnTick, note.StartSample, source.SourceIndex, 2, 0,
+                    new MidiNoteEvent(source.OnTick, trackIndex, endpoint.Channel,
+                        source.BaseNote, DefaultVelocity, NoteOn: true)));
+
+                for (int pitchIndex = 1; pitchIndex < source.PitchStates.Count; pitchIndex++)
                 {
-                    offTick = checked(onTick + 1);
-                    oneTickNotes++;
+                    PitchState state = source.PitchStates[pitchIndex];
+                    plan.Add(new Planned(state.Tick, state.SourceSample, source.SourceIndex, 1, pitchIndex,
+                        new MidiPitchBendEvent(state.Tick, trackIndex, endpoint.Channel,
+                            EncodeBend(state.Pitch - source.BaseNote, bendRange))));
                 }
 
-                plan.Add(new Planned(onTick, note.StartSample, source.SourceIndex, 1, 0,
-                    new MidiPitchBendEvent(onTick, trackIndex, endpoint.Channel,
-                        EncodeBend(initialPitch - baseNote, bendRange))));
-                plan.Add(new Planned(onTick, note.StartSample, source.SourceIndex, 2, 0,
-                    new MidiNoteEvent(onTick, trackIndex, endpoint.Channel,
-                        baseNote, DefaultVelocity, NoteOn: true)));
-
-                int pitchOrder = 0;
-                foreach (PitchChange change in PitchStates(note))
-                {
-                    if (change.SamplePosition == note.StartSample)
-                        continue; // folded into the attack; last write wins.
-                    if (change.SamplePosition <= note.StartSample || change.SamplePosition >= note.EndSample)
-                        continue;
-                    if (!double.IsFinite(change.MidiNote))
-                        throw new InvalidOperationException(
-                            $"Non-finite pitch on '{VoiceName(note)}' at sample {change.SamplePosition}.");
-
-                    long tick = MidiTransportClock.SampleToTick(
-                        timeline.StartSample, change.SamplePosition, timeline.SampleRate, _ppq);
-                    plan.Add(new Planned(tick, change.SamplePosition, source.SourceIndex, 1, ++pitchOrder,
-                        new MidiPitchBendEvent(tick, trackIndex, endpoint.Channel,
-                            EncodeBend(change.MidiNote - baseNote, bendRange))));
-                }
-
-                plan.Add(new Planned(offTick, note.EndSample, source.SourceIndex, 0, 0,
-                    new MidiNoteEvent(offTick, trackIndex, endpoint.Channel,
-                        baseNote, DefaultVelocity, NoteOn: false)));
+                plan.Add(new Planned(source.OffTick, note.EndSample, source.SourceIndex, 0, 0,
+                    new MidiNoteEvent(source.OffTick, trackIndex, endpoint.Channel,
+                        source.BaseNote, DefaultVelocity, NoteOn: false)));
             }
 
             FinishTrack(track, plan);
@@ -158,11 +147,19 @@ internal sealed class MidiTranscriber
             MidiEndpoint endpoint = MelodicEndpoint(endpointIndex);
             int trackIndex = tracks.Count;
             int bendRange = SampleBendRange(sampleEvents, sampleAssignments);
+            MidiVoiceDomain domain = CreateVoiceDomain(
+                source: null,
+                VoiceKind.PcmVoice,
+                endpointIndex,
+                endpoint,
+                bendRange);
+            RegisterDomain(domainsByEndpoint, domain);
             var track = new MidiTrack
             {
                 Name = "Sample " + sampleEvents[0].Event.VoiceId,
                 SourceVoiceId = sampleEvents[0].Event.VoiceId,
                 Endpoint = endpoint,
+                VoiceDomain = domain,
             };
             var plan = new List<Planned>(sampleEvents.Length * 4);
             if (bendRange > 0)
@@ -189,7 +186,7 @@ internal sealed class MidiTranscriber
                         identity.Note, DefaultVelocity, NoteOn: false)));
                 plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 0,
                     new MidiBankEvent(onTick, trackIndex, endpoint.Channel, identity.Bank)));
-                if (sample.MidiPitch is double pitch)
+                if (sample.MidiPitch is double pitch && bendRange > 0)
                 {
                     plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 1,
                         new MidiPitchBendEvent(onTick, trackIndex, endpoint.Channel,
@@ -205,7 +202,18 @@ internal sealed class MidiTranscriber
         }
 
         if (rhythm.Count > 0)
-            tracks.Add(BuildRhythmTrack(timeline, rhythm, tracks.Count));
+        {
+            MidiTrack rhythmTrack = BuildRhythmTrack(timeline, rhythm, tracks.Count);
+            MidiVoiceDomain domain = CreateVoiceDomain(
+                rhythm[0].Domain,
+                VoiceKind.Rhythm,
+                0,
+                rhythmTrack.Endpoint,
+                bendRange: 0);
+            RegisterDomain(domainsByEndpoint, domain);
+            rhythmTrack.VoiceDomain = domain;
+            tracks.Add(rhythmTrack);
+        }
 
         int serializedNoteOnCount = tracks
             .SelectMany(track => track.Events)
@@ -407,28 +415,92 @@ internal sealed class MidiTranscriber
         return collisions;
     }
 
-    private static int BendRange(IReadOnlyList<IndexedNote> notes)
+    private static int BendRange(IReadOnlyList<PlannedNote> notes)
     {
         double maximum = 0;
-        foreach (IndexedNote source in notes)
+        foreach (PlannedNote note in notes)
         {
-            NoteEvent note = source.Note;
-            double initial = InitialPitch(note);
-            int baseNote = BaseNote(initial);
-            maximum = Math.Max(maximum, Math.Abs(initial - baseNote));
-            foreach (PitchChange change in PitchStates(note))
-            {
-                if (change.SamplePosition <= note.StartSample || change.SamplePosition >= note.EndSample)
-                    continue;
-                if (!double.IsFinite(change.MidiNote))
-                    throw new InvalidOperationException("Source pitch change is not finite.");
-                maximum = Math.Max(maximum, Math.Abs(change.MidiNote - baseNote));
-            }
+            foreach (PitchState state in note.PitchStates)
+                maximum = Math.Max(maximum, Math.Abs(state.Pitch - note.BaseNote));
         }
         if (maximum > 127.0 + 1e-9)
             throw new InvalidOperationException(
                 $"Required pitch-bend excursion {maximum:0.###} exceeds MIDI's 127-semitone RPN limit.");
         return Math.Clamp((int)Math.Ceiling(maximum), MinimumBendRange, 127);
+    }
+
+    private PlannedNote PlanNote(
+        VisualizationTimeline timeline,
+        IndexedNote source,
+        ref int oneTickNotes)
+    {
+        NoteEvent note = source.Note;
+        ValidateNote(timeline, note);
+        long onTick = MidiTransportClock.SampleToTick(
+            timeline.StartSample, note.StartSample, timeline.SampleRate, _ppq);
+        long offTick = MidiTransportClock.SampleToTick(
+            timeline.StartSample, note.EndSample, timeline.SampleRate, _ppq);
+        if (offTick <= onTick)
+        {
+            offTick = checked(onTick + 1);
+            oneTickNotes++;
+        }
+
+        var statesByTick = new SortedDictionary<long, PitchState>
+        {
+            [onTick] = new(onTick, note.StartSample, InitialPitch(note)),
+        };
+        foreach (PitchChange change in PitchStates(note))
+        {
+            if (change.SamplePosition <= note.StartSample || change.SamplePosition >= note.EndSample)
+                continue;
+            if (!double.IsFinite(change.MidiNote))
+                throw new InvalidOperationException(
+                    $"Non-finite pitch on '{VoiceName(note)}' at sample {change.SamplePosition}.");
+
+            long tick = MidiTransportClock.SampleToTick(
+                timeline.StartSample, change.SamplePosition, timeline.SampleRate, _ppq);
+            // Several source transitions can quantize to one MIDI tick. The last
+            // source state is the only state a synth can observe at that tick. If
+            // it lands on NoteOn, fold it into the single attack bend below.
+            statesByTick[tick] = new(
+                tick,
+                tick == onTick ? note.StartSample : change.SamplePosition,
+                change.MidiNote);
+        }
+
+        PitchState[] states = statesByTick.Values.ToArray();
+        int baseNote = BaseNote(states[0].Pitch);
+        return new PlannedNote(source, onTick, offTick, baseNote, states);
+    }
+
+    private static MidiVoiceDomain CreateVoiceDomain(
+        SourceDomainKey? source,
+        VoiceKind fallbackKind,
+        int fallbackIndex,
+        MidiEndpoint endpoint,
+        int bendRange)
+    {
+        SourceDomainKey identity = source ?? new SourceDomainKey(
+            new DeviceId(ChipType.Unknown, 0), fallbackKind, fallbackIndex);
+        return new MidiVoiceDomain(
+            identity,
+            endpoint.Channel,
+            bendRangeSemitones: bendRange,
+            port: endpoint.Port);
+    }
+
+    private static void RegisterDomain(
+        IDictionary<MidiEndpoint, MidiVoiceDomain> domainsByEndpoint,
+        MidiVoiceDomain domain)
+    {
+        MidiEndpoint endpoint = new(domain.Port, domain.Channel);
+        if (domainsByEndpoint.TryGetValue(endpoint, out MidiVoiceDomain existing))
+        {
+            existing.EnsureCompatible(domain);
+            return;
+        }
+        domainsByEndpoint.Add(endpoint, domain);
     }
 
     private static double InitialPitch(NoteEvent note)
@@ -551,6 +623,18 @@ internal sealed class MidiTranscriber
     }
 
     private static int BoundaryRank(int phase) => phase == 0 ? 0 : 1;
+
+    private readonly record struct PitchState(long Tick, long SourceSample, double Pitch);
+    private sealed record PlannedNote(
+        IndexedNote Source,
+        long OnTick,
+        long OffTick,
+        int BaseNote,
+        IReadOnlyList<PitchState> PitchStates)
+    {
+        public NoteEvent Note => Source.Note;
+        public int SourceIndex => Source.SourceIndex;
+    }
 
     private sealed record IndexedNote(NoteEvent Note, int SourceIndex, string Voice);
     private sealed record IndexedSample(SamplePlaybackEvent Event, int SourceIndex);
