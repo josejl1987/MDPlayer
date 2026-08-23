@@ -252,12 +252,17 @@ public sealed class MidiAdversarialCorpusTests
         double bpm = control.GetProperty("bpm").GetDouble();
         Meter meter = Meter.TryParse(control.GetProperty("meter").GetString())!;
         long quarterSamples = (long)Math.Round(sampleRate * 60.0 / bpm);
-        int quarters = meter.Numerator * 8;
-        var notes = Enumerable.Range(0, quarters)
+        const int tatumsPerQuarter = 4;
+        int tatumsPerBar = meter.Denominator == 8
+            ? meter.Numerator * 2
+            : meter.Numerator * tatumsPerQuarter;
+        int tatumCount = tatumsPerBar * 8;
+        long tatumSamples = (long)Math.Round(quarterSamples / (double)tatumsPerQuarter);
+        var notes = Enumerable.Range(0, tatumCount)
             .Select(index => new NoteEvent(
                 "positive-control.voice",
-                index * quarterSamples,
-                index * quarterSamples + quarterSamples / 2,
+                index * tatumSamples,
+                index * tatumSamples + Math.Max(1, tatumSamples / 2),
                 440.0 * Math.Pow(2.0, ((60 + (index % 4)) - 69) / 12.0),
                 60 + (index % 4),
                 "positive-control",
@@ -265,21 +270,40 @@ public sealed class MidiAdversarialCorpusTests
                 false,
                 Array.Empty<PitchChange>()))
             .ToArray();
+        var rhythm = new List<RhythmEvent>(tatumCount + tatumCount / 4);
+        for (int index = 0; index < tatumCount; index++)
+        {
+            long sample = index * tatumSamples;
+            rhythm.Add(new RhythmEvent("hi-hat", "hi-hat", sample, 0.35f, 0));
+            bool downbeat = index % tatumsPerBar == 0;
+            bool secondary = meter.Denominator == 8
+                ? index % tatumsPerBar == tatumsPerBar / 2
+                : index % tatumsPerBar is tatumsPerBar / 4 or 3 * tatumsPerBar / 4;
+            if (downbeat)
+                rhythm.Add(new RhythmEvent("kick", "kick", sample, 1.0f, 0));
+            else if (secondary)
+                rhythm.Add(new RhythmEvent("snare", "snare", sample, 0.9f, 0));
+        }
+        long barSamples = checked(tatumSamples * tatumsPerBar);
         var timeline = new VisualizationTimeline
         {
             SampleRate = sampleRate,
             StartSample = 0,
-            EndSample = quarters * quarterSamples,
+            EndSample = checked(tatumCount * tatumSamples),
             Notes = notes,
-            Rhythm = Array.Empty<RhythmEvent>(),
+            Rhythm = rhythm,
+            LoopMarkers = new[]
+            {
+                new LoopMarker(0, LoopMarkerKind.Start, 0),
+                new LoopMarker(checked(barSamples * 4), LoopMarkerKind.Restart, 1),
+            },
         };
-        MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
-        {
-            FixedBpm = bpm,
-            Meter = meter,
-            BeatOffsetSamples = 0,
-            FirstDownbeatSample = 0,
-        });
+        // This is intentionally an inference control: the expected BPM/meter
+        // describe the generated evidence, but no user timing override is fed
+        // to the production decoder.
+        MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(
+            timeline,
+            new MusicalTimeMapOptions { DetectTempoChanges = true });
         MidiTranscriptionResult export = new MidiTranscriber(960, timing.Map).Transcribe(timeline);
         IndependentMidiPitchValidator.Validate(timeline, export, 960, timing.Map);
         IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export, 960);
