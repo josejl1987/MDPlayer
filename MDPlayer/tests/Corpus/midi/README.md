@@ -6,11 +6,11 @@ the test project; the manifest does not duplicate binary media.
 
 The `featuresToReview` labels are review prompts, not asserted facts. A corpus
 entry may only move from `pending` to `reviewed` after a human has inspected the
-source timeline and filled `expected.tempo`, `expected.meter`, and the downbeat
-annotation. A reviewed entry may instead be explicitly marked `unresolved` only
-when all corresponding `allowUnresolved*` gates are true. Null expectations
-intentionally keep the harness from turning an unverified guess into a golden
-test.
+source timeline and filled each expected field or explicitly accepted that
+dimension as unresolved with its corresponding `allowUnresolved*` gate. A
+reviewed entry may instead be explicitly marked `unresolved` only when all
+corresponding `allowUnresolved*` gates are true. Null expectations intentionally
+keep the harness from turning an unverified guess into a golden test.
 
 Corpus checks must compare semantics: channel ownership, pitch reconstruction,
 source-time round trips, meter/tempo resolution state, and explicit abstention.

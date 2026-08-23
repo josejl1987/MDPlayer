@@ -42,10 +42,9 @@ public sealed class MidiAdversarialCorpusTests
             JsonElement expected = entry.GetProperty("expected");
             if (status == "reviewed")
             {
-                Assert.False(expected.GetProperty("tempo").ValueKind == JsonValueKind.Null,
-                    $"Reviewed fixture {source} has no tempo annotation.");
-                Assert.False(expected.GetProperty("meter").ValueKind == JsonValueKind.Null,
-                    $"Reviewed fixture {source} has no meter annotation.");
+                AssertReviewedField(entry, expected, source, "tempo", "allowUnresolvedTempo");
+                AssertReviewedField(entry, expected, source, "meter", "allowUnresolvedMeter");
+                AssertReviewedField(entry, expected, source, "downbeat", "allowUnresolvedDownbeat");
             }
             else if (status == "unresolved")
             {
@@ -60,6 +59,20 @@ public sealed class MidiAdversarialCorpusTests
             {
                 Assert.Equal("pending", status);
             }
+        }
+    }
+
+    private static void AssertReviewedField(
+        JsonElement entry,
+        JsonElement expected,
+        string source,
+        string field,
+        string unresolvedFlag)
+    {
+        if (expected.GetProperty(field).ValueKind == JsonValueKind.Null)
+        {
+            Assert.True(entry.GetProperty(unresolvedFlag).GetBoolean(),
+                $"Reviewed fixture {source} has unresolved {field} without {unresolvedFlag}=true.");
         }
     }
 }
