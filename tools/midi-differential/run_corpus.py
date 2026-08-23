@@ -799,26 +799,31 @@ def run_export(
         pitch: dict[str, int | float] | None = None
         timing: dict[str, int] | None = None
         validation_timeline = captured_timeline if captured_timeline.exists() else timeline
-        if validation_timeline is not None and validation_timeline.exists():
-            try:
-                timeline_data = json.loads(validation_timeline.read_text(encoding="utf-8"))
-                phase_match = re.search(
-                    r"source-quarter-at-start: ([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)",
-                    text,
-                )
-                phase_tick_origin = (
-                    float(phase_match.group(1)) * int(smf["_division"])
-                    if phase_match is not None else None
-                )
-                pitch = validate_source_pitch(smf, timeline_data, phase_tick_origin)
-                timing = validate_source_event_timing(smf, timeline_data, phase_tick_origin)
-                pitch.update(validate_source_sample_pitch(smf, timeline_data))
-            except (OSError, ValueError, KeyError, TypeError, SmfError) as error:
-                return {
-                    "status": "failed",
-                    "capture": capture,
-                    "error": f"source pitch round trip failed: {error}",
-                }
+        if validation_timeline is None or not validation_timeline.exists():
+            return {
+                "status": "failed",
+                "capture": capture,
+                "error": "exact captured timeline is missing for pitch/time validation",
+            }
+        try:
+            timeline_data = json.loads(validation_timeline.read_text(encoding="utf-8"))
+            phase_match = re.search(
+                r"source-quarter-at-start: ([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)",
+                text,
+            )
+            phase_tick_origin = (
+                float(phase_match.group(1)) * int(smf["_division"])
+                if phase_match is not None else None
+            )
+            pitch = validate_source_pitch(smf, timeline_data, phase_tick_origin)
+            timing = validate_source_event_timing(smf, timeline_data, phase_tick_origin)
+            pitch.update(validate_source_sample_pitch(smf, timeline_data))
+        except (OSError, ValueError, KeyError, TypeError, SmfError) as error:
+            return {
+                "status": "failed",
+                "capture": capture,
+                "error": f"source pitch round trip failed: {error}",
+            }
         tempo = re.search(r"tempo: ([0-9]+(?:\.[0-9]+)?) BPM", text)
         notes = re.search(r"events: notes=([0-9]+)", text)
         resolution = re.search(
