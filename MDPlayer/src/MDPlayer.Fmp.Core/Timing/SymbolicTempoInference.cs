@@ -186,9 +186,9 @@ internal static class SymbolicTempoInference
         IReadOnlyList<PercussiveOnset> percussionEvidence,
         CounterAccumulator? acc)
     {
-        // Keep the established phase scorer as a bounded fallback and compatibility
-        // baseline. It no longer chooses the normal symbolic quarter-note level;
-        // the hierarchy below decides that from the source onset timeline first.
+        // Keep a deterministic transport fallback for sparse timelines. Normal
+        // symbolic inference is owned by EllisBeatTracker; an incomplete feature
+        // set must not trigger a second half/double-tempo heuristic.
         double fallbackBpm = 120.0;
         long fallbackPhaseSample = timeline.StartSample;
         double fallbackScore = 0;
@@ -196,24 +196,49 @@ internal static class SymbolicTempoInference
         double? fallbackAlternativeScore = null;
         var searchedCandidates = new List<TempoCandidate>();
         RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(percussionEvidence);
+        bool roleTempoResolved = false;
         if (onsets.Length >= 2)
         {
-            (double searchedBpm, long searchedPhase, double searchedScore, List<TempoCandidate> candidates) =
-                Search(onsets, timeline.SampleRate, acc, out long[] samples, out double[] weights);
-            searchedCandidates.AddRange(candidates);
-            long[] durations = CollectDurations(timeline);
-            Onset[] accents = CollectAccents(percussionEvidence);
-            (TempoCandidate resolved, double? alternative, double resolvedScore, double? alternativeScore) =
-                ResolveHalfDouble(
-                    searchedBpm, candidates, samples, weights,
-                    timeline.SampleRate, durations, accents,
-                    searchedPhase, searchedScore, acc);
-            fallbackBpm = resolved.Bpm;
-            fallbackPhaseSample = resolved.PhaseSample;
-            fallbackScore = resolvedScore;
-            fallbackAlternativeBpm = alternative;
-            fallbackAlternativeScore = alternativeScore;
+            // The legacy phase scorer remains available to the opt-in work
+            // counters, but the production winner now comes from independent
+            // symbolic feature streams and an Ellis-style beat path.
+            if (acc is not null)
+            {
+                _ = Search(onsets, timeline.SampleRate, acc,
+                    out _, out _);
+            }
+
+            EllisBeatTrackingResult? tracked = EllisBeatTracker.Track(
+                BuildBeatFeatureStreams(timeline, percussionEvidence),
+                timeline.SampleRate,
+                timeline.StartSample,
+                Math.Max(timeline.EndSample, timeline.StartSample + 1));
+            if (tracked is not null)
+            {
+                EllisBeatCandidate selected = tracked.Selected;
+                fallbackBpm = selected.Bpm;
+                fallbackPhaseSample = selected.PhaseSample;
+                fallbackScore = selected.Score;
+                fallbackAlternativeBpm = tracked.Alternative?.Bpm;
+                fallbackAlternativeScore = tracked.Alternative?.Score;
+                foreach (EllisBeatCandidate candidate in tracked.Candidates)
+                {
+                    TempoAmbiguity ambiguity = IsMetricalFamilyRatio(candidate.Bpm / selected.Bpm)
+                        ? Math.Abs(candidate.Bpm / selected.Bpm - 0.5) < 0.01
+                            ? TempoAmbiguity.HalfTempo
+                            : Math.Abs(candidate.Bpm / selected.Bpm - 2.0) < 0.01
+                                ? TempoAmbiguity.DoubleTempo
+                                : TempoAmbiguity.None
+                        : TempoAmbiguity.None;
+                    searchedCandidates.Add(new TempoCandidate(
+                        candidate.Bpm, candidate.PhaseSample, candidate.Score, ambiguity));
+                }
+            }
         }
+
+        // A classified kick/snare stream is an independent rhythmic feature. It
+        // may establish the central pulse when it has enough role diversity, but
+        // it is not a special-case 56/112 repair and it does not alter samples.
         double? preferredRoleBpm = PreferredRoleTempo(rhythmRoles, timeline.SampleRate);
         if (preferredRoleBpm is double roleBpm
             && roleBpm >= MinBpm && roleBpm <= MaxBpm
@@ -221,11 +246,16 @@ internal static class SymbolicTempoInference
             && rhythmRoles.Select(role => role.Role).Distinct().Count() >= 2)
         {
             fallbackBpm = roleBpm;
-            fallbackAlternativeBpm = null;
-            fallbackAlternativeScore = null;
+            fallbackAlternativeBpm ??= searchedCandidates
+                .Select(candidate => candidate.Bpm)
+                .Where(candidate => Math.Abs(candidate - roleBpm) > 0.01)
+                .OrderBy(candidate => Math.Abs(candidate - roleBpm))
+                .FirstOrDefault();
+            if (fallbackAlternativeBpm == 0)
+                fallbackAlternativeBpm = null;
             fallbackScore = Math.Max(fallbackScore, 0.75);
+            roleTempoResolved = true;
         }
-
         Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline, percussionEvidence);
         MetricalTiming hierarchy = InferMetricalTiming(
             timeline, hierarchyOnsets, percussionEvidence, fallbackBpm, fallbackPhaseSample, fallbackScore,
@@ -253,9 +283,7 @@ internal static class SymbolicTempoInference
             DownbeatPhase = hierarchy.DownbeatPhase,
         };
 
-        bool roleResolved = fallbackAlternativeBpm is null
-            && rhythmRoles.Length >= 8
-            && rhythmRoles.Select(role => role.Role).Distinct().Count() >= 2;
+        bool roleResolved = roleTempoResolved;
         bool hierarchyResolved = hierarchy.MetricalConfidence >= 0.20
             && hierarchy.TatumConfidence >= 0.20;
         bool hierarchyAgreesWithFallback = Math.Abs(bestBpm - fallbackBpm) < 0.50;
@@ -420,9 +448,10 @@ internal static class SymbolicTempoInference
         diagnostics.DownbeatKnown = map.FirstDownbeatQuarter is not null;
         diagnostics.PhaseSource = TimingSource.SymbolicInference;
         diagnostics.SampleZeroQuarter = map.Segments[0].QuarterPositionAtStart;
-        // Metrical-family ambiguity is surfaced whenever ResolveHalfDouble found a
-        // musically equivalent alternative, whether or not the octave was changed:
-        // resolving the octave does not make the alternative disappear (D.4).
+        // Metrical-family ambiguity is surfaced whenever the multi-feature tracker
+        // retained a musically equivalent alternative, whether or not the selected
+        // octave changed. Resolving the octave does not make that alternative
+        // disappear.
         diagnostics.TempoAmbiguous = diagnostics.AlternativeBpm is double;
         if (diagnostics.TempoAmbiguous)
         {
@@ -449,6 +478,51 @@ internal static class SymbolicTempoInference
         double marginComponent = Math.Clamp(aliasMargin, 0, 1);
         return Math.Clamp(0.5 * baseFit + 0.5 * marginComponent, 0, 1);
     }
+
+    private static IReadOnlyList<BeatFeatureStream> BuildBeatFeatureStreams(
+        VisualizationTimeline timeline,
+        IReadOnlyList<PercussiveOnset> percussionEvidence)
+    {
+        var percussion = new List<(long Sample, double Strength)>();
+        var accented = new List<(long Sample, double Strength)>();
+        foreach (PercussiveOnset onset in percussionEvidence)
+        {
+            percussion.Add((onset.SamplePosition, Math.Max(0.1, onset.Strength)));
+            if (onset.Role is RhythmRole.Bd or RhythmRole.Sd)
+                accented.Add((onset.SamplePosition, Math.Max(0.1, onset.Strength)));
+        }
+
+        var bass = new List<(long Sample, double Strength)>();
+        var melody = new List<(long Sample, double Strength)>();
+        var all = new List<(long Sample, double Strength)>();
+        foreach (NoteEvent note in timeline.Notes ?? Array.Empty<NoteEvent>())
+        {
+            if (note is null || note.IsRetrigger)
+                continue;
+            all.Add((note.StartSample, 1.0));
+            if (note.InitialMidiNote <= 48)
+                bass.Add((note.StartSample, 1.0));
+            else
+                melody.Add((note.StartSample, 1.0));
+        }
+
+        return new[]
+        {
+            new BeatFeatureStream("percussion", FoldFeature(percussion), 1.40),
+            new BeatFeatureStream("bass", FoldFeature(bass), 1.20),
+            new BeatFeatureStream("melody", FoldFeature(melody), 0.80),
+            new BeatFeatureStream("all", FoldFeature(all), 0.50),
+            new BeatFeatureStream("accent", FoldFeature(accented), 1.30),
+        };
+    }
+
+    private static IReadOnlyList<(long Sample, double Strength)> FoldFeature(
+        IEnumerable<(long Sample, double Strength)> onsets) =>
+        onsets
+            .GroupBy(onset => onset.Sample)
+            .Select(group => (group.Key, Math.Clamp(group.Sum(onset => onset.Strength), 0.1, 4.0)))
+            .OrderBy(onset => onset.Key)
+            .ToArray();
 
     private static MetricalTiming InferMetricalTiming(
         VisualizationTimeline timeline,
@@ -1109,67 +1183,17 @@ internal static class SymbolicTempoInference
             }
         }
 
-        // ResolveHalfDouble needs the exact coarse winner for at most four
-        // neighboring BPMs. Rebuild only that bounded family rather than keeping
-        // a score for every BPM searched above.
-        var candidates = BuildFamilyCandidates(
-            bestBpm, samples, weights, weightSuffix, totalWeight, sampleRate, acc);
-
         // Improve the phase resolution within the winning tempo directly via onsets.
         double winSpq = sampleRate * 60.0 / bestBpm;
         (long bestPhaseSample, double refinedScore) = RefinePhase(samples, weights, winSpq, bestPhase, sampleRate, acc);
 
         // Report the REFINED phase's score as the winner's score (previously the
         // coarse-grid score was reported alongside the refined phase — incoherent).
-        return (bestBpm, bestPhaseSample, refinedScore, candidates);
-    }
-
-    private static List<TempoCandidate> BuildFamilyCandidates(
-        double bestBpm,
-        long[] samples,
-        double[] weights,
-        double[] weightSuffix,
-        double totalWeight,
-        int sampleRate,
-        CounterAccumulator? acc)
-    {
-        double[] ratios = { 0.25, 0.5, 1.0, 2.0, 4.0 };
-        var candidates = new List<TempoCandidate>(ratios.Length);
-        double[] fractionalQuarters = new double[samples.Length];
-        foreach (double ratio in ratios)
+        var candidates = new List<TempoCandidate>
         {
-            double bpm = bestBpm / ratio;
-            if (bpm < MinBpm || bpm > MaxBpm)
-                continue;
-
-            double spq = sampleRate * 60.0 / bpm;
-            for (int i = 0; i < samples.Length; i++)
-            {
-                double normalized = samples[i] / spq;
-                fractionalQuarters[i] = normalized - Math.Floor(normalized);
-            }
-
-            double localBestScore = -1;
-            double localBestPhase = 0;
-            for (int p = 0; p < PhaseSteps; p++)
-            {
-                double phaseSamples = spq * p / PhaseSteps;
-                double phaseQuarters = PhaseQuarters[p];
-                double score = ScoreForFractionalPhase(
-                    fractionalQuarters, weights, weightSuffix, phaseQuarters,
-                    localBestScore, totalWeight, acc);
-                if (score > localBestScore * (1 + ScoreTieEpsilon))
-                {
-                    localBestScore = score;
-                    localBestPhase = phaseSamples;
-                }
-            }
-
-            candidates.Add(new TempoCandidate(
-                bpm, (long)localBestPhase, localBestScore, TempoAmbiguity.None, localBestPhase));
-        }
-
-        return candidates;
+            new(bestBpm, bestPhaseSample, refinedScore, TempoAmbiguity.None),
+        };
+        return (bestBpm, bestPhaseSample, refinedScore, candidates);
     }
 
     /// <summary>Subdivision-aware, weight-normalized phase score (Patch D.1/D.2): each
@@ -1580,9 +1604,9 @@ internal static class SymbolicTempoInference
             if (candidate < 0)
                 candidate = 0;
             double phaseQuarters = candidate / spq;
-            // TI-PRUNE: refinement intentionally unpruned (null suffix) — TI-PRUNE
-            // scope is the Search phase grid; keeping RefinePhase/ResolveHalfDouble
-            // bit-identical guarantees the fixture output is byte-identical.
+            // TI-PRUNE: refinement intentionally remains unpruned (null suffix);
+            // the instrumented compatibility path must retain deterministic phase
+            // scores while production inference uses EllisBeatTracker.
             double score = ScoreForPhase(normalized, weights, null, phaseQuarters, 0, totalWeight, acc);
             if (score > bestScore * (1 + ScoreTieEpsilon))
             {
