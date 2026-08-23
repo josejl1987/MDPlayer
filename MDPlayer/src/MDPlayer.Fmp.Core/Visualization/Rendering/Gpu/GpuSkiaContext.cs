@@ -40,6 +40,31 @@ internal sealed class GpuSkiaContext : IDisposable
     private const int PboSlotCount = 4;
     private int _surfaceFbo;
 
+    private readonly GpuFrameTimerRing _gpuTimerRing = new();
+
+    // GPU-resident export ring: N FBO+texture pairs wrapped as GPU-backed
+    // Skia surfaces. Each ring entry's texture id is known directly (for later
+    // cuGraphicsGLRegisterImage registration); the finished frame never leaves
+    // the GPU. Allocated on demand by AllocateExportRing.
+    private ExportTarget[] _exportTargets;
+
+    /// <summary>A single GPU render target in the export ring.</summary>
+    internal sealed class ExportTarget : IDisposable
+    {
+        public int Texture;
+        public int Fbo;
+        public GRBackendRenderTarget BackendTarget;
+        public SKSurface Surface;
+
+        public void Dispose()
+        {
+            Surface?.Dispose();
+            Surface = null;
+            try { BackendTarget?.Dispose(); } catch { }
+            BackendTarget = null;
+        }
+    }
+
     public GpuSkiaContext(int width, int height)
     {
         if (width <= 0 || height <= 0)
@@ -205,6 +230,24 @@ internal sealed class GpuSkiaContext : IDisposable
         Console.Error.WriteLine($"GL_VERSION={version}");
         Console.Error.WriteLine("SkiaBackend=Ganesh/OpenGL");
 
+        // GPU resource cache instrumentation. The Ganesh resource cache is
+        // LRU-evicted video-memory storage; surfacing its limit and live usage at
+        // startup (and exposing an override) makes eviction observable without
+        // changing the default behaviour. Do NOT bump the default absent a
+        // benchmark — an oversized cache can hide or defer eviction differently.
+        _grContext.GetResourceCacheUsage(out int cacheResourceCount, out long cacheResourceBytes);
+        long cacheLimitBytes = 0;
+        try { cacheLimitBytes = _grContext.GetResourceCacheLimit(); } catch { }
+        Console.Error.WriteLine($"GpuCacheLimitBytes={cacheLimitBytes}");
+        Console.Error.WriteLine($"GpuCacheResourceCount={cacheResourceCount}");
+        Console.Error.WriteLine($"GpuCacheResourceBytes={cacheResourceBytes}");
+        if (Environment.GetEnvironmentVariable("MDPLAYER_GPU_RESOURCE_CACHE") is string cacheOverride &&
+            long.TryParse(cacheOverride, out long overrideBytes) && overrideBytes > 0)
+        {
+            _grContext.SetResourceCacheLimit(overrideBytes);
+            Console.Error.WriteLine($"GpuCacheLimitBytesOverride={_grContext.GetResourceCacheLimit()}");
+        }
+
         // GLFW requires the context to be non-current on this thread before the
         // render thread can take ownership. Detach here; per-frame acquisition
         // happens inside RenderCompositeFrame (see ReleaseCurrent).
@@ -241,16 +284,150 @@ internal sealed class GpuSkiaContext : IDisposable
     public SKSurface CreateOffscreenSurface()
         => SKSurface.Create(_grContext, budgeted: true, _frameInfo, 0, GRSurfaceOrigin.TopLeft);
 
+    /// <summary>Number of render targets in the GPU-resident export ring (0 until allocated).</summary>
+    public int ExportTargetCount => _exportTargets?.Length ?? 0;
+
+    /// <summary>The <paramref name="slot"/> SKSurface in the export ring (valid after allocation).</summary>
+    public SKSurface ExportSurface(int slot) => _exportTargets![slot].Surface;
+
+    /// <summary>The raw GL texture id of export ring slot <paramref name="slot"/> (CUDA registration target).</summary>
+    public int ExportTextureId(int slot) => _exportTargets![slot].Texture;
+
+    /// <summary>
+    /// Lazily allocates the GPU-resident export ring of <paramref name="capacity"/>
+    /// FBO+texture pairs, each wrapped as a GPU-backed Skia surface sized to the
+    /// frame. Call with the GL context current (the render thread holds it during
+    /// the frame). Idempotent; returns the ring length.
+    /// </summary>
+    public int AllocateExportRing(int capacity)
+    {
+        if (capacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        if (_exportTargets is not null)
+            return _exportTargets.Length;
+
+        var targets = new ExportTarget[capacity];
+        try
+        {
+            for (int i = 0; i < capacity; i++)
+            {
+                int tex = GL.GenTexture();
+                GL.BindTexture(TextureTarget.Texture2D, tex);
+                GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba8, _frameInfo.Width, _frameInfo.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+                GL.BindTexture(TextureTarget.Texture2D, 0);
+
+                int fbo = GL.GenFramebuffer();
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+                GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, tex, 0);
+                var status = GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                if (status != FramebufferErrorCode.FramebufferComplete)
+                    throw new InvalidOperationException($"Export FBO incomplete: {status}");
+
+                var fbInfo = new GRGlFramebufferInfo((uint)fbo, 0x8058);
+                var backendRT = new GRBackendRenderTarget(_frameInfo.Width, _frameInfo.Height, 0, 0, fbInfo);
+                SKSurface surface = SKSurface.Create(_grContext, backendRT, GRSurfaceOrigin.TopLeft, SKColorType.Rgba8888);
+                if (surface is null)
+                    throw new InvalidOperationException($"Export SKSurface.Create returned null (slot {i})");
+
+                targets[i] = new ExportTarget
+                {
+                    Texture = tex,
+                    Fbo = fbo,
+                    BackendTarget = backendRT,
+                    Surface = surface,
+                };
+            }
+        }
+        catch
+        {
+            for (int i = 0; i < targets.Length; i++)
+            {
+                targets[i]?.Dispose();
+                if (targets[i] is { } t)
+                {
+                    if (t.Fbo != 0) { try { GL.DeleteFramebuffer(t.Fbo); } catch { } }
+                    if (t.Texture != 0) { try { GL.DeleteTexture(t.Texture); } catch { } }
+                }
+            }
+            _exportTargets = null;
+            throw;
+        }
+
+        _exportTargets = targets;
+        return targets.Length;
+    }
+
+    /// <summary>
+    /// Clears export ring slot <paramref name="slot"/> (RGBA opaque output) and
+    /// makes its surface the current draw target for the frame (<see cref="Canvas"/>
+    /// override). Call with the GL context current.
+    /// </summary>
+    public IDisposable BeginExportSurface(int slot, SKColor clearColor, bool clear = true)
+    {
+        SKSurface surface = ExportSurface(slot);
+        if (clear)
+            surface.Canvas.Clear(clearColor);
+        return UseCanvas(surface.Canvas);
+    }
+
+    /// <summary>Flushes draw commands into export ring slot <paramref name="slot"/>.</summary>
+    public void FlushExportSurface(int slot) => ExportSurface(slot).Canvas.Flush();
+
+    /// <summary>
+    /// Reads export ring slot <paramref name="slot"/> back into
+    /// <paramref name="destination"/>. TEST/VERIFICATION ONLY — the production
+    /// GPU-export path never reads back; this exists so a parity test can prove
+    /// the ring renders the same pixels as the standard path.
+    /// </summary>
+    public unsafe void ReadExportSurface(int slot, Span<byte> destination)
+    {
+        if (destination.Length < _frameInfo.BytesSize)
+            throw new ArgumentException($"Destination requires at least {_frameInfo.BytesSize} bytes.", nameof(destination));
+
+        // This runs outside the render call (a separate verification/test call),
+        // so it must acquire the context and synchronously finish submitted work
+        // before reading — same responsibility the async PBO completer has.
+        _window.MakeCurrent();
+        try
+        {
+            _grContext.Submit(true);
+            SKSurface surface = ExportSurface(slot);
+            fixed (byte* p = destination)
+            {
+                bool ok = surface.ReadPixels(
+                    _frameInfo,
+                    (IntPtr)p,
+                    _frameInfo.RowBytes,
+                    0,
+                    0);
+                if (!ok)
+                    throw new InvalidOperationException($"Export surface readback failed (slot {slot}).");
+            }
+        }
+        finally
+        {
+            _window.Context.MakeNoneCurrent();
+        }
+    }
+
     public SKImageInfo FrameInfo => _frameInfo;
 
     /// <summary>
-    /// Makes the OpenGL context current and clears the frame surface. Called
-    /// at the start of every frame before drawing.
+    /// Makes the OpenGL context current and (by default) clears the frame
+    /// surface. Called at the start of every frame before drawing.
+    /// <paramref name="clear"/> may be false when the caller is about to draw an
+    /// opaque full-frame cover (e.g. the chrome cache) that replaces every
+    /// pixel, avoiding one redundant full-screen fill per frame. The FBO-binding
+    /// lookup runs regardless so async readback can identify the surface.
     /// </summary>
-    public void BeginFrame(SKColor clearColor)
+    public void BeginFrame(SKColor clearColor, bool clear = true)
     {
         _window.MakeCurrent();
-        _surface.Canvas.Clear(clearColor);
+        if (clear)
+            _surface.Canvas.Clear(clearColor);
         GL.GetInteger(GetPName.DrawFramebufferBinding, out _surfaceFbo);
         if (_surfaceFbo == 0)
             GL.GetInteger(GetPName.FramebufferBinding, out _surfaceFbo);
@@ -258,6 +435,21 @@ internal sealed class GpuSkiaContext : IDisposable
 
     /// <summary>Submits the current frame's draw commands to the GPU.</summary>
     public void Flush() => _surface.Canvas.Flush();
+
+    // ------------------------------------------------------------------
+    // Whole-frame GPU timing (delayed, non-blocking). See GpuFrameTimerRing.
+    // BeginFrameTimer must be called with the context current immediately before
+    // the frame's flush; EndFrameTimer after its submit/readback-enqueue.
+    // ------------------------------------------------------------------
+
+    /// <summary>Starts the current frame's GPU-time measurement window.</summary>
+    public void BeginGpuFrameTimer() => _gpuTimerRing.BeginFrame();
+
+    /// <summary>Closes the current frame's GPU-time measurement window.</summary>
+    public void EndGpuFrameTimer() => _gpuTimerRing.EndFrame();
+
+    /// <summary>Returns accumulated GPU frame nanos since the last drain.</summary>
+    public long DrainGpuFrameNanos() => _gpuTimerRing.DrainFrameNanos();
 
     /// <summary>
     /// Submits the current frame and BLOCKS until the GPU has finished all
@@ -491,6 +683,30 @@ internal sealed class GpuSkiaContext : IDisposable
         }
         _grContext?.Dispose();
         _glInterface?.Dispose();
+        if (_exportTargets is not null)
+        {
+            try
+            {
+                _window.MakeCurrent();
+                foreach (ExportTarget t in _exportTargets)
+                {
+                    t.Dispose();
+                    if (t.Fbo != 0) { try { GL.DeleteFramebuffer(t.Fbo); } catch { } }
+                    if (t.Texture != 0) { try { GL.DeleteTexture(t.Texture); } catch { } }
+                }
+            }
+            catch { }
+            _exportTargets = null;
+        }
+        try
+        {
+            _window.MakeCurrent();
+            _gpuTimerRing.Dispose();
+        }
+        catch
+        {
+            // GL context may already be gone; timer teardown is best-effort.
+        }
         try
         {
             _window.Dispose();

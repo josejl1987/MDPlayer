@@ -40,7 +40,7 @@ internal enum GpuBenchmarkMode
 /// upload → dynamic content → text → flush → ONE readback into the caller's
 /// RGBA frame slot.
 /// </summary>
-internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
+internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExportSource
 {
     private readonly VisualizationTimeline _timeline;
     private readonly PanelOverlayRenderer.Options _options;
@@ -54,6 +54,7 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
     private readonly GpuSkiaContext _context;
     private readonly RenderPerformanceMetrics _performance;
     private readonly object _gate = new();
+    private int _exportCapacity;
 
     private readonly string[] _clockBySecond;
     private readonly string[] _loopLabelByFrame;
@@ -190,6 +191,18 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
     /// </summary>
     internal void ResetPerformanceMetrics() => _performance.Reset();
 
+    /// <summary>
+    /// TEST/VERIFICATION ONLY — reads export ring slot <paramref name="slot"/>
+    /// back to the CPU so a parity test can prove the GPU-export path renders
+    /// the same pixels as the standard readback path. The production export path
+    /// never reads back.
+    /// </summary>
+    internal void ReadExportFrameForTest(int slot, Span<byte> destination)
+        => _context.ReadExportSurface(slot, destination);
+
+    /// <summary>Raw GL texture id of export ring slot <paramref name="slot"/>.</summary>
+    internal int ExportTextureId(int slot) => _context.ExportTextureId(slot);
+
     public long TotalFrames
         => FrameSampleClock.FrameCount(
             Math.Max(0, _timeline.EndSample - _timeline.StartSample),
@@ -270,47 +283,17 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                     // 1) Background + chrome. Chrome is time-invariant, so it is
                     //    rendered once into an offscreen GPU surface and drawn
                     //    back as one textured quad (see EnsureChromeCache).
-                    _context.BeginFrame(ToSk(CanvasBackground));
-                    EnsureChromeCache();
-                    if (_chromeImage is not null)
-                        Canvas.DrawImage(_chromeImage, 0, 0);
-                    else
-                        DrawChrome();
+                    //    When the opaque chrome cache already covers the full
+                    //    frame, the clear underneath is redundant and is skipped.
+                    bool skipClear = BenchmarkMode == GpuBenchmarkMode.Full && _chromeImage is not null;
+                    _context.BeginFrame(ToSk(CanvasBackground), !skipClear);
 
-                    // 2) Time grid (dynamic window).
-                    long gridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawTimeGrid(currentSample);
-                    if (_performance.Enabled)
-                        _performance.GridLineTicks += Stopwatch.GetTimestamp() - gridStart;
-
-                    // 3) Fixed playheads (before the scope/dynamic layers, matching the
-                    //    CPU draw order).
-                    DrawPlayheads();
-
-                    // 4) ONE Corrscope texture upload + one DrawImage per panel.
-                    //    Case D (FullNoScopes) skips the upload entirely so the
-                    //    scope contribution can be isolated.
-                    if (!scopeGrid.IsEmpty && BenchmarkMode != GpuBenchmarkMode.FullNoScopes)
-                    {
-                        long scopeStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                        PlaceScopeRows(scopeGrid, scopeFramesAreOpaque);
-                        if (_performance.Enabled)
-                            _performance.ScopeUploadTicks += Stopwatch.GetTimestamp() - scopeStart;
-                    }
-
-                    // 5) Dynamic panel content + per-frame header state/patch text.
-                    long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawDynamicPanels(currentSample);
-                    if (_performance.Enabled)
-                        _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
-
-                    // 6) Dynamic metadata text (clock, loop label, progress).
-                    long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawClock(currentSample);
-                    DrawLoopLabel(frameIndex);
-                    DrawProgress(currentSample);
-                    if (_performance.Enabled)
-                        _performance.TextTicks += Stopwatch.GetTimestamp() - textStart;
+                    // 2-6) The shared visual draw body — the SAME command stream
+                    //      used by the CPU path, the pipelined slot path, and the
+                    //      (upcoming) GPU-resident export path, so no encoder only
+                    //      gets a "slightly different frame".
+                    bool withScopes = !scopeGrid.IsEmpty && BenchmarkMode != GpuBenchmarkMode.FullNoScopes;
+                    DrawFrameContents(currentSample, frameIndex, scopeGrid, scopeFramesAreOpaque, withScopes);
                 }
 
                 if (_performance.Enabled)
@@ -319,6 +302,8 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                 // 7) Flush. Case A blocks until the GPU has finished (draw +
                 //    submit cost, no readback); the production path stays async.
                 long flushStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                if (_performance.Enabled)
+                    _context.BeginGpuFrameTimer();
                 if (BenchmarkMode == GpuBenchmarkMode.DrawOnlySyncFlush)
                     _context.FlushSync();
                 else
@@ -334,6 +319,14 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                     if (_performance.Enabled)
                         _performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - readStart;
                 }
+
+                // Close the whole-frame GPU timing window after the readback has
+                // been issued so the end timestamp executes after the GPU finishes
+                // render + copy.
+                if (_performance.Enabled)
+                {
+                    _context.EndGpuFrameTimer();
+                }
             }
             finally
             {
@@ -347,6 +340,7 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                 _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
                 _performance.FullRedraws++;
                 _performance.RenderedPixels += (long)Width * Height;
+                _performance.GpuFrameNanos += _context.DrainGpuFrameNanos();
                 _performance.FinishFrame(allocatedBefore);
             }
         }
@@ -381,50 +375,26 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                 }
                 else
                 {
-                    _context.BeginFrame(ToSk(CanvasBackground));
-                    EnsureChromeCache();
-                    if (_chromeImage is not null)
-                        Canvas.DrawImage(_chromeImage, 0, 0);
-                    else
-                        DrawChrome();
+                    _context.BeginFrame(ToSk(CanvasBackground), BenchmarkMode != GpuBenchmarkMode.Full || _chromeImage is null);
 
-                    long gridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawTimeGrid(currentSample);
-                    if (_performance.Enabled)
-                        _performance.GridLineTicks += Stopwatch.GetTimestamp() - gridStart;
-
-                    DrawPlayheads();
-
-                    if (slot.HasGrid && slot.Grid.Length >= ScopeFrameByteCount && BenchmarkMode != GpuBenchmarkMode.FullNoScopes)
-                    {
-                        long scopeStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                        PlaceScopeRows(slot.Grid, scopeFramesAreOpaque);
-                        if (_performance.Enabled)
-                            _performance.ScopeUploadTicks += Stopwatch.GetTimestamp() - scopeStart;
-                    }
-
-                    long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawDynamicPanels(currentSample);
-                    if (_performance.Enabled)
-                        _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
-
-                    long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                    DrawClock(currentSample);
-                    DrawLoopLabel(frameIndex);
-                    DrawProgress(currentSample);
-                    if (_performance.Enabled)
-                        _performance.TextTicks += Stopwatch.GetTimestamp() - textStart;
+                    bool withScopes = slot.HasGrid && slot.Grid.Length >= ScopeFrameByteCount && BenchmarkMode != GpuBenchmarkMode.FullNoScopes;
+                    DrawFrameContents(currentSample, frameIndex, slot.Grid, scopeFramesAreOpaque, withScopes);
                 }
 
                 if (_performance.Enabled)
                     _performance.GpuDrawTicks += Stopwatch.GetTimestamp() - drawStart;
 
                 long flushStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+                if (_performance.Enabled)
+                    _context.BeginGpuFrameTimer();
                 if (BenchmarkMode == GpuBenchmarkMode.DrawOnlySyncFlush)
                 {
                     _context.FlushSync();
                     if (_performance.Enabled)
+                    {
                         _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
+                        _context.EndGpuFrameTimer();
+                    }
                     // Sync benchmark skips readback.
                     return;
                 }
@@ -439,15 +409,20 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                     {
                         _context.Flush();
                         if (_performance.Enabled)
+                        {
                             _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
-                        long readStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-                        _context.ReadPixels(slot.Frame);
-                        if (_performance.Enabled)
+                            long readStart = Stopwatch.GetTimestamp();
+                            _context.ReadPixels(slot.Frame);
                             _performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - readStart;
+                            _context.EndGpuFrameTimer();
+                        }
                         return;
                     }
                     if (_performance.Enabled)
+                    {
                         _performance.GpuFlushSyncTicks += Stopwatch.GetTimestamp() - flushStart;
+                        _context.EndGpuFrameTimer();
+                    }
                 }
             }
             finally
@@ -460,6 +435,7 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                 _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
                 _performance.FullRedraws++;
                 _performance.RenderedPixels += (long)Width * Height;
+                _performance.GpuFrameNanos += _context.DrainGpuFrameNanos();
                 _performance.FinishFrame(allocatedBefore);
             }
         }
@@ -474,6 +450,152 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
 
     public ISequentialCompositeSession CreateSequentialSession(bool scopeFramesAreOpaque = false)
         => new GpuSequentialSession(this, scopeFramesAreOpaque);
+
+    // ------------------------------------------------------------------
+    // GPU-resident export (IGpuExportSource).
+    // ------------------------------------------------------------------
+
+    public IGpuExportSession CreateGpuExportSession(
+        int capacity = 4,
+        bool scopeFramesAreOpaque = false)
+    {
+        if (capacity <= 0)
+            capacity = 4;
+        _exportCapacity = capacity;
+        return new GpuExportSession(this, capacity, scopeFramesAreOpaque);
+    }
+
+    /// <summary>
+    /// The production GPU-export render: draws the frame into export ring slot
+    /// <paramref name="slot"/>'s GPU surface and submits it, returning the
+    /// finished texture WITHOUT any readback. This is the entire readback
+    /// elimination — the frame never leaves VRAM. Only the CUDA mapping later
+    /// consumes <see cref="GpuFrame"/>.
+    /// </summary>
+    private GpuExportFrame RenderForGpuExport(
+        int slot,
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        bool scopeFramesAreOpaque)
+    {
+        lock (_gate)
+        {
+            if (frameIndex < 0 || frameIndex >= TotalFrames)
+                throw new ArgumentOutOfRangeException(
+                    nameof(frameIndex), $"Frame index {frameIndex} out of range 0..{TotalFrames - 1}.");
+            if (!scopeGrid.IsEmpty && scopeGrid.Length < ScopeFrameByteCount)
+                throw new ArgumentException(
+                    $"Scope grid requires at least {ScopeFrameByteCount} bytes, got {scopeGrid.Length}.",
+                    nameof(scopeGrid));
+
+            long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+            if (_performance.Enabled)
+                _performance.Frames++;
+
+            long currentSample = Math.Min(
+                _timeline.EndSample,
+                _timeline.StartSample + FrameSampleClock.SampleAtFrame(
+                    frameIndex, _timeline.SampleRate, FpsNumerator, FpsDenominator));
+
+            try
+            {
+                _context.MakeCurrent();
+                _context.AllocateExportRing(_exportCapacity);
+
+                if (_performance.Enabled)
+                    _context.BeginGpuFrameTimer();
+
+                // Draw the identical shared command stream into the export surface.
+                using (_context.BeginExportSurface(slot, ToSk(CanvasBackground), clear: true))
+                {
+                    DrawFrameContents(currentSample, frameIndex, scopeGrid, scopeFramesAreOpaque, !scopeGrid.IsEmpty);
+                }
+                _context.FlushExportSurface(slot);
+                _context.GrContext.Submit(false);
+
+                if (_performance.Enabled)
+                    _context.EndGpuFrameTimer();
+            }
+            finally
+            {
+                _context.ReleaseCurrent();
+            }
+
+            if (_performance.Enabled)
+            {
+                _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
+                _performance.FullRedraws++;
+                _performance.RenderedPixels += (long)Width * Height;
+                _performance.GpuFrameNanos += _context.DrainGpuFrameNanos();
+                _performance.FinishFrame(allocatedBefore);
+            }
+
+            return new GpuExportFrame(slot, _context.ExportTextureId(slot), Width, Height);
+        }
+    }
+
+    /// <summary>Disposes GPU state owned by an export session (context lives on).</summary>
+    private void ReleaseExportSession() { }
+
+    /// <summary>
+    /// The shared per-frame visual draw body: chrome (or its cached quad), the
+    /// dynamic time grid, fixed playheads, the ONE scope-grid texture upload,
+    /// dynamic panel content, and the dynamic metadata text. This is the exact
+    /// command stream shared by the synchronous, pipelined and GPU-export paths
+    /// so every consumer renders an identical frame.
+    ///
+    /// <paramref name="withScopes"/> is decided by the caller (which knows the
+    /// scope source and benchmark mode); when false the scope upload is skipped
+    /// (benchmark case D).
+    /// </summary>
+    private void DrawFrameContents(
+        long currentSample,
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        bool scopeFramesAreOpaque,
+        bool withScopes)
+    {
+        // 1) Background + chrome.
+        EnsureChromeCache();
+        if (_chromeImage is not null)
+            Canvas.DrawImage(_chromeImage, 0, 0);
+        else
+            DrawChrome();
+
+        // 2) Time grid (dynamic window).
+        long gridStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        DrawTimeGrid(currentSample);
+        if (_performance.Enabled)
+            _performance.GridLineTicks += Stopwatch.GetTimestamp() - gridStart;
+
+        // 3) Fixed playheads (before the scope/dynamic layers, matching the
+        //    CPU draw order).
+        DrawPlayheads();
+
+        // 4) ONE Corrscope texture upload + one DrawImage per panel.
+        if (withScopes)
+        {
+            long scopeStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+            PlaceScopeRows(scopeGrid, scopeFramesAreOpaque);
+            if (_performance.Enabled)
+                _performance.ScopeUploadTicks += Stopwatch.GetTimestamp() - scopeStart;
+        }
+
+        // 5) Dynamic panel content + per-frame header state/patch text.
+        long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        DrawDynamicPanels(currentSample);
+        if (_performance.Enabled)
+            _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
+
+        // 6) Dynamic metadata text (clock, loop label, progress).
+        long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        DrawClock(currentSample);
+        DrawLoopLabel(frameIndex);
+        DrawProgress(currentSample);
+        if (_performance.Enabled)
+            _performance.TextTicks += Stopwatch.GetTimestamp() - textStart;
+    }
 
     /// <summary>
     /// Renders the time-invariant chrome into an offscreen GPU surface exactly
@@ -860,6 +982,60 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer
                     _renderer._performance.GpuReadbackTicks += Stopwatch.GetTimestamp() - t0;
                 _pending.Dequeue();
             }
+        }
+    }
+
+    /// <summary>
+    /// GPU-resident export session: renders each frame into a ring of GL
+    /// textures and returns them without any GPU→CPU readback. The CUDA layer
+    /// (next slice) maps each returned texture, copies it to a hardware frame
+    /// the encoder owns, then calls <see cref="Release"/> so the slot can be
+    /// reused. <see cref="Capacity"/> bounds frames in flight.
+    /// </summary>
+    private sealed class GpuExportSession : IGpuExportSession
+    {
+        private readonly GpuPanelRenderer _renderer;
+        private readonly int _capacity;
+        private readonly bool _scopeFramesAreOpaque;
+        private readonly bool[] _inUse;
+        private int _cursor;
+
+        public GpuExportSession(GpuPanelRenderer renderer, int capacity, bool scopeFramesAreOpaque)
+        {
+            _renderer = renderer;
+            _capacity = capacity;
+            _scopeFramesAreOpaque = scopeFramesAreOpaque;
+            _inUse = new bool[capacity];
+        }
+
+        public int Capacity => _capacity;
+
+        public GpuExportFrame RenderNext(long frameIndex, ReadOnlySpan<byte> scopeGrid)
+        {
+            int slot = _cursor;
+            _cursor = (_cursor + 1) % _capacity;
+            if (_inUse[slot])
+            {
+                throw new InvalidOperationException(
+                    $"GPU export ring slot {slot} still in use — the CUDA layer must call " +
+                    "Release(slot) before the ring wraps (capacity " + _capacity + ").");
+            }
+
+            GpuExportFrame frame = _renderer.RenderForGpuExport(slot, frameIndex, scopeGrid, _scopeFramesAreOpaque);
+            _inUse[slot] = true;
+            return frame;
+        }
+
+        public void Release(int slot)
+        {
+            if ((uint)slot < (uint)_inUse.Length)
+                _inUse[slot] = false;
+        }
+
+        public void Dispose()
+        {
+            Array.Clear(_inUse, 0, _inUse.Length);
+            _renderer.ReleaseExportSession();
         }
     }
 }
