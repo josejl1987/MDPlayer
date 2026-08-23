@@ -17,7 +17,8 @@ public sealed class DbnMetricalDecoderTests
                 .Select(index => (Sample: index * Eighth, Strength: 0.35))
                 .ToArray(),
             Enumerable.Range(0, 32)
-                .Select(index => (Sample: index * Quarter, Strength: index % 4 == 0 ? 2.0 : 1.2))
+                .Where(index => index % 4 is 0 or 2)
+                .Select(index => (Sample: index * Quarter, Strength: index % 4 == 0 ? 2.0 : 0.25))
                 .ToArray(),
             endSample: 32 * Quarter,
             structuralEvidence: true);

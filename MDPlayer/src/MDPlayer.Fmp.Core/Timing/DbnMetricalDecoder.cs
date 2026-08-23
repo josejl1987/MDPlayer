@@ -48,14 +48,25 @@ internal static class DbnMetricalDecoder
         new(2, 4), new(3, 4), new(4, 4), new(6, 8),
     };
 
-    private const double MeterSwitchPenalty = 6.0;
-    private const double TempoSwitchPenalty = 8.0;
-    private const double TempoRatioPenalty = 1.5;
-    // Symbolic grids are quantized and often have near-tied bar hypotheses. The
-    // margin is deliberately small, but meter still requires a clearly preferred
-    // downbeat phase so a bare periodic stream remains unresolved.
-    private const double ResolveMargin = 0.002;
-    private const double DownbeatEvidenceMargin = 0.05;
+    // These are the explicit DBN parameters: transitions are independent of the
+    // song, while the observations are conditional on the hidden beat state.
+    // Meter priors are intentionally neutral; 4/4 must win by evidence.
+    private static readonly DbnModel Model = new(
+        MeterSwitchPenalty: 6.0,
+        TempoSwitchPenalty: 8.0,
+        TempoRatioPenalty: 1.5,
+        ResolveMargin: 0.002,
+        DownbeatEvidenceMargin: 0.05,
+        SurfaceDownbeatProbability: 0.82,
+        SurfaceCompoundProbability: 0.58,
+        SurfaceSecondaryProbability: 0.40,
+        SurfaceOffbeatProbability: 0.20,
+        AccentDownbeatProbability: 0.92,
+        AccentCompoundProbability: 0.68,
+        AccentSecondaryProbability: 0.46,
+        AccentOffbeatProbability: 0.22,
+        BoundaryDownbeatProbability: 0.95,
+        BoundaryOtherProbability: 0.08);
 
     internal static DbnMetricalResult? Decode(
         IReadOnlyList<DbnTempoHypothesis> tempos,
@@ -88,10 +99,9 @@ internal static class DbnMetricalDecoder
             DbnTempoHypothesis tempo = validTempos[tempoIndex];
             Dictionary<Meter, double> meterEvidence = SupportedMeters.ToDictionary(
                 meter => meter,
-                meter => 0.25 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
+                meter => 0.55 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
                     + 0.45 * MeterPatternScore(
-                        meter, tempo, streams, sampleRate, startSample)
-                    + 0.30 * MeterPrior(meter));
+                        meter, tempo, streams, sampleRate, startSample));
             Meter meter = meterEvidence
                 .OrderByDescending(pair => pair.Value)
                 .ThenByDescending(pair => pair.Key.QuartersPerBar)
@@ -137,12 +147,16 @@ internal static class DbnMetricalDecoder
             .Where(candidate => candidate != selected)
             .OrderByDescending(candidate => candidate.Score)
             .FirstOrDefault();
-        bool meterResolved = selected.Score >= 0.12
-            && selected.MeterMargin >= ResolveMargin
-            && selected.DownbeatMargin >= DownbeatEvidenceMargin;
+        bool meterResolved = HasAccentEvidence(streams)
+            && selected.Score >= 0.12
+            && selected.MeterMargin >= Model.ResolveMargin
+            && selected.DownbeatMargin >= Model.DownbeatEvidenceMargin;
+        bool downbeatEvidence = HasAccentEvidence(streams)
+            && HasStructuralBoundaryEvidence(
+                selected, streams, sampleRate, startSample, structuralBoundaries);
         bool downbeatResolved = meterResolved
-            && structuralBoundaries.Count > 0
-            && selected.DownbeatMargin >= ResolveMargin;
+            && downbeatEvidence
+            && selected.DownbeatMargin >= Model.ResolveMargin;
         double meterConfidence = Math.Clamp(
             0.60 * selected.Score + 0.40 * Math.Min(1, selected.MeterMargin * 8), 0, 1);
         double downbeatConfidence = Math.Clamp(
@@ -224,9 +238,7 @@ internal static class DbnMetricalDecoder
             {
                 State currentState = states[currentStateIndex];
                 double best = IsInitialNode(currentNode, startSample)
-                    ? InitialScore(
-                        tempos[currentNode.TempoIndex], currentState, currentNode,
-                        streams, structuralBoundaries)
+                    ? InitialScore(tempos[currentNode.TempoIndex])
                     : double.NegativeInfinity;
                 int bestPreviousNode = -1;
                 int bestPreviousState = -1;
@@ -393,16 +405,13 @@ internal static class DbnMetricalDecoder
         && node.Sample <= startSample + node.Step;
 
     private static double InitialScore(
-        DbnTempoHypothesis tempo,
-        State state,
-        GridNode node,
-        IReadOnlyList<BeatFeatureStream> streams,
-        IReadOnlyList<long> structuralBoundaries)
+        DbnTempoHypothesis tempo)
     {
         double prior = Math.Clamp(tempo.PriorScore, 0.001, 1.0);
-        return LogObservation(
-            ObservationAt(state, node.Sample, streams, node.Step, structuralBoundaries))
-            + 0.05 * Math.Log(prior);
+        // The first observation is added by the same update as every later
+        // observation. This keeps the Viterbi likelihood from double-counting
+        // the initial node. Tempo priors are weak and meter/phase priors neutral.
+        return 0.05 * Math.Log(prior);
     }
 
     private static int FindPreviousNode(
@@ -499,35 +508,37 @@ internal static class DbnMetricalDecoder
         double best = 0;
         for (int phase = 0; phase < units; phase++)
         {
-            double weighted = 0;
+            double logLikelihood = 0;
             double total = 0;
             foreach ((long sample, double strength) in accent.Onsets)
             {
                 long frame = (long)Math.Round((sample - tempo.PhaseSample) / step,
                     MidpointRounding.AwayFromZero);
                 int beat = (int)PositiveModulo(frame - phase, units);
-                double expected = beat == 0
-                    ? 1.0
-                    : meter.Denominator == 8 && beat == 3
-                        ? 0.62
-                        : beat % 2 == 0 ? 0.32 : 0.08;
-                weighted += strength * expected;
+                double activation = strength <= 0 ? 0 : strength / (1.0 + strength);
+                double expected = ExpectedAccentProbability(meter, beat);
+                logLikelihood += strength
+                    * Math.Log(BernoulliLikelihood(activation, expected));
                 total += strength;
             }
             if (total > 0)
-                best = Math.Max(best, weighted / total);
+                best = Math.Max(best, Math.Exp(logLikelihood / total));
         }
         _ = startSample;
         return Math.Clamp(best, 0, 1);
     }
 
-    private static double MeterPrior(Meter meter) => meter switch
+    private static double ExpectedAccentProbability(Meter meter, int beatInBar)
     {
-        { Numerator: 4, Denominator: 4 } => 1.0,
-        { Numerator: 3, Denominator: 4 } => 0.82,
-        { Numerator: 6, Denominator: 8 } => 0.78,
-        _ => 0.0,
-    };
+        bool compoundBeat = meter.Denominator == 8 && beatInBar == 3;
+        return beatInBar == 0
+            ? Model.AccentDownbeatProbability
+            : compoundBeat
+                ? Model.AccentCompoundProbability
+                : beatInBar % 2 == 0
+                    ? Model.AccentSecondaryProbability
+                    : Model.AccentOffbeatProbability;
+    }
 
     private static double ObservationAt(
         State state,
@@ -537,26 +548,76 @@ internal static class DbnMetricalDecoder
         IReadOnlyList<long> structuralBoundaries)
     {
         double signal = 0;
+        double signalWeight = 0;
         double accent = 0;
         foreach (BeatFeatureStream stream in streams)
         {
             double nearest = Nearest(stream.Onsets, sample, stepSamples * 0.32);
             signal += stream.Weight * nearest;
+            signalWeight += stream.Weight;
             if (stream.Name is "percussion" or "accent")
                 accent = Math.Max(accent, nearest);
         }
+        signal = signalWeight > 0 ? Math.Clamp(signal / signalWeight, 0, 1) : 0;
         double boundary = structuralBoundaries.Any(value =>
             Math.Abs(value - sample) <= stepSamples * 0.40) ? 1.0 : 0;
-        signal = signal / (signal + 2.0);
         bool compoundBeat = state.Meter == new Meter(6, 8) && state.BeatInBar == 3;
-        double result = state.BeatInBar switch
+        double surfaceProbability = state.BeatInBar switch
         {
-            0 => 0.72 * signal + 0.48 * accent + 0.15 * boundary,
-            _ when compoundBeat => 0.48 * signal + 0.24 * accent,
-            _ when state.BeatInBar % 2 == 0 => 0.30 * signal + 0.08 * accent,
-            _ => 0.05 * signal,
+            0 => Model.SurfaceDownbeatProbability,
+            _ when compoundBeat => Model.SurfaceCompoundProbability,
+            _ when state.BeatInBar % 2 == 0 => Model.SurfaceSecondaryProbability,
+            _ => Model.SurfaceOffbeatProbability,
         };
-        return Math.Clamp(result, 0.001, 0.999);
+        double accentProbability = ExpectedAccentProbability(state.Meter, state.BeatInBar);
+        double boundaryProbability = state.BeatInBar == 0
+            ? Model.BoundaryDownbeatProbability
+            : Model.BoundaryOtherProbability;
+        return Math.Clamp(
+            BernoulliLikelihood(signal, surfaceProbability)
+                * BernoulliLikelihood(accent, accentProbability)
+                * BernoulliLikelihood(boundary, boundaryProbability),
+            0.001,
+            0.999);
+    }
+
+    private static double BernoulliLikelihood(double activation, double expectedHitProbability)
+    {
+        double observedHitProbability = 0.05 + 0.90 * Math.Clamp(activation, 0, 1);
+        return expectedHitProbability * observedHitProbability
+            + (1.0 - expectedHitProbability) * (1.0 - observedHitProbability);
+    }
+
+    private static bool HasAccentEvidence(IReadOnlyList<BeatFeatureStream> streams) =>
+        streams.Any(stream => stream.Name == "accent" && stream.Onsets.Count >= 2);
+
+    private static bool HasStructuralBoundaryEvidence(
+        DbnMetricalCandidate selected,
+        IReadOnlyList<BeatFeatureStream> streams,
+        int sampleRate,
+        long startSample,
+        IReadOnlyList<long> structuralBoundaries)
+    {
+        if (structuralBoundaries.Count == 0)
+            return false;
+
+        double step = sampleRate * 60.0 / selected.Tempo.Bpm / 2.0;
+        long firstFrame = FirstFrameFor(selected.Tempo, sampleRate, startSample);
+        long downbeat = DownbeatAtOrBefore(
+            selected.Tempo.PhaseSample,
+            firstFrame,
+            startSample,
+            selected.Tempo.Bpm,
+            selected.Meter,
+            selected.DownbeatPhase,
+            sampleRate);
+        bool boundary = structuralBoundaries.Any(sample =>
+            Math.Abs(sample - downbeat) <= step * 0.40);
+        bool accent = streams
+            .Where(stream => stream.Name == "accent")
+            .SelectMany(stream => stream.Onsets)
+            .Any(onset => Math.Abs(onset.Sample - downbeat) <= step * 0.40);
+        return boundary && accent;
     }
 
     private static double Nearest(
@@ -608,8 +669,8 @@ internal static class DbnMetricalDecoder
         if (tempoChanged)
         {
             double ratio = tempos[currentTempoIndex].Bpm / tempos[priorTempoIndex].Bpm;
-            tempoPenalty = -TempoSwitchPenalty
-                - TempoRatioPenalty * Math.Abs(Math.Log(Math.Max(1e-9, ratio)));
+            tempoPenalty = -Model.TempoSwitchPenalty
+                - Model.TempoRatioPenalty * Math.Abs(Math.Log(Math.Max(1e-9, ratio)));
         }
 
         if (prior.Meter == current.Meter)
@@ -622,7 +683,7 @@ internal static class DbnMetricalDecoder
 
         bool priorAtBarEnd = prior.BeatInBar == Units(prior.Meter) - 1;
         return priorAtBarEnd && current.BeatInBar == 0
-            ? -MeterSwitchPenalty + tempoPenalty
+            ? -Model.MeterSwitchPenalty + tempoPenalty
             : double.NegativeInfinity;
     }
 
@@ -678,6 +739,23 @@ internal static class DbnMetricalDecoder
         long result = value % modulus;
         return result < 0 ? result + modulus : result;
     }
+
+    private sealed record DbnModel(
+        double MeterSwitchPenalty,
+        double TempoSwitchPenalty,
+        double TempoRatioPenalty,
+        double ResolveMargin,
+        double DownbeatEvidenceMargin,
+        double SurfaceDownbeatProbability,
+        double SurfaceCompoundProbability,
+        double SurfaceSecondaryProbability,
+        double SurfaceOffbeatProbability,
+        double AccentDownbeatProbability,
+        double AccentCompoundProbability,
+        double AccentSecondaryProbability,
+        double AccentOffbeatProbability,
+        double BoundaryDownbeatProbability,
+        double BoundaryOtherProbability);
 
     private readonly record struct State(Meter Meter, int BeatInBar);
 
