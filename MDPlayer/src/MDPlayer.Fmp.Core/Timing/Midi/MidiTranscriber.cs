@@ -92,7 +92,10 @@ internal sealed class MidiTranscriber
                 VoiceKind.Aggregate,
                 voiceIndex,
                 endpoint,
-                bendRange);
+                bendRange) with
+            {
+                Notes = voiceNotes.Select(source => source.Note).ToArray(),
+            };
             RegisterDomain(domainsByEndpoint, domain);
             var track = new MidiTrack
             {
@@ -100,6 +103,8 @@ internal sealed class MidiTranscriber
                 SourceVoiceId = voiceNotes[0].Voice,
                 Endpoint = endpoint,
                 VoiceDomain = domain,
+                ChannelProgram = new MidiChannelProgram(
+                    voiceNotes[0].Voice, endpoint.Channel, bendRange),
             };
             var plan = new List<Planned>(1 + notePlans.Sum(n => 3 + n.PitchStates.Count))
             {
@@ -160,6 +165,8 @@ internal sealed class MidiTranscriber
                 SourceVoiceId = sampleEvents[0].Event.VoiceId,
                 Endpoint = endpoint,
                 VoiceDomain = domain,
+                ChannelProgram = new MidiChannelProgram(
+                    sampleEvents[0].Event.VoiceId, endpoint.Channel, bendRange),
             };
             var plan = new List<Planned>(sampleEvents.Length * 4);
             if (bendRange > 0)
@@ -384,6 +391,8 @@ internal sealed class MidiTranscriber
             Name = "Native Rhythm",
             SourceVoiceId = "rhythm",
             Endpoint = new MidiEndpoint(0, PercussionChannel),
+            ChannelProgram = new MidiChannelProgram(
+                "rhythm", PercussionChannel, bendRange: 0),
         };
         var plan = new List<Planned>(rhythm.Count * 2);
         for (int index = 0; index < rhythm.Count; index++)
@@ -595,34 +604,23 @@ internal sealed class MidiTranscriber
 
     private static void FinishTrack(MidiTrack track, List<Planned> plan)
     {
-        plan.Sort(static (a, b) =>
+        if (track.ChannelProgram is MidiChannelProgram program)
         {
-            int c = a.Tick.CompareTo(b.Tick);
-            if (c != 0) return c;
-            c = a.SourceSample.CompareTo(b.SourceSample);
-            if (c != 0) return c;
-            // At an exact retrigger boundary every NoteOff must happen before the
-            // next attack state. After that boundary barrier, keep each source
-            // attack's bend -> NoteOn pair together instead of globally grouping
-            // all bends ahead of all attacks.
-            c = BoundaryRank(a.Phase).CompareTo(BoundaryRank(b.Phase));
-            if (c != 0) return c;
-            c = a.SourceIndex.CompareTo(b.SourceIndex);
-            if (c != 0) return c;
-            c = a.Phase.CompareTo(b.Phase);
-            return c != 0 ? c : a.LocalOrder.CompareTo(b.LocalOrder);
-        });
-        for (int i = 0; i < plan.Count; i++)
-        {
-            plan[i].Event.SourceOrder = i;
-            track.Events.Add(plan[i].Event);
+            program.MutableEvents.Clear();
+            foreach (Planned item in plan)
+                program.Append(item.Event);
+            program.Seal();
         }
-        // Equal-tick source order is part of fidelity. Do not let the writer regroup
-        // every bend ahead of every NoteOn at the same tick.
+        else
+        {
+            for (int index = 0; index < plan.Count; index++)
+                plan[index].Event.SourceOrder = index;
+            plan.Sort(static (left, right) => MidiEventOrder.Compare(left.Event, right.Event));
+            foreach (Planned item in plan)
+                track.Events.Add(item.Event);
+        }
         track.HasCanonicalEventOrder = true;
     }
-
-    private static int BoundaryRank(int phase) => phase == 0 ? 0 : 1;
 
     private readonly record struct PitchState(long Tick, long SourceSample, double Pitch);
     private sealed record PlannedNote(

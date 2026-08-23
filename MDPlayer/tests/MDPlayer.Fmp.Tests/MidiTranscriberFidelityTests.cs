@@ -235,12 +235,21 @@ public sealed class MidiTranscriberFidelityTests
     [Fact]
     public void Voices_SplitIntoPhysicalTracks_ChannelsAvoidPercussion()
     {
-        byte[] bytes = Transcriber.Transcribe(Timeline(
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
             Note("0", 0, Sr, 60.0),
             Note("1", 0, Sr, 62.0),
-            Note("2", 0, Sr, 64.0))).Bytes;
+            Note("2", 0, Sr, 64.0)));
+        byte[] bytes = result.Bytes;
 
         Assert.Equal(4, MidiRoundTrip.TrackChunks(bytes).Count); // conductor + 3 voices
+        Assert.Equal(3, result.Tracks.Count);
+        Assert.All(result.Tracks, track =>
+        {
+            Assert.NotNull(track.ChannelProgram);
+            Assert.Same(track.Events, track.ChannelProgram!.OrderedEvents);
+            Assert.Equal(track.Endpoint.Channel, track.ChannelProgram.MidiChannel);
+        });
+        Assert.Equal(3, result.Tracks.Select(track => track.ChannelProgram!.MidiChannel).Distinct().Count());
         for (int track = 1; track <= 3; track++)
         {
             var noteOn = (NoteOnEvent)Track(bytes, track).First(e => e.Event is NoteOnEvent).Event;

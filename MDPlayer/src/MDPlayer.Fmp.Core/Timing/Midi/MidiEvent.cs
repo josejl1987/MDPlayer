@@ -206,40 +206,57 @@ internal struct PackedMidiEvent
 /// <summary>End of Track is appended automatically.</summary>
 internal static class MidiEventOrder
 {
-    /// <summary>Deterministic ordering within a single tick (§9 / §10): note-off,
-    /// tempo/time-signature, bank/program, pitch bend, note-on, other metadata.</summary>
+    /// <summary>Deterministic ordering within a single channel program.</summary>
     public static int Rank(MidiEventBase evt)
     {
         return evt switch
         {
             MidiNoteEvent note when !note.NoteOn => 0,
-            MidiTempoEvent => 1,
-            MidiTimeSignatureEvent => 1,
-            MidiMarkerEvent => 1,
-            MidiMetaTextEvent => 1,
-            MidiBankEvent => 2,
-            MidiProgramEvent => 2,
-            MidiControlChangeEvent => 2,
+            MidiBankEvent => 1,
+            MidiProgramEvent => 1,
             MidiBendRangeEvent => 2,
             MidiTuningEvent => 2,
             MidiPitchBendEvent => 3,
             MidiNoteEvent => 4,
-            _ => 5,
+            MidiControlChangeEvent => 5,
+            MidiTempoEvent => 6,
+            MidiTimeSignatureEvent => 6,
+            MidiMarkerEvent => 6,
+            MidiMetaTextEvent => 6,
+            _ => 7,
         };
+    }
+
+    public static int Compare(MidiEventBase left, MidiEventBase right)
+    {
+        int compare = left.Tick.CompareTo(right.Tick);
+        if (compare != 0)
+            return compare;
+        compare = Rank(left).CompareTo(Rank(right));
+        return compare != 0 ? compare : left.SourceOrder.CompareTo(right.SourceOrder);
+    }
+
+    public static int Compare(PackedMidiEvent left, PackedMidiEvent right)
+    {
+        int compare = left.Tick.CompareTo(right.Tick);
+        if (compare != 0)
+            return compare;
+        compare = Rank(left).CompareTo(Rank(right));
+        return compare != 0 ? compare : left.SourceOrder.CompareTo(right.SourceOrder);
     }
 
     public static int Rank(PackedMidiEvent evt) => evt.Kind switch
     {
         PackedMidiEventKind.NoteOff => 0,
-        PackedMidiEventKind.Tempo => 1,
-        PackedMidiEventKind.TimeSignature => 1,
+        PackedMidiEventKind.Bank => 1,
+        PackedMidiEventKind.Program => 1,
         PackedMidiEventKind.BendRange => 2,
         PackedMidiEventKind.Tuning => 2,
-        PackedMidiEventKind.Bank => 2,
-        PackedMidiEventKind.Program => 2,
-        PackedMidiEventKind.ControlChange => 2,
         PackedMidiEventKind.PitchBend => 3,
         PackedMidiEventKind.NoteOn => 4,
-        _ => 5,
+        PackedMidiEventKind.ControlChange => 5,
+        PackedMidiEventKind.Tempo => 6,
+        PackedMidiEventKind.TimeSignature => 6,
+        _ => 7,
     };
 }

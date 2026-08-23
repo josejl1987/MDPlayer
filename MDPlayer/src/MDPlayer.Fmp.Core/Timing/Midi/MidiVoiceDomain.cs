@@ -20,6 +20,15 @@ internal readonly record struct MidiVoiceDomain(
 
     public SourceDomainKey Source => new(Device, VoiceFamily, SourceIndex);
 
+    /// <summary>Stable source identity used by the playable MIDI domain.</summary>
+    public string SourceVoiceId => "domain:" + Source;
+
+    /// <summary>The MIDI channel whose state this domain owns.</summary>
+    public int MidiChannel => Channel;
+
+    /// <summary>Source notes assigned to this physical domain.</summary>
+    public IReadOnlyList<NoteEvent> Notes { get; init; } = Array.Empty<NoteEvent>();
+
     /// <summary>The single pitch-bend sensitivity used by this channel-state domain.</summary>
     public int BendRange => BendRangeSemitones;
 

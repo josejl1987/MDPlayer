@@ -13,6 +13,7 @@ internal sealed class MidiTrack
 {
     private List<MidiEventBase>? _events;
     private readonly List<PackedMidiEvent> _packedEvents;
+    private MidiChannelProgram? _channelProgram;
 
     public MidiTrack()
     {
@@ -43,6 +44,32 @@ internal sealed class MidiTrack
     /// before serialization.
     /// </summary>
     internal MidiVoiceDomain? VoiceDomain { get; set; }
+
+    /// <summary>
+    /// The sole ordered channel-state stream for this playable track. Rich
+    /// compatibility tracks may leave this unset; production tracks attach it
+    /// before adding events.
+    /// </summary>
+    internal MidiChannelProgram? ChannelProgram
+    {
+        get => _channelProgram;
+        init
+        {
+            if (value is null)
+            {
+                _channelProgram = null;
+                return;
+            }
+            if (_events is null)
+                throw new InvalidOperationException(
+                    "A packed MIDI track cannot also own a rich channel program.");
+            if (_events.Count != 0)
+                throw new InvalidOperationException(
+                    "A MIDI channel program must be attached before track events are added.");
+            _channelProgram = value;
+            _events = value.MutableEvents;
+        }
+    }
 
     /// <summary>
     /// Compatibility view. Production export keeps this null and materializes
@@ -167,7 +194,8 @@ internal sealed class MidiFileWriter
             if (track.UsesPackedEvents)
                 AppendPackedEvents(chunk, track.PackedEvents, track.HasCanonicalEventOrder);
             else
-                AppendEvents(chunk, track.Events, track.HasCanonicalEventOrder);
+                AppendEvents(chunk, track.ChannelProgram?.OrderedEvents ?? track.Events,
+                    track.HasCanonicalEventOrder);
             file.Chunks.Add(chunk);
         }
 
@@ -181,8 +209,27 @@ internal sealed class MidiFileWriter
         var domainsByEndpoint = new Dictionary<MidiEndpoint, MidiVoiceDomain>();
         foreach (MidiTrack track in tracks)
         {
+            if (track.ChannelProgram is MidiChannelProgram program)
+            {
+                if (program.MidiChannel != track.Endpoint.Channel)
+                    throw new InvalidOperationException(
+                        $"MIDI channel program '{program.SourceVoiceId}' does not match track endpoint.");
+                if (!string.IsNullOrEmpty(track.SourceVoiceId)
+                    && !string.Equals(program.SourceVoiceId, track.SourceVoiceId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"MIDI channel program '{program.SourceVoiceId}' does not own track "
+                        + $"source '{track.SourceVoiceId}'.");
+                }
+                program.Validate();
+            }
+
             if (track.VoiceDomain is not MidiVoiceDomain domain)
                 continue;
+
+            if (track.ChannelProgram is not MidiChannelProgram ownedProgram)
+                throw new InvalidOperationException(
+                    $"MIDI voice domain '{domain.Source}' has no authoritative channel program.");
 
             MidiEndpoint domainEndpoint = new(domain.Port, domain.Channel);
             if (track.Endpoint != domainEndpoint)
@@ -192,6 +239,11 @@ internal sealed class MidiFileWriter
                 existing.EnsureCompatible(domain);
             else
                 domainsByEndpoint.Add(track.Endpoint, domain);
+
+            if (ownedProgram.BendRange != domain.BendRange)
+                throw new InvalidOperationException(
+                    $"MIDI channel program '{ownedProgram.SourceVoiceId}' has bend range "
+                    + $"{ownedProgram.BendRange}, expected {domain.BendRange}.");
 
             int rangeEvents = 0;
             int pitchBends = 0;
@@ -326,13 +378,7 @@ internal sealed class MidiFileWriter
     }
 
     private static int CompareRichEvents(MidiEventBase left, MidiEventBase right)
-    {
-        int compare = left.Tick.CompareTo(right.Tick);
-        if (compare != 0)
-            return compare;
-        compare = MidiEventOrder.Rank(left).CompareTo(MidiEventOrder.Rank(right));
-        return compare != 0 ? compare : left.SourceOrder.CompareTo(right.SourceOrder);
-    }
+        => MidiEventOrder.Compare(left, right);
 
     private static void AppendRawPackedEvents(
         Stream stream,
@@ -582,7 +628,7 @@ internal sealed class MidiFileWriter
     {
         IEnumerable<MidiEventBase> ordered = events;
         if (!canonical)
-            ordered = events.OrderBy(e => e.Tick).ThenBy(MidiEventOrder.Rank).ThenBy(e => e.SourceOrder);
+            ordered = events.OrderBy(e => e, Comparer<MidiEventBase>.Create(MidiEventOrder.Compare));
 
         long previousTick = 0;
         foreach (MidiEventBase evt in ordered)
@@ -653,13 +699,7 @@ internal sealed class MidiFileWriter
     }
 
     private static int ComparePackedEvents(PackedMidiEvent left, PackedMidiEvent right)
-    {
-        int compare = left.Tick.CompareTo(right.Tick);
-        if (compare != 0)
-            return compare;
-        compare = MidiEventOrder.Rank(left).CompareTo(MidiEventOrder.Rank(right));
-        return compare != 0 ? compare : left.SourceOrder.CompareTo(right.SourceOrder);
-    }
+        => MidiEventOrder.Compare(left, right);
 
     /// <summary>
     /// Converts one MDPlayer IR event to one or more DryWetMIDI events. Only the
