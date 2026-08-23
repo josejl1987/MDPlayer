@@ -262,6 +262,7 @@ internal static class SymbolicTempoInference
         double fallbackScore = 0;
         double? fallbackAlternativeBpm = null;
         double? fallbackAlternativeScore = null;
+        EllisBeatCandidate? trackedSelected = null;
         var searchedCandidates = new List<TempoCandidate>();
         RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(percussionEvidence);
         bool roleTempoResolved = false;
@@ -284,6 +285,7 @@ internal static class SymbolicTempoInference
             if (tracked is not null)
             {
                 EllisBeatCandidate selected = tracked.Selected;
+                trackedSelected = selected;
                 fallbackBpm = selected.Bpm;
                 fallbackPhaseSample = selected.PhaseSample;
                 fallbackScore = selected.Score;
@@ -446,6 +448,8 @@ internal static class SymbolicTempoInference
 
         diagnostics.SelectedBpm = bestBpm;
         diagnostics.SelectedScore = bestScore;
+        diagnostics.TempoEvidenceStreamCount = trackedSelected?.ActiveStreams ?? 0;
+        diagnostics.TempoAgreeingStreamCount = trackedSelected?.AgreeingStreams ?? 0;
         if (hierarchyResolved && !hierarchyAgreesWithFallback)
         {
             diagnostics.AlternativeBpm = hierarchy.AlternativeBpm;

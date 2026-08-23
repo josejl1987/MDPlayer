@@ -102,7 +102,11 @@ internal static class MidiCommand
                 + $"meter-resolved: {timing.Diagnostics.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}; "
                 + $"downbeat-resolved: {timing.Map.FirstDownbeatQuarter is not null}; ppq: {options.Ppq}");
         if (timing is not null)
+        {
             output.WriteLine($"source-quarter-at-start: {timing.Map.Segments[0].QuarterPositionAtStart:R}");
+            output.WriteLine($"tempo-evidence: {timing.Diagnostics.TempoAgreeingStreamCount}/" +
+                $"{timing.Diagnostics.TempoEvidenceStreamCount} independent streams");
+        }
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +

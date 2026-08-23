@@ -13,7 +13,9 @@ internal sealed record EllisBeatCandidate(
     long PhaseSample,
     double Score,
     double PathScore,
-    IReadOnlyList<long> BeatSamples);
+    IReadOnlyList<long> BeatSamples,
+    int AgreeingStreams,
+    int ActiveStreams);
 
 internal sealed record EllisBeatTrackingResult(
     EllisBeatCandidate Selected,
@@ -26,6 +28,11 @@ internal sealed record OnsetEnvelope(
     double[] Correlation,
     int HopSamples,
     double Weight);
+
+internal readonly record struct TempoAgreement(
+    double Score,
+    int AgreeingStreams,
+    int ActiveStreams);
 
 /// <summary>
 /// A small symbolic adaptation of Ellis's offline beat tracker.
@@ -87,19 +94,20 @@ internal static class EllisBeatTracker
         foreach (int bpmBin in candidateBpms)
         {
             double bpm = bpmBin / 2.0;
-            double tempoScore = AutocorrelationAgreement(envelopes, bpm, sampleRate);
-            if (tempoScore <= 0)
+            TempoAgreement agreement = AutocorrelationAgreement(envelopes, bpm, sampleRate);
+            if (agreement.Score <= 0)
                 continue;
 
             EllisBeatCandidate? bestPhase = null;
             foreach (long phase in PhaseCandidates(active, bpm, sampleRate, startSample))
             {
                 BeatPath path = DecodeBeatPath(active, bpm, phase, sampleRate, startSample, endSample);
-                double score = 0.65 * tempoScore + 0.35 * path.Score;
+                double score = 0.65 * agreement.Score + 0.35 * path.Score;
                 if (bestPhase is null || score > bestPhase.Score)
                 {
                     bestPhase = new EllisBeatCandidate(
-                        bpm, phase, score, path.Score, path.Samples);
+                        bpm, phase, score, path.Score, path.Samples,
+                        agreement.AgreeingStreams, agreement.ActiveStreams);
                 }
             }
             if (bestPhase is not null)
@@ -241,7 +249,7 @@ internal static class EllisBeatTracker
         }
     }
 
-    private static double AutocorrelationAgreement(
+    private static TempoAgreement AutocorrelationAgreement(
         IReadOnlyList<OnsetEnvelope> streams,
         double bpm,
         int sampleRate)
@@ -249,18 +257,23 @@ internal static class EllisBeatTracker
         double weightedScore = 0;
         double totalWeight = 0;
         int agreeingStreams = 0;
+        int activeStreams = 0;
         foreach (OnsetEnvelope stream in streams)
         {
             double score = StreamPeriodicity(stream, bpm, sampleRate);
             weightedScore += stream.Weight * score;
             totalWeight += stream.Weight;
+            activeStreams++;
             if (score >= 0.55)
                 agreeingStreams++;
         }
         if (totalWeight <= 0)
-            return 0;
+            return new TempoAgreement(0, agreeingStreams, activeStreams);
         double agreement = agreeingStreams / (double)streams.Count;
-        return 0.70 * weightedScore / totalWeight + 0.30 * agreement;
+        return new TempoAgreement(
+            0.70 * weightedScore / totalWeight + 0.30 * agreement,
+            agreeingStreams,
+            activeStreams);
     }
 
     private static double StreamPeriodicity(OnsetEnvelope stream, double bpm, int sampleRate)

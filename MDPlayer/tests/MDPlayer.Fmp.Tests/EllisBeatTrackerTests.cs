@@ -30,6 +30,8 @@ public sealed class EllisBeatTrackerTests
 
         Assert.Contains(result.Candidates, candidate => Math.Abs(candidate.Bpm - 112) < 0.01);
         Assert.Contains(result.Candidates, candidate => Math.Abs(candidate.Bpm - 56) < 0.01);
+        Assert.Equal(2, result.Selected.ActiveStreams);
+        Assert.True(result.Selected.AgreeingStreams >= 2);
         Assert.True(result.Alternative is not null);
         Assert.True(Math.Abs(result.Selected.Bpm / result.Alternative!.Bpm - 2.0) < 0.01
             || Math.Abs(result.Selected.Bpm / result.Alternative.Bpm - 0.5) < 0.01);

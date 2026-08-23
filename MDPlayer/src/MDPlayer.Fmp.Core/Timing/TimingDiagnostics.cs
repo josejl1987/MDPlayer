@@ -185,6 +185,12 @@ internal sealed class TimingDiagnostics
     /// <summary>Confidence derived from absolute normalized fit AND alias margin (Patch D).</summary>
     public double? TempoConfidence { get; set; }
 
+    /// <summary>Number of independent symbolic onset streams used by tempo inference.</summary>
+    public int TempoEvidenceStreamCount { get; set; }
+
+    /// <summary>Independent onset streams agreeing with the selected tempo family.</summary>
+    public int TempoAgreeingStreamCount { get; set; }
+
     /// <summary>Sample where quarter 0 occurs (negative => pickup).</summary>
     public long? PhaseSample { get; set; }
 
