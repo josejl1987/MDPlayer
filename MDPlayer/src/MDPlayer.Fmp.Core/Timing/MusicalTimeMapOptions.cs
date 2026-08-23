@@ -57,5 +57,5 @@ internal sealed class MusicalTimeMapOptions
     /// and diagnostics. Production musical export uses the bounded Ellis/DBN
     /// path instead; the legacy hierarchy has a quadratic candidate scorer.
     /// </summary>
-    public bool EnableLegacyHierarchyInference { get; init; } = true;
+    public bool EnableLegacyHierarchyInference { get; init; }
 }
