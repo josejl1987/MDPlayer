@@ -430,6 +430,7 @@ internal static class MusicalStructureAnalyzer
         diagnostics.AlternativeScore = alternativeScore;
         diagnostics.TempoConfidence = Math.Clamp(winner.Score.Score, 0.0, 1.0);
         diagnostics.TempoAmbiguous = tempoAmbiguous;
+        diagnostics.TempoResolved = resolution.TempoResolved;
         diagnostics.MeterKnown = selected.Meter is not null;
         diagnostics.DownbeatKnown = selected.FirstDownbeatQuarter is not null;
         diagnostics.SampleZeroQuarter = selected.Segments[0].QuarterPositionAtStart;
