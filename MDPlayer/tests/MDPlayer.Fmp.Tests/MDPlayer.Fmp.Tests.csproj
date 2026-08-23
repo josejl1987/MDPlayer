@@ -35,6 +35,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
+    <Content Include="..\Corpus\midi\adversarial-manifest.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\midi\adversarial-manifest.json</Link>
+    </Content>
     <!-- A real tracked repo fixture for the in-process preview smoke test. -->
     <Content Include="..\..\..\21 Master Ninja.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -46,10 +50,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\smash-up.spc</Link>
     </Content>
-    <!-- Corpus regression fixtures (FR-14 / request 40-41): 02 Stranger, 05
-         Twilight, 18 U.S.A. (Ken) I, 20 Ninja Yashiki, 28 Smoking Head. 12 - Ken's
-         Theme.vgz is MISSING from the repo (documented exclusion, D18); 32 Arctic
-         Wind.vgz is outside the 9-file corpus. -->
+    <!-- Corpus regression fixtures and MIDI adversarial sidecar members. 12 - Ken's
+         Theme.vgz is MISSING from the repo (documented exclusion, D18). -->
     <Content Include="..\..\..\02 Stranger ~ Wandering Swordsman.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\corpus\02-stranger.vgz</Link>
@@ -69,6 +71,10 @@
     <Content Include="..\..\..\28 - Smoking Head.vgz">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>testfixtures\corpus\28-smoking-head.vgz</Link>
+    </Content>
+    <Content Include="..\..\..\32 Arctic Wind.vgz">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>testfixtures\corpus\32-arctic-wind.vgz</Link>
     </Content>
     <!-- INV1/INV4/INV5 fixture (Gradius II - 53 Triumphal Arch): AY8910 noise
          rhythm edge/retrigger, SCC multi-byte frequency settle, and ultrasonic

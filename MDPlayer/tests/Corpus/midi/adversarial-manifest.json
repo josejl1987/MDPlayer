@@ -1,0 +1,87 @@
+{
+  "$schemaVersion": 1,
+  "purpose": "Semantic MIDI export corpus. Expected musical labels are deliberately null until manually reviewed from the source file.",
+  "entries": [
+    {
+      "source": "21 Master Ninja.vgz",
+      "featuresToReview": ["fm-vibrato", "patch-changes", "loop-restart"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "120 Smash Up.spc",
+      "featuresToReview": ["no-drums", "short-notes", "loop-restart"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "02 Stranger ~ Wandering Swordsman.vgz",
+      "featuresToReview": ["sparse-intro", "pickup"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "05 - Twilight Express.vgz",
+      "featuresToReview": ["portamento", "extreme-pitch"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "18 U.S.A. (Ken) I.vgz",
+      "featuresToReview": ["4-4", "native-rhythm", "patch-changes"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "20 Ninja Yashiki ~ Their Secrets Die With Them.vgz",
+      "featuresToReview": ["half-double-tempo", "native-rhythm", "loop-restart"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "28 - Smoking Head.vgz",
+      "featuresToReview": ["double-time-tempo", "native-rhythm"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "26 - Robotnik.vgz",
+      "featuresToReview": ["3-4-or-6-8", "short-notes"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    },
+    {
+      "source": "32 Arctic Wind.vgz",
+      "featuresToReview": ["tempo-change", "misleading-restart"],
+      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "allowUnresolvedTempo": true,
+      "allowUnresolvedMeter": true,
+      "allowUnresolvedDownbeat": true,
+      "reviewStatus": "pending"
+    }
+  ]
+}
