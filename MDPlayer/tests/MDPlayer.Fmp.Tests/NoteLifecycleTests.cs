@@ -67,8 +67,10 @@ public sealed class NoteLifecycleTests
         int bodyX = capX + 20;
         // Include the accent border when measuring the outer cap extent; the
         // border is intentionally brighter than the cap fill.
-        int capMinY = ScanRibbonMinY(frame, renderer.Width, capX + 1, lane.Y, lane.Bottom);
-        int bodyMinY = ScanRibbonMinY(frame, renderer.Width, bodyX, lane.Y, lane.Bottom);
+        // The diagnostic scope border occupies the lane's first row; exclude
+        // that chrome so this assertion measures ribbon geometry only.
+        int capMinY = ScanRibbonMinY(frame, renderer.Width, capX + 1, lane.Y + 1, lane.Bottom);
+        int bodyMinY = ScanRibbonMinY(frame, renderer.Width, bodyX, lane.Y + 1, lane.Bottom);
         Assert.True(bodyMinY >= 0, "No ribbon body pixels found beside the cap.");
         Assert.True(capMinY < bodyMinY,
             $"Enlarged cap does not extend above the body: capMinY={capMinY}, bodyMinY={bodyMinY}.");
