@@ -156,7 +156,13 @@ public class Program
         Console.WriteLine("MIDI options:");
         Console.WriteLine("  -o, --output PATH         Output .mid file (required)");
         Console.WriteLine("  --timeline PATH           Reuse an existing visualization timeline");
+        Console.WriteLine("  --timeline-out PATH       Retain the captured/reused source timeline");
         Console.WriteLine("  --ppq N                   Ticks per quarter note (default: 960)");
+        Console.WriteLine("  --musical-grid            Serialize the inferred Ellis/DBN musical map");
+        Console.WriteLine("  --bpm BPM                 Explicit musical tempo (implies --musical-grid)");
+        Console.WriteLine("  --meter N/D               Explicit meter (implies --musical-grid)");
+        Console.WriteLine("  --beat-offset SAMPLES    Signed phase offset (implies --musical-grid)");
+        Console.WriteLine("  --strict-timing           Reject unresolved inferred timing");
         Console.WriteLine("  --timing-report PATH      Write a raw source-time fidelity report");
         Console.WriteLine("  --pitch-report PATH       Write a raw endpoint/pitch-state report");
         Console.WriteLine();

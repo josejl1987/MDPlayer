@@ -18,6 +18,9 @@ internal sealed class MidiOptions : BatchRenderSettings
     public string Input { get; set; }
     public string Output { get; set; }
     public string Timeline { get; set; }
+
+    /// <summary>Optional path for retaining the captured source timeline.</summary>
+    public string TimelineOut { get; set; }
     public int Ppq { get; set; } = 960;
 
     public bool MusicalGrid { get; set; }
@@ -69,6 +72,7 @@ internal static class MidiOptionsParser
                 switch (name)
                 {
                     case "--timeline": result.Timeline = reader.RequireValue(name); break;
+                    case "--timeline-out": result.TimelineOut = reader.RequireValue(name); break;
                     case "--output":
                     case "-o": result.Output = reader.RequireValue(name); break;
                     case "--ppq": result.Ppq = reader.ReadInt(name); break;

@@ -58,6 +58,13 @@ internal static class MidiCommand
         captureWatch.Stop();
         output.WriteLine($"timeline: {timeline.Notes.Count} notes, {timeline.Beats.Length} beats, " +
             $"{timeline.Timing.Length} timing events, sample rate {timeline.SampleRate}");
+        if (!string.IsNullOrWhiteSpace(options.TimelineOut))
+        {
+            string timelineOut = Path.GetFullPath(options.TimelineOut);
+            Directory.CreateDirectory(Path.GetDirectoryName(timelineOut) ?? ".");
+            VisualizationJsonWriter.Write(timelineOut, timeline);
+            output.WriteLine($"timeline written: {timelineOut}");
+        }
 
         MusicalTimeMapBuildResult? timing = options.MusicalGrid
             ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
@@ -94,6 +101,8 @@ internal static class MidiCommand
                 + $"meter: {timing.Map.Meter?.ToString() ?? "unresolved"}; "
                 + $"meter-resolved: {timing.Diagnostics.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}; "
                 + $"downbeat-resolved: {timing.Map.FirstDownbeatQuarter is not null}; ppq: {options.Ppq}");
+        if (timing is not null)
+            output.WriteLine($"source-quarter-at-start: {timing.Map.Segments[0].QuarterPositionAtStart:R}");
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +

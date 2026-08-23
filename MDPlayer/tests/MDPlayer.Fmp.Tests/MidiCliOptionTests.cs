@@ -120,4 +120,12 @@ public sealed class MidiCliOptionTests
         MidiOptions o = Parse("--timeline", "track.visualization/timeline.json", "--output", "out.mid");
         Assert.Equal("track.visualization/timeline.json", o.Timeline);
     }
+
+    [Fact]
+    public void TimelineOut_CaptureRetentionAccepted()
+    {
+        MidiOptions o = Parse(
+            "--timeline-out", "captured/timeline.json", "--output", "out.mid", Input);
+        Assert.Equal("captured/timeline.json", o.TimelineOut);
+    }
 }
