@@ -53,6 +53,7 @@ internal sealed class RenderPerformanceMetrics
     public long GpuFlushSyncTicks { get; set; }
     public long GpuReadbackTicks { get; set; }
     public long ScopeUploadTicks { get; set; }
+    public long GpuFrameNanos { get; set; }
     public long AllocatedBytes { get; private set; }
 
     /// <summary>
@@ -96,6 +97,7 @@ internal sealed class RenderPerformanceMetrics
         GpuFlushSyncTicks = 0;
         GpuReadbackTicks = 0;
         ScopeUploadTicks = 0;
+        GpuFrameNanos = 0;
         AllocatedBytes = 0;
     }
 
@@ -118,7 +120,8 @@ internal sealed class RenderPerformanceMetrics
             AllocatedBytes, Process.GetCurrentProcess().PeakWorkingSet64,
             BackendName,
             Seconds(GpuDrawTicks), Seconds(GpuFlushSyncTicks),
-            Seconds(GpuReadbackTicks), Seconds(ScopeUploadTicks));
+            Seconds(GpuReadbackTicks), Seconds(ScopeUploadTicks),
+            GpuFrameNanos / 1_000_000_000.0);
 
     private static double Seconds(long ticks) => ticks / (double)Stopwatch.Frequency;
 }
@@ -161,7 +164,8 @@ internal sealed record RenderPerformanceSnapshot(
     double GpuDrawSeconds = 0,
     double GpuFlushSyncSeconds = 0,
     double GpuReadbackSeconds = 0,
-    double ScopeUploadSeconds = 0)
+    double ScopeUploadSeconds = 0,
+    double GpuFrameSeconds = 0)
 {
     public double AllocatedBytesPerFrame =>
         Frames > 0 ? AllocatedBytes / (double)Frames : 0;

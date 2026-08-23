@@ -273,7 +273,9 @@ internal sealed partial class PanelOverlayRenderer
     }
 
     private static string ShortAssetLabel(string displayName, string id)
-        => string.IsNullOrWhiteSpace(displayName) ? id : displayName;
+        => PresentationMetadata.OptionalLabel(displayName)
+            ?? PresentationMetadata.OptionalLabel(id)
+            ?? "";
 
     private static OverlayColor IdentityColor(string id, OverlayColor fallback)
     {

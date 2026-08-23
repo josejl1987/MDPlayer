@@ -94,9 +94,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// Covers MIDI 0–127, i.e. octaves -1 through 10.
     /// </summary>
     private static readonly string[] COctaveLabels = BuildCOctaveLabels();
-    private static readonly string[] PitchClassNames =
-        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    private static readonly string[] PitchLabels = BuildPitchLabels();
 
     private static string[] BuildCOctaveLabels()
     {
@@ -220,6 +217,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly EffectsMode _effects;
     private readonly AnalysisOverlayScene _analysisOverlay;
     private readonly RenderPerformanceMetrics _performance;
+    private readonly CurrentLaneStateResolver _laneStateResolver;
     private SequentialRenderState? _activeSequentialState;
     internal bool TestDisableZohRuns { get; set; }
 
@@ -332,6 +330,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             noteColorMode: _options.NoteColor,
             palette: _options.Palette);
         _panels = BuildPanels();
+        _laneStateResolver = new CurrentLaneStateResolver(_scene.Panels);
         AssignPanelStreamIds();
         _laneBaseAlphas = new double[_panels.Length][];
         _laneGridCache = new byte[_panels.Length][];
@@ -1353,6 +1352,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
 
+        DrawLaneStatuses(destination, currentSample);
         DrawPresentationTransition(destination, currentSample);
     }
 
@@ -2180,6 +2180,14 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             // scope is the signal portion of the roll. Notes and lane chrome
             // drawn afterward remain visible over the hole.
             ClearRect(frame, scope);
+            FillRect(
+                frame,
+                new OverlayRect(
+                    timeline.X,
+                    timeline.Y,
+                    Math.Min(_layout.PitchLabelWidth, Math.Max(0, timeline.Width)),
+                    timeline.Height),
+                HeaderBackground);
 
             if (!lanes)
             {
@@ -2200,25 +2208,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                         nameSlot.Right);
                 }
             }
-            else
-            {
-                // Lane label: compact scale-1 caption at the top of the pitch
-                // gutter, left-aligned so right-aligned pitch/rhythm labels in
-                // the same column stay readable.
-                OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
-                if (nameSlot.Width > 0)
-                {
-                    DrawText(
-                        frame,
-                        nameSlot.X,
-                        nameSlot.Y,
-                        Ellipsize(_panels[index].Label, 1, nameSlot.Width),
-                        PrimaryText,
-                        1,
-                        nameSlot.Right);
-                }
-            }
-
             switch (_panels[index].TrackKind)
             {
                 case VisualizationTrackKind.Pitched:
@@ -2260,15 +2249,14 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     DrawStaticPcmLanes(frame, _panels[index], timeline);
                     if (!_panels[index].Prepared.HasTrackEvents)
                     {
-                        string stateLabel = HasEnergyEnvelope(index)
-                            ? HasAudioEnergy(index)
-                                ? "AUDIO / EVENTS UNKNOWN"
-                                : "SILENT"
-                            : "NO DATA";
-                        DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4), stateLabel, MutedText, 1, timeline.Right - 8);
+                        if (!HasEnergyEnvelope(index) || !HasAudioEnergy(index))
+                            DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4),
+                                "SILENT", MutedText, 1, timeline.Right - 8);
                     }
                     break;
             }
+
+            DrawStaticLaneIdentity(frame, _panels[index], timeline);
         }
 
         // Performance lanes: thin separators between adjacent bands instead of
@@ -2370,7 +2358,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         int x = maxX - labelWidth;
         if (x < minX)
             x = minX;
-        DrawText(frame, x, labelY, label, TertiaryText, 1, maxX);
+        DrawText(frame, x, labelY, label, TertiaryText.WithAlpha(105), 1, maxX);
     }
 
     private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi, int panelIndex = -1)

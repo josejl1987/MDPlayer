@@ -128,7 +128,11 @@ internal sealed partial class GpuPanelRenderer
             int yTop = Math.Clamp(yCentreTop - half, lane.Y, lane.Bottom - 1);
             int yBottom = Math.Clamp(yCentreTop + (ribbonHeight - half), lane.Y, lane.Bottom);
             if (yBottom > yTop)
+            {
                 FillRect(new OverlayRect(left, yTop, right - left, yBottom - yTop), ribbonFill);
+                if (active)
+                    StrokeRectOutline(left, yTop, right - 1, yBottom - 1, note.Accent.Lighten(0.42).WithAlpha(235));
+            }
         }
         else
         {
@@ -173,7 +177,11 @@ internal sealed partial class GpuPanelRenderer
             }
             AddRibbonSegment(ribbonPath, segStartX, rightX, prevPitch, minMidi, maxMidi, lane, half, ribbonHeight);
             if (!ribbonPath.IsEmpty)
+            {
                 DrawPathFill(ribbonPath, ribbonFill);
+                if (active)
+                    DrawPathOutline(ribbonPath, note.Accent.Lighten(0.42).WithAlpha(235));
+            }
             // Smooth center trace for vibrato: only for the active note at the
             // playhead (1–2 notes per frame) to keep cost bounded. Inactive past
             // notes keep the ZOH stepped ribbon (visible but not smoothed).
@@ -473,15 +481,7 @@ internal sealed partial class GpuPanelRenderer
         }
 
         if (current == null)
-        {
-            DrawTextAt(
-                "TABLE UNAVAILABLE",
-                viewport.X + 4,
-                viewport.Y + Math.Max(1, viewport.Height / 2 - 4),
-                TextSizeScale1,
-                MutedText);
             return;
-        }
 
         OverlayColor identity = IdentityColor(current.Id, panel.Accent);
         long changeAge = currentIndex >= 0 ? currentSample - changes[currentIndex].SamplePosition : long.MaxValue;
@@ -494,12 +494,17 @@ internal sealed partial class GpuPanelRenderer
         DrawHorizontalLine(viewport.X, viewport.Right - 1, viewport.Bottom - 1, frame);
         if (viewport.Bottom + 2 < timeline.Bottom)
         {
-            DrawTextAt(
-                current.DisplayName ?? current.Id,
-                viewport.X + 4,
-                viewport.Bottom + 2,
-                TextSizeScale1,
-                BrightText.WithAlpha(210));
+            string label = PresentationMetadata.OptionalLabel(current.DisplayName)
+                ?? PresentationMetadata.OptionalLabel(current.Id);
+            if (label is not null)
+            {
+                DrawTextAt(
+                    label,
+                    viewport.X + 4,
+                    viewport.Bottom + 2,
+                    TextSizeScale1,
+                    BrightText.WithAlpha(210));
+            }
         }
     }
 
@@ -1078,6 +1083,25 @@ internal sealed partial class GpuPanelRenderer
         DrawHorizontalLine(left, right, bottom, color);
         DrawVerticalLine(left, top, bottom, color);
         DrawVerticalLine(right, top, bottom, color);
+    }
+
+    private void DrawPathOutline(SKPath path, OverlayColor color)
+    {
+        SKPaintStyle previousStyle = _fillPaint.Style;
+        float previousWidth = _fillPaint.StrokeWidth;
+        bool previousAA = _fillPaint.IsAntialias;
+        SKColor previousColor = _fillPaint.Color;
+
+        _fillPaint.Style = SKPaintStyle.Stroke;
+        _fillPaint.StrokeWidth = 1.2f;
+        _fillPaint.IsAntialias = true;
+        _fillPaint.Color = ToSk(color);
+        Canvas.DrawPath(path, _fillPaint);
+
+        _fillPaint.Color = previousColor;
+        _fillPaint.Style = previousStyle;
+        _fillPaint.StrokeWidth = previousWidth;
+        _fillPaint.IsAntialias = previousAA;
     }
 
     private void DrawHorizontalLine(int xLeft, int xRight, int y, OverlayColor color)

@@ -475,23 +475,6 @@ internal sealed partial class PanelOverlayRenderer
         return lane.Bottom - 1 - (int)Math.Round(fraction * Math.Max(0, lane.Height - 1));
     }
 
-    private static string[] BuildPitchLabels()
-    {
-        const int CentsPerNote = 201;
-        var labels = new string[128 * CentsPerNote];
-        for (int midi = 0; midi < 128; midi++)
-        {
-            string baseName = PitchClassNames[midi % 12] + (midi / 12 - 1);
-            for (int cents = -100; cents <= 100; cents++)
-            {
-                labels[midi * CentsPerNote + cents + 100] = Math.Abs(cents) < 8
-                    ? baseName
-                    : baseName + " " + (cents > 0 ? "+" : "") + cents + "c";
-            }
-        }
-        return labels;
-    }
-
     private string[] BuildClockStrings(string totalClock)
     {
         long durationSeconds = Math.Max(0, _timeline.EndSample - _timeline.StartSample)
@@ -532,15 +515,7 @@ internal sealed partial class PanelOverlayRenderer
     /// all string construction happens during type initialization.
     /// </summary>
     private static string FormatPitchWithCents(double actualMidi)
-    {
-        if (!double.IsFinite(actualMidi) || actualMidi < 0)
-            return "";
-        int nearestMidi = (int)Math.Round(actualMidi);
-        if ((uint)nearestMidi >= 128u)
-            return "";
-        int cents = Math.Clamp((int)Math.Round((actualMidi - nearestMidi) * 100), -100, 100);
-        return PitchLabels[nearestMidi * 201 + cents + 100];
-    }
+        => PitchLabelCache.Format(actualMidi);
 
     private static string FormatTime(double seconds)
     {

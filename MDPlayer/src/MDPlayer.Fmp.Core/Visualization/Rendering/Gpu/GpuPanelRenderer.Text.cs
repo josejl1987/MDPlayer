@@ -14,9 +14,11 @@ internal sealed partial class GpuPanelRenderer
     private const float TextSizeScale1 = 9f;
     private const float TextSizeScale2 = 14f;
     private const float TextSizeScale3 = 21f;
+    private const float PitchAxisTextSize = 8f;
 
     /// <summary>Int glyph height used for vertical centering at scale 1.</summary>
     private const int TextSizeScale1Glyph = 9;
+    private const int PitchAxisTextGlyph = 8;
 
     private OverlayColor PrimaryTextColor => _primaryText;
     private OverlayColor SecondaryTextColor => _secondaryText;

@@ -50,7 +50,7 @@ internal sealed partial class PanelOverlayRenderer
         int x = maxX - labelWidth;
         if (x < minX)
             x = minX;
-        DrawText(frame, x, y, label, TertiaryText, 1, maxX);
+        DrawText(frame, x, y, label, TertiaryText.WithAlpha(105), 1, maxX);
     }
 
     private void DrawClock(Span<byte> frame, long currentSample)
@@ -183,16 +183,16 @@ internal sealed partial class PanelOverlayRenderer
 
         string patch = showOverlay
             ? ""
-            : active?.Text.ShortLabel ?? "";
+            : PresentationMetadata.OptionalLabel(active?.Text.ShortLabel) ?? "";
         string badges = showOverlay
-            ? changeNote.Text.ChangeLabel
-            : active?.Text.BadgeLabel ?? "";
+            ? PresentationMetadata.OptionalLabel(changeNote.Text.ChangeLabel) ?? ""
+            : PresentationMetadata.OptionalLabel(active?.Text.BadgeLabel) ?? "";
 
         if (!showOverlay
             && ChipPanelHeaderBuilder.TryBuild(
                 panel.Prepared, currentSample, _chipHeaderCursors[panel.Index], out PanelHeaderData chipHeader))
         {
-            patch = chipHeader.Label;
+            patch = PresentationMetadata.OptionalLabel(chipHeader.Label) ?? "";
             badges = "";
         }
 

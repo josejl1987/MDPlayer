@@ -256,14 +256,16 @@ internal sealed class OverlayLayout
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the panel timeline area.");
         if (HasScopes && ScopeHeight < 1)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the scope area.");
-        // Pitch-label gutter scales with width from a 28px reference at 1920
-        // wide, floored at 20 so narrow canvases keep legible labels.
-        PitchLabelWidth = Math.Min(
-            56,
-            Math.Max(20, (int)Math.Round(width * (28.0 / 1920.0))));
-        // Internal padding for the pitch gutter: labels right-align within the
-        // gutter, keeping 6px clear of the panel boundary and 4px clear of the
-        // lane grid line.
+        // The left lane gutter carries semantic channel identity and the
+        // current-note badge, with pitch-axis labels sharing its right edge.
+        // Keep it compact but stable at video sizes instead of letting the
+        // status area collapse into the graph.
+        PitchLabelWidth = Math.Clamp(
+            (int)Math.Round(width * (100.0 / 1920.0)),
+            90,
+            125);
+        // Internal padding for the lane gutter: identity/status text is
+        // left-aligned while pitch/rhythm labels remain right-aligned.
         PitchLabelInsetLeft = Math.Max(3, PitchLabelWidth / 5);
         PitchLabelInsetRight = Math.Max(3, PitchLabelWidth / 7);
         if (PitchLabelInsetLeft + PitchLabelInsetRight > PitchLabelWidth)

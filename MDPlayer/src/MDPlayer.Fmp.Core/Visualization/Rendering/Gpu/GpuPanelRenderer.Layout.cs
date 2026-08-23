@@ -126,6 +126,8 @@ internal sealed partial class GpuPanelRenderer
                 DrawEmptyLaneChrome(panelIndex);
                 break;
         }
+
+        DrawLaneIdentity(panelIndex);
     }
 
     /// <summary>
@@ -176,7 +178,7 @@ internal sealed partial class GpuPanelRenderer
                 DrawGutterLabelRightAligned(
                     timeline,
                     $"C{midi / 12 - 1}",
-                    y - Math.Max(1, (TextSizeScale1Glyph - 2) / 2));
+                    y - Math.Max(1, (PitchAxisTextGlyph - 2) / 2));
             }
             else if (y > lane.Y)
             {
@@ -215,8 +217,9 @@ internal sealed partial class GpuPanelRenderer
         var labels = new List<string>();
         foreach (SampleDefinition sample in panel.Samples)
         {
-            if (!string.IsNullOrEmpty(sample.DisplayName) && !labels.Contains(sample.DisplayName))
-                labels.Add(sample.DisplayName);
+            string label = PresentationMetadata.OptionalLabel(sample.DisplayName);
+            if (label is not null && !labels.Contains(label))
+                labels.Add(label);
         }
         int laneCount = Math.Max(1, labels.Count);
         int rowHeight = Math.Max(1, timeline.Height / laneCount);
@@ -274,12 +277,43 @@ internal sealed partial class GpuPanelRenderer
             return;
         int minX = timeline.X + _layout.PitchLabelInsetLeft;
         int maxX = timeline.X + gutter - _layout.PitchLabelInsetRight;
-        SetFontSize(TextSizeScale1);
+        SetFontSize(PitchAxisTextSize);
         float labelWidth = _font.MeasureText(label);
         float x = maxX - labelWidth;
         if (x < minX)
             x = minX;
-        DrawTextAt(label, x, y, TextSizeScale1, TertiaryTextColor);
+        DrawTextAt(label, x, y, PitchAxisTextSize, TertiaryTextColor.WithAlpha(105));
+    }
+
+    private void DrawLaneIdentity(int panelIndex)
+    {
+        if (!_layout.HasRoll)
+            return;
+
+        OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+        int gutter = Math.Min(_layout.PitchLabelWidth, timeline.Width);
+        if (gutter <= 0 || timeline.Height <= 0)
+            return;
+
+        DrawLine(
+            timeline.X + gutter - 1,
+            timeline.Y,
+            timeline.X + gutter - 1,
+            timeline.Bottom - 1,
+            Border.WithAlpha(170));
+
+        int left = timeline.X + _layout.PitchLabelInsetLeft;
+        int right = timeline.X + gutter - _layout.PitchLabelInsetRight;
+        if (right <= left)
+            return;
+
+        DrawTextWithLimit(
+            _panels[panelIndex].Label,
+            left,
+            timeline.Y + 2,
+            TextSizeScale1,
+            _panels[panelIndex].Accent.Lighten(0.12).WithAlpha(225),
+            right);
     }
 
     private static IEnumerable<int> EnumerateDividers(OverlayRect timeline, int divisions)
