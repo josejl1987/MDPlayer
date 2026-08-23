@@ -1,3 +1,8 @@
+using Fmp.Core.Midi;
+using Fmp.Core.Playback.Spc;
+using Fmp.Core.Rendering;
+using Fmp.Core.Timing;
+using Fmp.Core.Visualization;
 using System.Text.Json;
 using Xunit;
 
@@ -67,6 +72,166 @@ public sealed class MidiAdversarialCorpusTests
         }
     }
 
+    [Fact]
+    public void RealCorpus_ExecutesCaptureToSerializedSmfAndHonorsTimingContract()
+    {
+        string manifestPath = Path.Combine(
+            AppContext.BaseDirectory, "testfixtures", "midi", "adversarial-manifest.json");
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        string? onlySource = Environment.GetEnvironmentVariable("MDPLAYER_CORPUS_SOURCE");
+
+        JsonElement[] corpusEntries = document.RootElement.GetProperty("entries")
+            .EnumerateArray()
+            .Where(entry => string.IsNullOrWhiteSpace(onlySource)
+                || string.Equals(entry.GetProperty("source").GetString(), onlySource,
+                    StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(corpusEntries);
+        foreach (JsonElement entry in corpusEntries)
+        {
+            string source = entry.GetProperty("source").GetString()!;
+            string linked = FixtureLinks[source];
+            string fixture = Path.Combine(
+                AppContext.BaseDirectory, "testfixtures", linked.Replace('/', Path.DirectorySeparatorChar));
+            CorpusExecution execution = Execute(fixture, entry);
+            VisualizationTimeline timeline = execution.Timeline;
+            Assert.True(timeline.EndSample > timeline.StartSample, source);
+            Assert.NotEmpty(timeline.Notes);
+            Assert.NotEmpty(execution.Export.Bytes);
+            AssertCaptureContract(entry, execution, source);
+            AssertTimingContract(entry, execution.Timing.Diagnostics, source);
+        }
+    }
+
+    private static CorpusExecution Execute(string fixture, JsonElement entry)
+    {
+        string wav = Path.Combine(Path.GetTempPath(), $"mdplayer-corpus-{Guid.NewGuid():N}.wav");
+        var sink = new TimelineDecoderEventSink(44_100);
+        try
+        {
+            bool isSpc = Path.GetExtension(fixture)
+                .Equals(".spc", StringComparison.OrdinalIgnoreCase);
+            IPlaybackBackend backend = isSpc
+                ? new SpcPlaybackBackend()
+                : new VgmPlaybackBackend();
+            using IPlaybackCaptureSession session = backend.Open(
+                new FileInfo(fixture),
+                new PlaybackOptions(
+                    LoopCount: 1,
+                    FadeSeconds: 0,
+                    TailSeconds: 0,
+                    MaxDurationSeconds: 60,
+                    OutputAudioPath: wav,
+                    SampleRate: 44_100),
+                sink);
+            session.Run();
+            VisualizationTimeline timeline = sink.Complete(
+                session.SamplePosition, "midi-adversarial-corpus");
+            MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(
+                timeline,
+                new MusicalTimeMapOptions { DetectTempoChanges = true });
+            MidiTranscriptionResult export = new MidiTranscriber(960, timing.Map)
+                .Transcribe(timeline);
+            IndependentMidiPitchValidator.Validate(timeline, export, 960, timing.Map);
+            IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export, 960);
+            if (string.Equals(Environment.GetEnvironmentVariable("MDPLAYER_CORPUS_TRACE"), "1", StringComparison.Ordinal))
+            {
+                Console.WriteLine($"CORPUS {entry.GetProperty("source").GetString()}: samples={timeline.StartSample}..{timeline.EndSample}, "
+                    + $"notes={timeline.Notes.Count}, rhythm={timeline.Rhythm.Count}, "
+                    + $"tempo={timing.Diagnostics.SelectedBpm:0.###}, "
+                    + $"alternative={timing.Diagnostics.AlternativeBpm:0.###}, "
+                    + $"ambiguous={timing.Diagnostics.TempoAmbiguous}, "
+                    + $"resolved={timing.Diagnostics.TempoResolved}, "
+                    + $"meter={timing.Diagnostics.MeterKnown}, downbeat={timing.Diagnostics.DownbeatKnown}");
+            }
+            return new CorpusExecution(
+                timeline,
+                timing,
+                export,
+                isSpc ? "native-spc" : "native-vgm");
+        }
+        finally
+        {
+            if (File.Exists(wav))
+                File.Delete(wav);
+            if (File.Exists(wav + ".tmp"))
+                File.Delete(wav + ".tmp");
+        }
+    }
+
+    private static void AssertCaptureContract(
+        JsonElement entry,
+        CorpusExecution execution,
+        string source)
+    {
+        if (!entry.TryGetProperty("captureMode", out JsonElement captureMode))
+            return;
+
+        string expected = captureMode.GetString()!;
+        Assert.Equal(expected, execution.BackendKind + (expected == "native-spc-required" ? "-required" : ""));
+        Assert.True(execution.Timeline.Notes.Count > 0,
+            $"{source} native capture produced no notes.");
+    }
+
+    private static void AssertTimingContract(
+        JsonElement entry,
+        TimingDiagnostics diagnostics,
+        string source)
+    {
+        string status = entry.GetProperty("reviewStatus").GetString()!;
+        JsonElement expected = entry.GetProperty("expected");
+        JsonElement tempo = expected.GetProperty("tempo");
+        if (status == "unresolved" && tempo.ValueKind == JsonValueKind.Null)
+            Assert.False(diagnostics.TempoResolved, $"{source} unexpectedly resolved tempo.");
+
+        if (tempo.ValueKind == JsonValueKind.Object)
+        {
+            double[] family = tempo.GetProperty("acceptedFamily")
+                .EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            if (family.Length > 0)
+            {
+                Assert.NotNull(diagnostics.SelectedBpm);
+                Assert.Contains(family, candidate =>
+                    Math.Abs(candidate - diagnostics.SelectedBpm!.Value) < 0.01);
+            }
+            // A reviewed preference documents the human-facing interpretation
+            // of an unresolved family; it must not turn an unresolved family
+            // into a hidden golden BPM. Enforce it only when the sidecar also
+            // requires resolution.
+            if (tempo.GetProperty("preferred").ValueKind == JsonValueKind.Number
+                && tempo.GetProperty("mustBeResolved").GetBoolean())
+                Assert.Equal(
+                    tempo.GetProperty("preferred").GetDouble(), diagnostics.SelectedBpm!.Value,
+                    precision: 2);
+            Assert.Equal(
+                tempo.GetProperty("mustBeAmbiguous").GetBoolean(), diagnostics.TempoAmbiguous);
+            Assert.Equal(
+                tempo.GetProperty("mustBeResolved").GetBoolean(), diagnostics.TempoResolved);
+        }
+
+        // Null means that the sidecar has no reviewed answer for that field. It
+        // must not silently become a golden guess; only an object with explicit
+        // mustBeResolved/mustBeAmbiguous assertions can constrain inference.
+        AssertExplicitResolutionContract(expected, "meter", diagnostics.MeterKnown, source);
+        AssertExplicitResolutionContract(expected, "downbeat", diagnostics.DownbeatKnown, source);
+    }
+
+    private static void AssertExplicitResolutionContract(
+        JsonElement expected,
+        string field,
+        bool actualResolved,
+        string source)
+    {
+        if (!expected.TryGetProperty(field, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("mustBeResolved", out JsonElement required))
+            return;
+
+        Assert.Equal(required.GetBoolean(), actualResolved);
+        if (required.GetBoolean())
+            Assert.True(actualResolved, $"{source} did not resolve reviewed {field}.");
+    }
+
     private static void AssertReviewedField(
         JsonElement entry,
         JsonElement expected,
@@ -80,4 +245,10 @@ public sealed class MidiAdversarialCorpusTests
                 $"Reviewed fixture {source} has unresolved {field} without {unresolvedFlag}=true.");
         }
     }
+
+    private sealed record CorpusExecution(
+        VisualizationTimeline Timeline,
+        MusicalTimeMapBuildResult Timing,
+        MidiTranscriptionResult Export,
+        string BackendKind);
 }

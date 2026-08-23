@@ -85,6 +85,35 @@ public sealed class MusicalTimeMapInvariantsTests
         Assert.Equal(-2160.0 / 960, map.TickToQuarterPosition(-2160, ppq), precision: 12);
     }
 
+    [Fact]
+    public void ElapsedTickConversion_DoesNotDoubleRoundMusicalPhase()
+    {
+        const int sampleRate = 44_100;
+        const double bpm = 188.0;
+        const int ppq = 960;
+        double samplesPerQuarter = sampleRate * 60.0 / bpm;
+        var map = new MusicalTimeMap(
+            sampleRate,
+            0,
+            new[]
+            {
+                new TempoSegment(
+                    0,
+                    1_000_000,
+                    -0.31333333333333335,
+                    samplesPerQuarter,
+                    bpm,
+                    TimingSource.SymbolicInference,
+                    0.5),
+            });
+
+        // Rounding the absolute phased tick and subtracting the rounded phase
+        // moves this timestamp from 32101 to 32102. MIDI export starts at tick
+        // zero, so the elapsed conversion must retain the nearest tick.
+        Assert.Equal(32101L, map.SampleToElapsedTick(470_636, ppq));
+        Assert.Equal(32102L, map.SampleToTick(470_636, ppq) - map.SampleToTick(0, ppq));
+    }
+
     // ---- T007: segment lookup at exact boundaries + out-of-range extrapolation ----
 
     private static MusicalTimeMap ThreeSegmentMap()

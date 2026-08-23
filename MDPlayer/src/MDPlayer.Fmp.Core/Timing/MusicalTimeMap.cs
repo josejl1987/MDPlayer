@@ -153,6 +153,34 @@ internal sealed class MusicalTimeMap
     }
 
     /// <summary>
+    /// Converts elapsed source time from <see cref="StartSample"/> to a MIDI
+    /// tick. This intentionally excludes the map's musical phase: MIDI export
+    /// places the source start at tick zero, so rounding an absolute phased tick
+    /// and subtracting the rounded start can move an event by one tick.
+    /// </summary>
+    public long SampleToElapsedTick(long sample, int ppq)
+    {
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+
+        long clamped = Math.Clamp(sample, FirstSample, EndSample);
+        decimal ticks = 0;
+        foreach (TempoSegment segment in _segments)
+        {
+            long from = Math.Max(StartSample, segment.StartSample);
+            long to = Math.Min(clamped, segment.EndSample);
+            if (to <= from)
+                continue;
+
+            ticks += (decimal)(to - from) * 1_000_000m * ppq
+                / ((decimal)SampleRate * segment.MicrosecondsPerQuarter);
+            if (clamped <= segment.EndSample)
+                break;
+        }
+        return decimal.ToInt64(decimal.Round(ticks, 0, MidpointRounding.AwayFromZero));
+    }
+
+    /// <summary>
     /// Converts an absolute quarter-note position to an absolute MIDI tick.
     /// Uses <see cref="MidpointRounding.AwayFromZero"/> so a beat anchor sitting
     /// exactly on a quarter boundary maps to the exact tick and never drifts.

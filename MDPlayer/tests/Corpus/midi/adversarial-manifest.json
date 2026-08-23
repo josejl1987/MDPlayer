@@ -16,11 +16,12 @@
       "source": "120 Smash Up.spc",
       "featuresToReview": ["no-drums", "short-notes", "loop-restart"],
       "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "captureMode": "native-spc-required",
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "The native SPC capture is unavailable and the persisted timeline has a half/double tempo disagreement with the librosa reference; meter and downbeat remain unproven."
+      "reviewNotes": "Native SPC capture is required and the complete capture-to-SMF pitch/time pipeline passes. No-drums symbolic evidence does not prove a unique tempo, meter, or downbeat, so musical timing remains explicitly unresolved."
     },
     {
       "source": "02 Stranger ~ Wandering Swordsman.vgz",
@@ -55,7 +56,16 @@
     {
       "source": "20 Ninja Yashiki ~ Their Secrets Die With Them.vgz",
       "featuresToReview": ["half-double-tempo", "native-rhythm", "loop-restart"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "expected": {
+        "tempo": {
+          "acceptedFamily": [56, 112],
+          "preferred": 112,
+          "mustBeAmbiguous": true,
+          "mustBeResolved": false
+        },
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
@@ -70,7 +80,7 @@
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "The exact capture retains an explicit 120/240 double-time tempo family; the implementation abstains from selecting a unique tempo, meter, or downbeat."
+      "reviewNotes": "The exact capture retains competing symbolic tempo hypotheses, including a half/double family; no independent review proves a unique tempo, meter, or downbeat, so the implementation abstains."
     },
     {
       "source": "26 - Robotnik.vgz",

@@ -17,8 +17,7 @@ internal static class IndependentMidiPitchValidator
         long SourceTick(long sample) => timeMap is null
             ? MidiTransportClock.SampleToTick(
                 timeline.StartSample, sample, timeline.SampleRate, ppq)
-            : timeMap.SampleToTick(sample, ppq)
-                - timeMap.SampleToTick(timeline.StartSample, ppq);
+            : timeMap.SampleToElapsedTick(sample, ppq);
 
         IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
         if (parsed.Count != export.Tracks.Count + 1)
@@ -133,6 +132,80 @@ internal static class IndependentMidiPitchValidator
             if (domain.BendRange == 0 && rangeSetCountAtEnd != 0)
                 throw new InvalidOperationException("Zero-range domain emitted bend-range configuration.");
             state.ValidateRangeSequence(domain.BendRange > 0);
+        }
+    }
+
+    public static void ValidateAbsoluteTiming(
+        VisualizationTimeline timeline,
+        MidiTranscriptionResult export,
+        int ppq)
+    {
+        ArgumentNullException.ThrowIfNull(timeline);
+        ArgumentNullException.ThrowIfNull(export);
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+
+        IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
+        (long Tick, int MicrosecondsPerQuarter)[] tempos = parsed[0].Events
+            .Where(evt => evt.Kind == ParsedKind.Tempo)
+            .Select(evt => (evt.Tick, evt.Data1))
+            .OrderBy(evt => evt.Tick)
+            .ToArray();
+        if (tempos.Length == 0 || tempos[0].Tick != 0)
+            throw new InvalidOperationException("Serialized conductor has no tick-zero tempo.");
+
+        double TickToSeconds(long tick)
+        {
+            long previousTick = 0;
+            int microseconds = tempos[0].MicrosecondsPerQuarter;
+            double seconds = 0;
+            foreach ((long tempoTick, int nextMicroseconds) in tempos)
+            {
+                if (tempoTick > tick)
+                    break;
+                if (tempoTick > previousTick)
+                {
+                    seconds += (tempoTick - previousTick) * microseconds
+                        / 1_000_000.0 / ppq;
+                    previousTick = tempoTick;
+                }
+                microseconds = nextMicroseconds;
+            }
+            return seconds + (tick - previousTick) * microseconds / 1_000_000.0 / ppq;
+        }
+
+        for (int trackIndex = 0; trackIndex < export.Tracks.Count; trackIndex++)
+        {
+            if (export.Tracks[trackIndex].VoiceDomain is not MidiVoiceDomain domain
+                || domain.Notes.Count == 0)
+                continue;
+
+            SourcePitchNote[] expectedNotes = domain.Notes.ToArray();
+            ParsedEvent[] noteOns = parsed[trackIndex + 1].Events
+                .Where(evt => evt.Kind == ParsedKind.NoteOn && evt.Channel == domain.MidiChannel)
+                .ToArray();
+            if (expectedNotes.Length != noteOns.Length)
+                throw new InvalidOperationException(
+                    $"Serialized NoteOn count {noteOns.Length} does not match source count "
+                    + $"{expectedNotes.Length} on track {trackIndex + 1}.");
+            for (int index = 0; index < expectedNotes.Length; index++)
+            {
+                double sourceSeconds = (expectedNotes[index].StartSample - timeline.StartSample)
+                    / (double)timeline.SampleRate;
+                double midiSeconds = TickToSeconds(noteOns[index].Tick);
+                int microseconds = tempos
+                    .Where(tempo => tempo.Tick <= noteOns[index].Tick)
+                    .Select(tempo => tempo.MicrosecondsPerQuarter)
+                    .Last();
+                double halfTickSeconds = microseconds / 1_000_000.0 / ppq / 2.0;
+                if (Math.Abs(sourceSeconds - midiSeconds) > halfTickSeconds + 1e-9)
+                {
+                    throw new InvalidOperationException(
+                        $"Serialized NoteOn timing error at track {trackIndex + 1}, "
+                        + $"tick {noteOns[index].Tick}: source={sourceSeconds:0.##########} "
+                        + $"MIDI={midiSeconds:0.##########}, allowed={halfTickSeconds:0.##########}.");
+                }
+            }
         }
     }
 

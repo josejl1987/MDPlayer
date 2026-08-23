@@ -11,13 +11,12 @@ internal static class MidiConductor
         if (ppq <= 0 || ppq > 0x7FFF)
             throw new ArgumentOutOfRangeException(nameof(ppq));
 
-        long originTick = map.SampleToTick(map.StartSample, ppq);
         var events = new List<MidiEventBase>();
         int sourceOrder = 0;
         int? previousTempo = null;
         foreach (TempoSegment segment in map.Segments)
         {
-            long tick = checked(map.SampleToTick(segment.StartSample, ppq) - originTick);
+            long tick = map.SampleToElapsedTick(segment.StartSample, ppq);
             int tempo = segment.MicrosecondsPerQuarter;
             if (previousTempo == tempo && tick != 0)
                 continue;

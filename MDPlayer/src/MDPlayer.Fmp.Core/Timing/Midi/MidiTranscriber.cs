@@ -103,6 +103,7 @@ internal sealed class MidiTranscriber
             PlannedNote[] notePlans = voiceNotes
                 .Select(source => PlanNote(timeline, source, ref oneTickNotes))
                 .ToArray();
+            notePlans = PreventQuantizedNoteOverlap(notePlans);
             int bendRange = BendRange(notePlans);
             Dictionary<string, int> instrumentPrograms = InstrumentPrograms(voiceNotes);
             MidiVoiceDomain domain = CreateVoiceDomain(
@@ -522,6 +523,25 @@ internal sealed class MidiTranscriber
         return new PlannedNote(source, onTick, offTick, baseNote, states);
     }
 
+    private static PlannedNote[] PreventQuantizedNoteOverlap(PlannedNote[] notes)
+    {
+        for (int index = 0; index + 1 < notes.Length; index++)
+        {
+            PlannedNote current = notes[index];
+            PlannedNote next = notes[index + 1];
+            if (current.OffTick <= next.OnTick)
+                continue;
+
+            // Source notes are monophonic but two adjacent attacks can collapse
+            // onto one MIDI tick. A forced one-tick duration would then leave the
+            // previous NoteOn active when the next NoteOn arrives. End the short
+            // note at the next attack tick; deterministic NoteOff-before-NoteOn
+            // ordering still gives the receiver a valid retrigger.
+            notes[index] = current with { OffTick = next.OnTick };
+        }
+        return notes;
+    }
+
     private static MidiVoiceDomain CreateVoiceDomain(
         SourceDomainKey? source,
         VoiceKind fallbackKind,
@@ -640,8 +660,7 @@ internal sealed class MidiTranscriber
             return MidiTransportClock.SampleToTick(
                 timeline.StartSample, sample, timeline.SampleRate, _ppq);
 
-        long origin = _timeMap.SampleToTick(timeline.StartSample, _ppq);
-        return checked(_timeMap.SampleToTick(sample, _ppq) - origin);
+        return _timeMap.SampleToElapsedTick(sample, _ppq);
     }
 
     private static void FinishTrack(MidiTrack track, List<Planned> plan)
