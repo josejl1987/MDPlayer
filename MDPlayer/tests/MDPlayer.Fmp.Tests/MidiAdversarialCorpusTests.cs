@@ -22,6 +22,8 @@ public sealed class MidiAdversarialCorpusTests
             ["28 - Smoking Head.vgz"] = "corpus/28-smoking-head.vgz",
             ["26 - Robotnik.vgz"] = "robotnik-dac.vgz",
             ["32 Arctic Wind.vgz"] = "corpus/32-arctic-wind.vgz",
+            ["positive-control-120-4-4.json"] = "midi/positive-control-120-4-4.json",
+            ["positive-control-90-6-8.json"] = "midi/positive-control-90-6-8.json",
         };
 
     [Fact]
@@ -99,7 +101,7 @@ public sealed class MidiAdversarialCorpusTests
             Assert.NotEmpty(timeline.Notes);
             Assert.NotEmpty(execution.Export.Bytes);
             AssertCaptureContract(entry, execution, source);
-            AssertTimingContract(entry, execution.Timing.Diagnostics, source);
+            AssertTimingContract(entry, execution.Timing, source);
         }
     }
 
@@ -109,6 +111,13 @@ public sealed class MidiAdversarialCorpusTests
         var sink = new TimelineDecoderEventSink(44_100);
         try
         {
+            bool isPositiveControl = entry.TryGetProperty("captureMode", out JsonElement captureMode)
+                && captureMode.GetString() == "deterministic-positive-control";
+            if (isPositiveControl)
+            {
+                return ExecutePositiveControl(entry);
+            }
+
             bool isSpc = Path.GetExtension(fixture)
                 .Equals(".spc", StringComparison.OrdinalIgnoreCase);
             IPlaybackBackend backend = isSpc
@@ -168,6 +177,11 @@ public sealed class MidiAdversarialCorpusTests
             return;
 
         string expected = captureMode.GetString()!;
+        if (expected == "deterministic-positive-control")
+        {
+            Assert.Equal(expected, execution.BackendKind);
+            return;
+        }
         Assert.Equal(expected, execution.BackendKind + (expected == "native-spc-required" ? "-required" : ""));
         Assert.True(execution.Timeline.Notes.Count > 0,
             $"{source} native capture produced no notes.");
@@ -175,9 +189,10 @@ public sealed class MidiAdversarialCorpusTests
 
     private static void AssertTimingContract(
         JsonElement entry,
-        TimingDiagnostics diagnostics,
+        MusicalTimeMapBuildResult timing,
         string source)
     {
+        TimingDiagnostics diagnostics = timing.Diagnostics;
         string status = entry.GetProperty("reviewStatus").GetString()!;
         JsonElement expected = entry.GetProperty("expected");
         JsonElement tempo = expected.GetProperty("tempo");
@@ -186,8 +201,9 @@ public sealed class MidiAdversarialCorpusTests
 
         if (tempo.ValueKind == JsonValueKind.Object)
         {
-            double[] family = tempo.GetProperty("acceptedFamily")
-                .EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            double[] family = tempo.TryGetProperty("acceptedFamily", out JsonElement acceptedFamily)
+                ? acceptedFamily.EnumerateArray().Select(value => value.GetDouble()).ToArray()
+                : Array.Empty<double>();
             if (family.Length > 0)
             {
                 Assert.NotNull(diagnostics.SelectedBpm);
@@ -198,15 +214,18 @@ public sealed class MidiAdversarialCorpusTests
             // of an unresolved family; it must not turn an unresolved family
             // into a hidden golden BPM. Enforce it only when the sidecar also
             // requires resolution.
-            if (tempo.GetProperty("preferred").ValueKind == JsonValueKind.Number
+            if (tempo.TryGetProperty("preferred", out JsonElement preferred)
+                && preferred.ValueKind == JsonValueKind.Number
                 && tempo.GetProperty("mustBeResolved").GetBoolean())
                 Assert.Equal(
-                    tempo.GetProperty("preferred").GetDouble(), diagnostics.SelectedBpm!.Value,
+                    preferred.GetDouble(), diagnostics.SelectedBpm!.Value,
                     precision: 2);
             Assert.Equal(
                 tempo.GetProperty("mustBeAmbiguous").GetBoolean(), diagnostics.TempoAmbiguous);
             Assert.Equal(
                 tempo.GetProperty("mustBeResolved").GetBoolean(), diagnostics.TempoResolved);
+            if (tempo.GetProperty("mustBeResolved").GetBoolean())
+                Assert.Equal(tempo.GetProperty("bpm").GetDouble(), timing.Map.Segments[0].BeatsPerMinute, precision: 2);
         }
 
         // Null means that the sidecar has no reviewed answer for that field. It
@@ -214,6 +233,57 @@ public sealed class MidiAdversarialCorpusTests
         // mustBeResolved/mustBeAmbiguous assertions can constrain inference.
         AssertExplicitResolutionContract(expected, "meter", diagnostics.MeterKnown, source);
         AssertExplicitResolutionContract(expected, "downbeat", diagnostics.DownbeatKnown, source);
+        if (expected.GetProperty("meter").ValueKind == JsonValueKind.Object
+            && expected.GetProperty("meter").GetProperty("mustBeResolved").GetBoolean())
+        {
+            JsonElement meter = expected.GetProperty("meter");
+            Assert.Equal(meter.GetProperty("numerator").GetInt32(), timing.Map.Meter!.Numerator);
+            Assert.Equal(meter.GetProperty("denominator").GetInt32(), timing.Map.Meter.Denominator);
+        }
+        if (expected.GetProperty("downbeat").ValueKind == JsonValueKind.Object
+            && expected.GetProperty("downbeat").GetProperty("mustBeResolved").GetBoolean())
+            Assert.NotNull(timing.Map.FirstDownbeatQuarter);
+    }
+
+    private static CorpusExecution ExecutePositiveControl(JsonElement entry)
+    {
+        JsonElement control = entry.GetProperty("positiveControl");
+        int sampleRate = control.GetProperty("sampleRate").GetInt32();
+        double bpm = control.GetProperty("bpm").GetDouble();
+        Meter meter = Meter.TryParse(control.GetProperty("meter").GetString())!;
+        long quarterSamples = (long)Math.Round(sampleRate * 60.0 / bpm);
+        int quarters = meter.Numerator * 8;
+        var notes = Enumerable.Range(0, quarters)
+            .Select(index => new NoteEvent(
+                "positive-control.voice",
+                index * quarterSamples,
+                index * quarterSamples + quarterSamples / 2,
+                440.0 * Math.Pow(2.0, ((60 + (index % 4)) - 69) / 12.0),
+                60 + (index % 4),
+                "positive-control",
+                VisualizationNoteMode.Fm,
+                false,
+                Array.Empty<PitchChange>()))
+            .ToArray();
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = sampleRate,
+            StartSample = 0,
+            EndSample = quarters * quarterSamples,
+            Notes = notes,
+            Rhythm = Array.Empty<RhythmEvent>(),
+        };
+        MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
+        {
+            FixedBpm = bpm,
+            Meter = meter,
+            BeatOffsetSamples = 0,
+            FirstDownbeatSample = 0,
+        });
+        MidiTranscriptionResult export = new MidiTranscriber(960, timing.Map).Transcribe(timeline);
+        IndependentMidiPitchValidator.Validate(timeline, export, 960, timing.Map);
+        IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export, 960);
+        return new CorpusExecution(timeline, timing, export, "deterministic-positive-control");
     }
 
     private static void AssertExplicitResolutionContract(

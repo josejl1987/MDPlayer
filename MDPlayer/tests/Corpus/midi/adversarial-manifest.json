@@ -101,6 +101,38 @@
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
       "reviewNotes": "Tempo-change and restart evidence require a segmented musical review; the available independent references do not prove a single grid or downbeat."
+    },
+    {
+      "source": "positive-control-120-4-4.json",
+      "featuresToReview": ["deterministic-positive-control", "4-4"],
+      "expected": {
+        "tempo": { "bpm": 120, "mustBeAmbiguous": false, "mustBeResolved": true },
+        "meter": { "numerator": 4, "denominator": 4, "mustBeResolved": true },
+        "downbeat": { "mustBeResolved": true }
+      },
+      "captureMode": "deterministic-positive-control",
+      "positiveControl": { "sampleRate": 44100, "bpm": 120, "meter": "4/4" },
+      "allowUnresolvedTempo": false,
+      "allowUnresolvedMeter": false,
+      "allowUnresolvedDownbeat": false,
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Deterministic control with an explicit 120 BPM, 4/4 grid and downbeat at sample zero; used to prove the executable corpus can require resolution."
+    },
+    {
+      "source": "positive-control-90-6-8.json",
+      "featuresToReview": ["deterministic-positive-control", "compound-meter"],
+      "expected": {
+        "tempo": { "bpm": 90, "mustBeAmbiguous": false, "mustBeResolved": true },
+        "meter": { "numerator": 6, "denominator": 8, "mustBeResolved": true },
+        "downbeat": { "mustBeResolved": true }
+      },
+      "captureMode": "deterministic-positive-control",
+      "positiveControl": { "sampleRate": 44100, "bpm": 90, "meter": "6/8" },
+      "allowUnresolvedTempo": false,
+      "allowUnresolvedMeter": false,
+      "allowUnresolvedDownbeat": false,
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Deterministic control with an explicit 90 BPM quarter-note tempo, compound 6/8 meter, and downbeat at sample zero."
     }
   ]
 }
