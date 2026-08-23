@@ -7,6 +7,11 @@ internal sealed record DbnTempoHypothesis(
     long PhaseSample,
     double PriorScore);
 
+internal sealed record DbnTempoRun(
+    long StartSample,
+    long EndSample,
+    DbnTempoHypothesis Tempo);
+
 internal sealed record DbnMetricalCandidate(
     DbnTempoHypothesis Tempo,
     Meter Meter,
@@ -24,7 +29,8 @@ internal sealed record DbnMetricalResult(
     double MeterConfidence,
     double DownbeatConfidence,
     IReadOnlyList<DbnMetricalCandidate> Candidates,
-    int TempoSwitchCount);
+    int TempoSwitchCount,
+    IReadOnlyList<DbnTempoRun> TempoPath);
 
 /// <summary>
 /// Compact symbolic DBN/Viterbi decoder for meter and downbeat.
@@ -149,7 +155,8 @@ internal static class DbnMetricalDecoder
             meterConfidence,
             downbeatConfidence,
             candidates,
-            joint.TempoSwitchCount);
+            joint.TempoSwitchCount,
+            joint.TempoPath);
     }
 
     private static JointViterbiResult? RunJointViterbi(
@@ -327,24 +334,58 @@ internal static class DbnMetricalDecoder
         if (selectedTempoIndex < 0 || selectedNodeIndex < 0 || selectedStateIndex < 0)
             return null;
 
-        int tempoSwitches = 0;
+        var reversePath = new List<GridNode>();
         int node = selectedNodeIndex;
         int state = selectedStateIndex;
-        while (previousNodes[node, state] >= 0)
+        while (node >= 0 && state >= 0)
         {
+            reversePath.Add(nodes[node]);
             int previousNode = previousNodes[node, state];
-            if (nodes[previousNode].TempoIndex != nodes[node].TempoIndex)
-                tempoSwitches++;
+            if (previousNode < 0)
+                break;
             int previousState = previousStates[node, state];
             node = previousNode;
             state = previousState;
         }
+        reversePath.Reverse();
+
+        var tempoPath = new List<DbnTempoRun>();
+        if (reversePath.Count > 0)
+        {
+            int currentTempoIndex = reversePath[0].TempoIndex;
+            long currentStart = startSample;
+            for (int pathIndex = 1; pathIndex < reversePath.Count; pathIndex++)
+            {
+                GridNode pathNode = reversePath[pathIndex];
+                if (pathNode.TempoIndex == currentTempoIndex)
+                    continue;
+
+                long boundary = Math.Clamp(pathNode.Sample, startSample, endSample);
+                if (boundary > currentStart)
+                {
+                    tempoPath.Add(new DbnTempoRun(
+                        currentStart,
+                        boundary,
+                        tempos[currentTempoIndex]));
+                }
+                currentTempoIndex = pathNode.TempoIndex;
+                currentStart = boundary;
+            }
+            if (endSample > currentStart)
+            {
+                tempoPath.Add(new DbnTempoRun(
+                    currentStart,
+                    endSample,
+                    tempos[currentTempoIndex]));
+            }
+        }
 
         return new JointViterbiResult(
             selectedTempoIndex,
-            tempoSwitches,
+            Math.Max(0, tempoPath.Count - 1),
             tempoScores,
-            tempoMeterScores);
+            tempoMeterScores,
+            tempoPath);
     }
 
     private static bool IsInitialNode(GridNode node, long startSample) =>
@@ -649,5 +690,6 @@ internal static class DbnMetricalDecoder
         int SelectedTempoIndex,
         int TempoSwitchCount,
         IReadOnlyList<double> TempoScores,
-        IReadOnlyList<IReadOnlyDictionary<Meter, double>> TempoMeterScores);
+        IReadOnlyList<IReadOnlyDictionary<Meter, double>> TempoMeterScores,
+        IReadOnlyList<DbnTempoRun> TempoPath);
 }

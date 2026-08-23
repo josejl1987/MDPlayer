@@ -57,7 +57,8 @@ internal readonly record struct MetricalTiming(
     int? DownbeatPhase,
     long? DownbeatSample,
     double? AlternativeBpm,
-    double? AlternativeScore);
+    double? AlternativeScore,
+    IReadOnlyList<DbnTempoRun>? TempoPath = null);
 
 internal readonly record struct BeatLevelScore(
     int TatumsPerBeat,
@@ -137,7 +138,8 @@ internal static class SymbolicTempoInference
                 null,
                 null,
                 fallbackAlternativeBpm,
-                fallbackAlternativeScore);
+                fallbackAlternativeScore,
+                null);
         }
 
         DbnMetricalCandidate selected = decoded.Selected;
@@ -167,7 +169,8 @@ internal static class SymbolicTempoInference
             downbeatPhase,
             downbeatSample,
             alternativeBpm,
-            alternativeScore);
+            alternativeScore,
+            decoded.TempoPath);
     }
 
     /// <summary>Relative tie epsilon for phase-selection comparisons (TI-HOIST).
@@ -490,35 +493,35 @@ internal static class SymbolicTempoInference
         // Phase sign convention (Patch D): phaseSample is the source sample where
         // musical quarter 0 occurs; if it is after the source start, the quarter at
         // the source start is negative (pickup). Never flipped positive.
-        double spq = timeline.SampleRate * 60.0 / bestBpm;
-        double quarterAtStart = (timeline.StartSample - bestPhaseSample) / (double)timeline.SampleRate * (bestBpm / 60.0);
-        quarterAtStart *= options.QuartersPerBeat;
-
-        if (beatOffsetQuarter is double q)
-            quarterAtStart = q;
-
-        var segment = new TempoSegment(
-            timeline.StartSample,
-            Math.Max(timeline.EndSample, timeline.StartSample),
-            quarterAtStart,
-            spq,
+        double aliasMargin = diagnostics.AlternativeBpm is double amb
+            && IsMetricalFamilyRatio(bestBpm / amb)
+                ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0))
+                : 1.0;
+        IReadOnlyList<TempoSegment> segments = BuildSymbolicTempoSegments(
+            timeline,
+            options,
+            beatOffsetQuarter,
+            // An unresolved symbolic tempo path is retained by the DBN result for
+            // diagnostics, but it is not promoted to transport until independent
+            // role evidence resolves the tempo. This prevents a locally plausible
+            // family switch from changing the serialized musical grid.
+            roleResolved ? hierarchy.TempoPath : null,
+            bestPhaseSample,
             bestBpm,
-            TimingSource.SymbolicInference,
-            ConfidenceFromScore(bestScore, diagnostics.AlternativeBpm is double amb && IsMetricalFamilyRatio(bestBpm / amb)
-                ? Math.Abs((diagnostics.SelectedScore ?? 0) - (diagnostics.AlternativeScore ?? 0)) : 1.0));
-        diagnostics.TempoMicrosecondsPerQuarter = segment.MicrosecondsPerQuarter;
+            bestScore,
+            aliasMargin);
+        TempoSegment firstSegment = segments[0];
+        diagnostics.TempoMicrosecondsPerQuarter = firstSegment.MicrosecondsPerQuarter;
 
         Meter? meter = options.Meter ?? hierarchy.Meter;
         double? firstDownbeatQuarter = null;
         if (options.FirstDownbeatSample is long explicitDownbeat && meter is not null)
         {
-            firstDownbeatQuarter = quarterAtStart
-                + (explicitDownbeat - timeline.StartSample) / spq;
+            firstDownbeatQuarter = ComputeSymbolicSampleToQuarter(segments, explicitDownbeat);
         }
         else if (hierarchy.DownbeatSample is long inferredDownbeat && meter is not null)
         {
-            firstDownbeatQuarter = quarterAtStart
-                + (inferredDownbeat - timeline.StartSample) / spq;
+            firstDownbeatQuarter = ComputeSymbolicSampleToQuarter(segments, inferredDownbeat);
         }
 
         IReadOnlyList<MusicalGridCandidate> gridCandidates =
@@ -536,10 +539,10 @@ internal static class SymbolicTempoInference
         var map = new MusicalTimeMap(
             timeline.SampleRate,
             timeline.StartSample,
-            new[] { segment },
+            segments,
             meter,
             firstDownbeatQuarter,
-            confidence: diagnostics.TempoConfidence ?? segment.Confidence,
+            confidence: diagnostics.TempoConfidence ?? firstSegment.Confidence,
             alternateBpm: diagnostics.AlternativeBpm,
             isTempoAmbiguous: diagnostics.AlternativeBpm is double,
             gridCandidates: gridCandidates);
@@ -562,13 +565,149 @@ internal static class SymbolicTempoInference
                 $"{bestBpm:0.#}/{diagnostics.AlternativeBpm!.Value:0.#} BPM ambiguity; " +
                 "treat phase/tempo as inferred");
         }
-        diagnostics.SegmentCount = 1;
+        diagnostics.SegmentCount = segments.Count;
         return new MusicalTimeMapBuildResult
         {
             Map = map,
             Diagnostics = diagnostics,
             PercussionEvidence = percussionEvidence,
         };
+    }
+
+    private static IReadOnlyList<TempoSegment> BuildSymbolicTempoSegments(
+        VisualizationTimeline timeline,
+        MusicalTimeMapOptions options,
+        double? beatOffsetQuarter,
+        IReadOnlyList<DbnTempoRun>? tempoPath,
+        long fallbackPhaseSample,
+        double fallbackBpm,
+        double score,
+        double aliasMargin)
+    {
+        long endSample = Math.Max(timeline.EndSample, timeline.StartSample);
+        var runs = tempoPath is null
+            ? Array.Empty<DbnTempoRun>()
+            : tempoPath
+                .Where(run => run.EndSample > run.StartSample
+                    && run.Tempo.Bpm > 0
+                    && double.IsFinite(run.Tempo.Bpm))
+                .ToArray();
+        double confidence = ConfidenceFromScore(score, aliasMargin);
+        if (runs.Length == 0)
+        {
+            double samplesPerQuarter = timeline.SampleRate * 60.0 / fallbackBpm;
+            double quarterAtStart = beatOffsetQuarter
+                ?? (timeline.StartSample - fallbackPhaseSample) / samplesPerQuarter
+                    * options.QuartersPerBeat;
+            return new[]
+            {
+                new TempoSegment(
+                    timeline.StartSample,
+                    endSample,
+                    quarterAtStart,
+                    samplesPerQuarter,
+                    fallbackBpm,
+                    TimingSource.SymbolicInference,
+                    confidence),
+            };
+        }
+
+        double firstSamplesPerQuarter = timeline.SampleRate * 60.0 / runs[0].Tempo.Bpm;
+        double quarter = beatOffsetQuarter
+            ?? (timeline.StartSample - runs[0].Tempo.PhaseSample) / firstSamplesPerQuarter
+                * options.QuartersPerBeat;
+        long cursor = timeline.StartSample;
+        var segments = new List<TempoSegment>(runs.Length);
+        foreach (DbnTempoRun run in runs)
+        {
+            long start = Math.Clamp(run.StartSample, timeline.StartSample, endSample);
+            long finish = Math.Clamp(run.EndSample, timeline.StartSample, endSample);
+            if (finish <= start)
+                continue;
+            if (start > cursor)
+            {
+                TempoSegment previous = segments.Count > 0 ? segments[^1] : new TempoSegment(
+                    cursor,
+                    cursor,
+                    quarter,
+                    firstSamplesPerQuarter,
+                    runs[0].Tempo.Bpm,
+                    TimingSource.SymbolicInference,
+                    confidence);
+                TempoSegment filler = new(
+                    cursor,
+                    start,
+                    quarter,
+                    previous.SamplesPerQuarter,
+                    previous.BeatsPerMinute,
+                    previous.Source,
+                    previous.Confidence);
+                segments.Add(filler);
+                quarter = filler.QuarterPositionAtEnd;
+            }
+            start = Math.Max(start, cursor);
+            if (finish <= start)
+                continue;
+
+            double samplesPerQuarter = timeline.SampleRate * 60.0 / run.Tempo.Bpm;
+            TempoSegment segment = new(
+                start,
+                finish,
+                quarter,
+                samplesPerQuarter,
+                run.Tempo.Bpm,
+                TimingSource.SymbolicInference,
+                confidence);
+            segments.Add(segment);
+            cursor = finish;
+            quarter = segment.QuarterPositionAtEnd;
+        }
+
+        if (segments.Count == 0)
+        {
+            double samplesPerQuarter = timeline.SampleRate * 60.0 / fallbackBpm;
+            return new[]
+            {
+                new TempoSegment(
+                    timeline.StartSample,
+                    endSample,
+                    beatOffsetQuarter
+                        ?? (timeline.StartSample - fallbackPhaseSample) / samplesPerQuarter
+                            * options.QuartersPerBeat,
+                    samplesPerQuarter,
+                    fallbackBpm,
+                    TimingSource.SymbolicInference,
+                    confidence),
+            };
+        }
+
+        if (cursor < endSample)
+        {
+            TempoSegment previous = segments[^1];
+            segments.Add(new TempoSegment(
+                cursor,
+                endSample,
+                previous.QuarterPositionAtEnd,
+                previous.SamplesPerQuarter,
+                previous.BeatsPerMinute,
+                previous.Source,
+                previous.Confidence));
+        }
+        return segments;
+    }
+
+    private static double ComputeSymbolicSampleToQuarter(
+        IReadOnlyList<TempoSegment> segments,
+        long sample)
+    {
+        if (sample <= segments[0].StartSample)
+            return segments[0].QuarterPositionAtStart;
+        foreach (TempoSegment segment in segments)
+        {
+            if (sample <= segment.EndSample)
+                return segment.QuarterPositionAt(sample);
+        }
+        return segments[^1].QuarterPositionAtEnd;
     }
 
     /// <summary>Confidence from normalized fit and alias margin: a strong fit with a

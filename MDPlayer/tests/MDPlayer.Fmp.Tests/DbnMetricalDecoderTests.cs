@@ -98,6 +98,11 @@ public sealed class DbnMetricalDecoderTests
         Assert.True(result.TempoSwitchCount >= 1,
             $"selected={result.Selected.Tempo.Bpm} BPM; " +
             $"candidates={string.Join(", ", result.Candidates.Select(c => c.Tempo.Bpm))}");
+        Assert.True(result.TempoPath.Count >= 2,
+            "the selected tempo path must be available to the time-map compiler");
+        Assert.Equal(0, result.TempoPath[0].StartSample);
+        Assert.Equal(firstSegmentEnd + 16 * secondBeat, result.TempoPath[^1].EndSample);
+        Assert.NotEqual(result.TempoPath[0].Tempo.Bpm, result.TempoPath[^1].Tempo.Bpm);
     }
 
     private static DbnMetricalResult Decode(
