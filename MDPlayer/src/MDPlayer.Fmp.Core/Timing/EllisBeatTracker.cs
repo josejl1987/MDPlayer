@@ -56,6 +56,11 @@ internal static class EllisBeatTracker
     private const double MaxBpm = 240.0;
     private const int MaxTempoSeedsPerStream = 5;
     private const int MaxCandidates = 12;
+    // A retained family member is an ambiguity only when it has independent
+    // support and remains within the calibrated competition band. Candidates
+    // outside this band stay available to DBN diagnostics but do not suppress
+    // a resolved tempo merely by existing.
+    private const double CompetitiveTempoScoreRatio = 0.90;
 
     internal static EllisBeatTrackingResult? Track(
         IReadOnlyList<BeatFeatureStream> streams,
@@ -127,6 +132,8 @@ internal static class EllisBeatTracker
         // ambiguous merely because the search retained several hypotheses.
         EllisBeatCandidate? alternative = candidates
             .Where(candidate => IsHalfDouble(candidate.Bpm, selected.Bpm))
+            .Where(candidate => candidate.AgreeingStreams >= 2)
+            .Where(candidate => candidate.Score >= selected.Score * CompetitiveTempoScoreRatio)
             .OrderByDescending(candidate => candidate.Score)
             .FirstOrDefault();
 
@@ -390,6 +397,10 @@ internal static class EllisBeatTracker
     {
         var backlink = Enumerable.Repeat(-1, localScore.Length).ToArray();
         var cumulative = new double[localScore.Length];
+        // Match librosa 0.11: retain first-beat mode while local score stays
+        // below the initial threshold, including leading silence and weak
+        // pickup frames. The first meaningful frame keeps its predecessor;
+        // only the absence of a predecessor makes it a path root.
         double threshold = 0.01 * localScore.Max();
         bool firstBeat = true;
         for (int frame = 0; frame < localScore.Length; frame++)
@@ -415,10 +426,15 @@ internal static class EllisBeatTracker
             cumulative[frame] = beatLocation >= 0
                 ? localScore[frame] + bestScore
                 : localScore[frame];
-            backlink[frame] = firstBeat && localScore[frame] < threshold
-                ? -1
-                : beatLocation;
-            firstBeat = false;
+            if (firstBeat && localScore[frame] < threshold)
+            {
+                backlink[frame] = -1;
+            }
+            else
+            {
+                backlink[frame] = beatLocation;
+                firstBeat = false;
+            }
         }
         return (backlink, cumulative);
     }

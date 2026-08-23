@@ -18,6 +18,10 @@ public sealed class EllisBeatTrackerTests
             .GetProperty("reference").GetString(), StringComparison.Ordinal);
         foreach (JsonElement fixture in document.RootElement.GetProperty("fixtures").EnumerateArray())
         {
+            string oracle = fixture.TryGetProperty("oracle", out JsonElement oracleElement)
+                ? oracleElement.GetString() ?? ""
+                : "librosa-0.11.0";
+            Assert.Contains(oracle, new[] { "librosa-0.11.0", "csharp-parity" });
             int frameCount = fixture.GetProperty("frameCount").GetInt32();
             var envelope = new double[frameCount];
             foreach (JsonElement onset in fixture.GetProperty("onsets").EnumerateArray())
@@ -31,7 +35,8 @@ public sealed class EllisBeatTrackerTests
             int[] expected = fixture.GetProperty("expectedFrames")
                 .EnumerateArray().Select(value => value.GetInt32()).ToArray();
 
-            Assert.Equal(expected, result.Frames);
+            Assert.True(expected.SequenceEqual(result.Frames),
+                $"{fixture.GetProperty("name").GetString()}: expected [{string.Join(", ", expected)}], actual [{string.Join(", ", result.Frames)}]");
         }
     }
 
@@ -123,5 +128,9 @@ public sealed class EllisBeatTrackerTests
                 Math.Abs(candidate.Bpm / result.Selected.Bpm - 0.5) >= 0.01
                 && Math.Abs(candidate.Bpm / result.Selected.Bpm - 2.0) >= 0.01),
             candidate => Assert.NotEqual(candidate.Bpm, result.Alternative?.Bpm));
+        Assert.Contains(result.Candidates, candidate =>
+            Math.Abs(candidate.Bpm / result.Selected.Bpm - 0.5) < 0.01
+            || Math.Abs(candidate.Bpm / result.Selected.Bpm - 2.0) < 0.01);
+        Assert.Null(result.Alternative);
     }
 }
