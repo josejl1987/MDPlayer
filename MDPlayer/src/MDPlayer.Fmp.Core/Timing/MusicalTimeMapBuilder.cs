@@ -186,6 +186,12 @@ internal static class MusicalTimeMapBuilder
                     : TimingSource.DriverValidatedTempo;
         }
 
+        // Tempo resolution is independent from phase resolution: a fixed or
+        // driver-validated rate is known even when no beat origin is available.
+        fit.Diagnostics.TempoResolved = source is TimingSource.UserOverride
+            or TimingSource.DriverValidatedTempo
+            or TimingSource.DriverBeatAnchors;
+
         if (options.StrictTiming && !fit.Diagnostics.IsTrustworthy)
         {
             throw new MusicalTimingException(

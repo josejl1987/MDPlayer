@@ -46,6 +46,7 @@ public sealed class MidiIntegrationRoundTripTests
         TimelineFixture fx = new(Sr, 120, withBeats: false);
         var build = MusicalTimeMapBuilder.Build(fx.Timeline, new MusicalTimeMapOptions { FixedBpm = 120 });
         Assert.Equal(TimingSource.UserOverride, build.Diagnostics.TempoSource);
+        Assert.True(build.Diagnostics.TempoResolved);
         Assert.True(build.Diagnostics.PhaseUnknown);
     }
 
@@ -85,6 +86,7 @@ public sealed class MidiIntegrationRoundTripTests
         var build = MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
         { Source = TimingSource.SymbolicInference });
         Assert.True(build.Diagnostics.TempoInferred, "symbolic forcing must be inferred, not authoritative");
+        Assert.False(build.Diagnostics.TempoResolved);
         Assert.True(build.Diagnostics.PhaseInferred);
         // The resolved source is reported.
         Assert.Equal(TimingSource.SymbolicInference, build.Diagnostics.TempoSource);

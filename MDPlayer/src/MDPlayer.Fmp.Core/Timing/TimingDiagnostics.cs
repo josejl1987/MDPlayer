@@ -221,6 +221,12 @@ internal sealed class TimingDiagnostics
     /// <summary>Combined metrical salience score of the selected beat level.</summary>
     public double? MetricalScore { get; set; }
 
+    /// <summary>
+    /// True only when tempo has an authoritative source or sufficient independent
+    /// symbolic evidence. A transport fallback never becomes a musical tempo claim.
+    /// </summary>
+    public bool TempoResolved { get; set; }
+
     /// <summary>Beat number within the inferred meter, when a downbeat is known.</summary>
     public int? DownbeatPhase { get; set; }
 

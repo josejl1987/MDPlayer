@@ -134,7 +134,7 @@ public sealed class MidiExportService
         {
             TimingDiagnostics d = timing.Diagnostics;
             lines.Add($"tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; "
-                + $"resolved: {d.GridSelection?.TempoResolved ?? !d.TempoAmbiguous}");
+                + $"resolved: {d.GridSelection?.TempoResolved ?? d.TempoResolved}");
             lines.Add($"meter: {timing.Map.Meter?.ToString() ?? "unresolved"}; "
                 + $"resolved: {d.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}");
             lines.Add($"downbeat: {(timing.Map.FirstDownbeatQuarter is null ? "unresolved" : "resolved")}; "

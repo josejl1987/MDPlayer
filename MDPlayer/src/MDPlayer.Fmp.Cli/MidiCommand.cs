@@ -97,7 +97,7 @@ internal static class MidiCommand
         output.WriteLine(timing is null
             ? $"midi mode: raw-fidelity; transport: 120 BPM; ppq: {options.Ppq}"
             : $"midi mode: musical-time-map; tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; "
-                + $"tempo-resolved: {timing.Diagnostics.GridSelection?.TempoResolved ?? !timing.Diagnostics.TempoAmbiguous}; "
+                + $"tempo-resolved: {timing.Diagnostics.GridSelection?.TempoResolved ?? timing.Diagnostics.TempoResolved}; "
                 + $"meter: {timing.Map.Meter?.ToString() ?? "unresolved"}; "
                 + $"meter-resolved: {timing.Diagnostics.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}; "
                 + $"downbeat-resolved: {timing.Map.FirstDownbeatQuarter is not null}; ppq: {options.Ppq}");
