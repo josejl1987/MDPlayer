@@ -23,7 +23,8 @@ internal sealed record DbnMetricalResult(
     bool DownbeatResolved,
     double MeterConfidence,
     double DownbeatConfidence,
-    IReadOnlyList<DbnMetricalCandidate> Candidates);
+    IReadOnlyList<DbnMetricalCandidate> Candidates,
+    int TempoSwitchCount);
 
 /// <summary>
 /// Compact symbolic DBN/Viterbi decoder for meter and downbeat.
@@ -42,6 +43,8 @@ internal static class DbnMetricalDecoder
     };
 
     private const double MeterSwitchPenalty = 6.0;
+    private const double TempoSwitchPenalty = 8.0;
+    private const double TempoRatioPenalty = 1.5;
     // Symbolic grids are quantized and often have near-tied bar hypotheses. The
     // margin is deliberately small, but meter still requires a clearly preferred
     // downbeat phase so a bare periodic stream remains unresolved.
@@ -62,20 +65,24 @@ internal static class DbnMetricalDecoder
         if (sampleRate <= 0 || endSample <= startSample || tempos.Count == 0)
             return null;
 
-        var candidates = new List<DbnMetricalCandidate>();
-        foreach (DbnTempoHypothesis tempo in tempos)
-        {
-            if (tempo.Bpm <= 0 || !double.IsFinite(tempo.Bpm))
-                continue;
-            ViterbiPath path = RunViterbi(
-                tempo, fixedMeter: null, streams, sampleRate, startSample, endSample,
-                structuralBoundaries);
-            if (path.Frames.Count == 0)
-                continue;
+        DbnTempoHypothesis[] validTempos = tempos
+            .Where(tempo => tempo.Bpm > 0 && double.IsFinite(tempo.Bpm))
+            .ToArray();
+        if (validTempos.Length == 0)
+            return null;
 
+        JointViterbiResult? joint = RunJointViterbi(
+            validTempos, streams, sampleRate, startSample, endSample, structuralBoundaries);
+        if (joint is null)
+            return null;
+
+        var candidates = new List<DbnMetricalCandidate>(validTempos.Length);
+        for (int tempoIndex = 0; tempoIndex < validTempos.Length; tempoIndex++)
+        {
+            DbnTempoHypothesis tempo = validTempos[tempoIndex];
             Dictionary<Meter, double> meterEvidence = SupportedMeters.ToDictionary(
                 meter => meter,
-                meter => 0.25 * path.MeterScores.GetValueOrDefault(meter)
+                meter => 0.25 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
                     + 0.45 * MeterPatternScore(
                         meter, tempo, streams, sampleRate, startSample)
                     + 0.30 * MeterPrior(meter));
@@ -98,29 +105,32 @@ internal static class DbnMetricalDecoder
                 .DefaultIfEmpty(0)
                 .Max();
             double meterMargin = meterEvidence[meter] - competingMeter;
-            // The Viterbi path explains the full state sequence; the
-            // downbeat observation term keeps a bar-length accent pattern
-            // from being washed out by dense surface onsets.
-            double score = 0.25 * path.Score
+            // The joint Viterbi path explains the complete tempo/meter/beat
+            // state sequence; the observation terms keep a bar-length accent
+            // pattern from being washed out by dense surface onsets.
+            double score = 0.55 * joint.TempoScores[tempoIndex]
                 + 0.25 * downbeatScore
-                + 0.45 * meterPatternScore
-                + 0.05 * Math.Clamp(tempo.PriorScore, 0, 1);
+                + 0.20 * meterPatternScore;
             long downbeat = DownbeatAtOrBefore(
-                tempo.PhaseSample, path.FirstFrame, startSample, tempo.Bpm, meter, phase, sampleRate);
+                tempo.PhaseSample,
+                FirstFrameFor(tempo, sampleRate, startSample),
+                startSample, tempo.Bpm, meter, phase, sampleRate);
             candidates.Add(new DbnMetricalCandidate(
                 tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin));
         }
 
-        if (candidates.Count == 0)
-            return null;
         candidates = candidates
             .OrderByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.Tempo.Bpm)
             .ThenBy(candidate => candidate.Meter.Numerator)
             .ThenBy(candidate => candidate.DownbeatPhase)
             .ToList();
-        DbnMetricalCandidate selected = candidates[0];
-        DbnMetricalCandidate? alternative = candidates.Skip(1).FirstOrDefault();
+        DbnMetricalCandidate selected = candidates.Single(
+            candidate => candidate.Tempo == validTempos[joint.SelectedTempoIndex]);
+        DbnMetricalCandidate? alternative = candidates
+            .Where(candidate => candidate != selected)
+            .OrderByDescending(candidate => candidate.Score)
+            .FirstOrDefault();
         bool meterResolved = selected.Score >= 0.12
             && selected.MeterMargin >= ResolveMargin
             && selected.DownbeatMargin >= DownbeatEvidenceMargin;
@@ -138,111 +148,265 @@ internal static class DbnMetricalDecoder
             downbeatResolved,
             meterConfidence,
             downbeatConfidence,
-            candidates);
+            candidates,
+            joint.TempoSwitchCount);
     }
 
-    private static ViterbiPath RunViterbi(
-        DbnTempoHypothesis tempo,
-        Meter? fixedMeter,
+    private static JointViterbiResult? RunJointViterbi(
+        IReadOnlyList<DbnTempoHypothesis> tempos,
         IReadOnlyList<BeatFeatureStream> streams,
         int sampleRate,
         long startSample,
         long endSample,
         IReadOnlyList<long> structuralBoundaries)
     {
-        double quarterSamples = sampleRate * 60.0 / tempo.Bpm;
-        double stepSamples = quarterSamples / 2.0;
-        if (stepSamples < 1)
-            return ViterbiPath.Empty;
-        long firstFrame = (long)Math.Floor((startSample - tempo.PhaseSample) / stepSamples) - 2;
-        long lastFrame = (long)Math.Ceiling((endSample - tempo.PhaseSample) / stepSamples) + 2;
-        int frameCount = (int)Math.Clamp(lastFrame - firstFrame + 1, 2, 250_000);
-        State[] states = fixedMeter is Meter fixedValue
-            ? StatesFor(fixedValue)
-            : SupportedMeters.SelectMany(StatesFor).ToArray();
-        double[,] scores = new double[frameCount, states.Length];
-        int[,] previous = new int[frameCount, states.Length];
-        for (int stateIndex = 0; stateIndex < states.Length; stateIndex++)
+        var rawNodes = new List<GridNode>();
+        var steps = new double[tempos.Count];
+        for (int tempoIndex = 0; tempoIndex < tempos.Count; tempoIndex++)
         {
-            State state = states[stateIndex];
-            long sample = SampleAt(tempo.PhaseSample, firstFrame, stepSamples);
-            scores[0, stateIndex] = LogObservation(
-                ObservationAt(state, sample, streams, stepSamples, structuralBoundaries));
-            previous[0, stateIndex] = -1;
+            DbnTempoHypothesis tempo = tempos[tempoIndex];
+            double step = sampleRate * 60.0 / tempo.Bpm / 2.0;
+            if (step < 1 || !double.IsFinite(step))
+                continue;
+
+            steps[tempoIndex] = step;
+            long firstFrame = FirstFrameFor(tempo, sampleRate, startSample);
+            long lastFrame = (long)Math.Ceiling(
+                (endSample - tempo.PhaseSample) / step) + 2;
+            int frameCount = (int)Math.Clamp(lastFrame - firstFrame + 1, 2, 250_000);
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                rawNodes.Add(new GridNode(
+                    tempoIndex,
+                    SampleAt(tempo.PhaseSample, firstFrame + frame, step),
+                    step));
+            }
         }
 
-        for (int frame = 1; frame < frameCount; frame++)
+        if (rawNodes.Count == 0)
+            return null;
+
+        GridNode[] nodes = rawNodes
+            .OrderBy(node => node.Sample)
+            .ThenBy(node => node.TempoIndex)
+            .ToArray();
+        var nodesByTempo = Enumerable.Range(0, tempos.Count)
+            .Select(_ => new List<int>())
+            .ToArray();
+        for (int nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
+            nodesByTempo[nodes[nodeIndex].TempoIndex].Add(nodeIndex);
+
+        State[] states = SupportedMeters.SelectMany(StatesFor).ToArray();
+        int stateCount = states.Length;
+        double[,] scores = new double[nodes.Length, stateCount];
+        int[,] previousNodes = new int[nodes.Length, stateCount];
+        int[,] previousStates = new int[nodes.Length, stateCount];
+        for (int nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
         {
-            long sample = SampleAt(tempo.PhaseSample, firstFrame + frame, stepSamples);
-            for (int currentIndex = 0; currentIndex < states.Length; currentIndex++)
+            for (int stateIndex = 0; stateIndex < stateCount; stateIndex++)
             {
-                State current = states[currentIndex];
-                double best = double.NegativeInfinity;
-                int bestPrevious = -1;
-                for (int previousIndex = 0; previousIndex < states.Length; previousIndex++)
+                scores[nodeIndex, stateIndex] = double.NegativeInfinity;
+                previousNodes[nodeIndex, stateIndex] = -1;
+                previousStates[nodeIndex, stateIndex] = -1;
+            }
+
+            GridNode currentNode = nodes[nodeIndex];
+            for (int currentStateIndex = 0;
+                 currentStateIndex < stateCount;
+                 currentStateIndex++)
+            {
+                State currentState = states[currentStateIndex];
+                double best = IsInitialNode(currentNode, startSample)
+                    ? InitialScore(
+                        tempos[currentNode.TempoIndex], currentState, currentNode,
+                        streams, structuralBoundaries)
+                    : double.NegativeInfinity;
+                int bestPreviousNode = -1;
+                int bestPreviousState = -1;
+
+                for (int previousTempoIndex = 0;
+                     previousTempoIndex < tempos.Count;
+                     previousTempoIndex++)
                 {
-                    State prior = states[previousIndex];
-                    double transition = TransitionScore(prior, current);
-                    if (double.IsNegativeInfinity(transition))
+                    if (nodesByTempo[previousTempoIndex].Count == 0)
                         continue;
-                    double value = scores[frame - 1, previousIndex] + transition;
-                    if (value > best)
+                    double tolerance = Math.Min(
+                        currentNode.Step, steps[previousTempoIndex]) * 0.45;
+                    int previousNodeIndex = FindPreviousNode(
+                        nodes, nodesByTempo[previousTempoIndex],
+                        currentNode.Sample - currentNode.Step,
+                        currentNode.Sample, tolerance);
+                    if (previousNodeIndex < 0)
+                        continue;
+
+                    for (int previousStateIndex = 0;
+                         previousStateIndex < stateCount;
+                         previousStateIndex++)
                     {
-                        best = value;
-                        bestPrevious = previousIndex;
+                        double previousScore = scores[previousNodeIndex, previousStateIndex];
+                        if (double.IsNegativeInfinity(previousScore))
+                            continue;
+                        double transition = TransitionScore(
+                            states[previousStateIndex], currentState,
+                            nodes[previousNodeIndex].TempoIndex,
+                            currentNode.TempoIndex, tempos);
+                        if (double.IsNegativeInfinity(transition))
+                            continue;
+                        double value = previousScore + transition;
+                        if (value > best)
+                        {
+                            best = value;
+                            bestPreviousNode = previousNodeIndex;
+                            bestPreviousState = previousStateIndex;
+                        }
                     }
                 }
-                scores[frame, currentIndex] = best + LogObservation(
-                    ObservationAt(current, sample, streams, stepSamples, structuralBoundaries));
-                previous[frame, currentIndex] = bestPrevious;
+
+                if (!double.IsNegativeInfinity(best))
+                {
+                    scores[nodeIndex, currentStateIndex] = best + LogObservation(
+                        ObservationAt(
+                            currentState, currentNode.Sample, streams,
+                            currentNode.Step, structuralBoundaries));
+                    previousNodes[nodeIndex, currentStateIndex] = bestPreviousNode;
+                    previousStates[nodeIndex, currentStateIndex] = bestPreviousState;
+                }
             }
         }
 
-        int finalState = 0;
-        for (int stateIndex = 1; stateIndex < states.Length; stateIndex++)
+        var tempoScores = new double[tempos.Count];
+        var tempoMeterScores = new IReadOnlyDictionary<Meter, double>[tempos.Count];
+        int selectedTempoIndex = -1;
+        int selectedNodeIndex = -1;
+        int selectedStateIndex = -1;
+        double selectedRawScore = double.NegativeInfinity;
+        for (int tempoIndex = 0; tempoIndex < tempos.Count; tempoIndex++)
         {
-            if (scores[frameCount - 1, stateIndex] > scores[frameCount - 1, finalState])
-                finalState = stateIndex;
-        }
-
-        State[] path = new State[frameCount];
-        int currentState = finalState;
-        for (int frame = frameCount - 1; frame >= 0; frame--)
-        {
-            path[frame] = states[currentState];
-            currentState = frame > 0 ? previous[frame, currentState] : currentState;
-            if (currentState < 0)
-                currentState = 0;
-        }
-
-        var meterScores = new Dictionary<Meter, double>();
-        foreach (Meter meter in SupportedMeters)
-        {
-            double best = double.NegativeInfinity;
-            for (int stateIndex = 0; stateIndex < states.Length; stateIndex++)
+            List<int> tempoNodes = nodesByTempo[tempoIndex];
+            if (tempoNodes.Count == 0)
             {
-                if (states[stateIndex].Meter == meter)
-                    best = Math.Max(best, scores[frameCount - 1, stateIndex]);
+                tempoScores[tempoIndex] = 0;
+                tempoMeterScores[tempoIndex] = new Dictionary<Meter, double>();
+                continue;
             }
-            meterScores[meter] = Math.Clamp(Math.Exp(best / frameCount), 0, 1);
+
+            int finalNodeIndex = tempoNodes
+                .OrderBy(nodeIndex => Math.Abs(nodes[nodeIndex].Sample - endSample))
+                .First();
+            int finalFrameCount = Math.Max(
+                1, (int)Math.Round((endSample - startSample) / steps[tempoIndex]));
+            double tempoRawScore = double.NegativeInfinity;
+            var meterScores = new Dictionary<Meter, double>();
+            foreach (Meter meter in SupportedMeters)
+            {
+                double meterRawScore = double.NegativeInfinity;
+                for (int stateIndex = 0; stateIndex < stateCount; stateIndex++)
+                {
+                    if (states[stateIndex].Meter != meter)
+                        continue;
+                    double value = scores[finalNodeIndex, stateIndex];
+                    meterRawScore = Math.Max(meterRawScore, value);
+                    tempoRawScore = Math.Max(tempoRawScore, value);
+                }
+                meterScores[meter] = NormalizeScore(meterRawScore, finalFrameCount);
+            }
+            tempoScores[tempoIndex] = 0.65 * NormalizeScore(tempoRawScore, finalFrameCount)
+                + 0.35 * Math.Clamp(tempos[tempoIndex].PriorScore, 0, 1);
+            tempoMeterScores[tempoIndex] = meterScores;
+            if (tempoScores[tempoIndex] > selectedRawScore)
+            {
+                selectedRawScore = tempoScores[tempoIndex];
+                selectedTempoIndex = tempoIndex;
+                selectedNodeIndex = finalNodeIndex;
+                selectedStateIndex = Enumerable.Range(0, stateCount)
+                    .OrderByDescending(index => scores[finalNodeIndex, index])
+                    .First();
+            }
         }
 
-        Meter selectedMeter = path
-            .GroupBy(value => value.Meter)
-            .OrderByDescending(group => group.Count())
-            .ThenBy(group => group.Key.Numerator)
-            .First().Key;
-        int firstBeatInBar = path.First(value => value.Meter == selectedMeter).BeatInBar;
-        double pathScore = Math.Clamp(
-            Math.Exp(scores[frameCount - 1, finalState] / frameCount), 0, 1);
-        return new ViterbiPath(
-            selectedMeter,
-            firstBeatInBar,
-            firstFrame,
-            pathScore,
-            meterScores,
-            path);
+        if (selectedTempoIndex < 0 || selectedNodeIndex < 0 || selectedStateIndex < 0)
+            return null;
+
+        int tempoSwitches = 0;
+        int node = selectedNodeIndex;
+        int state = selectedStateIndex;
+        while (previousNodes[node, state] >= 0)
+        {
+            int previousNode = previousNodes[node, state];
+            if (nodes[previousNode].TempoIndex != nodes[node].TempoIndex)
+                tempoSwitches++;
+            int previousState = previousStates[node, state];
+            node = previousNode;
+            state = previousState;
+        }
+
+        return new JointViterbiResult(
+            selectedTempoIndex,
+            tempoSwitches,
+            tempoScores,
+            tempoMeterScores);
     }
+
+    private static bool IsInitialNode(GridNode node, long startSample) =>
+        node.Sample >= startSample - node.Step * 2.5
+        && node.Sample <= startSample + node.Step;
+
+    private static double InitialScore(
+        DbnTempoHypothesis tempo,
+        State state,
+        GridNode node,
+        IReadOnlyList<BeatFeatureStream> streams,
+        IReadOnlyList<long> structuralBoundaries)
+    {
+        double prior = Math.Clamp(tempo.PriorScore, 0.001, 1.0);
+        return LogObservation(
+            ObservationAt(state, node.Sample, streams, node.Step, structuralBoundaries))
+            + 0.05 * Math.Log(prior);
+    }
+
+    private static int FindPreviousNode(
+        IReadOnlyList<GridNode> nodes,
+        IReadOnlyList<int> nodesByTempo,
+        double targetSample,
+        long currentSample,
+        double tolerance)
+    {
+        int low = 0;
+        int high = nodesByTempo.Count;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (nodes[nodesByTempo[middle]].Sample < targetSample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+
+        int bestNode = -1;
+        double bestDistance = double.PositiveInfinity;
+        for (int offset = -2; offset <= 1; offset++)
+        {
+            int position = low + offset;
+            if (position < 0 || position >= nodesByTempo.Count)
+                continue;
+            int nodeIndex = nodesByTempo[position];
+            long sample = nodes[nodeIndex].Sample;
+            if (sample >= currentSample)
+                continue;
+            double distance = Math.Abs(sample - targetSample);
+            if (distance <= tolerance && distance < bestDistance)
+            {
+                bestNode = nodeIndex;
+                bestDistance = distance;
+            }
+        }
+        return bestNode;
+    }
+
+    private static double NormalizeScore(double rawScore, int frameCount) =>
+        double.IsNegativeInfinity(rawScore)
+            ? 0
+            : Math.Clamp(Math.Exp(rawScore / Math.Max(1, frameCount)), 0, 1);
 
     private static double[] PhaseScores(
         Meter meter,
@@ -391,16 +555,33 @@ internal static class DbnMetricalDecoder
 
     private static double LogObservation(double observation) => Math.Log(observation);
 
-    private static double TransitionScore(State prior, State current)
+    private static double TransitionScore(
+        State prior,
+        State current,
+        int priorTempoIndex,
+        int currentTempoIndex,
+        IReadOnlyList<DbnTempoHypothesis> tempos)
     {
+        bool tempoChanged = priorTempoIndex != currentTempoIndex;
+        double tempoPenalty = 0;
+        if (tempoChanged)
+        {
+            double ratio = tempos[currentTempoIndex].Bpm / tempos[priorTempoIndex].Bpm;
+            tempoPenalty = -TempoSwitchPenalty
+                - TempoRatioPenalty * Math.Abs(Math.Log(Math.Max(1e-9, ratio)));
+        }
+
         if (prior.Meter == current.Meter)
         {
             int expected = (int)PositiveModulo(prior.BeatInBar + 1, Units(prior.Meter));
-            return expected == current.BeatInBar ? 0 : double.NegativeInfinity;
+            return expected == current.BeatInBar
+                ? tempoPenalty
+                : double.NegativeInfinity;
         }
+
         bool priorAtBarEnd = prior.BeatInBar == Units(prior.Meter) - 1;
         return priorAtBarEnd && current.BeatInBar == 0
-            ? -MeterSwitchPenalty
+            ? -MeterSwitchPenalty + tempoPenalty
             : double.NegativeInfinity;
     }
 
@@ -414,6 +595,15 @@ internal static class DbnMetricalDecoder
 
     private static long SampleAt(long phase, long frame, double step) =>
         (long)Math.Round(phase + frame * step, MidpointRounding.AwayFromZero);
+
+    private static long FirstFrameFor(
+        DbnTempoHypothesis tempo,
+        int sampleRate,
+        long startSample)
+    {
+        double step = sampleRate * 60.0 / tempo.Bpm / 2.0;
+        return (long)Math.Floor((startSample - tempo.PhaseSample) / step) - 2;
+    }
 
     private static long DownbeatAtOrBefore(
         long phaseSample,
@@ -450,17 +640,14 @@ internal static class DbnMetricalDecoder
 
     private readonly record struct State(Meter Meter, int BeatInBar);
 
-    private sealed record ViterbiPath(
-        Meter Meter,
-        int InitialBeatInBar,
-        long FirstFrame,
-        double Score,
-        IReadOnlyDictionary<Meter, double> MeterScores,
-        IReadOnlyList<State> Frames)
-    {
-        public static ViterbiPath Empty { get; } = new(
-            new Meter(4, 4), 0, 0, 0,
-            new Dictionary<Meter, double>(),
-            Array.Empty<State>());
-    }
+    private readonly record struct GridNode(
+        int TempoIndex,
+        long Sample,
+        double Step);
+
+    private sealed record JointViterbiResult(
+        int SelectedTempoIndex,
+        int TempoSwitchCount,
+        IReadOnlyList<double> TempoScores,
+        IReadOnlyList<IReadOnlyDictionary<Meter, double>> TempoMeterScores);
 }

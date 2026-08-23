@@ -66,6 +66,40 @@ public sealed class DbnMetricalDecoderTests
         Assert.False(result.DownbeatResolved);
     }
 
+    [Fact]
+    public void JointViterbi_AllowsTempoFamilyChangeWithATransitionPenalty()
+    {
+        const long firstSegmentEnd = 8 * Quarter;
+        const long secondBeat = 16_000; // 180 BPM
+        var onsets = Enumerable.Range(0, 8)
+            .Select(index => (Sample: index * Quarter, Strength: 1.5))
+            .Concat(Enumerable.Range(0, 16)
+                .Select(index => (Sample: firstSegmentEnd + index * secondBeat, Strength: 1.5)))
+            .ToArray();
+
+        DbnMetricalResult? result = DbnMetricalDecoder.Decode(
+            new[]
+            {
+                new DbnTempoHypothesis(120, 0, 0.20),
+                new DbnTempoHypothesis(180, 0, 1.00),
+            },
+            new[]
+            {
+                new BeatFeatureStream("percussion", onsets, 1.5),
+                new BeatFeatureStream("accent", onsets, 1.5),
+            },
+            SampleRate,
+            0,
+            firstSegmentEnd + 16 * secondBeat,
+            new[] { 0L });
+
+        Assert.NotNull(result);
+        Assert.Equal(180, result!.Selected.Tempo.Bpm);
+        Assert.True(result.TempoSwitchCount >= 1,
+            $"selected={result.Selected.Tempo.Bpm} BPM; " +
+            $"candidates={string.Join(", ", result.Candidates.Select(c => c.Tempo.Bpm))}");
+    }
+
     private static DbnMetricalResult Decode(
         IReadOnlyList<(long Sample, double Strength)> surface,
         IReadOnlyList<(long Sample, double Strength)> accents,
