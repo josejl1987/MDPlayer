@@ -179,7 +179,7 @@ public sealed class MetricalHierarchyInferenceTests
         new(voice, start, end, 440, 60, "inst", VisualizationNoteMode.Fm, false,
             Array.Empty<PitchChange>());
     [Fact]
-    public void RhythmRoles_SelectMiddleTempoAliasAndEstablishDownbeat()
+    public void RhythmEvidence_SelectsTempoFamilyButDoesNotInventDownbeat()
     {
         const int sampleRate = 44_100;
         const double expectedBpm = 149.408;
@@ -211,16 +211,15 @@ public sealed class MetricalHierarchyInferenceTests
         Assert.InRange(build.Diagnostics.SelectedBpm!.Value, 148.5, 150.5);
         // The 16th-note hi-hat stream is physically identical at the double
         // tempo (32nds at ~298.8), so the octave family stays within the
-        // ambiguity band (tempo margin ~0.031 < 0.04): the rhythm roles pick
-        // the middle alias and the family ambiguity is surfaced honestly —
-        // consistent with Symbolic_BeatLockedRhythm_SurfacesAccentEvidence_
-        // ResolvesCentralOctave.
+        // ambiguity band and the family ambiguity is surfaced honestly. The
+        // rhythmic roles are feature evidence only: with no restart/structure
+        // boundary they cannot fabricate a downbeat.
         Assert.True(build.Diagnostics.TempoAmbiguous);
         Assert.False(build.Diagnostics.TempoResolved);
         Assert.Equal(4, build.Diagnostics.TatumsPerBeat);
-        Assert.True(build.Diagnostics.DownbeatKnown);
-        Assert.Equal(new Meter(4, 4), build.Map.Meter);
-        Assert.NotNull(build.Map.FirstDownbeatQuarter);
+        Assert.False(build.Diagnostics.DownbeatKnown);
+        Assert.Null(build.Map.Meter);
+        Assert.Null(build.Map.FirstDownbeatQuarter);
     }
 
 }

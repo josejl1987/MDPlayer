@@ -267,8 +267,6 @@ internal static class SymbolicTempoInference
         double? fallbackAlternativeScore = null;
         EllisBeatCandidate? trackedSelected = null;
         var searchedCandidates = new List<TempoCandidate>();
-        RhythmRoleOnset[] rhythmRoles = CollectRhythmRoles(percussionEvidence);
-        bool roleTempoResolved = false;
         if (onsets.Length >= 2)
         {
             // The legacy phase scorer remains available to the opt-in work
@@ -307,27 +305,6 @@ internal static class SymbolicTempoInference
                         candidate.Bpm, candidate.PhaseSample, candidate.Score, ambiguity));
                 }
             }
-        }
-
-        // Classified percussion is an independent feature stream. It may settle
-        // the central pulse when kick/snare evidence agrees, but it does not
-        // rewrite source time and is not a half/double-tempo repair.
-        double? preferredRoleBpm = PreferredRoleTempo(rhythmRoles, timeline.SampleRate);
-        if (preferredRoleBpm is double roleBpm
-            && roleBpm >= MinBpm && roleBpm <= MaxBpm
-            && rhythmRoles.Length >= 8
-            && rhythmRoles.Select(role => role.Role).Distinct().Count() >= 2)
-        {
-            fallbackBpm = roleBpm;
-            fallbackAlternativeBpm ??= searchedCandidates
-                .Select(candidate => candidate.Bpm)
-                .Where(candidate => Math.Abs(candidate - roleBpm) > 0.01)
-                .OrderBy(candidate => Math.Abs(candidate - roleBpm))
-                .FirstOrDefault();
-            if (fallbackAlternativeBpm == 0)
-                fallbackAlternativeBpm = null;
-            fallbackScore = Math.Max(fallbackScore, 0.75);
-            roleTempoResolved = true;
         }
 
         Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline, percussionEvidence);
@@ -383,7 +360,6 @@ internal static class SymbolicTempoInference
             DownbeatPhase = hierarchy.DownbeatPhase,
         };
 
-        bool roleResolved = roleTempoResolved;
         bool hierarchyResolved = hierarchy.MetricalConfidence >= 0.20
             && hierarchy.TatumConfidence >= 0.20;
         bool hierarchyAgreesWithFallback = Math.Abs(bestBpm - fallbackBpm) < 0.50;
@@ -392,26 +368,6 @@ internal static class SymbolicTempoInference
             && IsMetricalFamilyRatio(fallbackRatio)
             && Math.Abs(fallbackRatio - 1.0) > 0.01
             && hierarchy.MetricalConfidence < 0.50;
-        if (roleResolved)
-        {
-            hierarchyResolved = true;
-            hierarchyAgreesWithFallback = true;
-            bestBpm = fallbackBpm;
-            bestPhaseSample = fallbackPhaseSample;
-            double beatDuration = timeline.SampleRate * 60.0 / Math.Max(1.0, bestBpm);
-            long downbeat = CanonicalBoundary(
-                fallbackPhaseSample, timeline.StartSample, beatDuration);
-            hierarchy = hierarchy with
-            {
-                TatumDuration = beatDuration / 4.0,
-                TatumsPerBeat = 4,
-                BeatDuration = beatDuration,
-                BeatPhaseSample = fallbackPhaseSample,
-                Meter = hierarchy.Meter ?? new Meter(4, 4),
-                DownbeatSample = hierarchy.DownbeatSample ?? downbeat,
-                DownbeatPhase = hierarchy.DownbeatPhase ?? 0,
-            };
-        }
         if (unresolvedPowerOfTwoAlias)
             hierarchyResolved = false;
         if (hierarchyResolved && hierarchyAgreesWithFallback)
@@ -490,6 +446,16 @@ internal static class SymbolicTempoInference
                 "supply driver timing or an explicit --bpm/--beat-offset-samples");
         }
 
+        // Tempo resolution is owned by the complete multi-stream tracker and
+        // metrical decoder. Classified kick/snare roles are evidence streams;
+        // they never manufacture a BPM or bypass the ambiguity gate.
+        bool tempoResolved = trackedSelected is not null
+            && trackedSelected.ActiveStreams >= 2
+            && trackedSelected.AgreeingStreams >= 2
+            && hierarchyResolved
+            && hierarchyAgreesWithFallback
+            && fallbackAlternativeBpm is null;
+
         // Phase sign convention (Patch D): phaseSample is the source sample where
         // musical quarter 0 occurs; if it is after the source start, the quarter at
         // the source start is negative (pickup). Never flipped positive.
@@ -502,10 +468,9 @@ internal static class SymbolicTempoInference
             options,
             beatOffsetQuarter,
             // An unresolved symbolic tempo path is retained by the DBN result for
-            // diagnostics, but it is not promoted to transport until independent
-            // role evidence resolves the tempo. This prevents a locally plausible
-            // family switch from changing the serialized musical grid.
-            roleResolved ? hierarchy.TempoPath : null,
+            // diagnostics, but it is not promoted to transport until the complete
+            // multi-stream tempo gate resolves the family.
+            tempoResolved ? hierarchy.TempoPath : null,
             bestPhaseSample,
             bestBpm,
             bestScore,
@@ -555,10 +520,9 @@ internal static class SymbolicTempoInference
         // octave changed. Resolving the octave does not make that alternative
         // disappear.
         diagnostics.TempoAmbiguous = diagnostics.AlternativeBpm is double;
-        // Classified kick/snare evidence can settle a transport tempo only when
-        // no metrically equivalent alternative remains. Plain symbolic fallback,
-        // including a lone 120-BPM default, remains explicitly unresolved.
-        diagnostics.TempoResolved = roleResolved && !diagnostics.TempoAmbiguous;
+        // A tempo is resolved only by independent stream agreement, a successful
+        // metrical decode, and no retained half/double family competitor.
+        diagnostics.TempoResolved = tempoResolved && !diagnostics.TempoAmbiguous;
         if (diagnostics.TempoAmbiguous)
         {
             diagnostics.Warnings.Add(
@@ -2027,156 +1991,6 @@ internal static class SymbolicTempoInference
         return (bestCandidate, altBpm, bestScore, altScore);
     }
 
-    private static bool RhythmRoleResolutionIsStrong(
-        RhythmRoleOnset[] roles,
-        TempoCandidate winner,
-        List<(TempoCandidate Candidate, double Score)> scored,
-        int sampleRate)
-    {
-        if (roles.Length < 8 || roles.Select(role => role.Role).Distinct().Count() < 2)
-            return false;
-
-        double winnerRole = RhythmRoleScore(roles, winner.Bpm, winner.PhaseSample, sampleRate);
-        double runnerUp = 0;
-        foreach ((TempoCandidate candidate, _) in scored)
-        {
-            if (Math.Abs(candidate.Bpm - winner.Bpm) < 0.01)
-                continue;
-            runnerUp = Math.Max(
-                runnerUp,
-                RhythmRoleScore(roles, candidate.Bpm, candidate.PhaseSample, sampleRate));
-        }
-        return winnerRole >= 0.50 && winnerRole - runnerUp >= 0.05;
-    }
-
-    private static double RhythmRoleScore(
-        IReadOnlyList<RhythmRoleOnset> roles,
-        double bpm,
-        long phaseSample,
-        int sampleRate)
-    {
-        if (roles.Count == 0 || bpm <= 0)
-            return 0.5;
-
-        double spq = sampleRate * 60.0 / bpm;
-        double weighted = 0;
-        double totalWeight = 0;
-        foreach (RhythmRole role in Enum.GetValues<RhythmRole>())
-        {
-            if (role == RhythmRole.Unknown)
-                continue;
-            RhythmRoleOnset[] events = roles.Where(value => value.Role == role).ToArray();
-            if (events.Length == 0)
-                continue;
-
-            double eventFit = 0;
-            foreach (RhythmRoleOnset rhythm in events)
-            {
-                double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
-                double fit = role switch
-                {
-                    // 4/4 backbeat template. Half/double aliases stay on-grid, so
-                    // this is a phase preference, not a tempo discriminator.
-                    RhythmRole.Bd => DistanceToSet(quarter, 0, 2, 4),
-                    RhythmRole.Sd => DistanceToSet(quarter, 1, 3, 4),
-                    RhythmRole.Hh => DistanceToGrid(quarter, 0.25),
-                    _ => 0.5,
-                };
-
-                eventFit += fit * rhythm.Strength;
-            }
-            double eventWeight = events.Sum(value => value.Strength);
-            eventFit = eventWeight > 0 ? eventFit / eventWeight : 0.5;
-
-            double patternFit = role is RhythmRole.Bd or RhythmRole.Sd
-                ? 0.25 * BackbeatCoverage(events, role, phaseSample, spq)
-                    + 0.75 * PulseIntervalFit(events, spq)
-                : 0.5;
-            double roleWeight = role == RhythmRole.Sd ? 2.0
-                : role == RhythmRole.Bd ? 1.5
-                : 0.35;
-            weighted += roleWeight * (0.35 * eventFit + 0.65 * patternFit);
-            totalWeight += roleWeight;
-        }
-        return totalWeight > 0 ? weighted / totalWeight : 0.5;
-    }
-    private static double PulseIntervalFit(
-        IReadOnlyList<RhythmRoleOnset> events,
-        double spq)
-    {
-        if (events.Count < 3 || spq <= 0)
-            return 0.5;
-        long[] samples = events.Select(value => value.Sample).OrderBy(value => value).ToArray();
-        double median = samples
-            .Zip(samples.Skip(1), (left, right) => (double)(right - left))
-            .OrderBy(value => value)
-            .ElementAt(samples.Length / 2 - 1);
-        double beatRatio = median / spq;
-        return Math.Exp(-(beatRatio - 2.0) * (beatRatio - 2.0) / (2 * 0.45 * 0.45));
-    }
-
-
-    private static double BackbeatCoverage(
-        IReadOnlyList<RhythmRoleOnset> events,
-        RhythmRole role,
-        long phaseSample,
-        double spq)
-    {
-        bool first = false;
-        bool second = false;
-        foreach (RhythmRoleOnset rhythm in events)
-        {
-            double quarter = PositiveModulo((rhythm.Sample - phaseSample) / spq, 4.0);
-            if (DistanceToSet(quarter, role == RhythmRole.Bd ? 0 : 1,
-                    role == RhythmRole.Bd ? 2 : 3, 4) >= 0.9)
-            {
-                double firstDistance = CircularDistance(
-                    quarter, role == RhythmRole.Bd ? 0 : 1, 4);
-                if (firstDistance < 0.12)
-                    first = true;
-                else
-                    second = true;
-            }
-        }
-        return (first ? 0.5 : 0) + (second ? 0.5 : 0);
-    }
-    private static double? PreferredRoleTempo(
-        IReadOnlyList<RhythmRoleOnset> roles,
-        int sampleRate)
-    {
-        foreach (RhythmRole role in new[] { RhythmRole.Sd, RhythmRole.Bd })
-        {
-            long[] samples = roles
-                .Where(value => value.Role == role)
-                .Select(value => value.Sample)
-                .OrderBy(value => value)
-                .ToArray();
-            if (samples.Length < 3)
-                continue;
-            double median = samples
-                .Zip(samples.Skip(1), (left, right) => (double)(right - left))
-                .OrderBy(value => value)
-                .ElementAt(samples.Length / 2 - 1);
-            if (median > 0)
-                return sampleRate * 120.0 / median;
-        }
-        return null;
-    }
-
-    private static double DistanceToSet(double value, double first, double second, double period)
-    {
-        double distance = Math.Min(
-            CircularDistance(value, first, period),
-            CircularDistance(value, second, period));
-        return Math.Exp(-distance * distance / (2 * 0.12 * 0.12));
-    }
-
-    private static double DistanceToGrid(double value, double step)
-    {
-        double distance = Math.Abs(value / step - Math.Round(value / step));
-        return Math.Exp(-distance * distance / (2 * 0.12 * 0.12));
-    }
-
     private static TempoCandidate? FindCandidate(List<TempoCandidate> candidates, double bpm)
     {
         for (int index = 0; index < candidates.Count; index++)
@@ -2599,10 +2413,9 @@ internal static class SymbolicTempoInference
     {
         // Unified evidence accents (spec §3/§7, D3): rhythm and aggregate hits
         // keep their established per-sample dedup and weights; classified FM
-        // notes contribute as aggregate-strength accents REGARDLESS of role —
-        // an Unknown-role onset is still accent evidence (it NEVER contributes
-        // to known-role hits / distinct roles / BD-SD pattern scores, which
-        // live only in CollectRhythmRoles).
+        // notes contribute as aggregate-strength accents regardless of role.
+        // An Unknown-role onset remains valid accent evidence; role labels are
+        // not consulted by the global tempo decoder.
         var seen = new HashSet<long>();
         var accented = new List<Onset>();
         foreach (PercussiveOnset onset in percussionEvidence)
@@ -2623,26 +2436,6 @@ internal static class SymbolicTempoInference
         return accented.ToArray();
     }
 
-    private static RhythmRoleOnset[] CollectRhythmRoles(IReadOnlyList<PercussiveOnset> percussionEvidence)
-    {
-        // Unified evidence roles (spec §3/§7, D3): ONLY known-role onsets enter
-        // role evidence; Unknown-role onsets contribute to the onset/accent
-        // streams only and never to knownRoleHits/distinctRoles/BD-SD scores.
-        // Native rhythm events keep their established strength weighting;
-        // classified FM notes enter at the note-attack strength (1.0).
-        var result = new List<RhythmRoleOnset>();
-        foreach (PercussiveOnset onset in percussionEvidence)
-        {
-            if (onset.Role == RhythmRole.Unknown)
-                continue;
-            double strength = onset.EvidenceKind == PercussionEvidenceKind.NativeRhythm
-                ? Math.Clamp(0.8 + onset.Strength, 0.2, 2.0)
-                : 1.0;
-            result.Add(new RhythmRoleOnset(onset.SamplePosition, strength, onset.Role));
-        }
-        return result.ToArray();
-    }
-
     private static double WeightFor(float strength, bool high) =>
         high ? Math.Clamp(0.7 + strength * 0.6, 0.1, 1.3) : 0.6;
 
@@ -2652,11 +2445,6 @@ internal static class SymbolicTempoInference
     // scorer and the public onset collector retain their existing weights.
     private static double MetricalRhythmWeight(float strength) =>
         Math.Clamp(1.6 + strength * 0.8, 1.2, 2.4);
-
-    private readonly record struct RhythmRoleOnset(
-        long Sample,
-        double Strength,
-        RhythmRole Role);
 
     internal readonly record struct Onset(long Sample, double Weight);
 
