@@ -673,6 +673,79 @@ def validate_source_event_timing(
     return {"timingEvents": checked}
 
 
+def validate_source_sample_pitch(
+    smf: dict[str, Any],
+    timeline: dict[str, Any],
+) -> dict[str, int | float]:
+    """Check optional absolute sample-playback pitch at serialized attacks."""
+
+    samples = timeline.get("samplePlayback") or []
+    note_attack_ids = {
+        str(note["sourceAttackId"])
+        for note in timeline.get("notes") or []
+        if isinstance(note, dict) and note.get("sourceAttackId") is not None
+    }
+    samples = [
+        sample for sample in samples
+        if isinstance(sample, dict)
+        and (sample.get("sourceAttackId") is None
+             or str(sample["sourceAttackId"]) not in note_attack_ids)
+    ]
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for sample in samples:
+        if sample.get("voiceId") is not None:
+            groups[str(sample["voiceId"])].append(sample)
+
+    checked = 0
+    maximum_error = 0.0
+    track_events: list[list[dict[str, Any]]] = smf["_trackEvents"]
+    for track_index, name in enumerate(smf["_trackNames"]):
+        if not name or not name.startswith("Sample "):
+            continue
+        group = groups.get(name.removeprefix("Sample "))
+        if not group:
+            continue
+        bend_range = 0
+        bend = 0
+        rpn_msb, rpn_lsb = 127, 127
+        source_index = 0
+        for event in track_events[track_index]:
+            kind = event["kind"]
+            if kind == "control":
+                controller = int(event["controller"])
+                value = int(event["data2"])
+                if controller == 101:
+                    rpn_msb = value
+                elif controller == 100:
+                    rpn_lsb = value
+                elif controller == 6 and (rpn_msb, rpn_lsb) == (0, 0):
+                    bend_range = value
+            elif kind == "pitch_bend":
+                bend = int(event["data2"]) * 128 + int(event["data1"]) - 8192
+            elif kind == "note_on":
+                if source_index >= len(group):
+                    raise SmfError(f"sample track {name} has too many NoteOns")
+                source = group[source_index]
+                source_index += 1
+                expected = source.get("midiPitch")
+                if expected is None:
+                    continue
+                base = int(event["data1"])
+                denominator = 8192.0 if bend < 0 else 8191.0
+                actual = base + bend / denominator * bend_range
+                delta = float(expected) - base
+                step = 0.0 if bend_range == 0 else bend_range / (
+                    8192.0 if delta < 0 else 8191.0)
+                error = abs(actual - float(expected))
+                checked += 1
+                maximum_error = max(maximum_error, error)
+                if error > step + 1e-8:
+                    raise SmfError(
+                        f"sample track {name} pitch error {error:.9f} exceeds "
+                        f"quantization step {step:.9f}")
+    return {"samplePitchCheckpoints": checked, "maxSamplePitchError": maximum_error}
+
+
 def run_export(
     cli: Path,
     source: Path | None,
@@ -739,6 +812,7 @@ def run_export(
                 )
                 pitch = validate_source_pitch(smf, timeline_data, phase_tick_origin)
                 timing = validate_source_event_timing(smf, timeline_data, phase_tick_origin)
+                pitch.update(validate_source_sample_pitch(smf, timeline_data))
             except (OSError, ValueError, KeyError, TypeError, SmfError) as error:
                 return {
                     "status": "failed",
