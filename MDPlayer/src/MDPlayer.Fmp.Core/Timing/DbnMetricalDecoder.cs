@@ -41,7 +41,7 @@ internal static class DbnMetricalDecoder
         new(2, 4), new(3, 4), new(4, 4), new(6, 8),
     };
 
-    private const double MeterSwitchPenalty = 1.25;
+    private const double MeterSwitchPenalty = 6.0;
     // Symbolic grids are quantized and often have near-tied bar hypotheses. The
     // margin is deliberately small, but meter still requires a clearly preferred
     // downbeat phase so a bare periodic stream remains unresolved.
@@ -67,38 +67,48 @@ internal static class DbnMetricalDecoder
         {
             if (tempo.Bpm <= 0 || !double.IsFinite(tempo.Bpm))
                 continue;
-            ViterbiPath[] paths = SupportedMeters
-                .Select(meter => RunViterbi(
-                    tempo, meter, streams, sampleRate, startSample, endSample, structuralBoundaries))
-                .Where(path => path.Frames.Count > 0)
-                .ToArray();
-            foreach (ViterbiPath path in paths)
-            {
-                Meter meter = path.Meter;
-                double[] phaseScores = PhaseScores(
-                    meter, tempo, streams, sampleRate, startSample, endSample, structuralBoundaries);
-                int phase = Array.IndexOf(phaseScores, phaseScores.Max());
-                double downbeatScore = phaseScores[phase];
-                double downbeatMargin = phaseScores
-                    .Where((_, index) => index != phase)
-                    .DefaultIfEmpty(0)
-                    .Max(value => downbeatScore - value);
-                double meterMargin = paths
-                    .Where(other => other.Meter != meter)
-                    .Select(other => path.Score - other.Score)
-                    .DefaultIfEmpty(0)
-                    .Max();
-                // The Viterbi path explains the full state sequence; the
-                // downbeat observation term keeps a bar-length accent pattern
-                // from being washed out by dense surface onsets.
-                double score = 0.40 * path.Score
-                    + 0.45 * downbeatScore
-                    + 0.15 * Math.Clamp(tempo.PriorScore, 0, 1);
-                long downbeat = DownbeatAtOrBefore(
-                    tempo.PhaseSample, path.FirstFrame, startSample, tempo.Bpm, meter, phase, sampleRate);
-                candidates.Add(new DbnMetricalCandidate(
-                    tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin));
-            }
+            ViterbiPath path = RunViterbi(
+                tempo, fixedMeter: null, streams, sampleRate, startSample, endSample,
+                structuralBoundaries);
+            if (path.Frames.Count == 0)
+                continue;
+
+            Dictionary<Meter, double> meterEvidence = SupportedMeters.ToDictionary(
+                meter => meter,
+                meter => 0.25 * path.MeterScores.GetValueOrDefault(meter)
+                    + 0.45 * MeterPatternScore(
+                        meter, tempo, streams, sampleRate, startSample)
+                    + 0.30 * MeterPrior(meter));
+            Meter meter = meterEvidence
+                .OrderByDescending(pair => pair.Value)
+                .ThenByDescending(pair => pair.Key.QuartersPerBar)
+                .First().Key;
+            double[] phaseScores = PhaseScores(
+                meter, tempo, streams, sampleRate, startSample, endSample, structuralBoundaries);
+            int phase = Array.IndexOf(phaseScores, phaseScores.Max());
+            double downbeatScore = phaseScores[phase];
+            double downbeatMargin = phaseScores
+                .Where((_, index) => index != phase)
+                .DefaultIfEmpty(0)
+                .Max(value => downbeatScore - value);
+            double meterPatternScore = meterEvidence[meter];
+            double competingMeter = meterEvidence
+                .Where(pair => pair.Key != meter)
+                .Select(pair => pair.Value)
+                .DefaultIfEmpty(0)
+                .Max();
+            double meterMargin = meterEvidence[meter] - competingMeter;
+            // The Viterbi path explains the full state sequence; the
+            // downbeat observation term keeps a bar-length accent pattern
+            // from being washed out by dense surface onsets.
+            double score = 0.25 * path.Score
+                + 0.25 * downbeatScore
+                + 0.45 * meterPatternScore
+                + 0.05 * Math.Clamp(tempo.PriorScore, 0, 1);
+            long downbeat = DownbeatAtOrBefore(
+                tempo.PhaseSample, path.FirstFrame, startSample, tempo.Bpm, meter, phase, sampleRate);
+            candidates.Add(new DbnMetricalCandidate(
+                tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin));
         }
 
         if (candidates.Count == 0)
@@ -110,16 +120,6 @@ internal static class DbnMetricalDecoder
             .ThenBy(candidate => candidate.DownbeatPhase)
             .ToList();
         DbnMetricalCandidate selected = candidates[0];
-        double bestSameTempoMeter = candidates
-            .Where(candidate => candidate.Tempo.Bpm == selected.Tempo.Bpm
-                && candidate.Meter != selected.Meter)
-            .Select(candidate => candidate.Score)
-            .DefaultIfEmpty(0)
-            .Max();
-        selected = selected with
-        {
-            MeterMargin = selected.Score - bestSameTempoMeter,
-        };
         DbnMetricalCandidate? alternative = candidates.Skip(1).FirstOrDefault();
         bool meterResolved = selected.Score >= 0.12
             && selected.MeterMargin >= ResolveMargin
@@ -143,7 +143,7 @@ internal static class DbnMetricalDecoder
 
     private static ViterbiPath RunViterbi(
         DbnTempoHypothesis tempo,
-        Meter fixedMeter,
+        Meter? fixedMeter,
         IReadOnlyList<BeatFeatureStream> streams,
         int sampleRate,
         long startSample,
@@ -157,7 +157,9 @@ internal static class DbnMetricalDecoder
         long firstFrame = (long)Math.Floor((startSample - tempo.PhaseSample) / stepSamples) - 2;
         long lastFrame = (long)Math.Ceiling((endSample - tempo.PhaseSample) / stepSamples) + 2;
         int frameCount = (int)Math.Clamp(lastFrame - firstFrame + 1, 2, 250_000);
-        State[] states = StatesFor(fixedMeter);
+        State[] states = fixedMeter is Meter fixedValue
+            ? StatesFor(fixedValue)
+            : SupportedMeters.SelectMany(StatesFor).ToArray();
         double[,] scores = new double[frameCount, states.Length];
         int[,] previous = new int[frameCount, states.Length];
         for (int stateIndex = 0; stateIndex < states.Length; stateIndex++)
@@ -275,6 +277,53 @@ internal static class DbnMetricalDecoder
         return scores;
     }
 
+    private static double MeterPatternScore(
+        Meter meter,
+        DbnTempoHypothesis tempo,
+        IReadOnlyList<BeatFeatureStream> streams,
+        int sampleRate,
+        long startSample)
+    {
+        BeatFeatureStream? accent = streams.FirstOrDefault(stream => stream.Name == "accent")
+            ?? streams.FirstOrDefault(stream => stream.Name == "percussion");
+        if (accent is null || accent.Onsets.Count == 0)
+            return 0.5;
+
+        double step = sampleRate * 60.0 / tempo.Bpm / 2.0;
+        int units = Units(meter);
+        double best = 0;
+        for (int phase = 0; phase < units; phase++)
+        {
+            double weighted = 0;
+            double total = 0;
+            foreach ((long sample, double strength) in accent.Onsets)
+            {
+                long frame = (long)Math.Round((sample - tempo.PhaseSample) / step,
+                    MidpointRounding.AwayFromZero);
+                int beat = (int)PositiveModulo(frame - phase, units);
+                double expected = beat == 0
+                    ? 1.0
+                    : meter.Denominator == 8 && beat == 3
+                        ? 0.62
+                        : beat % 2 == 0 ? 0.32 : 0.08;
+                weighted += strength * expected;
+                total += strength;
+            }
+            if (total > 0)
+                best = Math.Max(best, weighted / total);
+        }
+        _ = startSample;
+        return Math.Clamp(best, 0, 1);
+    }
+
+    private static double MeterPrior(Meter meter) => meter switch
+    {
+        { Numerator: 4, Denominator: 4 } => 1.0,
+        { Numerator: 3, Denominator: 4 } => 0.82,
+        { Numerator: 6, Denominator: 8 } => 0.78,
+        _ => 0.0,
+    };
+
     private static double ObservationAt(
         State state,
         long sample,
@@ -370,6 +419,12 @@ internal static class DbnMetricalDecoder
     private static int PositiveModulo(int value, int modulus)
     {
         int result = value % modulus;
+        return result < 0 ? result + modulus : result;
+    }
+
+    private static long PositiveModulo(long value, int modulus)
+    {
+        long result = value % modulus;
         return result < 0 ? result + modulus : result;
     }
 

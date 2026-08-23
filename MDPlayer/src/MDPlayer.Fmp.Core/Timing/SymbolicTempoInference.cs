@@ -236,9 +236,9 @@ internal static class SymbolicTempoInference
             }
         }
 
-        // A classified kick/snare stream is an independent rhythmic feature. It
-        // may establish the central pulse when it has enough role diversity, but
-        // it is not a special-case 56/112 repair and it does not alter samples.
+        // Classified percussion is an independent feature stream. It may settle
+        // the central pulse when kick/snare evidence agrees, but it does not
+        // rewrite source time and is not a half/double-tempo repair.
         double? preferredRoleBpm = PreferredRoleTempo(rhythmRoles, timeline.SampleRate);
         if (preferredRoleBpm is double roleBpm
             && roleBpm >= MinBpm && roleBpm <= MaxBpm
@@ -256,6 +256,7 @@ internal static class SymbolicTempoInference
             fallbackScore = Math.Max(fallbackScore, 0.75);
             roleTempoResolved = true;
         }
+
         Onset[] hierarchyOnsets = CollectCollapsedOnsets(timeline, percussionEvidence);
         var tempoHypotheses = searchedCandidates
             .Where(candidate => candidate.Bpm > 0 && double.IsFinite(candidate.Bpm))
