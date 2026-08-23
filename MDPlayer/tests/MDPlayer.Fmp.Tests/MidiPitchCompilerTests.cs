@@ -52,7 +52,6 @@ public sealed class MidiPitchCompilerTests
     }
 
     [Theory]
-    [InlineData(0, 8192)]
     [InlineData(-8192, 0)]
     [InlineData(-1, 8191)]
     [InlineData(0, 8192)]

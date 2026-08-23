@@ -490,7 +490,10 @@ internal sealed class MidiFileWriter
 
     private static void WritePackedBendRange(Stream stream, PackedMidiEvent evt, long delta)
     {
-        int value = evt.A & 0x7F;
+        if (evt.A is < 0 or > 127)
+            throw new InvalidOperationException(
+                $"Pitch-bend range {evt.A} is outside the valid [0, 127] semitone range.");
+        int value = evt.A;
         WriteControlChange(stream, delta, evt.Channel, 101, 0);
         WriteControlChange(stream, 0, evt.Channel, 100, 0);
         WriteControlChange(stream, 0, evt.Channel, 6, value);
@@ -821,7 +824,10 @@ internal sealed class MidiFileWriter
 
     private static void AppendBendRange(TrackChunk chunk, MidiBendRangeEvent range, long delta)
     {
-        int value = range.Semitones & 0x7F;
+        if (range.Semitones is < 0 or > 127)
+            throw new InvalidOperationException(
+                $"Pitch-bend range {range.Semitones} is outside the valid [0, 127] semitone range.");
+        int value = range.Semitones;
         // RPN pitch-bend range (semitones): select RPN 0, write both data-entry
         // bytes, then null the RPN (CC101/CC100 = 127) to prevent later Data Entry
         // messages from changing channel sensitivity.
@@ -837,11 +843,15 @@ internal sealed class MidiFileWriter
 
     private static void AppendPackedBendRange(TrackChunk chunk, PackedMidiEvent range, long delta)
     {
-        int value = range.A & 0x7F;
+        if (range.A is < 0 or > 127)
+            throw new InvalidOperationException(
+                $"Pitch-bend range {range.A} is outside the valid [0, 127] semitone range.");
+        int value = range.A;
         var channel = Channel(range.Channel);
         AddControlChange(chunk, channel, 101, 0, ref delta);
         AddControlChange(chunk, channel, 100, 0, ref delta);
         AddControlChange(chunk, channel, 6, value, ref delta);
+        AddControlChange(chunk, channel, 38, 0, ref delta);
         AddControlChange(chunk, channel, 101, 127, ref delta);
         AddControlChange(chunk, channel, 100, 127, ref delta);
     }

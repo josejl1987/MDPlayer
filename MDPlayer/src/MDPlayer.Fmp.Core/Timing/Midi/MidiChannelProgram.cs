@@ -79,6 +79,19 @@ internal sealed class MidiChannelProgram
 
             switch (evt)
             {
+                case MidiNoteEvent note when note.Note is < 0 or > 127
+                    || note.Velocity is < 0 or > 127:
+                    throw new InvalidOperationException(
+                        $"MIDI channel program '{SourceVoiceId}' emitted an invalid note value.");
+
+                case MidiProgramEvent program when program.Program is < 0 or > 127:
+                    throw new InvalidOperationException(
+                        $"MIDI channel program '{SourceVoiceId}' emitted program {program.Program} outside [0, 127].");
+
+                case MidiPitchBendEvent bend when bend.Bend is < -8192 or > 8191:
+                    throw new InvalidOperationException(
+                        $"MIDI channel program '{SourceVoiceId}' emitted pitch bend {bend.Bend} outside [-8192, 8191].");
+
                 case MidiBendRangeEvent range:
                     rangeEvents++;
                     if (range.Tick != 0)
