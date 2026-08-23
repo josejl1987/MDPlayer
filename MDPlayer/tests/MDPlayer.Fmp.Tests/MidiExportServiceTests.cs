@@ -49,7 +49,7 @@ public sealed class MidiExportServiceTests
         // The musical vocabulary is not part of the contract. Anything beyond
         // PPQ + receipt hooks must be a compile error, enforced here by
         // reflection so a reintroduced option fails this test.
-        string[] allowed = { "Ppq", "EnablePerformanceReceipts", "PerformanceFixture" };
+        string[] allowed = { "Ppq", "EnablePerformanceReceipts", "PerformanceFixture", "TimingMode" };
         string[] actual = typeof(MidiExportRequest)
             .GetProperties()
             .Select(p => p.Name)
@@ -136,6 +136,36 @@ public sealed class MidiExportServiceTests
     }
 
     [Fact]
+    public void MusicalTimingMode_SerializesMapTempoAndPreservesSourceSeconds()
+    {
+        VisualizationTimeline timeline = BuildTimeline(
+            withBeats: false,
+            timing: [new DriverTimingEvent(0, 0x42, 90.0)]);
+        string path = WriteTimeline(timeline);
+
+        MidiExportResult result = new MidiExportService().ExportFromTimelinePath(path,
+            new MidiExportRequest { TimingMode = MidiExportTimingMode.MusicalTimeMap });
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Contains(result.Report, line => line.Contains("midi-mode: musical-time-map"));
+        Assert.Contains(result.Report, line => line.Contains("tempo: 90"));
+        SetTempoEvent tempo = MidiRoundTrip.TimedEvents(result.Bytes!, 0)
+            .Select(pair => pair.Event)
+            .OfType<SetTempoEvent>()
+            .Single();
+        Assert.Equal(0, MidiRoundTrip.TimedEvents(result.Bytes!, 0)
+            .Single(pair => pair.Event is SetTempoEvent).Tick);
+        Assert.Equal(666_667, tempo.MicrosecondsPerQuarterNote);
+
+        long noteOnTick = MidiRoundTrip.TimedEvents(result.Bytes!, 1)
+            .Where(pair => pair.Event is NoteOnEvent note && note.Velocity != 0)
+            .ElementAt(1).Tick;
+        double expectedSeconds = timeline.Notes[1].StartSample / (double)timeline.SampleRate;
+        double actualSeconds = noteOnTick * tempo.MicrosecondsPerQuarterNote / 1_000_000.0 / 960.0;
+        Assert.InRange(Math.Abs(expectedSeconds - actualSeconds), 0, 1.0 / 90.0 / 960.0 / 2.0 + 1e-9);
+    }
+
+    [Fact]
     public void Export_RejectsZeroSampleRate_WithActionableMessage()
     {
         // A timeline that lost its SampleRate must be rejected with the
@@ -194,7 +224,9 @@ public sealed class MidiExportServiceTests
 
     /* ---- helpers ---- */
 
-    private static VisualizationTimeline BuildTimeline(bool withBeats = true)
+    private static VisualizationTimeline BuildTimeline(
+        bool withBeats = true,
+        DriverTimingEvent[]? timing = null)
     {
         double spq = Sr * 60.0 / 120.0;
         var notes = Enumerable.Range(0, 8)
@@ -220,6 +252,7 @@ public sealed class MidiExportServiceTests
                     .Select(i => new BeatEvent((long)Math.Round(i * spq), i))
                     .ToArray()
                 : Array.Empty<BeatEvent>(),
+            Timing = timing ?? Array.Empty<DriverTimingEvent>(),
             Source = new TrackMetadata("vgz", "song", "chip", "song.vgz"),
         };
     }

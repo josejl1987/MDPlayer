@@ -1263,9 +1263,13 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            // Raw MIDI is a direct transcription of the captured timeline. No
-            // tempo/grid or per-voice projection is part of this command.
-            var request = new MidiExportRequest { Ppq = MidiPpq };
+            // Musical MIDI still compiles directly from the captured source
+            // timeline; the inferred map only supplies serialized transport.
+            var request = new MidiExportRequest
+            {
+                Ppq = MidiPpq,
+                TimingMode = MidiExportTimingMode.MusicalTimeMap,
+            };
             MidiExportResult result;
             if (_session is null)
             {

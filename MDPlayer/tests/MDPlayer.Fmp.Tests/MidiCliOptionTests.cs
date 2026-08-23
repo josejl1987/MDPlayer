@@ -4,8 +4,9 @@ using Xunit;
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// Raw MIDI export option surface. --ppq (default 960, MIDI-valid 1..32767) is
-/// the only transcription control; the musical vocabulary (tempo source, BPM,
+/// MIDI export option surface. --ppq (default 960, MIDI-valid 1..32767) and the
+/// explicit musical-grid mode are the transport controls; the musical vocabulary
+/// (tempo source, BPM,
 /// meter, downbeat, beat offset, quantization, pitch bend, velocity, track
 /// layout, pitch normalization) is gone and every removed option must be
 /// rejected as unknown so stale scripts fail loudly instead of silently
@@ -22,6 +23,13 @@ public sealed class MidiCliOptionTests
     {
         MidiOptions o = Parse("--output", "out.mid", Input);
         Assert.Equal(960, o.Ppq);
+    }
+
+    [Fact]
+    public void MusicalGrid_IsExplicitlyOptIn()
+    {
+        MidiOptions o = Parse("--musical-grid", "--output", "out.mid", Input);
+        Assert.True(o.MusicalGrid);
     }
 
     [Theory]

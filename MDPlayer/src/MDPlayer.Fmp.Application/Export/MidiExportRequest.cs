@@ -2,6 +2,12 @@ using Fmp.Core.Midi;
 
 namespace Fmp.Application.Export;
 
+public enum MidiExportTimingMode
+{
+    RawSourceTime,
+    MusicalTimeMap,
+}
+
 /// <summary>Options for source-faithful raw MIDI transcription.</summary>
 public sealed class MidiExportRequest
 {
@@ -9,6 +15,9 @@ public sealed class MidiExportRequest
 
     /// <summary>Ticks per quarter note. The raw transport is always 120 BPM.</summary>
     public int Ppq { get; init; } = MidiTranscriber.DefaultPpq;
+
+    /// <summary>Chooses raw source transport or the inferred/validated musical time map.</summary>
+    public MidiExportTimingMode TimingMode { get; init; } = MidiExportTimingMode.RawSourceTime;
 
     /// <summary>Opt-in allocation/wall-clock receipt for the transcription stage.</summary>
     public bool EnablePerformanceReceipts { get; init; }

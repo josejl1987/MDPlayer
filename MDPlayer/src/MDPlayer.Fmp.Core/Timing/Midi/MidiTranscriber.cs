@@ -1,5 +1,6 @@
 #nullable enable
 
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Midi;
@@ -39,12 +40,14 @@ internal sealed class MidiTranscriber
     private const int UnknownNativeDrumNote = 60;
 
     private readonly int _ppq;
+    private readonly MusicalTimeMap? _timeMap;
 
-    public MidiTranscriber(int ppq = DefaultPpq)
+    public MidiTranscriber(int ppq = DefaultPpq, MusicalTimeMap? timeMap = null)
     {
         if (ppq <= 0 || ppq > 0x7FFF)
             throw new ArgumentOutOfRangeException(nameof(ppq));
         _ppq = ppq;
+        _timeMap = timeMap;
     }
 
     public MidiTranscriptionResult Transcribe(VisualizationTimeline timeline)
@@ -54,6 +57,12 @@ internal sealed class MidiTranscriber
             throw new InvalidOperationException("Timeline sample rate must be positive.");
         if (timeline.EndSample < timeline.StartSample)
             throw new InvalidOperationException("Timeline end precedes timeline start.");
+        if (_timeMap is not null && (_timeMap.SampleRate != timeline.SampleRate
+            || _timeMap.StartSample != timeline.StartSample))
+        {
+            throw new InvalidOperationException(
+                "Musical time map must use the timeline sample rate and start sample.");
+        }
         IReadOnlyList<NoteEvent> notes = timeline.Notes ?? Array.Empty<NoteEvent>();
         IReadOnlyList<RhythmEvent> rhythm = timeline.Rhythm ?? Array.Empty<RhythmEvent>();
         ValidatePhysicalVoiceMonophony(notes);
@@ -208,10 +217,8 @@ internal sealed class MidiTranscriber
                 SamplePlaybackEvent sample = source.Event;
                 ValidateSample(timeline, sample);
                 DacNoteAssignment identity = sampleAssignments[sample.SampleId];
-                long onTick = MidiTransportClock.SampleToTick(
-                    timeline.StartSample, sample.StartSample, timeline.SampleRate, _ppq);
-                long offTick = MidiTransportClock.SampleToTick(
-                    timeline.StartSample, sample.EndSample, timeline.SampleRate, _ppq);
+                long onTick = SampleToTick(timeline, sample.StartSample);
+                long offTick = SampleToTick(timeline, sample.EndSample);
                 if (offTick <= onTick)
                 {
                     offTick = checked(onTick + 1);
@@ -263,7 +270,9 @@ internal sealed class MidiTranscriber
                 $"serialized NoteOn events={serializedNoteOnCount}.");
         }
 
-        IReadOnlyList<MidiEventBase> conductor = MidiConductor.FixedTransport();
+        IReadOnlyList<MidiEventBase> conductor = _timeMap is null
+            ? MidiConductor.FixedTransport()
+            : MidiConductor.FromTimeMap(_timeMap, _ppq);
         byte[] bytes = new MidiFileWriter(_ppq).Write(conductor, tracks);
         return new MidiTranscriptionResult
         {
@@ -448,8 +457,7 @@ internal sealed class MidiTranscriber
         for (int index = 0; index < rhythm.Count; index++)
         {
             RhythmEvent hit = rhythm[index];
-            long tick = MidiTransportClock.SampleToTick(
-                timeline.StartSample, hit.SamplePosition, timeline.SampleRate, _ppq);
+            long tick = SampleToTick(timeline, hit.SamplePosition);
             int note = GeneralMidiDrumMapper.TryMap(hit, out int mapped)
                 ? mapped
                 : UnknownNativeDrumNote; // preserve the attack; do not invent a role.
@@ -468,8 +476,7 @@ internal sealed class MidiTranscriber
         var seen = new HashSet<(string Voice, long Tick)>();
         int collisions = 0;
         foreach (IndexedNote note in notes)
-            if (!seen.Add((note.Voice, MidiTransportClock.SampleToTick(
-                    timeline.StartSample, note.Note.StartSample, timeline.SampleRate, _ppq))))
+            if (!seen.Add((note.Voice, SampleToTick(timeline, note.Note.StartSample))))
                 collisions++;
         return collisions;
     }
@@ -486,10 +493,8 @@ internal sealed class MidiTranscriber
         NoteEvent note = source.Note;
         SourcePitchNote pitchNote = source.PitchNote;
         ValidateNote(timeline, pitchNote);
-        long onTick = MidiTransportClock.SampleToTick(
-            timeline.StartSample, pitchNote.StartSample, timeline.SampleRate, _ppq);
-        long offTick = MidiTransportClock.SampleToTick(
-            timeline.StartSample, pitchNote.EndSample, timeline.SampleRate, _ppq);
+        long onTick = SampleToTick(timeline, pitchNote.StartSample);
+        long offTick = SampleToTick(timeline, pitchNote.EndSample);
         if (offTick <= onTick)
         {
             offTick = checked(onTick + 1);
@@ -502,8 +507,7 @@ internal sealed class MidiTranscriber
         };
         foreach (SourcePitchPoint point in pitchNote.PitchCurve.Skip(1))
         {
-            long tick = MidiTransportClock.SampleToTick(
-                timeline.StartSample, point.Sample, timeline.SampleRate, _ppq);
+            long tick = SampleToTick(timeline, point.Sample);
             // Several source transitions can quantize to one MIDI tick. The last
             // source state is the only state a synth can observe at that tick. If
             // it lands on NoteOn, fold it into the single attack bend below.
@@ -630,8 +634,19 @@ internal sealed class MidiTranscriber
             : Math.Clamp((int)Math.Ceiling(24.0 + 103.0 * Math.Pow(normalized, 0.45)), 1, 127);
     }
 
+    private long SampleToTick(VisualizationTimeline timeline, long sample)
+    {
+        if (_timeMap is null)
+            return MidiTransportClock.SampleToTick(
+                timeline.StartSample, sample, timeline.SampleRate, _ppq);
+
+        long origin = _timeMap.SampleToTick(timeline.StartSample, _ppq);
+        return checked(_timeMap.SampleToTick(sample, _ppq) - origin);
+    }
+
     private static void FinishTrack(MidiTrack track, List<Planned> plan)
     {
+        plan = FoldSameTickPitchBends(plan);
         if (track.ChannelProgram is MidiChannelProgram program)
         {
             program.MutableEvents.Clear();
@@ -648,6 +663,44 @@ internal sealed class MidiTranscriber
                 track.Events.Add(item.Event);
         }
         track.HasCanonicalEventOrder = true;
+    }
+
+    private static List<Planned> FoldSameTickPitchBends(IReadOnlyList<Planned> plan)
+    {
+        var winnerByTick = new Dictionary<long, int>();
+        for (int index = 0; index < plan.Count; index++)
+        {
+            if (plan[index].Event is not MidiPitchBendEvent)
+                continue;
+            if (!winnerByTick.TryGetValue(plan[index].Tick, out int previous)
+                || ComparePitchState(plan[previous], plan[index]) <= 0)
+            {
+                winnerByTick[plan[index].Tick] = index;
+            }
+        }
+
+        if (winnerByTick.Count == plan.Count(item => item.Event is MidiPitchBendEvent))
+            return plan.ToList();
+
+        var folded = new List<Planned>(plan.Count -
+            plan.Count(item => item.Event is MidiPitchBendEvent) + winnerByTick.Count);
+        for (int index = 0; index < plan.Count; index++)
+        {
+            if (plan[index].Event is MidiPitchBendEvent
+                && winnerByTick.GetValueOrDefault(plan[index].Tick) != index)
+                continue;
+            folded.Add(plan[index]);
+        }
+        return folded;
+    }
+
+    private static int ComparePitchState(Planned left, Planned right)
+    {
+        int compare = left.SourceSample.CompareTo(right.SourceSample);
+        if (compare != 0)
+            return compare;
+        compare = left.SourceIndex.CompareTo(right.SourceIndex);
+        return compare != 0 ? compare : left.LocalOrder.CompareTo(right.LocalOrder);
     }
 
     private readonly record struct PitchState(long Tick, long SourceSample, double Pitch);

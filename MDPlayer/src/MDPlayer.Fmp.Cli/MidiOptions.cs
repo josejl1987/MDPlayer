@@ -7,9 +7,9 @@ internal static class MidiOptionsLimits
 }
 
 /// <summary>
-/// Raw MIDI transcription options. Musical interpretation is deliberately not
-/// configurable here: tempo, meter, downbeat, quantization, tuning normalization
-/// and track-layout transforms belong to separate downstream tools.
+/// MIDI transcription options. Raw source transport remains the default; the
+/// optional musical-grid mode serializes the validated/inferred time map without
+/// changing source event time or pitch.
 /// </summary>
 internal sealed class MidiOptions : BatchRenderSettings
 {
@@ -17,6 +17,8 @@ internal sealed class MidiOptions : BatchRenderSettings
     public string Output { get; set; }
     public string Timeline { get; set; }
     public int Ppq { get; set; } = 960;
+
+    public bool MusicalGrid { get; set; }
 
     /// <summary>Optional raw source-time fidelity report.</summary>
     public string TimingReport { get; set; }
@@ -56,6 +58,7 @@ internal static class MidiOptionsParser
                     case "--output":
                     case "-o": result.Output = reader.RequireValue(name); break;
                     case "--ppq": result.Ppq = reader.ReadInt(name); break;
+                    case "--musical-grid" when value == null: result.MusicalGrid = true; break;
                     case "--timing-report": result.TimingReport = reader.RequireValue(name); break;
                     case "--pitch-report": result.PitchReport = reader.RequireValue(name); break;
                     case "--channels" when value == null: result.Channels = true; break;

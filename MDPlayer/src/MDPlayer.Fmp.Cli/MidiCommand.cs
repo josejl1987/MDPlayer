@@ -59,10 +59,12 @@ internal static class MidiCommand
         output.WriteLine($"timeline: {timeline.Notes.Count} notes, {timeline.Beats.Length} beats, " +
             $"{timeline.Timing.Length} timing events, sample rate {timeline.SampleRate}");
 
-        // Raw MIDI export is transcription, not musical interpretation. Keep the
-        // source timeline untouched: no voice normalization, tempo/grid analysis,
-        // tuning normalization, quantization or structural pass belongs here.
-        MidiTranscriptionResult result = new MidiTranscriber(options.Ppq).Transcribe(timeline);
+        MusicalTimeMapBuildResult? timing = options.MusicalGrid
+            ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions())
+            : null;
+        MidiTranscriptionResult result = timing is null
+            ? new MidiTranscriber(options.Ppq).Transcribe(timeline)
+            : new MidiTranscriber(options.Ppq, timing.Map).Transcribe(timeline);
 
         if (options.Channels)
             return WriteChannels(options, timeline, result);
@@ -74,7 +76,9 @@ internal static class MidiCommand
         fileWatch.Stop();
 
         output.WriteLine($"wrote {System.IO.Path.GetFullPath(options.Output)} ({result.Bytes.Length} bytes)");
-        output.WriteLine($"midi mode: raw-fidelity; transport: 120 BPM; ppq: {options.Ppq}");
+        output.WriteLine(timing is null
+            ? $"midi mode: raw-fidelity; transport: 120 BPM; ppq: {options.Ppq}"
+            : $"midi mode: musical-time-map; tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; ppq: {options.Ppq}");
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +

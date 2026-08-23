@@ -1,8 +1,42 @@
+using Fmp.Core.Timing;
+
 namespace Fmp.Core.Midi;
 
 /// <summary>Builds the absolute transport conductor without musical inference.</summary>
 internal static class MidiConductor
 {
+    public static IReadOnlyList<MidiEventBase> FromTimeMap(MusicalTimeMap map, int ppq)
+    {
+        ArgumentNullException.ThrowIfNull(map);
+        if (ppq <= 0 || ppq > 0x7FFF)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+
+        long originTick = map.SampleToTick(map.StartSample, ppq);
+        var events = new List<MidiEventBase>();
+        int sourceOrder = 0;
+        int? previousTempo = null;
+        foreach (TempoSegment segment in map.Segments)
+        {
+            long tick = checked(map.SampleToTick(segment.StartSample, ppq) - originTick);
+            int tempo = segment.MicrosecondsPerQuarter;
+            if (previousTempo == tempo && tick != 0)
+                continue;
+            events.Add(new MidiTempoEvent(tick, tempo) { SourceOrder = sourceOrder++ });
+            previousTempo = tempo;
+        }
+
+        if (map.Meter is Meter meter)
+        {
+            events.Add(new MidiTimeSignatureEvent(0, meter.Numerator, meter.Denominator)
+            {
+                SourceOrder = sourceOrder,
+            });
+        }
+
+        Validate(events);
+        return events;
+    }
+
     public static IReadOnlyList<MidiEventBase> FixedTransport(long? endTick = null)
     {
         var events = new List<MidiEventBase>
