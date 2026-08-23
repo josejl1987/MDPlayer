@@ -450,10 +450,6 @@ internal static class SymbolicTempoInference
         diagnostics.SelectedScore = bestScore;
         diagnostics.TempoEvidenceStreamCount = trackedSelected?.ActiveStreams ?? 0;
         diagnostics.TempoAgreeingStreamCount = trackedSelected?.AgreeingStreams ?? 0;
-        // Classified kick/snare evidence is an independent, multi-role source
-        // strong enough to settle a transport tempo. Plain symbolic fallback,
-        // including a lone 120-BPM default, remains explicitly unresolved.
-        diagnostics.TempoResolved = roleResolved;
         if (hierarchyResolved && !hierarchyAgreesWithFallback)
         {
             diagnostics.AlternativeBpm = hierarchy.AlternativeBpm;
@@ -556,6 +552,10 @@ internal static class SymbolicTempoInference
         // octave changed. Resolving the octave does not make that alternative
         // disappear.
         diagnostics.TempoAmbiguous = diagnostics.AlternativeBpm is double;
+        // Classified kick/snare evidence can settle a transport tempo only when
+        // no metrically equivalent alternative remains. Plain symbolic fallback,
+        // including a lone 120-BPM default, remains explicitly unresolved.
+        diagnostics.TempoResolved = roleResolved && !diagnostics.TempoAmbiguous;
         if (diagnostics.TempoAmbiguous)
         {
             diagnostics.Warnings.Add(
