@@ -155,6 +155,17 @@ internal sealed partial class GpuPanelRenderer
                 double xThresh = _layout.SampleToX(ptSample, currentSample, _timeline.SampleRate, lane);
                 if (xThresh <= segStartX) continue;
                 if (xThresh > rightX) break;
+                // Merge sub-pixel segments: floor/ceil inflate a 0.5px step to a
+                // 2px rect, so a 200-point LFO at low zoom would bloat the path
+                // with overlapping slivers. Hold emission until the accumulated
+                // span crosses a pixel boundary; the merged segment uses the
+                // latest pitch (visually indistinguishable at that scale).
+                if (Math.Ceiling(xThresh) - Math.Floor(segStartX) <= 1.0)
+                {
+                    prevPitch = note.Pitch[pi].MidiNote;
+                    pitchIdx = pi;
+                    continue;
+                }
                 AddRibbonSegment(ribbonPath, segStartX, xThresh, prevPitch, minMidi, maxMidi, lane, half, ribbonHeight);
                 segStartX = xThresh;
                 prevPitch = note.Pitch[pi].MidiNote;
