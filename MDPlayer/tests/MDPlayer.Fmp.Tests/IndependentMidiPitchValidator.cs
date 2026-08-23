@@ -5,6 +5,13 @@ using Fmp.Core.Visualization;
 namespace MDPlayer.Fmp.Tests;
 internal static class IndependentMidiPitchValidator
 {
+    public static void ValidateSerializedNoteState(MidiTranscriptionResult export)
+    {
+        IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
+        foreach (ParsedTrack track in parsed)
+            ValidateTrackSemantics(track);
+    }
+
     public static void Validate(
         VisualizationTimeline timeline,
         MidiTranscriptionResult export,

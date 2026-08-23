@@ -376,10 +376,20 @@ public sealed class MidiTranscriberFidelityTests
     [Fact]
     public void SameTickAttackCollisions_CountedInDiagnostics()
     {
-        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
+        VisualizationTimeline timeline = Timeline(
             Note("0", 0, 0, 60.0),
-            Note("0", 0, Sr, 62.0)));
+            Note("0", 0, Sr, 62.0));
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+
         Assert.Equal(1, result.Diagnostics.SameTickAttackCollisions);
+        Assert.Equal(1, result.Diagnostics.QuantizationCollapsedNotes);
+        Assert.Equal(2, result.Diagnostics.UniqueAudibleAttackCount);
+
+        IndependentMidiPitchValidator.Validate(timeline, result, Ppq);
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(result.Bytes, 1);
+        Assert.Single(voice.Where(e => e.Event is NoteOnEvent));
+        Assert.Single(voice.Where(e => e.Event is NoteOffEvent));
+        Assert.Equal(0L, voice.First(e => e.Event is NoteOnEvent).Tick);
     }
 
     [Fact]

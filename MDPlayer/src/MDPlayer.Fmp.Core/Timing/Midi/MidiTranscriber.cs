@@ -19,7 +19,8 @@ internal sealed record MidiTranscriptionDiagnostics(
     int SameTickAttackCollisions,
     int OneTickNotes,
     int UniqueAudibleAttackCount,
-    IReadOnlyList<string>? BendRangeDiagnostics = null)
+    IReadOnlyList<string>? BendRangeDiagnostics = null,
+    int QuantizationCollapsedNotes = 0)
 {
     public IReadOnlyList<string> BendRangeDiagnostics { get; init; } =
         BendRangeDiagnostics ?? Array.Empty<string>();
@@ -87,6 +88,7 @@ internal sealed class MidiTranscriber
         int oneTickNotes = 0;
         var tracks = new List<MidiTrack>();
         var domainsByEndpoint = new Dictionary<MidiEndpoint, MidiVoiceDomain>();
+        int quantizationCollapsedNotes = 0;
 
         IGrouping<string, IndexedNote>[] voices = indexed
             .GroupBy(n => n.Voice, StringComparer.Ordinal)
@@ -103,7 +105,8 @@ internal sealed class MidiTranscriber
             PlannedNote[] notePlans = voiceNotes
                 .Select(source => PlanNote(timeline, source, ref oneTickNotes))
                 .ToArray();
-            notePlans = PreventQuantizedNoteOverlap(notePlans);
+            notePlans = DropQuantizedAttackCollisions(
+                notePlans, ref quantizationCollapsedNotes);
             int bendRange = BendRange(notePlans);
             Dictionary<string, int> instrumentPrograms = InstrumentPrograms(voiceNotes);
             MidiVoiceDomain domain = CreateVoiceDomain(
@@ -113,7 +116,10 @@ internal sealed class MidiTranscriber
                 endpoint,
                 bendRange) with
             {
-                Notes = voiceNotes.Select(source => source.PitchNote).ToArray(),
+                // The validator's expected-note sequence describes the emitted
+                // stream. Explicitly dropped quantization collisions must not
+                // remain in the domain or they look like missing NoteOns.
+                Notes = notePlans.Select(plan => plan.Source.PitchNote).ToArray(),
             };
             RegisterDomain(domainsByEndpoint, domain);
             var track = new MidiTrack
@@ -264,10 +270,12 @@ internal sealed class MidiTranscriber
             .SelectMany(track => track.Events)
             .OfType<MidiNoteEvent>()
             .Count(note => note.NoteOn);
-        if (serializedNoteOnCount != uniqueAudibleAttackCount)
+        int expectedSerializedAttackCount = uniqueAudibleAttackCount - quantizationCollapsedNotes;
+        if (serializedNoteOnCount != expectedSerializedAttackCount)
         {
             throw new InvalidOperationException(
                 $"MIDI attack conservation failed: source attacks={uniqueAudibleAttackCount}, " +
+                $"quantization-collapsed={quantizationCollapsedNotes}, " +
                 $"serialized NoteOn events={serializedNoteOnCount}.");
         }
 
@@ -290,7 +298,8 @@ internal sealed class MidiTranscriber
                     .Select(domain =>
                         $"{domain.Source}: bend-range={domain.BendRange}; "
                         + $"classification={MidiPitchCompiler.ClassifyBendRange(domain.BendRange)}")
-                    .ToArray()),
+                    .ToArray(),
+                quantizationCollapsedNotes),
         };
     }
 
@@ -523,23 +532,29 @@ internal sealed class MidiTranscriber
         return new PlannedNote(source, onTick, offTick, baseNote, states);
     }
 
-    private static PlannedNote[] PreventQuantizedNoteOverlap(PlannedNote[] notes)
+    private static PlannedNote[] DropQuantizedAttackCollisions(
+        PlannedNote[] notes,
+        ref int quantizationCollapsedNotes)
     {
-        for (int index = 0; index + 1 < notes.Length; index++)
-        {
-            PlannedNote current = notes[index];
-            PlannedNote next = notes[index + 1];
-            if (current.OffTick <= next.OnTick)
-                continue;
+        if (notes.Length < 2)
+            return notes;
 
-            // Source notes are monophonic but two adjacent attacks can collapse
-            // onto one MIDI tick. A forced one-tick duration would then leave the
-            // previous NoteOn active when the next NoteOn arrives. End the short
-            // note at the next attack tick; deterministic NoteOff-before-NoteOn
-            // ordering still gives the receiver a valid retrigger.
-            notes[index] = current with { OffTick = next.OnTick };
+        var kept = new List<PlannedNote>(notes.Length);
+        foreach (PlannedNote note in notes)
+        {
+            if (kept.Count > 0 && kept[^1].OnTick == note.OnTick)
+            {
+                // Two monophonic source attacks cannot both be represented at one
+                // MIDI tick while preserving NoteOff-before-NoteOn ordering. Keep
+                // the later attack and report the earlier one explicitly dropped;
+                // neither source attack is moved in time.
+                kept[^1] = note;
+                quantizationCollapsedNotes++;
+                continue;
+            }
+            kept.Add(note);
         }
-        return notes;
+        return kept.ToArray();
     }
 
     private static MidiVoiceDomain CreateVoiceDomain(
