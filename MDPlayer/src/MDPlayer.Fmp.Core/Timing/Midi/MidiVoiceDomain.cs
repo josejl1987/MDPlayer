@@ -27,7 +27,7 @@ internal readonly record struct MidiVoiceDomain(
     public int MidiChannel => Channel;
 
     /// <summary>Source notes assigned to this physical domain.</summary>
-    public IReadOnlyList<NoteEvent> Notes { get; init; } = Array.Empty<NoteEvent>();
+    public IReadOnlyList<SourcePitchNote> Notes { get; init; } = Array.Empty<SourcePitchNote>();
 
     /// <summary>The single pitch-bend sensitivity used by this channel-state domain.</summary>
     public int BendRange => BendRangeSemitones;

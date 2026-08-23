@@ -197,7 +197,9 @@ public sealed class MidiSerializedPitchInvariantTests
 
                         // The base note belongs to the attack state, not to each
                         // later source pitch. The exporter keeps it stable for the note.
-                        int attackBase = BaseNote(notePoints[onTick].Pitch);
+                        int attackBase = MidiPitchCompiler.SelectMinimaxBaseNote(
+                            notePoints.Select(point => new SourcePitchPoint(
+                                point.Key, point.Value.Pitch)).ToArray());
                         foreach ((long tick, ExpectedPoint point) in notePoints)
                             points[tick] = point with { BaseNote = attackBase };
                     }
@@ -228,9 +230,6 @@ public sealed class MidiSerializedPitchInvariantTests
 
     private static string VoiceId(NoteEvent note) =>
         note.Domain is SourceDomainKey domain ? "domain:" + domain : "channel:" + note.ChannelId;
-
-    private static int BaseNote(double pitch) =>
-        (int)Math.Clamp(Math.Round(pitch, MidpointRounding.AwayFromZero), 0, 127);
 
     private sealed class ChannelState
     {

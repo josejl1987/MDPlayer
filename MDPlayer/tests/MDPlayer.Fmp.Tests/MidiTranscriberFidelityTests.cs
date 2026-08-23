@@ -118,11 +118,12 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
-    public void ExactAttackPitch_BendIsZero()
+    public void ExactAttackPitch_EmitsNoPitchBendOrRange()
     {
         byte[] bytes = Transcriber.Transcribe(Timeline(Note("0", 0, Sr, 60.0))).Bytes;
-        var bend = (PitchBendEvent)Track(bytes, 1).First(e => e.Event is PitchBendEvent).Event;
-        Assert.Equal(8192, bend.PitchValue); // 0 in signed 14-bit terms
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(bytes, 1);
+        Assert.DoesNotContain(voice, e => e.Event is PitchBendEvent);
+        Assert.DoesNotContain(voice, e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6);
     }
 
     [Fact]
@@ -139,10 +140,9 @@ public sealed class MidiTranscriberFidelityTests
         long boundaryTick = Ppq; // 0.5 s @ 120 BPM = 1 quarter = 960 ticks
         var atTick = voice.Where(e => e.Tick == boundaryTick).ToList();
         var channel = atTick.Where(e => e.Event is NoteOffEvent or NoteOnEvent or PitchBendEvent).ToList();
-        Assert.Equal(3, channel.Count);
+        Assert.Equal(2, channel.Count);
         Assert.IsType<NoteOffEvent>(channel[0].Event);
-        Assert.IsType<PitchBendEvent>(channel[1].Event);
-        Assert.IsType<NoteOnEvent>(channel[2].Event);
+        Assert.IsType<NoteOnEvent>(channel[1].Event);
     }
 
     [Fact]
@@ -164,6 +164,34 @@ public sealed class MidiTranscriberFidelityTests
         Assert.Equal(0, bends[0].Tick);
         Assert.Equal(2 * Ppq / 4, bends[1].Tick);
         Assert.Equal(Ppq, bends[2].Tick);
+    }
+
+    [Fact]
+    public void BaseNote_UsesTheWholePitchCurve()
+    {
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(Note("0", 0, Sr, 60.25,
+            pitch: new[] { Pitch(Sr / 2, 61.75) })));
+
+        NoteOnEvent noteOn = (NoteOnEvent)Track(result.Bytes, 1)
+            .First(e => e.Event is NoteOnEvent).Event;
+        Assert.Equal(61, (int)noteOn.NoteNumber);
+        Assert.Equal(1, result.Tracks[0].VoiceDomain!.Value.BendRange);
+    }
+
+    [Fact]
+    public void BendRange_IsOneGlobalValueAcrossTheSourceDomain()
+    {
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
+            Note("0", 0, Sr, 60.25,
+                pitch: new[] { Pitch(Sr / 2, 60.75) }),
+            Note("0", Sr, 2 * Sr, 62.25,
+                pitch: new[] { Pitch(Sr + Sr / 2, 64.75) })));
+
+        MidiVoiceDomain domain = result.Tracks[0].VoiceDomain!.Value;
+        Assert.Equal(2, domain.BendRange);
+        Assert.Equal(2, domain.Notes.Count);
+        Assert.Equal(1, Track(result.Bytes, 1)
+            .Count(e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6));
     }
 
     [Fact]
