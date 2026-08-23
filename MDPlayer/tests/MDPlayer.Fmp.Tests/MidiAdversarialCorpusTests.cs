@@ -47,6 +47,15 @@ public sealed class MidiAdversarialCorpusTests
                 Assert.False(expected.GetProperty("meter").ValueKind == JsonValueKind.Null,
                     $"Reviewed fixture {source} has no meter annotation.");
             }
+            else if (status == "unresolved")
+            {
+                Assert.True(entry.GetProperty("allowUnresolvedTempo").GetBoolean(),
+                    $"Unresolved fixture {source} must explicitly allow unresolved tempo.");
+                Assert.True(entry.GetProperty("allowUnresolvedMeter").GetBoolean(),
+                    $"Unresolved fixture {source} must explicitly allow unresolved meter.");
+                Assert.True(entry.GetProperty("allowUnresolvedDownbeat").GetBoolean(),
+                    $"Unresolved fixture {source} must explicitly allow unresolved downbeat.");
+            }
             else
             {
                 Assert.Equal("pending", status);

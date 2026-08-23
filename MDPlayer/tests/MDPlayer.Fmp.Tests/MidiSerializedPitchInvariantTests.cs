@@ -1,4 +1,5 @@
 using Fmp.Core.Midi;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 using Melanchall.DryWetMidi.Core;
 using Xunit;
@@ -112,6 +113,48 @@ public sealed class MidiSerializedPitchInvariantTests
 
             Assert.Equal(1, channelEvents.Count(e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6));
         }
+    }
+
+    [Fact]
+    public void SerializedSmf_MusicalMapUsesSerializedTickOriginForPitchChecks()
+    {
+        VisualizationTimeline timeline = new()
+        {
+            SampleRate = SampleRate,
+            StartSample = 0,
+            EndSample = SampleRate,
+            Notes = new[]
+            {
+                new NoteEvent(
+                    "musical",
+                    0,
+                    SampleRate,
+                    0,
+                    60.25,
+                    "test",
+                    VisualizationNoteMode.Fm,
+                    false,
+                    new[] { new PitchChange(SampleRate / 2, 0, 61.75) })
+                {
+                    Domain = new SourceDomainKey(
+                        new DeviceId(ChipType.Ym2608, 0), VoiceKind.Fm, 0),
+                },
+            },
+        };
+        var map = new MusicalTimeMap(
+            SampleRate,
+            0,
+            new[]
+            {
+                new TempoSegment(0, SampleRate / 2, 0, SampleRate / 2.0, 120,
+                    TimingSource.UserOverride, 1),
+                new TempoSegment(SampleRate / 2, SampleRate, 1, SampleRate, 60,
+                    TimingSource.UserOverride, 1),
+            });
+
+        MidiTranscriptionResult export = new MidiTranscriber(Ppq, map).Transcribe(timeline);
+
+        IndependentMidiPitchValidator.Validate(timeline, export, Ppq, map);
     }
 
     private static IReadOnlyList<TimedEvent> ReadMergedEvents(byte[] bytes)

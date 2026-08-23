@@ -1,4 +1,5 @@
 using Fmp.Core.Midi;
+using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 
 namespace MDPlayer.Fmp.Tests;
@@ -7,8 +8,18 @@ internal static class IndependentMidiPitchValidator
     public static void Validate(
         VisualizationTimeline timeline,
         MidiTranscriptionResult export,
-        int ppq)
+        int ppq,
+        MusicalTimeMap? timeMap = null)
     {
+        if (timeMap is not null && (timeMap.SampleRate != timeline.SampleRate
+            || timeMap.StartSample != timeline.StartSample))
+            throw new InvalidOperationException("Pitch validator received a mismatched musical time map.");
+        long SourceTick(long sample) => timeMap is null
+            ? MidiTransportClock.SampleToTick(
+                timeline.StartSample, sample, timeline.SampleRate, ppq)
+            : timeMap.SampleToTick(sample, ppq)
+                - timeMap.SampleToTick(timeline.StartSample, ppq);
+
         IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
         if (parsed.Count != export.Tracks.Count + 1)
             throw new InvalidOperationException("Serialized SMF track count does not match the export.");
@@ -88,8 +99,7 @@ internal static class IndependentMidiPitchValidator
                             throw new InvalidOperationException("Serialized NoteOn count exceeds source-note count.");
 
                         SourcePitchNote source = expectedNotes[sourceIndex++];
-                        long expectedTick = MidiTransportClock.SampleToTick(
-                            timeline.StartSample, source.StartSample, timeline.SampleRate, ppq);
+                        long expectedTick = SourceTick(source.StartSample);
                         if (evt.Tick != expectedTick)
                             throw new InvalidOperationException(
                                 $"Source NoteOn tick {expectedTick} became serialized tick {evt.Tick}.");
@@ -106,7 +116,7 @@ internal static class IndependentMidiPitchValidator
                     case ParsedKind.NoteOff:
                         if (activeSource is SourcePitchNote closing)
                         {
-                            ValidateNote(timeline, closing, activeBase, state.BendRange, observed, ppq);
+                            ValidateNote(closing, activeBase, state.BendRange, observed, SourceTick);
                             activeSource = null;
                             observed.Clear();
                         }
@@ -115,7 +125,7 @@ internal static class IndependentMidiPitchValidator
             }
 
             if (activeSource is SourcePitchNote last)
-                ValidateNote(timeline, last, activeBase, state.BendRange, observed, ppq);
+                ValidateNote(last, activeBase, state.BendRange, observed, SourceTick);
             if (sourceIndex != expectedNotes.Count)
                 throw new InvalidOperationException("Serialized NoteOn count does not conserve source notes.");
             if (domain.BendRange > 0 && rangeSetCountAtEnd != 1)
@@ -181,25 +191,19 @@ internal static class IndependentMidiPitchValidator
         _ => 6,
     };
     private static void ValidateNote(
-        VisualizationTimeline timeline,
         SourcePitchNote source,
         int baseNote,
         int bendRange,
         SortedDictionary<long, double> observed,
-        int ppq)
+        Func<long, long> sourceTick)
     {
         var expected = new SortedDictionary<long, double>();
         foreach (SourcePitchPoint point in source.PitchCurve)
-        {
-            long tick = MidiTransportClock.SampleToTick(
-                timeline.StartSample, point.Sample, timeline.SampleRate, ppq);
-            expected[tick] = point.MidiNote;
-        }
+            expected[sourceTick(point.Sample)] = point.MidiNote;
 
         foreach ((long tick, double sourcePitch) in expected)
         {
-            if (tick >= MidiTransportClock.SampleToTick(
-                    timeline.StartSample, source.EndSample, timeline.SampleRate, ppq))
+            if (tick >= sourceTick(source.EndSample))
                 continue;
             KeyValuePair<long, double>? actual = observed
                 .Where(pair => pair.Key <= tick)
