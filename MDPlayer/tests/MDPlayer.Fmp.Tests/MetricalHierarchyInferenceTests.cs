@@ -128,6 +128,7 @@ public sealed class MetricalHierarchyInferenceTests
         MusicalTimeMapBuildResult repeat = Build(timeline);
 
         Assert.Equal(120, build.Diagnostics.SelectedBpm);
+        Assert.False(build.Diagnostics.TempoResolved);
         Assert.Equal(0, build.Diagnostics.MetricalConfidence);
         Assert.False(build.Diagnostics.DownbeatKnown);
         Assert.Equal(0, build.Map.SampleToTick(0, Ppq));
@@ -215,6 +216,7 @@ public sealed class MetricalHierarchyInferenceTests
         // consistent with Symbolic_BeatLockedRhythm_SurfacesAccentEvidence_
         // ResolvesCentralOctave.
         Assert.True(build.Diagnostics.TempoAmbiguous);
+        Assert.False(build.Diagnostics.TempoResolved);
         Assert.Equal(4, build.Diagnostics.TatumsPerBeat);
         Assert.True(build.Diagnostics.DownbeatKnown);
         Assert.Equal(new Meter(4, 4), build.Map.Meter);
