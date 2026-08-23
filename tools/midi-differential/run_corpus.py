@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import compare_tempo
+
 
 class SmfError(ValueError):
     pass
@@ -751,6 +753,7 @@ def run_export(
     source: Path | None,
     timeline: Path | None,
     timeout: float,
+    differential: bool,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="mdplayer-midi-corpus-") as directory:
         output = Path(directory) / "export.mid"
@@ -824,6 +827,7 @@ def run_export(
                 "capture": capture,
                 "error": f"source pitch round trip failed: {error}",
             }
+        reference = run_tempo_differential(cli, validation_timeline) if differential else None
         tempo = re.search(r"tempo: ([0-9]+(?:\.[0-9]+)?) BPM", text)
         notes = re.search(r"events: notes=([0-9]+)", text)
         resolution = re.search(
@@ -844,7 +848,57 @@ def run_export(
             "meter": resolution.group(2) if resolution else None,
             "meterResolved": resolution.group(3) == "True" if resolution else None,
             "downbeatResolved": resolution.group(4) == "True" if resolution else None,
+            "reference": reference,
         }
+
+
+def run_tempo_differential(cli: Path, timeline: Path) -> dict[str, Any]:
+    """Compare one exact captured timeline with optional MIR references.
+
+    A disagreement is deliberately recorded as an investigation alarm. It does
+    not turn an unreviewed source label into a guessed golden value.
+    """
+
+    hop_length = 512
+    timeline_data = compare_tempo.load_timeline(timeline)
+    md_bpm, md_status, md_resolved = compare_tempo.mdplayer_tempo(cli, timeline)
+    report: dict[str, Any] = {
+        "sampleRate": timeline_data.get("sampleRate"),
+        "onsetCount": len(compare_tempo.onset_events(timeline_data)),
+        "hopLength": hop_length,
+        "mdplayerBpm": md_bpm,
+        "mdplayerStatus": md_status,
+        "mdplayerTempoResolved": md_resolved,
+    }
+
+    try:
+        report["librosaBpm"] = compare_tempo.librosa_tempo(timeline_data, hop_length)
+        report["librosaStatus"] = "ok"
+    except ImportError as error:
+        report["librosaBpm"] = None
+        report["librosaStatus"] = f"unavailable: {error}"
+
+    try:
+        report["essentiaBpm"] = compare_tempo.essentia_tempo(timeline_data, hop_length)
+        report["essentiaStatus"] = "ok"
+    except ImportError as error:
+        report["essentiaBpm"] = None
+        report["essentiaStatus"] = f"unavailable: {error}"
+
+    references = [
+        value
+        for value in (report.get("librosaBpm"), report.get("essentiaBpm"))
+        if isinstance(value, (int, float)) and value > 0
+    ]
+    report["dyadicDistance"] = {
+        "librosa": compare_tempo.dyadic_distance(md_bpm, report.get("librosaBpm")),
+        "essentia": compare_tempo.dyadic_distance(md_bpm, report.get("essentiaBpm")),
+    }
+    report["referenceAgreement"] = (
+        len(references) >= 2
+        and max(references) / min(references) < 2 ** 0.15
+    )
+    return report
 
 
 def review_error(entry: dict[str, Any], result: dict[str, Any]) -> str | None:
@@ -877,6 +931,11 @@ def main() -> int:
     parser.add_argument("--mdplayer", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--require-reviewed", action="store_true")
+    parser.add_argument(
+        "--differential",
+        action="store_true",
+        help="run optional librosa/Essentia comparison for every exact capture",
+    )
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -897,9 +956,11 @@ def main() -> int:
             source if source.exists() else None,
             timeline if timeline is not None and timeline.exists() else None,
             args.timeout,
+            args.differential,
         )
         if result["status"] != "passed" and timeline is not None and timeline.exists() and source.exists():
-            fallback = run_export(args.mdplayer, None, timeline, args.timeout)
+            fallback = run_export(
+                args.mdplayer, None, timeline, args.timeout, args.differential)
             if fallback["status"] == "passed":
                 result = fallback
                 result["sourceFallback"] = True

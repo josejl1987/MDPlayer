@@ -34,5 +34,8 @@ The runner validates that every successful result is an SMF, reports decoder
 fallbacks explicitly, retains the exact capture with `midi --timeline-out`, and
 independently checks serialized note pitch, note/rhythm/sample timing, channel
 ownership, RPN state, and SMF ordering. It returns a nonzero status for export
-or round-trip failures. Use `--require-reviewed` only after human sidecars have
-filled the expected musical labels.
+or round-trip failures. Add `--differential` to run the optional librosa and
+Essentia reference trackers against every exact captured timeline; disagreements
+are recorded as alarms and do not become guessed labels. Use
+`--require-reviewed` only after human sidecars have filled the expected musical
+labels.
