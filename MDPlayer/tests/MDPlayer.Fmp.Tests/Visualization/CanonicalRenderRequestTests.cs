@@ -250,6 +250,54 @@ public sealed class CanonicalRenderRequestTests
         Assert.DoesNotContain("FMP.COM", json, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(new[] { "song.vgz" }, "auto")]
+    [InlineData(new[] { "song.vgz", "--render-backend", "cpu" }, "cpu")]
+    [InlineData(new[] { "song.vgz", "--render-backend", "gpu" }, "gpu")]
+    [InlineData(new[] { "song.vgz", "--render-backend", "skia-gpu" }, "skia-gpu")]
+    public void RenderBackendOptionIsRuntimeOnly(string[] args, string expected)
+    {
+        var parsed = RenderCommandParser.ParseCore(args);
+        Assert.Equal(expected, parsed.Runtime.RenderBackend);
+        // The render-backend selector is a runtime tool option: it never
+        // enters the serialized request schema.
+        Assert.DoesNotContain("render-backend", VisualizationRequestSerializer.Serialize(parsed.Request), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RenderBackendOptionRejectsUnknownValues()
+        => Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--render-backend", "vulkan"]));
+
+    [Theory]
+    [InlineData(new[] { "song.vgz" }, null)]
+    [InlineData(new[] { "song.vgz", "--scope", "off" }, "off")]
+    [InlineData(new[] { "song.vgz", "--scope", "channel" }, "channel")]
+    [InlineData(new[] { "song.vgz", "--scope", "master" }, "master")]
+    [InlineData(new[] { "song.vgz", "--scope", "AUTO" }, "auto")]
+    public void ScopeModeOptionFlowsIntoTheRequest(string[] args, string? expected)
+    {
+        var parsed = RenderCommandParser.ParseCore(args);
+        Assert.Equal(expected, parsed.Request.View.ScopeMode);
+    }
+
+    [Fact]
+    public void ScopeModeOptionRejectsUnknownValues()
+        => Assert.Throws<ArgumentException>(() =>
+            RenderCommandParser.ParseCore(["song.vgz", "--scope", "vaporwave"]));
+
+    [Theory]
+    [InlineData("gpu", "Gpu")]
+    [InlineData("skia-gpu", "Gpu")]
+    [InlineData("cpu", "Cpu")]
+    [InlineData("skia-cpu", "Cpu")]
+    [InlineData("auto", "Auto")]
+    [InlineData(null, "Auto")]
+    [InlineData("", "Auto")]
+    [InlineData("unknown", "Auto")]
+    public void RenderBackendKeyResolvesFamilies(string? key, string expected)
+        => Assert.Equal(expected, RenderBackendKey.Resolve(key).ToString());
+
     [Fact]
     public void FullyResolvedFormatterRoundTripsRequest()
     {

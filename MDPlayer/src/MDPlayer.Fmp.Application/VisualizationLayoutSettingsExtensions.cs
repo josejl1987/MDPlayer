@@ -38,7 +38,9 @@ internal static class VisualizationLayoutSettingsExtensions
                 : Array.Empty<string>(),
             ExcludeTracks: request.Tracks.Selection == TrackSelectionMode.Custom
                 ? request.Tracks.ExcludedIds.ToList()
-                : Array.Empty<string>());
+                : Array.Empty<string>(),
+            ScopesEnabled: !string.Equals(
+                request.View.ScopeMode, "off", StringComparison.OrdinalIgnoreCase));
     }
 
 

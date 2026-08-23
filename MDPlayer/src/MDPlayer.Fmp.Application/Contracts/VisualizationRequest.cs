@@ -97,6 +97,15 @@ public sealed record ViewSettings
     /// frames.
     /// </summary>
     public double? ScopeFps { get; init; }
+
+    /// <summary>
+    /// Scope layer selection: <c>auto</c> (default), <c>channel</c>,
+    /// <c>device</c>, <c>master</c>, or <c>off</c>. <c>off</c> renders
+    /// piano-roll-only output: no waveform strips (the layout reclaims the
+    /// scope region for the roll) and no per-channel stem capture — master
+    /// audio only.
+    /// </summary>
+    public string? ScopeMode { get; init; }
 }
 
 /// <summary>Visual style: effects, note coloring and palette.</summary>

@@ -86,6 +86,7 @@ internal static class RenderCommandParser
         string? analysisPython = null;
         var searchPaths = new List<string>();
         string backend = "auto";
+        string renderBackend = "auto";
         bool quiet = false;
         bool json = false;
         string? progressMode = null;
@@ -193,6 +194,9 @@ internal static class RenderCommandParser
                     case "--structure":
                         view = view with { Structure = ParseStructure(reader.RequireValue(name)) };
                         break;
+                    case "--scope":
+                        view = view with { ScopeMode = ParseScopeMode(reader.RequireValue(name)) };
+                        break;
                     case "--scope-fps":
                         {
                             // Scope render cadence (plan §5.1). Bare in
@@ -287,6 +291,7 @@ internal static class RenderCommandParser
                     case "-I":
                     case "--search-path": searchPaths.Add(reader.RequireValue(name)); break;
                     case "--backend": backend = reader.RequireValue(name); break;
+                    case "--render-backend": renderBackend = ParseRenderBackend(reader.RequireValue(name)); break;
                     case "--tool-timeout-minutes": toolTimeoutMinutes = reader.ReadInt(name); break;
                     case "--quiet" when value == null: quiet = true; break;
                     case "--json" when value == null: json = true; break;
@@ -354,6 +359,7 @@ internal static class RenderCommandParser
             AnalysisPython = analysisPython,
             SearchPaths = searchPaths,
             Backend = backend,
+            RenderBackend = renderBackend,
             Quiet = quiet,
             Json = json,
             ProgressMode = progressMode,
@@ -364,6 +370,32 @@ internal static class RenderCommandParser
 
         return (request, runtime, requestJsonPath, captureDirectory, captureKey);
     }
+
+    /// <summary>
+    /// Validates the <c>--render-backend</c> value and returns the normalized
+    /// key (<c>auto</c> | <c>cpu</c> | <c>gpu</c>, with the <c>skia-*</c>
+    /// aliases preserved as-is for the resolver).
+    /// </summary>
+    private static string ParseRenderBackend(string value)
+        => value.Trim().ToLowerInvariant() switch
+        {
+            "auto" or "cpu" or "gpu" or "skia-cpu" or "skia-gpu" => value.Trim().ToLowerInvariant(),
+            _ => throw new ArgumentException(
+                $"unknown render backend '{value}' (expected auto, cpu or gpu)"),
+        };
+
+    /// <summary>
+    /// Validates the <c>--scope</c> layer selection and returns the normalized
+    /// key (<c>auto</c> | <c>channel</c> | <c>device</c> | <c>master</c> |
+    /// <c>off</c>).
+    /// </summary>
+    private static string ParseScopeMode(string value)
+        => value.Trim().ToLowerInvariant() switch
+        {
+            "auto" or "channel" or "device" or "master" or "off" => value.Trim().ToLowerInvariant(),
+            _ => throw new ArgumentException(
+                $"unknown scope mode '{value}' (expected auto, channel, device, master or off)"),
+        };
 
     /// <summary>
     /// Capture reuse requires both a validated capture directory and an

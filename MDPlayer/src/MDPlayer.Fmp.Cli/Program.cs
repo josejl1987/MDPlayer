@@ -86,6 +86,7 @@ public class Program
         Console.WriteLine("  --effects off|subtle|cinematic  Visual effect preset (default: subtle)");
         Console.WriteLine("  --note-color instrument|channel|pitch");
         Console.WriteLine("  --palette default|accessible|monochrome");
+        Console.WriteLine("  --scope MODE               Scope/waveform layer: auto|channel|device|master|off (default: auto; off = piano-roll only, no waveform stems)");
         Console.WriteLine("  --scope-fps FPS             Scope render cadence (default: min(output, 30))");
         Console.WriteLine("  --scope-opacity 0.05..1.0   Waveform layer opacity over the panel body (default: 1.0)");
         Console.WriteLine("  --title TEXT --subtitle TEXT --credits TEXT --font PATH");
@@ -97,6 +98,7 @@ public class Program
         Console.WriteLine("  --dump-furnace-assets DIR  Export FM instruments as Furnace .tfi (FMP/OVI and VGM/VGZ)");
         Console.WriteLine("  --encoder auto|x264|nvenc  Encoder (default: auto)");
         Console.WriteLine("  --overwrite                Overwrite existing output");
+        Console.WriteLine("  --render-backend auto|cpu|gpu  Overlay renderer backend (default: auto = CPU; the GPU is opt-in via gpu and requires a GL surface)");
         Console.WriteLine("  --progress human|jsonl     Progress output mode");
         Console.WriteLine("  --quiet                    Suppress progress output");
         Console.WriteLine();

@@ -15,7 +15,10 @@ internal sealed record VisualizationLayoutSettings(
     VisualizationChannelFilter Channels,
     VisualizationGroupBy GroupBy,
     IReadOnlyList<string> IncludeTracks = null,
-    IReadOnlyList<string> ExcludeTracks = null);
+    IReadOnlyList<string> ExcludeTracks = null,
+    // False (--scope off) removes the waveform-strip region entirely: panels
+    // hand that space to the piano roll and no scope source is created.
+    bool ScopesEnabled = true);
 
 internal static class VisualizationLayoutBuilder
 {
@@ -142,7 +145,8 @@ internal static class VisualizationLayoutBuilder
             settings.TimelineHeight,
             settings.RollZoom,
             settings.ScopeRatio,
-            settings.ScopePosition);
+            settings.ScopePosition,
+            showScopes: settings.ScopesEnabled ? null : false);
 
         if (VisualizationContentAvailability.HasRenderableContent(timeline))
             VisualizationLayoutValidator.Validate(geometry, topology);
@@ -180,7 +184,8 @@ internal static class VisualizationLayoutBuilder
             settings.TimelineHeight,
             settings.RollZoom,
             settings.ScopeRatio,
-            settings.ScopePosition);
+            settings.ScopePosition,
+            showScopes: settings.ScopesEnabled ? null : false);
 
         (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
             VisualizationLayoutResolver.Decide(
@@ -231,7 +236,8 @@ internal static class VisualizationLayoutBuilder
             settings.TimelineHeight,
             settings.RollZoom,
             settings.ScopeRatio,
-            settings.ScopePosition);
+            settings.ScopePosition,
+            showScopes: settings.ScopesEnabled ? null : false);
 
         (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
             VisualizationLayoutResolver.Decide(

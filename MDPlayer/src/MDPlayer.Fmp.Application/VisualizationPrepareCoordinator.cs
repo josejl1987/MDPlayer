@@ -356,6 +356,29 @@ internal static class VisualizationPrepareCoordinator
         {
             try
             {
+                // --scope off keeps the master-audio-only capture (the stem
+                // pass is skipped) and marks the scope artifacts disabled, so
+                // the frame factory creates no waveform source and the layout
+                // has already reclaimed the strip region for the roll.
+                bool scopesOff = string.Equals(
+                    request.View.ScopeMode, "off", StringComparison.OrdinalIgnoreCase);
+                if (scopesOff
+                    && !File.Exists(workspace.MasterAudioPath)
+                    && preparedFmpTrack is not null)
+                {
+                    try
+                    {
+                        VisualizationScopeCoordinator.RenderMasterAudioOnly(
+                            request, workspace, preparedFmpTrack);
+                    }
+                    catch (VisualizationScopeException ex)
+                    {
+                        throw new VisualizationExecutionException(
+                            $"scope-off render could not produce master audio: {ex.Message}",
+                            ex.ExitCode);
+                    }
+                }
+
                 scopeArtifacts = VisualizationScopeCoordinator.Render(
                     resolution.Backend.Id,
                     resolution.Input,
@@ -366,7 +389,7 @@ internal static class VisualizationPrepareCoordinator
                     semanticTimeline.Voices,
                     Math.Max(1, semanticTimeline.EndSample - semanticTimeline.StartSample),
                     preparedFmpTrack,
-                    scopesRequired: true);
+                    scopesRequired: !scopesOff);
             }
             catch (VisualizationScopeException)
             {
