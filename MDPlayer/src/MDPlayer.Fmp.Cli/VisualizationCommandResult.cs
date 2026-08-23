@@ -121,6 +121,10 @@ internal sealed record VisualizationStageMetrics
     public double RendererBlockedSeconds { get; init; }
     public double EncoderIdleSeconds { get; init; }
     public double EncoderBlockedSeconds { get; init; }
+    public double GpuDrawSeconds { get; init; }
+    public double GpuFlushSyncSeconds { get; init; }
+    public double GpuReadbackSeconds { get; init; }
+    public double ScopeUploadSeconds { get; init; }
 }
 
 /// <summary>
@@ -248,7 +252,7 @@ internal static class VisualizationResultBuilder
             NoteCount = timeline?.Notes.Count ?? 0,
             InstrumentCount = timeline?.Instruments.Count ?? 0,
             Encoder = encoder,
-            Renderer = "Cpu",
+            Renderer = composeMetrics?.Renderer?.BackendName ?? "Cpu",
             EncoderFallback = encoderFallback,
             OutputSizeBytes = outputSizeBytes,
             TrackDurationSeconds = trackDurationSeconds,
@@ -344,6 +348,10 @@ internal static class VisualizationResultBuilder
             RendererBlockedSeconds = m?.RendererBlockedSeconds ?? 0,
             EncoderIdleSeconds = m?.EncoderIdleSeconds ?? 0,
             EncoderBlockedSeconds = m?.FfmpegWriteWaitSeconds ?? 0,
+            GpuDrawSeconds = m?.Renderer?.GpuDrawSeconds ?? 0,
+            GpuFlushSyncSeconds = m?.Renderer?.GpuFlushSyncSeconds ?? 0,
+            GpuReadbackSeconds = m?.Renderer?.GpuReadbackSeconds ?? 0,
+            ScopeUploadSeconds = m?.Renderer?.ScopeUploadSeconds ?? 0,
         };
 }
 

@@ -150,6 +150,10 @@ internal static class VisualizationSupport
                 rendererBlockedSeconds = composeMetrics?.RendererBlockedSeconds ?? 0,
                 encoderIdleSeconds = composeMetrics?.EncoderIdleSeconds ?? 0,
                 encoderBlockedSeconds = composeMetrics?.FfmpegWriteWaitSeconds ?? 0,
+                gpuDrawSeconds = composeMetrics?.Renderer?.GpuDrawSeconds ?? 0,
+                gpuFlushSyncSeconds = composeMetrics?.Renderer?.GpuFlushSyncSeconds ?? 0,
+                gpuReadbackSeconds = composeMetrics?.Renderer?.GpuReadbackSeconds ?? 0,
+                scopeUploadSeconds = composeMetrics?.Renderer?.ScopeUploadSeconds ?? 0,
             },
         }, new JsonSerializerOptions { WriteIndented = true }));
     }

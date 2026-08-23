@@ -62,4 +62,72 @@ internal static class PitchContour
             ? note.InitialMidiNote
             : pitch[Math.Min(segmentIndex, pitch.Length - 1)].MidiNote;
     }
+
+    /// <summary>
+    /// Linear interpolation between pitch points. Holds <see cref="PreparedNote.InitialMidiNote"/>
+    /// before the first point, then linearly interpolates between successive points.
+    /// This smooths vibrato and bends into continuous lines instead of ZOH stair-steps,
+    /// while still honoring the sampled pitch values exactly at their timestamps.
+    /// </summary>
+    public static double PitchAtSampleInterpolated(PreparedNote note, long sample, double samplesPerFrame)
+        => PitchAtSampleInterpolated(note.InitialMidiNote, note.Pitch, sample);
+
+    internal static double PitchAtSampleInterpolated(
+        double initialMidiNote,
+        PreparedPitchPoint[] pitch,
+        long sample)
+    {
+        if (pitch.Length == 0)
+            return initialMidiNote;
+        int low = 0;
+        int high = pitch.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (pitch[middle].SamplePosition <= sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+
+        if (low == 0)
+            return initialMidiNote;
+        if (low >= pitch.Length)
+            return pitch[pitch.Length - 1].MidiNote;
+
+        PreparedPitchPoint prev = pitch[low - 1];
+        PreparedPitchPoint next = pitch[low];
+        if (next.SamplePosition == prev.SamplePosition)
+            return next.MidiNote;
+        double t = (sample - prev.SamplePosition) / (double)(next.SamplePosition - prev.SamplePosition);
+        t = Math.Clamp(t, 0, 1);
+        return prev.MidiNote + t * (next.MidiNote - prev.MidiNote);
+    }
+
+    public static double PitchAtSampleInterpolatedMonotonic(
+        PreparedNote note,
+        long sample,
+        double samplesPerFrame,
+        ref int segmentIndex)
+    {
+        PreparedPitchPoint[] pitch = note.Pitch;
+        if (pitch.Length == 0)
+            return note.InitialMidiNote;
+        while (segmentIndex + 1 < pitch.Length
+            && pitch[segmentIndex + 1].SamplePosition <= sample)
+            segmentIndex++;
+        if (segmentIndex < 0)
+            return note.InitialMidiNote;
+        if (segmentIndex + 1 >= pitch.Length)
+            return pitch[pitch.Length - 1].MidiNote;
+        PreparedPitchPoint prev = pitch[segmentIndex];
+        PreparedPitchPoint next = pitch[segmentIndex + 1];
+        if (sample < prev.SamplePosition)
+            return note.InitialMidiNote;
+        if (next.SamplePosition == prev.SamplePosition)
+            return next.MidiNote;
+        double t = (sample - prev.SamplePosition) / (double)(next.SamplePosition - prev.SamplePosition);
+        t = Math.Clamp(t, 0, 1);
+        return prev.MidiNote + t * (next.MidiNote - prev.MidiNote);
+    }
 }

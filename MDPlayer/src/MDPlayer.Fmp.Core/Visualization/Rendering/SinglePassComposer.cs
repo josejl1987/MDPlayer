@@ -244,6 +244,11 @@ internal sealed class SinglePassComposer
                         long stageStart = Stopwatch.GetTimestamp();
                         try
                         {
+                            // Frame bytes are premultiplied (Skia storage);
+                            // rawvideo rgba is straight-alpha, so convert first.
+                            // GPU output is opaque, where straight == premultiplied.
+                            if (!overlayRenderer.ProducesOpaqueFrames)
+                                RgbaConversions.UnpremultiplyInPlace(slot.Frame.AsSpan(0, outFrameBytes));
                             ffmpegIn.Write(slot.Frame, 0, outFrameBytes);
                         }
                         catch (IOException)
@@ -413,6 +418,10 @@ internal sealed class SinglePassComposer
                         long stageStart = Stopwatch.GetTimestamp();
                         try
                         {
+                            // Premultiplied Skia storage vs straight rawvideo rgba;
+                            // GPU output is opaque so it skips the conversion.
+                            if (!overlayRenderer.ProducesOpaqueFrames)
+                                RgbaConversions.UnpremultiplyInPlace(slot.Frame.AsSpan(0, outFrameBytes));
                             input.Write(slot.Frame, 0, outFrameBytes);
                         }
                         catch (IOException)

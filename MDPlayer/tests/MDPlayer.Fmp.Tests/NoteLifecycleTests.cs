@@ -236,8 +236,13 @@ public sealed class NoteLifecycleTests
         for (int y = top; y < bottom; y++)
         {
             int offset = (y * width + x) * 4;
-            if (frame[offset + 3] > 0
-                && frame[offset] + frame[offset + 1] + frame[offset + 2] > 150)
+            int a = frame[offset + 3];
+            if (a == 0)
+                continue;
+            // Skia stores premultiplied pixels; un-premultiply so the
+            // brightness gate measures the visible straight tint.
+            int UnPremul(int c) => a == 255 ? c : Math.Min(255, (c * 255 + a / 2) / a);
+            if (UnPremul(frame[offset]) + UnPremul(frame[offset + 1]) + UnPremul(frame[offset + 2]) > 150)
                 return y;
         }
         return -1;

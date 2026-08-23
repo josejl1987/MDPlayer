@@ -37,7 +37,7 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
     private readonly ColumnEnvelope[] _columnEnvelopes;
 
     private MasterWaveformFrameSource(
-        PanelOverlayRenderer overlay,
+        IFrameOverlayRenderer overlay,
         FileStream stream,
         int sampleRate,
         int fpsNumerator,
@@ -82,7 +82,7 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
     /// headers) are parsed correctly instead of being misread.
     /// </summary>
     public static MasterWaveformFrameSource? TryCreate(
-        PanelOverlayRenderer overlay,
+        IFrameOverlayRenderer overlay,
         string masterWavPath,
         int fpsNumerator,
         int fpsDenominator)

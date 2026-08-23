@@ -7,9 +7,14 @@ namespace Fmp.Core.Visualization.Rendering;
 /// <summary>Opt-in renderer work counters accumulated per renderer instance.</summary>
 internal sealed class RenderPerformanceMetrics
 {
-    public RenderPerformanceMetrics(bool enabled) => Enabled = enabled;
+    public RenderPerformanceMetrics(bool enabled, string backendName = "Cpu")
+    {
+        Enabled = enabled;
+        BackendName = backendName;
+    }
 
     public bool Enabled { get; }
+    public string BackendName { get; }
     public long Frames { get; set; }
     public long FullRedraws { get; set; }
     public long PartialRedraws { get; set; }
@@ -34,12 +39,20 @@ internal sealed class RenderPerformanceMetrics
     public long PitchGridTicks { get; set; }
     public long PitchBandTicks { get; set; }
     public long GridLineTicks { get; set; }
+    public long HeaderTicks { get; set; }
+    public long BorderTicks { get; set; }
+    public long OtherPanelTicks { get; set; }
+    public long PresentationTicks { get; set; }
     public long RibbonTicks { get; set; }
     public long RibbonDecorationTicks { get; set; }
     public long RibbonColumnsEvaluated { get; set; }
     public long RibbonPixelsBlended { get; set; }
     public long PitchSegmentsVisited { get; set; }
     public long WaveformTicks { get; set; }
+    public long GpuDrawTicks { get; set; }
+    public long GpuFlushSyncTicks { get; set; }
+    public long GpuReadbackTicks { get; set; }
+    public long ScopeUploadTicks { get; set; }
     public long AllocatedBytes { get; private set; }
 
     /// <summary>
@@ -79,6 +92,10 @@ internal sealed class RenderPerformanceMetrics
         RibbonPixelsBlended = 0;
         PitchSegmentsVisited = 0;
         WaveformTicks = 0;
+        GpuDrawTicks = 0;
+        GpuFlushSyncTicks = 0;
+        GpuReadbackTicks = 0;
+        ScopeUploadTicks = 0;
         AllocatedBytes = 0;
     }
 
@@ -98,7 +115,10 @@ internal sealed class RenderPerformanceMetrics
             ScopeCopies, CopiedBytes, SourceCursorAdvances, PianoRollCursorAdvances,
             VisibleNotesVisited, RibbonColumnsEvaluated, RibbonPixelsBlended, PitchSegmentsVisited,
             checked((long)frameWidth * frameHeight),
-            AllocatedBytes, Process.GetCurrentProcess().PeakWorkingSet64);
+            AllocatedBytes, Process.GetCurrentProcess().PeakWorkingSet64,
+            BackendName,
+            Seconds(GpuDrawTicks), Seconds(GpuFlushSyncTicks),
+            Seconds(GpuReadbackTicks), Seconds(ScopeUploadTicks));
 
     private static double Seconds(long ticks) => ticks / (double)Stopwatch.Frequency;
 }
@@ -136,7 +156,12 @@ internal sealed record RenderPerformanceSnapshot(
     long PitchSegmentsVisited,
     long FramePixels,
     long AllocatedBytes = 0,
-    long PeakWorkingSetBytes = 0)
+    long PeakWorkingSetBytes = 0,
+    string BackendName = "Cpu",
+    double GpuDrawSeconds = 0,
+    double GpuFlushSyncSeconds = 0,
+    double GpuReadbackSeconds = 0,
+    double ScopeUploadSeconds = 0)
 {
     public double AllocatedBytesPerFrame =>
         Frames > 0 ? AllocatedBytes / (double)Frames : 0;

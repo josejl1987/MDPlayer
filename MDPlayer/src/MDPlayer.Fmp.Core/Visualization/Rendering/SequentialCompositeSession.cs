@@ -5,7 +5,7 @@ namespace Fmp.Core.Visualization.Rendering;
 /// each subsequent frame restores only the deterministic dynamic rectangles,
 /// inserts the current Corrscope grid, and draws the current overlay.
 /// </summary>
-internal sealed class SequentialCompositeSession
+internal sealed class SequentialCompositeSession : ISequentialCompositeSession
 {
     private readonly PanelOverlayRenderer _renderer;
     private readonly PanelOverlayRenderer.SequentialRenderState _state;

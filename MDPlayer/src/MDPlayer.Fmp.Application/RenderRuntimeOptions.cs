@@ -21,5 +21,14 @@ internal sealed record RenderRuntimeOptions
     public bool Json { get; init; }
     public string? ProgressMode { get; init; }
     public string Backend { get; init; } = "auto";
+
+    /// <summary>
+    /// Overlay renderer backend: <c>auto</c> (CPU) | <c>cpu</c> | <c>gpu</c>
+    /// (<c>skia-gpu</c> accepted as an alias). The GPU backend (Skia GL) is
+    /// strictly opt-in: it fails hard when no GL surface can be created rather
+    /// than falling back silently.
+    /// </summary>
+    public string RenderBackend { get; init; } = "auto";
+
     public int ToolTimeoutMinutes { get; init; } = 60;
 }

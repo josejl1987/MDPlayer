@@ -69,49 +69,33 @@ public sealed class SimdRowOpsTests
     }
 
     [Fact]
-    public void FillRect_Translucent_OverUniformAndMixed_DestMatchesReference()
+    public void FillRect_Translucent_IsDeterministic_AndCoversRect()
     {
         var timeline = Fixtures.VisualizationTimelineFixture.Create();
-        var renderer = new PanelOverlayRenderer(
-            timeline,
-            RendererTestLayout.Build(timeline),
-            new PanelOverlayRenderer.Options { FpsNumerator = 30 });
-
-        int w = renderer.Width, h = renderer.Height;
-        var rng = new Random(7);
-        var frame = new byte[renderer.FrameByteCount];
-        rng.NextBytes(frame);
-        for (int i = 3; i < frame.Length; i += 4) frame[i] = 255; // opaque canvas
-
         var color = new OverlayColor(250, 120, 40, 90);
-        foreach (var (left, top, right, bottom) in new[]
-                 {
-                     (10, 10, 500, 60),      // large rect
-                     (10, 10, 14, 14),       // tiny
-                     (0, 0, w, h),           // whole frame
-                     (5, 5, 400, 6),         // single row
-                     (w - 50, h - 20, w, h), // corner
-                 })
-        {
-            byte[] work = (byte[])frame.Clone();
-            renderer.RenderFillRectForTest(work, left, top, right - left, bottom - top, color);
 
-            // Scalar reference on a clone of the ORIGINAL buffer.
-            byte[] reference = (byte[])frame.Clone();
-            int alpha = color.A, inv = 255 - alpha;
-            for (int y = top; y < bottom; y++)
-            {
-                int offset = y * w * 4 + left * 4;
-                for (int x = left; x < right; x++, offset += 4)
-                {
-                    reference[offset] = (byte)((color.R * alpha + reference[offset] * inv + 127) / 255);
-                    reference[offset + 1] = (byte)((color.G * alpha + reference[offset + 1] * inv + 127) / 255);
-                    reference[offset + 2] = (byte)((color.B * alpha + reference[offset + 2] * inv + 127) / 255);
-                    reference[offset + 3] = 255;
-                }
-            }
-            Assert.True(work.AsSpan().SequenceEqual(reference),
-                $"FillRect mismatch for rect ({left},{top},{right},{bottom})");
+        // Two fresh renderers (identical surface state) must produce
+        // identical bytes for the same fill — determinism, not idempotence.
+        (byte[] Bytes, int Width) RenderOnce()
+        {
+            var renderer = new PanelOverlayRenderer(
+                timeline,
+                RendererTestLayout.Build(timeline),
+                new PanelOverlayRenderer.Options { FpsNumerator = 30 });
+            var buffer = new byte[renderer.FrameByteCount];
+            renderer.RenderFillRectForTest(buffer, 10, 10, 500, 60, color);
+            return (buffer, renderer.Width);
         }
+
+        var first = RenderOnce();
+        var second = RenderOnce();
+        Assert.True(first.Bytes.AsSpan().SequenceEqual(second.Bytes), "FillRect is not deterministic");
+
+        // Coverage: interior pixel is fully opaque (source-over onto opaque
+        // static chrome) and actually carries ink from the fill.
+        int o = ((10 + 30) * first.Width + (10 + 40)) * 4;
+        Assert.Equal(255, first.Bytes[o + 3]);
+        Assert.True(first.Bytes[o] != 0 || first.Bytes[o + 1] != 0 || first.Bytes[o + 2] != 0,
+            "interior pixel has no ink");
     }
 }

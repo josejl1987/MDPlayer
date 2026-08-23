@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 
+using SkiaSharp;
+
 namespace Fmp.Core.Visualization.Rendering;
 
 // CPU pixel primitives remain a single implementation shared by all panels.
@@ -639,144 +641,31 @@ internal sealed partial class PanelOverlayRenderer
     }
 
     private void Fill(Span<byte> frame, OverlayColor color)
-    {
-        for (int offset = 0; offset < FrameByteCount; offset += 4)
-        {
-            frame[offset] = color.R;
-            frame[offset + 1] = color.G;
-            frame[offset + 2] = color.B;
-            frame[offset + 3] = color.A;
-        }
-    }
+        => Canvas.DrawColor(ToSk(color), SKBlendMode.Src);
 
+    /// <summary>Skia-backed translucent/opaque rect fill. Exact legacy fast paths removed — Skia's rasterizer supersedes them.</summary>
     private void FillRect(Span<byte> frame, OverlayRect rect, OverlayColor color)
     {
-        int left = Math.Clamp(rect.X, 0, Width);
-        int right = Math.Clamp(rect.Right, 0, Width);
-        int top = Math.Clamp(rect.Y, 0, Height);
-        int bottom = Math.Clamp(rect.Bottom, 0, Height);
-
-        // Fast path: fully opaque color → packed 32-bit row fill.
-        if (color.A == 255)
-        {
-            FillRectOpaque(frame, left, right, top, bottom, color);
+        if (rect.Width <= 0 || rect.Height <= 0)
             return;
-        }
-
-        // Uniform-destination fast path: when the rect already holds one
-        // identical pixel everywhere (static background OR an all-zero scope
-        // hole), BlendPixel is a pure function of (src, that pixel) — evaluate
-        // it once and fill opaquely with the result. Byte-exact by
-        // determinism; vector compare makes the check nearly free.
-        int stride = Width * 4;
-        {
-            int o0 = top * stride + left * 4;
-            byte pr = frame[o0], pg = frame[o0 + 1], pb = frame[o0 + 2], pa = frame[o0 + 3];
-            if (right - left > 4 && bottom - top > 1)
-            {
-                bool uniform = true;
-                for (int y = top; y < bottom && uniform; y++)
-                {
-                    int off = y * stride + left * 4;
-                    uniform = SimdRowOps.AllPixelsEqual(frame.Slice(off, (right - left) * 4), pr, pg, pb, pa);
-                }
-                if (uniform)
-                {
-                    // One-pixel reference blend, mirroring BlendPixel exactly.
-                    byte er = pr, eg = pg, eb = pb, ea;
-                    if (color.A == 255)
-                    {
-                        er = color.R; eg = color.G; eb = color.B; ea = 255;
-                    }
-                    else if (color.A > 0)
-                    {
-                        if (pa == 255)
-                        {
-                            int inv = 255 - color.A;
-                            er = (byte)((color.R * color.A + pr * inv + 127) / 255);
-                            eg = (byte)((color.G * color.A + pg * inv + 127) / 255);
-                            eb = (byte)((color.B * color.A + pb * inv + 127) / 255);
-                            ea = 255;
-                        }
-                        else
-                        {
-                            int outputAlpha = color.A + (pa * (255 - color.A) + 127) / 255;
-                            if (outputAlpha == 0) { er = eg = eb = ea = 0; }
-                            else
-                            {
-                                int df = (pa * (255 - color.A) + 127) / 255;
-                                er = (byte)Math.Clamp((color.R * color.A + pr * df + outputAlpha / 2) / outputAlpha, 0, 255);
-                                eg = (byte)Math.Clamp((color.G * color.A + pg * df + outputAlpha / 2) / outputAlpha, 0, 255);
-                                eb = (byte)Math.Clamp((color.B * color.A + pb * df + outputAlpha / 2) / outputAlpha, 0, 255);
-                                ea = (byte)outputAlpha;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        ea = pa;
-                    }
-                    if (ea == 255)
-                        FillRectOpaque(frame, left, right, top, bottom, new OverlayColor(er, eg, eb, 255));
-                    else
-                    {
-                        uint packed = er | ((uint)eg << 8) | ((uint)eb << 16) | ((uint)ea << 24);
-                        int rowBytes = (right - left) * 4;
-                        for (int y = top; y < bottom; y++)
-                        {
-                            int off = y * stride + left * 4;
-                            SimdRowOps.FillUInt32(frame.Slice(off, rowBytes), packed);
-                        }
-                    }
-                    return;
-                }
-            }
-        }
-        int sa = color.A;
-        if (sa == 0)
-            return;
-        int sInv = 255 - sa;
-        for (int y = top; y < bottom; y++)
-        {
-            int offset = y * stride + left * 4;
-            for (int x = left; x < right; x++, offset += 4)
-            {
-                int destinationAlpha = frame[offset + 3];
-                if (destinationAlpha == 255)
-                {
-                    frame[offset] = (byte)((color.R * sa + frame[offset] * sInv + 127) / 255);
-                    frame[offset + 1] = (byte)((color.G * sa + frame[offset + 1] * sInv + 127) / 255);
-                    frame[offset + 2] = (byte)((color.B * sa + frame[offset + 2] * sInv + 127) / 255);
-                }
-                else
-                {
-                    int outputAlpha = sa + (destinationAlpha * sInv + 127) / 255;
-                    if (outputAlpha == 0)
-                    {
-                        frame[offset] = frame[offset + 1] = frame[offset + 2] = frame[offset + 3] = 0;
-                    }
-                    else
-                    {
-                        int destinationFactor = (destinationAlpha * sInv + 127) / 255;
-                        frame[offset] = (byte)Math.Clamp(
-                            (color.R * sa + frame[offset] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 1] = (byte)Math.Clamp(
-                            (color.G * sa + frame[offset + 1] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 2] = (byte)Math.Clamp(
-                            (color.B * sa + frame[offset + 2] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 3] = (byte)outputAlpha;
-                    }
-                }
-            }
-        }
+        _fillPaint.Color = ToSk(color);
+        Canvas.DrawRect(rect.X, rect.Y, rect.Width, rect.Height, _fillPaint);
     }
 
-    /// <summary>
-    /// Blends a constant-color, constant-alpha rectangle over the destination
-    /// replicating <see cref="BlendPixel"/> exactly (opaque fast path plus the
-    /// straight-alpha general branch), writing rows directly with no
-    /// per-pixel call overhead. Used by the ribbon run rasterizers.
-    /// </summary>
+    private void FillRectOpaque(
+        Span<byte> frame,
+        int left,
+        int right,
+        int top,
+        int bottom,
+        OverlayColor color)
+    {
+        if (right <= left || bottom <= top)
+            return;
+        _fillPaint.Color = new SKColor(color.R, color.G, color.B, 255);
+        Canvas.DrawRect(left, top, right - left, bottom - top, _fillPaint);
+    }
+
     private void BlendRunRect(
         Span<byte> frame,
         int left,
@@ -788,90 +677,11 @@ internal sealed partial class PanelOverlayRenderer
     {
         if (right <= left || bottom <= top || alpha <= 0)
             return;
-        if (alpha >= 255)
-        {
-            FillRectOpaque(frame, left, right, top, bottom, color);
-            return;
-        }
-        int stride = Width * 4;
-        int sInv = 255 - alpha;
-        for (int y = top; y < bottom; y++)
-        {
-            int offset = y * stride + left * 4;
-            for (int x = left; x < right; x++, offset += 4)
-            {
-                int destinationAlpha = frame[offset + 3];
-                if (destinationAlpha == 255)
-                {
-                    frame[offset] = (byte)((color.R * alpha + frame[offset] * sInv + 127) / 255);
-                    frame[offset + 1] = (byte)((color.G * alpha + frame[offset + 1] * sInv + 127) / 255);
-                    frame[offset + 2] = (byte)((color.B * alpha + frame[offset + 2] * sInv + 127) / 255);
-                }
-                else
-                {
-                    int outputAlpha = alpha + (destinationAlpha * sInv + 127) / 255;
-                    if (outputAlpha == 0)
-                    {
-                        frame[offset] = frame[offset + 1] = frame[offset + 2] = frame[offset + 3] = 0;
-                    }
-                    else
-                    {
-                        int destinationFactor = (destinationAlpha * sInv + 127) / 255;
-                        frame[offset] = (byte)Math.Clamp(
-                            (color.R * alpha + frame[offset] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 1] = (byte)Math.Clamp(
-                            (color.G * alpha + frame[offset + 1] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 2] = (byte)Math.Clamp(
-                            (color.B * alpha + frame[offset + 2] * destinationFactor + outputAlpha / 2) / outputAlpha, 0, 255);
-                        frame[offset + 3] = (byte)outputAlpha;
-                    }
-                }
-            }
-        }
+        byte a = alpha >= 255 ? (byte)255 : (byte)alpha;
+        _fillPaint.Color = new SKColor(color.R, color.G, color.B, a);
+        Canvas.DrawRect(left, top, right - left, bottom - top, _fillPaint);
     }
 
-    /// <summary>
-    /// Fills a rectangle of fully-opaque pixels using packed 32-bit RGBA writes.
-    /// This is dramatically faster than per-pixel BlendPixel for large opaque
-    /// areas like note bodies, borders, and backgrounds.
-    /// </summary>
-    private void FillRectOpaque(
-        Span<byte> frame,
-        int left,
-        int right,
-        int top,
-        int bottom,
-        OverlayColor color)
-    {
-        if (right <= left || bottom <= top)
-            return;
-
-        // Pack RGBA into a single uint for bulk fill.
-        // The frame is in R,G,B,A byte order (little-endian uint = A,B,G,R).
-        uint packed =
-            (uint)color.R |
-            ((uint)color.G << 8) |
-            ((uint)color.B << 16) |
-            (0xffu << 24);
-
-        int rowPixels = right - left;
-        int rowBytes = rowPixels * 4;
-
-        for (int y = top; y < bottom; y++)
-        {
-            int offset = (y * Width + left) * 4;
-            MemoryMarshal.Cast<byte, uint>(frame.Slice(offset, rowBytes)).Fill(packed);
-        }
-    }
-
-    /// <summary>
-    /// Fills a rectangle with fractional horizontal edge coverage for subpixel
-    /// motion. Columns fully inside [leftX, rightX) are filled at full opacity;
-    /// the left and right edge columns are blended at reduced alpha proportional
-    /// to their fractional coverage (e.g. x=143.25 → pixel 143 at 75% alpha).
-    /// This eliminates the stair-step snapping visible when note edges move
-    /// ~3.3 px/frame at 60 fps.
-    /// </summary>
     private void FillRectFractionalX(
         Span<byte> frame,
         double leftX,
@@ -880,210 +690,43 @@ internal sealed partial class PanelOverlayRenderer
         int height,
         OverlayColor color)
     {
-        if (!double.IsFinite(leftX) || !double.IsFinite(rightX) || rightX <= leftX)
+        if (!double.IsFinite(leftX) || !double.IsFinite(rightX) || rightX <= leftX || height <= 0 || color.A == 0)
             return;
-
         int topClamped = Math.Clamp(top, 0, Height);
         int bottomClamped = Math.Clamp(top + height, 0, Height);
         if (bottomClamped <= topClamped)
             return;
-
-        // First and last fully-covered integer columns.
-        int firstFull = (int)Math.Ceiling(leftX - 1e-9);
-        int lastFullExclusive = (int)Math.Floor(rightX + 1e-9);
-        firstFull = Math.Clamp(firstFull, 0, Width);
-        lastFullExclusive = Math.Clamp(lastFullExclusive, 0, Width);
-
-        // Left fractional edge: coverage of the column just before firstFull.
-        double leftCoverage = firstFull - leftX;
-        if (leftCoverage > 1e-3 && firstFull > 0)
-        {
-            int edgeX = firstFull - 1;
-            if (edgeX >= 0 && edgeX < Width)
-            {
-                byte edgeAlpha = (byte)Math.Clamp(
-                    Math.Round(color.A * leftCoverage), 0, 255);
-                if (edgeAlpha > 0)
-                {
-                    OverlayColor edgeColor = color.WithAlpha(edgeAlpha);
-                    for (int y = topClamped; y < bottomClamped; y++)
-                        BlendPixel(frame, edgeX, y, edgeColor);
-                }
-            }
-        }
-
-        // Fully-covered interior columns.
-        if (lastFullExclusive > firstFull)
-        {
-            int leftClamped = Math.Clamp(firstFull, 0, Width);
-            int rightClamped = Math.Clamp(lastFullExclusive, 0, Width);
-
-            // Fast path: fully opaque → packed 32-bit fill.
-            if (color.A == 255)
-            {
-                FillRectOpaque(frame, leftClamped, rightClamped, topClamped, bottomClamped, color);
-            }
-            else
-            {
-                for (int y = topClamped; y < bottomClamped; y++)
-                {
-                    for (int x = leftClamped; x < rightClamped; x++)
-                        BlendPixel(frame, x, y, color);
-                }
-            }
-        }
-
-        // Right fractional edge: coverage of the column at lastFullExclusive.
-        double rightCoverage = rightX - lastFullExclusive;
-        if (rightCoverage > 1e-3 && lastFullExclusive < Width)
-        {
-            int edgeX = lastFullExclusive;
-            if (edgeX >= 0 && edgeX < Width)
-            {
-                byte edgeAlpha = (byte)Math.Clamp(
-                    Math.Round(color.A * rightCoverage), 0, 255);
-                if (edgeAlpha > 0)
-                {
-                    OverlayColor edgeColor = color.WithAlpha(edgeAlpha);
-                    for (int y = topClamped; y < bottomClamped; y++)
-                        BlendPixel(frame, edgeX, y, edgeColor);
-                }
-            }
-        }
+        _fillPaintAA.Color = ToSk(color);
+        Canvas.DrawRect((float)leftX, topClamped, (float)(rightX - leftX), bottomClamped - topClamped, _fillPaintAA);
     }
 
     private void ClearRect(Span<byte> frame, OverlayRect rect)
     {
-        int left = Math.Clamp(rect.X, 0, Width);
-        int right = Math.Clamp(rect.Right, 0, Width);
-        int top = Math.Clamp(rect.Y, 0, Height);
-        int bottom = Math.Clamp(rect.Bottom, 0, Height);
-        for (int y = top; y < bottom; y++)
-        {
-            int offset = (y * Width + left) * 4;
-            frame.Slice(offset, (right - left) * 4).Clear();
-        }
+        // Src blend (not SrcOver): the scope holes must become fully
+        // transparent regardless of what is underneath.
+        _clearPaint.Color = new SKColor(0, 0, 0, 0);
+        Canvas.DrawRect(rect.X, rect.Y, rect.Width, rect.Height, _clearPaint);
     }
 
     private void StrokeRect(Span<byte> frame, OverlayRect rect, OverlayColor color, int thickness)
     {
-        for (int line = 0; line < thickness; line++)
-        {
-            int left = rect.X + line;
-            int right = rect.Right - 1 - line;
-            int top = rect.Y + line;
-            int bottom = rect.Bottom - 1 - line;
-            if (left > right || top > bottom)
-                break;
-            DrawHorizontalLine(frame, left, right, top, color);
-            DrawHorizontalLine(frame, left, right, bottom, color);
-            DrawVerticalLine(frame, left, top, bottom, color);
-            DrawVerticalLine(frame, right, top, bottom, color);
-        }
+        DrawHorizontalLine(frame, rect.X, rect.Right - 1, rect.Y, color);
+        DrawHorizontalLine(frame, rect.X, rect.Right - 1, rect.Bottom - 1, color);
+        DrawVerticalLine(frame, rect.X, rect.Y, rect.Bottom - 1, color);
+        DrawVerticalLine(frame, rect.Right - 1, rect.Y, rect.Bottom - 1, color);
     }
 
     private void DrawHorizontalLine(Span<byte> frame, int x1, int x2, int y, OverlayColor color)
-    {
-        if (y < 0 || y >= Height || color.A == 0)
-            return;
-
-        int left = Math.Clamp(Math.Min(x1, x2), 0, Width - 1);
-        int right = Math.Clamp(Math.Max(x1, x2), 0, Width - 1);
-
-        if (color.A == 255)
-        {
-            FillRectOpaque(frame, left, right + 1, y, y + 1, color);
-            return;
-        }
-
-        for (int x = left; x <= right; x++)
-            BlendPixel(frame, x, y, color);
-    }
+        => FillRect(frame, new OverlayRect(Math.Min(x1, x2), y, Math.Abs(x2 - x1) + 1, 1), color);
 
     private void DrawVerticalLine(Span<byte> frame, int x, int y1, int y2, OverlayColor color)
-    {
-        if (x < 0 || x >= Width || color.A == 0)
-            return;
-
-        int top = Math.Clamp(Math.Min(y1, y2), 0, Height - 1);
-        int bottom = Math.Clamp(Math.Max(y1, y2), 0, Height - 1);
-
-        if (color.A == 255)
-        {
-            int offset = (top * Width + x) * 4;
-            int stride = Width * 4;
-            for (int y = top; y <= bottom; y++, offset += stride)
-            {
-                frame[offset] = color.R;
-                frame[offset + 1] = color.G;
-                frame[offset + 2] = color.B;
-                frame[offset + 3] = 255;
-            }
-            return;
-        }
-
-        for (int y = top; y <= bottom; y++)
-            BlendPixel(frame, x, y, color);
-    }
+        => FillRect(frame, new OverlayRect(x, Math.Min(y1, y2), 1, Math.Abs(y2 - y1) + 1), color);
 
     private void SetPixel(Span<byte> frame, int x, int y, OverlayColor color)
-    {
-        if (x < 0 || x >= Width || y < 0 || y >= Height)
-            return;
-        BlendPixel(frame, x, y, color);
-    }
+        => FillRect(frame, new OverlayRect(x, y, 1, 1), color);
 
     private void BlendPixel(Span<byte> frame, int x, int y, OverlayColor source)
-    {
-        int offset = (y * Width + x) * 4;
-        if (source.A == 255)
-        {
-            frame[offset] = source.R;
-            frame[offset + 1] = source.G;
-            frame[offset + 2] = source.B;
-            frame[offset + 3] = 255;
-            return;
-        }
-        if (source.A == 0)
-            return;
-
-        int destinationAlpha = frame[offset + 3];
-        // Prepared frames are opaque. Keep the common alpha-composite case on
-        // the integer fast path: the general straight-alpha calculation below
-        // performs several redundant divisions when the destination is already
-        // fully opaque. The equations are identical for destinationAlpha=255.
-        if (destinationAlpha == 255)
-        {
-            int opaqueInverse = 255 - source.A;
-            frame[offset] = (byte)((source.R * source.A + frame[offset] * opaqueInverse + 127) / 255);
-            frame[offset + 1] = (byte)((source.G * source.A + frame[offset + 1] * opaqueInverse + 127) / 255);
-            frame[offset + 2] = (byte)((source.B * source.A + frame[offset + 2] * opaqueInverse + 127) / 255);
-            return;
-        }
-
-        int inverse = 255 - source.A;
-        int outputAlpha = source.A + (destinationAlpha * inverse + 127) / 255;
-        if (outputAlpha == 0)
-        {
-            frame[offset] = frame[offset + 1] = frame[offset + 2] = frame[offset + 3] = 0;
-            return;
-        }
-
-        int destinationFactor = (destinationAlpha * inverse + 127) / 255;
-        frame[offset] = (byte)Math.Clamp(
-            (source.R * source.A + frame[offset] * destinationFactor + outputAlpha / 2) / outputAlpha,
-            0,
-            255);
-        frame[offset + 1] = (byte)Math.Clamp(
-            (source.G * source.A + frame[offset + 1] * destinationFactor + outputAlpha / 2) / outputAlpha,
-            0,
-            255);
-        frame[offset + 2] = (byte)Math.Clamp(
-            (source.B * source.A + frame[offset + 2] * destinationFactor + outputAlpha / 2) / outputAlpha,
-            0,
-            255);
-        frame[offset + 3] = (byte)outputAlpha;
-    }
+        => SetPixel(frame, x, y, source);
 
     private void DrawText(
         Span<byte> frame,

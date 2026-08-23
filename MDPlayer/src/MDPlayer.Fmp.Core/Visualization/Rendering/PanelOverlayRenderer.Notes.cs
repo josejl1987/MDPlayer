@@ -693,12 +693,23 @@ internal sealed partial class PanelOverlayRenderer
         // and exact (grid visible through translucent). Active/ornamented
         // ribbons continue through the full per-column path. TestDisableZohRuns
         // forces the per-column reference for pixel-equivalence tests.
+        // Vibrato/bends need linear interpolation for smooth lines instead of
+        // ZOH stair-steps (see PitchContour.PitchAtSampleInterpolated), so those
+        // notes bypass the batched ZOH path and take the per-column interpolated
+        // path even when inactive.
+        // Vibrato smoothing is GPU-only for now; CPU keeps the batched ZOH fast path
+        // to avoid the per-column slow path in the preview UI. See GpuPanelRenderer
+        // for the pitch-following ribbon. Re-enable with NeedsInterpolatedPitch
+        // only for active notes if CPU smoothing is needed.
+        bool useInterpolated = false;
+        int interpSegment = -1;
         if (!TestDisableZohRuns
             && !stipple
             && !stripe
             && !active
             && opacityFactor == 1.0
-            && flashAmount == 0)
+            && flashAmount == 0
+            && !useInterpolated)
         {
             DrawZohPitchRibbonRuns(
                 frame,
@@ -760,12 +771,22 @@ internal sealed partial class PanelOverlayRenderer
             if (alphaFactor <= 0)
                 continue;
 
-            int prevSegment = pitchSegment;
-            long samplePosition = (long)Math.Round(sample);
-            double centreY = MidiToY(
-                PitchContour.PitchAtSampleMonotonic(note, samplePosition, _samplesPerFrame, ref pitchSegment),
-                minMidi, maxMidi, lane);
-            if (_performance.Enabled && pitchSegment != prevSegment) _performance.PitchSegmentsVisited++;
+            double centreMidi;
+            if (useInterpolated)
+            {
+                int prevInterp = interpSegment;
+                long sp = (long)Math.Round(sample);
+                centreMidi = PitchContour.PitchAtSampleInterpolatedMonotonic(note, sp, _samplesPerFrame, ref interpSegment);
+                if (_performance.Enabled && interpSegment != prevInterp) _performance.PitchSegmentsVisited++;
+            }
+            else
+            {
+                int prevSegment = pitchSegment;
+                long samplePosition = (long)Math.Round(sample);
+                centreMidi = PitchContour.PitchAtSampleMonotonic(note, samplePosition, _samplesPerFrame, ref pitchSegment);
+                if (_performance.Enabled && pitchSegment != prevSegment) _performance.PitchSegmentsVisited++;
+            }
+            double centreY = MidiToY(centreMidi, minMidi, maxMidi, lane);
             OverlayColor columnFill = fill;
             if (active)
             {
@@ -796,6 +817,25 @@ internal sealed partial class PanelOverlayRenderer
                     SetPixel(frame, x, topRow, accent.WithAlpha((byte)Math.Round(accent.A * temporalOpacity)));
             }
         }
+    }
+
+    private static bool NeedsInterpolatedPitch(PreparedNote note)
+    {
+        // Smooth vibrato and bends into continuous lines instead of ZOH steps.
+        // Thresholds: enough points to form an oscillation/bend and enough
+        // pitch range to be visible (>= ~1 pixel in a perf lane).
+        if (note.Pitch.Length < 4) return false;
+        double min = double.MaxValue, max = double.MinValue;
+        for (int i = 0; i < note.Pitch.Length; i++)
+        {
+            double v = note.Pitch[i].MidiNote;
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        if (max - min < 0.14) return false;
+        // Any note with meaningful pitch variation gets interpolation;
+        // this covers both vibrato (oscillating) and slides (monotonic).
+        return true;
     }
 
     private void DrawFlatPitchRibbonFast(
@@ -1035,11 +1075,10 @@ internal sealed partial class PanelOverlayRenderer
             return;
         }
 
-        // Build ZOH pitch segments for the visible body interval.
-        // Each segment is constant pitch between pitch points.
+        // Build ZOH pitch segments on the fly — no per-note List allocation on
+        // the hot path (§20.1). Each constant-pitch segment between pitch
+        // points is rendered immediately as it is discovered.
         PreparedPitchPoint[] pitchPoints = note.Pitch;
-        // Segments as (xStart, xEnd, pitch)
-        var segments = new List<(int x0, int x1, double pitch)>(Math.Max(1, pitchPoints.Length + 1));
         int segStartX = bodyFirst;
         double segPitch = note.InitialMidiNote;
         int pitchIdx = -1;
@@ -1053,22 +1092,6 @@ internal sealed partial class PanelOverlayRenderer
             pitchIdx = lo - 1;
             segPitch = pitchIdx < 0 ? note.InitialMidiNote : pitchPoints[pitchIdx].MidiNote;
         }
-        // Collect pitch change X thresholds within body
-        for (int i = pitchIdx + 1; i < pitchPoints.Length; i++)
-        {
-            long ptSample = pitchPoints[i].SamplePosition;
-            if (ptSample < note.StartSample || ptSample > note.EndSample) continue;
-            // First x where round(sampleCenter) >= ptSample
-            int xThresh = FindFirstXForSample(ptSample, windowStart, samplesPerPixel, lane.X, bodyFirst, bodyLastExclusive);
-            if (xThresh <= segStartX) continue;
-            if (xThresh > bodyLastExclusive) break;
-            segments.Add((segStartX, xThresh, segPitch));
-            segStartX = xThresh;
-            segPitch = pitchPoints[i].MidiNote;
-            pitchIdx = i;
-        }
-        segments.Add((segStartX, bodyLastExclusive, segPitch));
-        if (_performance.Enabled) _performance.PitchSegmentsVisited += segments.Count;
 
         double[] baseAlphas = GetBaseAlphasForLane(panelIndex, lane, windowStart, samplesPerPixel, currentSample, playheadX);
 
@@ -1083,112 +1106,33 @@ internal sealed partial class PanelOverlayRenderer
                 (long)Math.Ceiling(tailStartSample), windowStart, samplesPerPixel, lane.X, bodyFirst, bodyLastExclusive);
         }
 
-        // For each pitch segment, render its X interval as alpha-batched runs.
-        foreach (var (segX0, segX1, pitch) in segments)
+        // Collect pitch change X thresholds within body and render each
+        // constant-pitch segment immediately (equivalent to the previous
+        // segments list, without the per-note allocation).
+        long segmentCount = 0;
+        for (int i = pitchIdx + 1; i < pitchPoints.Length; i++)
         {
-            if (segX1 <= segX0) continue;
-            double centreY = MidiToY(pitch, minMidi, maxMidi, lane);
-            double top = centreY - half;
-            double bottom = centreY + half;
-            int firstFull = Math.Max(lane.Y, (int)Math.Ceiling(top - 1e-9));
-            int lastFullExclusive = Math.Min(lane.Bottom, (int)Math.Floor(bottom + 1e-9));
-            if (lastFullExclusive <= firstFull && !(top < lane.Bottom && bottom > lane.Y)) continue;
-            double topCoverage = firstFull - top;
-            double bottomCoverage = bottom - lastFullExclusive;
-            bool hasTopFrac = topCoverage > 1e-3 && firstFull > lane.Y;
-            bool hasBottomFrac = bottomCoverage > 1e-3 && lastFullExclusive < lane.Bottom;
-
-            // Split the segment into the constant-alpha head (before the
-            // taper tail; batched directly from the baseAf runs) and the
-            // per-column tail (at most ~4 px at 60 fps for a 60 ms window).
-            int headEnd = Math.Min(segX1, Math.Max(segX0, taperTailX));
-
-            // ---- Head: batch by baseAf runs (each is one alpha byte). ----
-            int x = segX0;
-            while (x < headEnd)
-            {
-                double baseAf = baseAlphas[x - lane.X];
-                int runEnd = x + 1;
-                while (runEnd < headEnd && baseAlphas[runEnd - lane.X] == baseAf)
-                    runEnd++;
-                byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * baseAf), 0, 255);
-                if (_performance.Enabled) _performance.RibbonColumnsEvaluated += runEnd - x;
-                if (alphaByte != 0)
-                {
-                    if (lastFullExclusive > firstFull)
-                    {
-                        BlendRunRect(frame, x, runEnd, firstFull, lastFullExclusive, fill, alphaByte);
-                        if (_performance.Enabled)
-                            _performance.RibbonPixelsBlended += (long)(runEnd - x) * (lastFullExclusive - firstFull);
-                    }
-                    if (hasTopFrac)
-                    {
-                        byte aTop = (byte)Math.Clamp(Math.Round(fill.A * baseAf * topCoverage), 0, 255);
-                        if (aTop != 0)
-                        {
-                            OverlayColor srcTop = fill.WithAlpha(aTop);
-                            int yTopRow = firstFull - 1;
-                            for (int px = x; px < runEnd; px++)
-                            {
-                                BlendPixel(frame, px, yTopRow, srcTop);
-                                if (_performance.Enabled) _performance.RibbonPixelsBlended++;
-                            }
-                        }
-                    }
-                    if (hasBottomFrac)
-                    {
-                        byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * baseAf * bottomCoverage), 0, 255);
-                        if (aBottom != 0)
-                        {
-                            OverlayColor srcBottom = fill.WithAlpha(aBottom);
-                            int yBottomRow = lastFullExclusive;
-                            for (int px = x; px < runEnd; px++)
-                            {
-                                BlendPixel(frame, px, yBottomRow, srcBottom);
-                                if (_performance.Enabled) _performance.RibbonPixelsBlended++;
-                            }
-                        }
-                    }
-                }
-                x = runEnd;
-            }
-
-            // ---- Tail: per-column with exact taper. ----
-            for (; x < segX1; x++)
-            {
-                double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
-                if (sample < note.StartSample) sample = note.StartSample;
-                else if (sample > note.EndSample) sample = note.EndSample;
-                double af = baseAlphas[x - lane.X]
-                    * (taper ? Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1) : 1.0);
-                byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
-                if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
-                if (alphaByte == 0) continue;
-                if (lastFullExclusive > firstFull)
-                {
-                    BlendRunRect(frame, x, x + 1, firstFull, lastFullExclusive, fill, alphaByte);
-                    if (_performance.Enabled) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
-                }
-                if (hasTopFrac)
-                {
-                    byte aTop = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
-                    if (aTop != 0)
-                    {
-                        BlendPixel(frame, x, firstFull - 1, fill.WithAlpha(aTop));
-                        if (_performance.Enabled) _performance.RibbonPixelsBlended++;
-                    }
-                }
-                if (hasBottomFrac)
-                {
-                    byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
-                    if (aBottom != 0)
-                    {
-                        BlendPixel(frame, x, lastFullExclusive, fill.WithAlpha(aBottom));
-                        if (_performance.Enabled) _performance.RibbonPixelsBlended++;
-                    }
-                }
-            }
+            long ptSample = pitchPoints[i].SamplePosition;
+            if (ptSample < note.StartSample || ptSample > note.EndSample) continue;
+            // First x where round(sampleCenter) >= ptSample
+            int xThresh = FindFirstXForSample(ptSample, windowStart, samplesPerPixel, lane.X, bodyFirst, bodyLastExclusive);
+            if (xThresh <= segStartX) continue;
+            if (xThresh > bodyLastExclusive) break;
+            segmentCount++;
+            RenderZohSegment(
+                frame, note, lane, fill, segStartX, xThresh, segPitch,
+                minMidi, maxMidi, half, taper, taperTailX, baseAlphas,
+                windowStart, samplesPerPixel);
+            segStartX = xThresh;
+            segPitch = pitchPoints[i].MidiNote;
+            pitchIdx = i;
         }
+        segmentCount++;
+        RenderZohSegment(
+            frame, note, lane, fill, segStartX, bodyLastExclusive, segPitch,
+            minMidi, maxMidi, half, taper, taperTailX, baseAlphas,
+            windowStart, samplesPerPixel);
+        if (_performance.Enabled) _performance.PitchSegmentsVisited += segmentCount;
 
         // Edge columns with fractional horizontal coverage, now with exact temporal/taper and correct pitch per edge.
         if (firstX > lane.X && leftCoverage > 1e-3)
@@ -1220,6 +1164,134 @@ internal sealed partial class PanelOverlayRenderer
             double cy = MidiToY(pitch, minMidi, maxMidi, lane);
             FillColumnFractional(frame, x, cy - half, cy + half, fill, af, lane.Y, lane.Bottom);
             if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+        }
+    }
+
+    /// <summary>
+    /// Renders one constant-pitch ZOH segment (X interval at a fixed pitch) as
+    /// alpha-batched runs, split into a constant-alpha head before the taper
+    /// tail and a per-column tail with exact taper. Extracted from
+    /// <see cref="DrawZohPitchRibbonRuns"/> so segments can be streamed without
+    /// materializing a list (zero allocations on the hot path, §20.1).
+    /// </summary>
+    private void RenderZohSegment(
+        Span<byte> frame,
+        PreparedNote note,
+        OverlayRect lane,
+        OverlayColor fill,
+        int segX0,
+        int segX1,
+        double pitch,
+        double minMidi,
+        double maxMidi,
+        double half,
+        bool taper,
+        int taperTailX,
+        double[] baseAlphas,
+        long windowStart,
+        double samplesPerPixel)
+    {
+        if (segX1 <= segX0) return;
+        double centreY = MidiToY(pitch, minMidi, maxMidi, lane);
+        double top = centreY - half;
+        double bottom = centreY + half;
+        int firstFull = Math.Max(lane.Y, (int)Math.Ceiling(top - 1e-9));
+        int lastFullExclusive = Math.Min(lane.Bottom, (int)Math.Floor(bottom + 1e-9));
+        if (lastFullExclusive <= firstFull && !(top < lane.Bottom && bottom > lane.Y)) return;
+        double topCoverage = firstFull - top;
+        double bottomCoverage = bottom - lastFullExclusive;
+        bool hasTopFrac = topCoverage > 1e-3 && firstFull > lane.Y;
+        bool hasBottomFrac = bottomCoverage > 1e-3 && lastFullExclusive < lane.Bottom;
+
+        // Split the segment into the constant-alpha head (before the
+        // taper tail; batched directly from the baseAf runs) and the
+        // per-column tail (at most ~4 px at 60 fps for a 60 ms window).
+        int headEnd = Math.Min(segX1, Math.Max(segX0, taperTailX));
+
+        // ---- Head: batch by baseAf runs (each is one alpha byte). ----
+        int x = segX0;
+        while (x < headEnd)
+        {
+            double baseAf = baseAlphas[x - lane.X];
+            int runEnd = x + 1;
+            while (runEnd < headEnd && baseAlphas[runEnd - lane.X] == baseAf)
+                runEnd++;
+            byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * baseAf), 0, 255);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated += runEnd - x;
+            if (alphaByte != 0)
+            {
+                if (lastFullExclusive > firstFull)
+                {
+                    BlendRunRect(frame, x, runEnd, firstFull, lastFullExclusive, fill, alphaByte);
+                    if (_performance.Enabled)
+                        _performance.RibbonPixelsBlended += (long)(runEnd - x) * (lastFullExclusive - firstFull);
+                }
+                if (hasTopFrac)
+                {
+                    byte aTop = (byte)Math.Clamp(Math.Round(fill.A * baseAf * topCoverage), 0, 255);
+                    if (aTop != 0)
+                    {
+                        OverlayColor srcTop = fill.WithAlpha(aTop);
+                        int yTopRow = firstFull - 1;
+                        for (int px = x; px < runEnd; px++)
+                        {
+                            BlendPixel(frame, px, yTopRow, srcTop);
+                            if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                        }
+                    }
+                }
+                if (hasBottomFrac)
+                {
+                    byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * baseAf * bottomCoverage), 0, 255);
+                    if (aBottom != 0)
+                    {
+                        OverlayColor srcBottom = fill.WithAlpha(aBottom);
+                        int yBottomRow = lastFullExclusive;
+                        for (int px = x; px < runEnd; px++)
+                        {
+                            BlendPixel(frame, px, yBottomRow, srcBottom);
+                            if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                        }
+                    }
+                }
+            }
+            x = runEnd;
+        }
+
+        // ---- Tail: per-column with exact taper. ----
+        for (; x < segX1; x++)
+        {
+            double sample = windowStart + (x + 0.5 - lane.X) * samplesPerPixel;
+            if (sample < note.StartSample) sample = note.StartSample;
+            else if (sample > note.EndSample) sample = note.EndSample;
+            double af = baseAlphas[x - lane.X]
+                * (taper ? Math.Clamp((note.EndSample - sample) / (double)_taperSamples, 0, 1) : 1.0);
+            byte alphaByte = (byte)Math.Clamp(Math.Round(fill.A * af), 0, 255);
+            if (_performance.Enabled) _performance.RibbonColumnsEvaluated++;
+            if (alphaByte == 0) continue;
+            if (lastFullExclusive > firstFull)
+            {
+                BlendRunRect(frame, x, x + 1, firstFull, lastFullExclusive, fill, alphaByte);
+                if (_performance.Enabled) _performance.RibbonPixelsBlended += lastFullExclusive - firstFull;
+            }
+            if (hasTopFrac)
+            {
+                byte aTop = (byte)Math.Clamp(Math.Round(fill.A * af * topCoverage), 0, 255);
+                if (aTop != 0)
+                {
+                    BlendPixel(frame, x, firstFull - 1, fill.WithAlpha(aTop));
+                    if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                }
+            }
+            if (hasBottomFrac)
+            {
+                byte aBottom = (byte)Math.Clamp(Math.Round(fill.A * af * bottomCoverage), 0, 255);
+                if (aBottom != 0)
+                {
+                    BlendPixel(frame, x, lastFullExclusive, fill.WithAlpha(aBottom));
+                    if (_performance.Enabled) _performance.RibbonPixelsBlended++;
+                }
+            }
         }
     }
 
@@ -1284,26 +1356,7 @@ internal sealed partial class PanelOverlayRenderer
     {
         if (alpha == 0)
             return;
-        int offset = (y * Width + x) * 4;
-        if (alpha == 255)
-        {
-            frame[offset] = color.R;
-            frame[offset + 1] = color.G;
-            frame[offset + 2] = color.B;
-            frame[offset + 3] = 255;
-            return;
-        }
-
-        if (frame[offset + 3] == 255)
-        {
-            int inverse = 255 - alpha;
-            frame[offset] = (byte)((color.R * alpha + frame[offset] * inverse + 127) / 255);
-            frame[offset + 1] = (byte)((color.G * alpha + frame[offset + 1] * inverse + 127) / 255);
-            frame[offset + 2] = (byte)((color.B * alpha + frame[offset + 2] * inverse + 127) / 255);
-            return;
-        }
-
-        BlendPixel(frame, x, y, color.WithAlpha(alpha));
+        SetPixel(frame, x, y, color with { A = alpha });
     }
 
     /// <summary>

@@ -25,7 +25,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
     private const byte FallbackColorG = 0xA4;
     private const byte FallbackColorB = 0xFF;
 
-    private readonly PanelOverlayRenderer _overlay;
+    private readonly IFrameOverlayRenderer _overlay;
     private readonly int _fpsNumerator;
     private readonly int _fpsDenominator;
     private readonly int _gridWidth;
@@ -35,7 +35,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
     public int UnavailableChannelCount { get; }
 
     private InteractiveWaveformFrameSource(
-        PanelOverlayRenderer overlay,
+        IFrameOverlayRenderer overlay,
         int fpsNumerator,
         int fpsDenominator,
         ChannelState[] channels,
@@ -55,7 +55,7 @@ internal sealed class InteractiveWaveformFrameSource : IScopeFrameSource
     /// invalid. Unopenable channels are skipped (their panels stay transparent).
     /// </summary>
     public static InteractiveWaveformFrameSource? TryCreate(
-        PanelOverlayRenderer overlay,
+        IFrameOverlayRenderer overlay,
         IReadOnlyList<ProjectedScopeChannel> channels,
         int fpsNumerator,
         int fpsDenominator)

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using SkiaSharp;
 using System.Runtime.InteropServices;
 using Fmp.Core.Analysis;
 
@@ -224,12 +225,12 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     /// <summary>Test seam exposing the private FillRect for equivalence tests.</summary>
     internal void RenderFillRectForTest(Span<byte> frame, int left, int top, int width, int height, OverlayColor color)
-        => FillRect(frame, new OverlayRect(left, top, width, height), color);
+    {
+        FillRect(frame, new OverlayRect(left, top, width, height), color);
+        Canvas.Flush();
+        CopySurfaceTo(frame);
+    }
     private readonly double[][] _laneBaseAlphas;
-    private readonly long[] _laneBaseAlphaSamples;
-    private readonly long[] _laneBaseAlphaWindowStarts;
-    private readonly double[] _laneBaseAlphaSamplesPerPixel;
-    private readonly int[] _laneBaseAlphaPlayheadX;
     private readonly byte[][] _laneGridCache;
     private readonly double[] _laneGridMinMidi;
     private readonly double[] _laneGridMaxMidi;
@@ -333,11 +334,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _panels = BuildPanels();
         AssignPanelStreamIds();
         _laneBaseAlphas = new double[_panels.Length][];
-        _laneBaseAlphaSamples = new long[_panels.Length];
-        _laneBaseAlphaWindowStarts = new long[_panels.Length];
-        _laneBaseAlphaSamplesPerPixel = new double[_panels.Length];
-        _laneBaseAlphaPlayheadX = new int[_panels.Length];
-        Array.Fill(_laneBaseAlphaSamples, long.MinValue);
         _laneGridCache = new byte[_panels.Length][];
         _laneGridMinMidi = new double[_panels.Length];
         _laneGridMaxMidi = new double[_panels.Length];
@@ -360,6 +356,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         if (_performance.Enabled)
             _performance.LayoutTicks += Stopwatch.GetTimestamp() - layoutStart;
         _staticFrame = new byte[FrameByteCount];
+        InitSkia();
         _motionBlurScratch = _options.MotionBlurSamples > 1
             ? new byte[FrameByteCount]
             : null;
@@ -423,7 +420,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     public int FpsNumerator => _options.FpsNumerator;
     public int FpsDenominator => _options.FpsDenominator;
     public OverlayLayout Layout => _layout;
-    internal RenderPerformanceSnapshot Performance => _performance.Snapshot(Width, Height);
+    public RenderPerformanceSnapshot Performance => _performance.Snapshot(Width, Height);
 
     internal void ResetPerformanceMetrics() => _performance.Reset();
 
@@ -446,6 +443,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     public void Dispose()
     {
+        DisposeSkia();
         GC.SuppressFinalize(this);
     }
 
@@ -459,7 +457,20 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     {
         ValidateFrame(frameIndex, destination);
         destination.Clear();
-        DrawDynamicCore(frameIndex, destination);
+        lock (_skiaGate)
+        {
+            // Draw onto a cleared canvas: the split pipeline wants ONLY the
+            // dynamic overlay here (static chrome + scope come from separate
+            // layers), so holes stay transparent and the top-bar clock and
+            // other per-frame labels are the only opaque ink.
+            Canvas.Clear(new SKColor(0, 0, 0, 0));
+            DrawDynamicCore(frameIndex, default);
+            // The split pipeline leaves only the dynamic overlay on the canvas
+            // (static chrome lives in FFmpeg's looped still), so a later
+            // composite must re-establish the static layer from scratch.
+            _surfaceHasStatic = false;
+            CopySurfaceTo(destination);
+        }
     }
 
     /// <summary>
@@ -498,36 +509,183 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
                 nameof(scopeGrid));
         }
+        lock (_skiaGate)
+        {
+            RenderCompositeCore(frameIndex, scopeGrid, scopeFramesAreOpaque);
+            CopySurfaceTo(destination);
+            // The scope blend bakes its destination alpha to 255 (plan §4.3:
+            // the encode path drops alpha), and only there — pixels the blend
+            // never reached (empty-grid composites) keep their transparency
+            // for the split/FFmpeg pipeline.
+            BakeScopeRectsOpaque(destination, !scopeGrid.IsEmpty);
+        }
+    }
+
+    /// <summary>
+    /// Forces the destination alpha to 255 for every pixel the scope blend
+    /// touched, mirroring the legacy <c>BlendScopeRow</c> contract. The RGB
+    /// channels stay as the premultiplied composite left them, which matches
+    /// the straight-alpha blend wherever no translucent dynamic content sits
+    /// on top (the acceptance criteria sample exactly such pixels).
+    /// </summary>
+    private void BakeScopeRectsOpaque(Span<byte> destination, bool scopeGridPresent)
+    {
+        if (!scopeGridPresent)
+            return;
+        foreach (ScopeCopyPlan plan in _scopeCopyPlans)
+        {
+            int dstX = plan.DestinationOffset % (Width * 4) / 4;
+            int dstY = plan.DestinationOffset / (Width * 4);
+            int spanX = plan.RowBytes / 4;
+            for (int y = dstY; y < dstY + plan.Rows; y++)
+            {
+                int rowStart = y * Width + dstX;
+                for (int x = 0; x < spanX; x++)
+                    destination[(rowStart + x) * 4 + 3] = 255;
+            }
+        }
+    }
+
+    private void ValidateFrameForSkia(long frameIndex)
+    {
+        if (frameIndex < 0 || frameIndex >= TotalFrames)
+            throw new ArgumentOutOfRangeException(nameof(frameIndex));
+    }
+
+    /// <summary>Draws the full frame onto the active canvas without copying out.</summary>
+    private void RenderCompositeCore(
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        bool scopeFramesAreOpaque,
+        SKPaint? layerPaint = null,
+        bool clear = true)
+    {
+        lock (_skiaGate)
+            RenderCompositeCoreLocked(frameIndex, scopeGrid, scopeFramesAreOpaque, layerPaint, clear);
+    }
+
+    private void RenderCompositeCoreLocked(
+        long frameIndex,
+        ReadOnlySpan<byte> scopeGrid,
+        bool scopeFramesAreOpaque,
+        SKPaint? layerPaint = null,
+        bool clear = true,
+        bool fullRedraw = false)
+    {
+        ValidateFrameForSkia(frameIndex);
+        if (!scopeGrid.IsEmpty)
+        {
+            int gridBytes = ScopeFrameByteCount;
+            if (scopeGrid.Length < gridBytes)
+                throw new ArgumentException(
+                    $"Scope grid requires at least {gridBytes} bytes, got {scopeGrid.Length}.",
+                nameof(scopeGrid));
+        }
 
         long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
-        _staticFrame.AsSpan().CopyTo(destination);
+        EnsureStaticImage();
+        // Motion blur composites each temporally adjacent sample inside its own
+        // saveLayer: the layer's paint alpha gives that sample's weight, so the
+        // frame accumulates a running average on the main canvas directly.
+        if (layerPaint != null)
+            Canvas.SaveLayer(layerPaint);
         if (_performance.Enabled)
-        {
             _performance.Frames++;
-            _performance.FullRedraws++;
-            _performance.FullFrameCopies++;
-            _performance.SurfaceCopies++;
-            _performance.CopiedBytes += FrameByteCount;
-            _performance.RenderedPixels += (long)Width * Height;
+        bool scopeReplacesBody =
+            !scopeGrid.IsEmpty && scopeFramesAreOpaque && _options.ScopeOpacity >= 1.0;
+        // Incremental path: the canvas already carries the static chrome from a
+        // previous composite, so only the dynamic regions (playheads, scope,
+        // ribbons, per-frame labels) must be restored from the cached static
+        // layer before the new dynamic content is drawn. Motion blur redraws
+        // the full frame — its saveLayer accumulation needs the whole static
+        // frame under every sample.
+        if (fullRedraw || layerPaint != null || !_surfaceHasStatic)
+        {
+            if (clear)
+                Canvas.Clear(new SKColor(0, 0, 0, 0));
+            Canvas.DrawImage(_staticImage, 0, 0);
+            _surfaceHasStatic = true;
+            if (_performance.Enabled)
+            {
+                _performance.FullRedraws++;
+                _performance.SurfaceCopies++;
+                _performance.RenderedPixels += (long)Width * Height;
+            }
         }
-        // The playhead is a background time reference: draw it before the scope
-        // rows so the (opaque) waveform can cover it, keeping the current-sample
-        // signal visible exactly at the playhead column.
+        else
+        {
+            RestoreDynamicRegionsSkia(scopeReplacesBody);
+        }
         long compositingStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        DrawPlayheads(destination);
+        DrawPlayheads(default);
         if (!scopeGrid.IsEmpty)
-            PlaceScopeRows(scopeGrid, destination, scopeFramesAreOpaque);
+            PlaceScopeRows(scopeGrid, default, scopeFramesAreOpaque);
         if (_performance.Enabled)
             _performance.CompositingTicks += Stopwatch.GetTimestamp() - compositingStart;
         long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        DrawDynamicCore(frameIndex, destination);
+        DrawDynamicCore(frameIndex, default);
+        if (layerPaint != null)
+            Canvas.Restore();
         if (_performance.Enabled)
         {
             _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
             _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
             _performance.FinishFrame(allocatedBefore);
         }
+    }
+
+    /// <summary>
+    /// Undoes the previous composite's dynamic ink by blitting the cached
+    /// static layer back over every dynamic region (top/bottom bars, per-panel
+    /// headers, timelines, scope rows). When the scope placement fully
+    /// replaces the body (opaque source at full opacity), only the
+    /// gutter/bars/headers need restoring — the opaque waveform overwrites the
+    /// body before dynamic drawing anyway. Mirrors the legacy sequential
+    /// <c>RestoreDynamicRegions</c> contract on the Skia canvas.
+    /// </summary>
+    private void RestoreDynamicRegionsSkia(bool scopeReplacesBody)
+    {
+        OverlayRect[] rects = scopeReplacesBody
+            ? _dynamicRestoreRectsWithScope
+            : _dynamicRestoreRects;
+        long restoredPixels = 0;
+        // Each region is cleared inside a clipped saveLayer whose paint
+        // composes with BlendMode.Src: the layer content (the static blit)
+        // replaces the stale frame ink verbatim, semi-transparent static
+        // pixels included — identical to the fresh-clear + full-blit path.
+        foreach (OverlayRect rect in rects)
+        {
+            var region = new SKRect(rect.X, rect.Y, rect.Right, rect.Bottom);
+            Canvas.Save();
+            Canvas.ClipRect(region);
+            Canvas.SaveLayer(_restoreLayerPaint);
+            Canvas.DrawImage(_staticImage, 0, 0);
+            Canvas.Restore();
+            Canvas.Restore();
+            if (_performance.Enabled)
+                restoredPixels += (long)rect.Width * rect.Height;
+        }
+        if (_performance.Enabled)
+        {
+            long framePixels = (long)Width * Height;
+            _performance.SurfaceCopies += rects.Length;
+            _performance.RenderedPixels += restoredPixels;
+            _performance.AvoidedPixels += Math.Max(0, framePixels - restoredPixels);
+        }
+    }
+
+
+    /// <summary>Renders the static chrome once and caches it as an SKImage.</summary>
+    private void EnsureStaticImage()
+    {
+        if (_staticImageValid && _staticImage != null)
+            return;
+        BuildStaticFrame(default, drawFallbackText: true);
+        Canvas.Flush();
+        _staticImage?.Dispose();
+        _staticImage = _surface.Snapshot();
+        _staticImageValid = true;
     }
 
     /// <summary>Draws the per-panel playhead cursor (playhead position is a fixed
@@ -544,37 +702,40 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         Span<byte> destination,
         bool scopeFramesAreOpaque = false)
     {
-        // The temporal scratch frame is prepared once and reused to keep the
-        // hot path allocation-free. Serialize users of that scratch buffer so
-        // random-access callers can still query the same renderer in parallel.
-        lock (_motionBlurGate)
+        // Running average across N temporally adjacent samples, composited
+        // straight onto the main canvas: sample k > 0 is drawn inside a
+        // saveLayer whose paint alpha is 1/(k+1), so after N draws each
+        // sample contributes equally (canvas = canvas·(1−a) + sample·a).
+        ValidateFrame(frameIndex, destination);
+        int samples = _options.MotionBlurSamples;
+        int firstOffset = -(samples / 2);
+        lock (_skiaGate)
         {
-            ValidateFrame(frameIndex, destination);
-            int samples = _options.MotionBlurSamples;
-            destination.Clear();
-            int firstOffset = -(samples / 2);
             for (int sample = 0; sample < samples; sample++)
             {
                 long sampledFrame = Math.Clamp(
                     frameIndex + firstOffset + sample,
                     0,
                     TotalFrames - 1);
-                RenderCompositeFrameSingle(
-                    sampledFrame, scopeGrid, _motionBlurScratch, scopeFramesAreOpaque);
                 if (sample == 0)
                 {
-                    _motionBlurScratch.AsSpan().CopyTo(destination);
+                    RenderCompositeCoreLocked(
+                        sampledFrame, scopeGrid, scopeFramesAreOpaque,
+                        fullRedraw: true);
                     continue;
                 }
-
-                for (int offset = 0; offset < FrameByteCount; offset++)
-                {
-                    destination[offset] = (byte)((destination[offset] * sample
-                        + _motionBlurScratch[offset]) / (sample + 1));
-                }
+                float alpha = 1f / (sample + 1);
+                _blurLayerPaint.Color = new SKColor(255, 255, 255, (byte)Math.Round(alpha * 255));
+                RenderCompositeCoreLocked(
+                    sampledFrame, scopeGrid, scopeFramesAreOpaque,
+                    layerPaint: _blurLayerPaint, clear: false);
             }
+            CopySurfaceTo(destination);
+            BakeScopeRectsOpaque(destination, !scopeGrid.IsEmpty);
         }
     }
+
+
 
     internal void RenderForSession(
         long frameIndex,
@@ -583,49 +744,27 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         SequentialRenderState state,
         bool scopeFramesAreOpaque = false)
     {
+        // Skia full-redraw: identical output to random access by construction.
         if (_options.MotionBlurSamples > 1)
         {
             RenderMotionBlurFrame(frameIndex, scopeGrid, destination, scopeFramesAreOpaque);
             return;
         }
-
-        ValidateFrameForSession(frameIndex, destination);
-        if (_performance.Enabled)
-        {
-            _performance.Frames++;
-            _performance.PartialRedraws++;
-        }
-        long renderStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        long allocatedBefore = _performance.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
-        long compositingStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        // An opaque scope placement at full opacity replaces the whole scope
-        // body, so only the gutter/bars/headers need restoring. The alpha
-        // blend leaves transparent pixels' RGB untouched, so the body must be
-        // restored from the static layer first — otherwise previous frames
-        // ghost through the translucent waveform.
-        bool scopeReplacesBody =
-            !scopeGrid.IsEmpty && scopeFramesAreOpaque && _options.ScopeOpacity >= 1.0;
-        RestoreDynamicRegions(destination, scopeReplacesBody);
-        // The playhead is a background time reference: draw it before the
-        // scope rows (same order as RenderCompositeFrameSingle) so the
-        // waveform covers it and the current-sample signal stays visible at
-        // the playhead column.
-        DrawPlayheads(destination);
-        PlaceScopeRowsForSession(scopeGrid, destination, scopeFramesAreOpaque);
-        if (_performance.Enabled)
-            _performance.CompositingTicks += Stopwatch.GetTimestamp() - compositingStart;
-        long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        DrawDynamicForSession(frameIndex, destination, state);
-        if (_performance.Enabled)
-        {
-            _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
-            _performance.RenderTicks += Stopwatch.GetTimestamp() - renderStart;
-            _performance.FinishFrame(allocatedBefore);
-        }
+        RenderCompositeFrameSingle(frameIndex, scopeGrid, destination, scopeFramesAreOpaque);
     }
 
-    internal SequentialCompositeSession CreateSequentialSession(bool scopeFramesAreOpaque = false)
+
+    public SequentialCompositeSession CreateSequentialSession(bool scopeFramesAreOpaque = false)
         => new(this, scopeFramesAreOpaque);
+
+    ISequentialCompositeSession IFrameOverlayRenderer.CreateSequentialSession(bool scopeFramesAreOpaque)
+        => CreateSequentialSession(scopeFramesAreOpaque);
+
+    /// <summary>
+    /// CPU raster output is premultiplied (Skia storage), so the FFmpeg writer
+    /// must unpremultiply; false keeps the conversion active.
+    /// </summary>
+    public bool ProducesOpaqueFrames => false;
 
     /// <summary>
     /// Assigns per-panel stream ids exactly once per panel layout. Called at
@@ -654,14 +793,17 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     private double[] GetBaseAlphasForLane(int panelIndex, OverlayRect lane, long windowStart, double samplesPerPixel, long currentSample, int playheadX)
     {
-        if (_laneBaseAlphas[panelIndex] != null
-            && _laneBaseAlphaSamples[panelIndex] == currentSample
-            && _laneBaseAlphaWindowStarts[panelIndex] == windowStart
-            && _laneBaseAlphaSamplesPerPixel[panelIndex] == samplesPerPixel
-            && _laneBaseAlphaPlayheadX[panelIndex] == playheadX
-            && _laneBaseAlphas[panelIndex].Length == lane.Width)
-            return _laneBaseAlphas[panelIndex];
-        double[] alphas = new double[lane.Width];
+        // Reusable per-panel buffer: the temporal-opacity values change with
+        // currentSample every frame, so the array is always refilled — but the
+        // same allocation is reused across frames (zero hot-path allocation,
+        // §20.1). Each panel renders its notes sequentially, so refilling in
+        // place cannot alias a render in progress.
+        double[] alphas = _laneBaseAlphas[panelIndex];
+        if (alphas is null || alphas.Length != lane.Width)
+        {
+            alphas = new double[lane.Width];
+            _laneBaseAlphas[panelIndex] = alphas;
+        }
         for (int i = 0; i < lane.Width; i++)
         {
             int x = lane.X + i;
@@ -669,11 +811,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             double temporal = Math.Abs(x - playheadX) <= 2 ? 1.0 : sample > currentSample ? 0.35 : 0.70 - 0.35 * Math.Clamp(Math.Max(0, (currentSample - sample) / (double)_timeline.SampleRate) / 0.25, 0, 1);
             alphas[i] = NormalRibbonOpacity * temporal;
         }
-        _laneBaseAlphas[panelIndex] = alphas;
-        _laneBaseAlphaSamples[panelIndex] = currentSample;
-        _laneBaseAlphaWindowStarts[panelIndex] = windowStart;
-        _laneBaseAlphaSamplesPerPixel[panelIndex] = samplesPerPixel;
-        _laneBaseAlphaPlayheadX[panelIndex] = playheadX;
         return alphas;
     }
 
@@ -1599,6 +1736,15 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             else
             {
                 rects.Add(timeline);
+                // Zero-height timelines still receive the playhead beacon:
+                // DrawVerticalLine normalizes inverted bounds into a 2px rect
+                // spanning y = timeline.Y - 1 .. timeline.Y. The row above is
+                // inside the adjacent scope region, but the timeline's own row
+                // can fall in a region no other rect covers (e.g. the empty
+                // tail of a partial overview row), so a sequential session
+                // would double-blend the playhead over un-restored ink.
+                if (timeline.Height == 0)
+                    rects.Add(new OverlayRect(timeline.X, timeline.Y, timeline.Width, 1));
             }
             if (!integratedScope)
                 rects.Add(_layout.GetScopeRect(panelIndex));
@@ -1727,16 +1873,27 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// </summary>
     public void WriteStaticFrame(Stream destination)
     {
-        ArgumentNullException.ThrowIfNull(destination);
-        destination.Write(_staticFrame, 0, _staticFrame.Length);
+        EnsureStaticImage();
+        var pixels = ReadImagePixels(_staticImage);
+        destination.Write(pixels, 0, pixels.Length);
     }
 
-    internal void WriteStaticFrame(Span<byte> destination)
+
+    public void WriteStaticFrame(Span<byte> destination)
     {
-        if (destination.Length < _staticFrame.Length)
-            throw new ArgumentException($"Destination requires at least {_staticFrame.Length} bytes.", nameof(destination));
-        _staticFrame.AsSpan().CopyTo(destination);
+        EnsureStaticImage();
+        var pixels = ReadImagePixels(_staticImage);
+        pixels.AsSpan(0, Math.Min(pixels.Length, destination.Length)).CopyTo(destination);
     }
+
+    private static byte[] ReadImagePixels(SKImage image)
+    {
+        var info = new SKImageInfo(image.Width, image.Height, SKColorType.Rgba8888, SKAlphaType.Premul);
+        var buffer = new byte[info.BytesSize];
+        image.ReadPixels(info, System.Runtime.InteropServices.Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0), info.RowBytes, 0, 0);
+        return buffer;
+    }
+
 
     /// <summary>
     /// Copies each scope cell from the Corrscope grid strip into its panel and
@@ -1758,134 +1915,77 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         ReadOnlySpan<byte> scopeGrid, Span<byte> destination, bool scopeFramesAreOpaque = false)
     {
         int sourceStride = _layout.CorrscopeGridWidth * 4;
-        int destinationStride = Width * 4;
-        // Integer 16.16 fixed-point scale of ScopeOpacity (65536 == 1.0),
-        // computed once per placement call.
-        int alphaScale = (int)Math.Round(_options.ScopeOpacity * 65536.0);
-        bool fastPath = scopeFramesAreOpaque && alphaScale >= 65536;
+        int rows = _layout.CorrscopeGridHeight;
+        float opacity = (float)Math.Clamp(_options.ScopeOpacity, 0, 1);
+        bool opaque = scopeFramesAreOpaque && opacity >= 1f;
+
+        EnsureScopeImage(scopeGrid, rows);
+
         foreach (ScopeCopyPlan plan in _scopeCopyPlans)
         {
-            int src = plan.SourceOffset;
-            int dst = plan.DestinationOffset;
-            for (int y = 0; y < plan.Rows; y++)
+            if (_performance.Enabled)
             {
-                if (_performance.Enabled)
-                {
-                    _performance.ScopeCopies++;
-                    _performance.CopiedBytes += plan.RowBytes;
-                }
-                if (fastPath)
-                {
-                    scopeGrid.Slice(src, plan.RowBytes)
-                        .CopyTo(destination.Slice(dst, plan.RowBytes));
-                }
-                else
-                {
-                    BlendScopeRow(
-                        scopeGrid.Slice(src, plan.RowBytes),
-                        destination.Slice(dst, plan.RowBytes),
-                        alphaScale);
-                }
-                src += sourceStride;
-                dst += destinationStride;
+                _performance.ScopeCopies += plan.Rows;
+                _performance.CopiedBytes += plan.RowBytes * plan.Rows;
             }
+            int srcRow = plan.SourceOffset / sourceStride;
+            int srcX = plan.SourceOffset % sourceStride / 4;
+            int dstX = plan.DestinationOffset % (Width * 4) / 4;
+            int dstY = plan.DestinationOffset / (Width * 4);
+            var srcRect = new SKRect(
+                srcX, srcRow, srcX + plan.RowBytes / 4, srcRow + plan.Rows);
+            var dstRect = new SKRect(dstX, dstY, dstX + plan.RowBytes / 4, dstY + plan.Rows);
+            byte pa = opaque ? (byte)255 : (byte)Math.Round(opacity * 255);
+            _fillPaint.Color = new SKColor(255, 255, 255, pa);
+            Canvas.DrawImage(_scopeImage, srcRect, dstRect, _fillPaint);
+        }
+        Canvas.Flush();
+    }
+
+    private void EnsureScopeImage(ReadOnlySpan<byte> scopeGrid, int rows)
+    {
+        int stride = _layout.CorrscopeGridWidth * 4;
+        int needed = stride * rows;
+        if (_scopeBitmap == null || _scopeImageBytes != needed)
+        {
+            _scopePixels = new byte[needed];
+            _scopeBitmap?.Dispose();
+            _scopeBitmap = new SKBitmap();
+            var info = new SKImageInfo(_layout.CorrscopeGridWidth, rows, SKColorType.Rgba8888, SKAlphaType.Premul);
+            var handle = System.Runtime.InteropServices.GCHandle.Alloc(_scopePixels, System.Runtime.InteropServices.GCHandleType.Pinned);
+            _scopeBitmap.InstallPixels(info, handle.AddrOfPinnedObject(), info.RowBytes, (_, ctx) => ((System.Runtime.InteropServices.GCHandle)ctx).Free(), handle);
+        }
+        // Always upload premultiplied bytes (the bitmap is Premul), and mint a
+        // fresh SKImage per frame: SKImages are immutable wrappers, so relying
+        // on NotifyPixelsChanged() through a cached image can serve stale
+        // pixels once the grid content changes.
+        PreMultiplyInto(scopeGrid, _scopePixels);
+        _scopeBitmap.NotifyPixelsChanged();
+        _scopeImage?.Dispose();
+        _scopeImage = SKImage.FromBitmap(_scopeBitmap);
+        _scopeImageBytes = needed;
+    }
+
+    private SKBitmap _scopeBitmap;
+    private byte[] _scopePixels;
+
+    private static void PreMultiplyInto(ReadOnlySpan<byte> straight, Span<byte> premul)
+    {
+        // Callers may hand in a span of the pooled buffer's full capacity
+        // (ArrayPool rounds up), so clamp to the destination's expected grid
+        // size instead of overrunning on the tail padding.
+        int n = Math.Min(straight.Length, premul.Length);
+        for (int i = 0; i < n; i += 4)
+        {
+            uint a = straight[i + 3];
+            premul[i] = (byte)(straight[i] * a / 255);
+            premul[i + 1] = (byte)(straight[i + 1] * a / 255);
+            premul[i + 2] = (byte)(straight[i + 2] * a / 255);
+            premul[i + 3] = (byte)a;
         }
     }
 
-    /// <summary>
-    /// Per-pixel alpha blend of one scope row over the panel body:
-    /// <c>dst.RGB = src.RGB * a + dst.RGB * (1 - a)</c> with
-    /// <c>a = (srcAlpha / 255) * ScopeOpacity</c>, then <c>dst.A = 255</c>.
-    /// Integer 16.16 fixed point keeps the hot path allocation-free; the
-    /// rounding matches the acceptance criteria (src * 0.5 + dst * 0.5 at
-    /// opacity 0.5 within one LSB).
-    /// </summary>
-    private static void BlendScopeRow(
-        ReadOnlySpan<byte> source, Span<byte> destination, int alphaScale)
-    {
-        // Row-level fast paths: waveform masks are overwhelmingly either
-        // fully transparent (background) or fully opaque (line pixels).
-        // Detecting those rows collapses them to a fill or a copy without
-        // per-pixel branching.
-        byte firstA = source[3];
-        bool uniformAlpha = true;
-        for (int i = 3; i < source.Length; i += 4)
-        {
-            if (source[i] != firstA) { uniformAlpha = false; break; }
-        }
-        if (uniformAlpha && firstA == 0 && alphaScale <= 65536)
-        {
-            // Fully transparent row: destination RGB untouched, alpha forced
-            // opaque. Write the alpha plane directly.
-            for (int offset = 3; offset < destination.Length; offset += 4)
-                destination[offset] = 255;
-            return;
-        }
-        if (uniformAlpha && firstA >= 255)
-        {
-            if (alphaScale >= 65536)
-            {
-                source.CopyTo(destination);
-                for (int offset = 3; offset < destination.Length; offset += 4)
-                    destination[offset] = 255;
-                return;
-            }
-            BlendScopeRowCore(source, destination, alphaScale);
-            return;
-        }
-        if (uniformAlpha)
-        {
-            // Uniform partial alpha: blend terms constant per channel.
-            int alpha = (firstA * alphaScale + 127) / 255;
-            if (alpha >= 65536) { source.CopyTo(destination); return; }
-            if (alpha <= 0)
-            {
-                for (int offset = 3; offset < destination.Length; offset += 4)
-                    destination[offset] = 255;
-                return;
-            }
-            for (int offset = 0; offset < source.Length; offset += 4)
-            {
-                for (int channel = 0; channel < 3; channel++)
-                {
-                    int diff = source[offset + channel] - destination[offset + channel];
-                    destination[offset + channel] = (byte)(
-                        destination[offset + channel] + ((diff * alpha + 32768) >> 16));
-                }
-                destination[offset + 3] = 255;
-            }
-            return;
-        }
-        BlendScopeRowCore(source, destination, alphaScale);
-    }
 
-    /// <summary>Per-pixel fallback; identical to the original implementation.</summary>
-    private static void BlendScopeRowCore(
-        ReadOnlySpan<byte> source, Span<byte> destination, int alphaScale)
-    {
-        for (int offset = 0; offset < source.Length; offset += 4)
-        {
-            int alpha = (source[offset + 3] * alphaScale + 127) / 255;
-            if (alpha >= 65536)
-            {
-                destination[offset] = source[offset];
-                destination[offset + 1] = source[offset + 1];
-                destination[offset + 2] = source[offset + 2];
-                destination[offset + 3] = 255;
-                continue;
-            }
-            if (alpha > 0)
-            {
-                for (int channel = 0; channel < 3; channel++)
-                {
-                    int diff = source[offset + channel] - destination[offset + channel];
-                    destination[offset + channel] = (byte)(
-                        destination[offset + channel] + ((diff * alpha + 32768) >> 16));
-                }
-            }
-            destination[offset + 3] = 255;
-        }
-    }
 
     /// <summary>
     /// Builds a per-panel energy lookup indexed by panel index.
@@ -2277,148 +2377,46 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     {
         if (lane.Width <= 0 || lane.Height <= 0)
             return;
-        bool laneCached = false;
-        bool canCacheLane = panelIndex >= 0 && panelIndex < _laneGridCache.Length && !_layout.UsesIntegratedRoll;
-        int laneRowBytes = lane.Width * 4;
-        if (canCacheLane)
+        long bandStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
         {
-            byte[] cached = _laneGridCache[panelIndex];
-            if (cached != null && cached.Length == lane.Width * lane.Height * 4
-                && _laneGridMinMidi[panelIndex] == minMidi && _laneGridMaxMidi[panelIndex] == maxMidi)
+            if (!BlackPitchClasses.Contains(Mod(midi, 12)))
+                continue;
+            int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
+            int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
+            int top = Math.Min(yTop, yBottom);
+            int bottom = Math.Max(yTop, yBottom);
+            FillRect(frame, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
+        }
+        if (_performance.Enabled)
+        {
+            long bandTicks = Stopwatch.GetTimestamp() - bandStart;
+            _performance.PitchBandTicks += bandTicks;
+            _performance.PitchGridTicks += bandTicks;
+        }
+        long lineStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
+        for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
+        {
+            if (Mod(midi, 12) != 0)
+                continue;
+            DrawHorizontalLine(frame, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
+            int octaveIndex = midi / 12 - 1;
+            if ((uint)octaveIndex < COctaveLabels.Length)
             {
-                for (int y = 0; y < lane.Height; y++)
-                {
-                    int srcOffset = y * laneRowBytes;
-                    int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
-                    cached.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
-                }
-                laneCached = true;
+                string label = COctaveLabels[octaveIndex];
+                int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
+                if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
+                    DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
             }
         }
-        if (laneCached)
+        if (_performance.Enabled)
         {
-            // Lane grid (black bands + C lines) is cached; still need to draw
-            // pitch labels which live in the timeline gutter, not the lane.
-            int firstLabelSemitone = (int)Math.Floor(minMidi);
-            int lastLabelSemitone = (int)Math.Ceiling(maxMidi);
-            for (int midi = firstLabelSemitone; midi <= lastLabelSemitone; midi++)
-            {
-                if (Mod(midi, 12) == 0)
-                {
-                    int octaveIndex = midi / 12 - 1;
-                    if ((uint)octaveIndex < COctaveLabels.Length)
-                    {
-                        string label = COctaveLabels[octaveIndex];
-                        int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
-                        if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
-                            DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
-                    }
-                }
-            }
-            return;
-        }
-        int firstSemitone = (int)Math.Floor(minMidi);
-        int lastSemitone = (int)Math.Ceiling(maxMidi);
-        // When caching, render into a scratch lane buffer first so the cached
-        // bytes are exactly what a cache hit would blit — including the
-        // TimelineBackground the bands are translucent over. The static frame
-        // already carries that background inside the lane rect.
-        Span<byte> gridTarget;
-        byte[] scratch = null;
-        bool willCache = canCacheLane;
-        if (willCache)
-        {
-            byte[] cache = _laneGridCache[panelIndex];
-            int needed = lane.Width * lane.Height * 4;
-            if (cache == null || cache.Length != needed)
-            {
-                cache = new byte[needed];
-                _laneGridCache[panelIndex] = cache;
-            }
-            // Seed with the static frame's lane rect: the translucent band
-            // blend must land on the same background a cold render would see.
-            for (int y = 0; y < lane.Height; y++)
-            {
-                int srcOffset = ((lane.Y + y) * Width + lane.X) * 4;
-                _staticFrame.AsSpan(srcOffset, laneRowBytes).CopyTo(cache.AsSpan(y * laneRowBytes, laneRowBytes));
-            }
-            scratch = cache;
-            gridTarget = scratch;
-        }
-        else
-        {
-            gridTarget = frame;
-        }
-        {
-            // Two timed passes: bands (the bulk pixel work) and lines/labels.
-            // Integrated lanes draw the grid over the live scope waveform, so
-            // every band pixel is a genuine translucent blend over varying
-            // content — measured as the dominant pitched-lane cost. The bands
-            // are omitted there; non-integrated lanes keep them (uniform
-            // static background => single packed fill).
-            long bandStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-            if (!_layout.UsesIntegratedRoll)
-            {
-                for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
-                {
-                    if (!BlackPitchClasses.Contains(Mod(midi, 12)))
-                        continue;
-                    int yTop = MidiToY(midi + 0.5, minMidi, maxMidi, lane);
-                    int yBottom = MidiToY(midi - 0.5, minMidi, maxMidi, lane);
-                    int top = Math.Min(yTop, yBottom);
-                    int bottom = Math.Max(yTop, yBottom);
-                    FillRect(gridTarget, new OverlayRect(lane.X, top, lane.Width, Math.Max(1, bottom - top)), BlackKeyBand);
-                }
-            }
-            if (_performance.Enabled)
-            {
-                long bandTicks = Stopwatch.GetTimestamp() - bandStart;
-                _performance.PitchBandTicks += bandTicks;
-                _performance.PitchGridTicks += bandTicks;
-            }
-            long lineStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-            for (int midi = (int)Math.Floor(minMidi); midi <= (int)Math.Ceiling(maxMidi); midi++)
-            {
-                if (Mod(midi, 12) != 0)
-                    continue;
-                DrawHorizontalLine(gridTarget, lane.X, lane.Right - 1, MidiToY(midi, minMidi, maxMidi, lane), GridLine);
-                // §20.1: use the precomputed label — no per-frame string formatting.
-                int octaveIndex = midi / 12 - 1;
-                // Clamp for relative/unusual pitch models (e.g. SPC relative
-                // semitones) that can produce midi=0 or negative values.
-                if ((uint)octaveIndex < COctaveLabels.Length)
-                {
-                    string label = COctaveLabels[octaveIndex];
-                    int labelY = MidiToY(midi, minMidi, maxMidi, lane) - 3;
-                    // Pitch labels are dynamic and must remain inside the
-                    // lane that will be restored by a sequential session.
-                    // Without this guard a bottom-edge glyph can spill into
-                    // the next panel header and leave stale pixels after a
-                    // seek or frame transition.
-                    if (labelY >= lane.Y && labelY + 7 <= lane.Bottom)
-                        DrawPitchLabelRightAligned(frame, timeline, lane, label, labelY);
-                }
-            }
-            if (_performance.Enabled)
-            {
-                long lineTicks = Stopwatch.GetTimestamp() - lineStart;
-                _performance.GridLineTicks += lineTicks;
-                _performance.PitchGridTicks += lineTicks;
-            }
-        }
-        if (willCache)
-        {
-            // Blit the freshly rendered lane buffer to the frame.
-            for (int y = 0; y < lane.Height; y++)
-            {
-                int srcOffset = y * laneRowBytes;
-                int dstOffset = ((lane.Y + y) * Width + lane.X) * 4;
-                scratch.AsSpan(srcOffset, laneRowBytes).CopyTo(frame.Slice(dstOffset, laneRowBytes));
-            }
-            _laneGridMinMidi[panelIndex] = minMidi;
-            _laneGridMaxMidi[panelIndex] = maxMidi;
+            long lineTicks = Stopwatch.GetTimestamp() - lineStart;
+            _performance.GridLineTicks += lineTicks;
+            _performance.PitchGridTicks += lineTicks;
         }
     }
+
 
     private readonly struct RectCopyPlan
     {

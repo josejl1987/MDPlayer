@@ -1097,8 +1097,16 @@ public sealed class PanelOverlayRendererTests
     private static bool IsBrightRibbonPixel(byte[] frame, int width, int x, int y)
     {
         int offset = (y * width + x) * 4;
-        int max = Math.Max(frame[offset], Math.Max(frame[offset + 1], frame[offset + 2]));
-        int min = Math.Min(frame[offset], Math.Min(frame[offset + 1], frame[offset + 2]));
+        int alpha = frame[offset + 3];
+        if (alpha == 0)
+            return false;
+        // The Skia backend stores premultiplied pixels (RGB scaled by alpha).
+        // Un-premultiply so the brightness gates measure the visible tint, not
+        // the alpha-weighted storage — under the straight contract these same
+        // gates distinguished the ribbing from the dark lane backgrounds.
+        int UnPremul(int c) => alpha == 255 ? c : Math.Min(255, (c * 255 + alpha / 2) / alpha);
+        int max = Math.Max(UnPremul(frame[offset]), Math.Max(UnPremul(frame[offset + 1]), UnPremul(frame[offset + 2])));
+        int min = Math.Min(UnPremul(frame[offset]), Math.Min(UnPremul(frame[offset + 1]), UnPremul(frame[offset + 2])));
         // A ribbon column must clearly differ from the rake of dark lane
         // backgrounds beneath it (canvas/timeline at sum<=57, black-key bands
         // at sum<=44). The energy-reduced ribbon is semi-transparent and
@@ -1107,9 +1115,8 @@ public sealed class PanelOverlayRendererTests
         // a continuous ribbon crossed a black-key band (note bends landing on a
         // C#/D#/F#/G#/A#). Require a comfortable margin above every background
         // while keeping gap detection: any genuine fill is >=150.
-        int sum = frame[offset] + frame[offset + 1] + frame[offset + 2];
-        return frame[offset + 3] > 0
-            && sum > 150
+        int sum = UnPremul(frame[offset]) + UnPremul(frame[offset + 1]) + UnPremul(frame[offset + 2]);
+        return sum > 150
             && max - min > 25;
     }
 

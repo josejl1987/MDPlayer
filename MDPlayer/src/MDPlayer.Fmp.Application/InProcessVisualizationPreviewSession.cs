@@ -327,7 +327,8 @@ internal sealed class InProcessVisualizationPreviewSession : IVisualizationPrevi
             VisualizationFrameRendererFactory
                 .CreateTimelinePreview(
                     source,
-                    introOutro: true);
+                    introOutro: true,
+                    renderBackend: _runtime.RenderBackend);
 
         long frameIndex = FrameIndexAt(
             preview.TimeSeconds,

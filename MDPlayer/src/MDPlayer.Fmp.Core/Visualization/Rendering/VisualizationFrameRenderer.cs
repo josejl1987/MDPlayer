@@ -16,7 +16,7 @@ namespace Fmp.Core.Visualization.Rendering;
 /// </summary>
 internal sealed class VisualizationFrameRenderer : IDisposable
 {
-    private readonly PanelOverlayRenderer _overlay;
+    private readonly IFrameOverlayRenderer _overlay;
     private readonly IScopeFrameSource? _scopeFrames;
     private readonly byte[]? _scopeBuffer;
     private readonly byte[]? _lastScopeFrame;
@@ -26,7 +26,7 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     private bool _disposed;
 
     public VisualizationFrameRenderer(
-        PanelOverlayRenderer overlay,
+        IFrameOverlayRenderer overlay,
         IScopeFrameSource? scopeFrames,
         double? scopeFps = null)
     {
@@ -200,11 +200,11 @@ internal sealed class VisualizationFrameRenderer : IDisposable
     internal sealed class SequentialSession
     {
         private readonly VisualizationFrameRenderer _owner;
-        private readonly SequentialCompositeSession _overlay;
+        private readonly ISequentialCompositeSession _overlay;
 
         internal SequentialSession(
             VisualizationFrameRenderer owner,
-            SequentialCompositeSession overlay)
+            ISequentialCompositeSession overlay)
         {
             _owner = owner;
             _overlay = overlay;

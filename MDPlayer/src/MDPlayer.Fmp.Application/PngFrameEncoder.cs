@@ -1,3 +1,4 @@
+using Fmp.Core.Visualization.Rendering;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 #nullable enable
@@ -25,7 +26,10 @@ internal static class PngFrameEncoder
                 nameof(rgba));
         }
 
+        // The renderer's frame bytes are premultiplied (Skia surface storage);
+        // PNG stores straight alpha, so convert before encoding.
         byte[] data = rgba[..checked(width * height * 4)].ToArray();
+        RgbaConversions.UnpremultiplyInPlace(data);
 
         var image = new Image<Rgba32>(width, height);
         image.ProcessPixelRows(accessor =>

@@ -8,10 +8,12 @@ using Fmp.Core.Visualization;
 namespace Fmp.Cli;
 
 /// <summary>
-/// The single production construction point for <see cref="PanelOverlayRenderer"/>
-/// and <see cref="VisualizationFrameRenderer"/>. Every consumer (final video,
-/// GUI preview, visual review) builds a frame renderer here so they all use the
-/// same overlay options and the same scope source.
+/// The single production construction point for the overlay renderer (CPU
+/// <see cref="PanelOverlayRenderer"/> or GPU <c>GpuPanelRenderer</c>, selected
+/// by <c>--render-backend</c>) and <see cref="VisualizationFrameRenderer"/>.
+/// Every consumer (final video, GUI preview, visual review) builds a frame
+/// renderer here so they all use the same overlay options and the same scope
+/// source.
 /// </summary>
 internal static class VisualizationFrameRendererFactory
 {
@@ -25,11 +27,18 @@ internal static class VisualizationFrameRendererFactory
     /// </summary>
     public static VisualizationFrameRenderer CreateTimelinePreview(
         PreparedTimelineSource prepared,
-        bool introOutro)
+        bool introOutro,
+        string? renderBackend = null)
     {
         ArgumentNullException.ThrowIfNull(prepared);
 
-        PanelOverlayRenderer overlay =
+        // The timeline preview has no RenderRuntimeOptions of its own; it
+        // follows the caller-supplied backend selection exactly like full
+        // renders do, so the GUI first frame now rides the same
+        // --render-backend path (auto currently = CPU until the GPU beats it; gpu
+        // is opt-in)
+        // otherwise).
+        IFrameOverlayRenderer overlay =
             VisualizationComposition.CreateRenderer(
                 prepared.Timeline,
                 prepared.Layout,
@@ -37,7 +46,8 @@ internal static class VisualizationFrameRendererFactory
                     prepared.Request,
                     prepared.Presentation,
                     introOutro,
-                    Array.Empty<ChannelEnergyEnvelope>()));
+                    Array.Empty<ChannelEnergyEnvelope>()),
+                renderBackend);
 
         IScopeFrameSource? scope = null;
 
@@ -84,14 +94,15 @@ internal static class VisualizationFrameRendererFactory
                     prepared, workspace, runtime, scopeFrameByteCount);
             }
 
-            PanelOverlayRenderer overlay = VisualizationComposition.CreateRenderer(
+            IFrameOverlayRenderer overlay = VisualizationComposition.CreateRenderer(
                 prepared.Timeline,
                 prepared.Layout,
                 VisualizationRendererOptions.Build(
                     prepared.Request,
                     prepared.Presentation,
                     introOutro,
-                    prepared.Energy));
+                    prepared.Energy),
+                runtime.RenderBackend);
 
             if (scopePolicy == ScopeFrameSourcePolicy.Interactive)
                 scope = CreateInteractiveScopeSource(prepared, overlay);
@@ -140,7 +151,7 @@ internal static class VisualizationFrameRendererFactory
     /// </summary>
     private static IScopeFrameSource? CreateInteractiveScopeSource(
         PreparedVisualizationSource prepared,
-        PanelOverlayRenderer overlay)
+        IFrameOverlayRenderer overlay)
     {
         if (!prepared.Scope.Enabled
             || !prepared.Layout.Geometry.HasScopes
