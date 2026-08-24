@@ -1,8 +1,10 @@
 # Makefile for the MDPlayer FMP visualization / renderer build.
 #
 # Targets:
-#   make            - build Release and run the fast unit-test suite (default)
+#   make            - build Release (incl. native libs) and run the fast
+#                     unit-test suite (default)
 #   make build      - build Release
+#   make native     - build the native SPC/OPNA libraries via cmake
 #   make debug      - build Debug
 #   make test       - run all three test projects (Release) and build
 #   make test-quick - build+run ONLY the fast unit-test project (no CLI/GUI
@@ -12,6 +14,12 @@
 #   make clean      - remove obj/ and bin/ for the FMP projects
 #   make purge      - clean the whole solution (including submodule deps)
 #
+# `build` and `test` first build the native SPC/OPNA libraries (mdplayer_spc /
+# mdplayer_opna) with cmake; their post-build steps copy the result into
+# MDPlayer/runtimes/<rid>/native, which the CLI and GUI projects package into
+# their own output. Without this, the UI reports that SPC/OPNA playback
+# requires the native library.
+#
 # The CLI entry point after a build is:
 #   MDPlayer/src/MDPlayer.Fmp.Cli/bin/Release/net8.0/mdplayer-render
 # (the repo-root ./fmp-render wrapper also resolves it).
@@ -20,6 +28,14 @@ SLN       := MDPlayer/MDPlayer.Fmp.sln
 CONFIG    ?= Release
 FRAMEWORK ?= net8.0
 CLI_DLL   := MDPlayer/src/MDPlayer.Fmp.Cli/bin/$(CONFIG)/$(FRAMEWORK)/mdplayer-render.dll
+
+# Native libraries built with cmake (Linux). Their CMake post-build steps copy
+# the built library into MDPlayer/runtimes/<rid>/native automatically.
+NATIVE_PROJECTS := \
+	MDPlayer/native/MDPlayer.SpcNative \
+	MDPlayer/native/MDPlayer.OpnaNative
+NATIVE_SRC_DIR  := $(firstword $(NATIVE_PROJECTS))
+NATIVE_RUNTIME_RID ?= linux-x64
 
 TEST_PROJECTS := \
 	MDPlayer/tests/MDPlayer.Fmp.Tests/MDPlayer.Fmp.Tests.csproj \
@@ -33,12 +49,25 @@ QUICK_TEST_PROJECT := MDPlayer/tests/MDPlayer.Fmp.Application.Tests/MDPlayer.Fmp
 
 DOTNET ?= dotnet
 
-.PHONY: all build debug release test test-quick test-full test-one clean purge cli
+.PHONY: all build debug release native test test-quick test-full test-one clean purge cli
 
 all: build test-quick
 
-build release:
+build release: native
 	$(DOTNET) build $(SLN) -c $(CONFIG)
+
+# Build the native SPC/OPNA libraries with cmake. Configure once per build
+# type, then build incrementally; the CMake post-build step copies each library
+# into MDPlayer/runtimes/<rid>/native for the .NET projects to package.
+native:
+	@command -v cmake >/dev/null 2>&1 || { echo "cmake is required to build the native libraries" 1>&2; exit 2; }
+	@for d in $(NATIVE_PROJECTS); do \
+		echo "==> cmake configure $$d"; \
+		cmake -S $$d -B $$d/build -DCMAKE_BUILD_TYPE=$(CONFIG) || exit $$?; \
+		echo "==> cmake --build $$d"; \
+		cmake --build $$d/build || exit $$?; \
+	done
+	@echo "native libraries ready in MDPlayer/runtimes/$(NATIVE_RUNTIME_RID)/native/"
 
 debug:
 	$(MAKE) build CONFIG=Debug

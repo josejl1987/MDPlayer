@@ -36,6 +36,35 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Native backend packaging: copied from runtimes/<rid>/native by the
+         native cmake builds (linux-x64 on non-Windows, win-x64 on Windows);
+         SpcNativeSession / OpnaNativeSession probe the current-OS path under
+         AppContext.BaseDirectory (or MDPLAYER_SPC_NATIVE / MDPLAYER_OPNA_NATIVE).
+         The GUI must ship these too; otherwise SPC/OPNA playback reports that
+         the native library is missing. -->
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_spc.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_spc.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_spc.so</Link>
+    </None>
+    <None Include="..\..\runtimes\win-x64\native\mdplayer_spc.dll"
+          Condition="Exists('..\..\runtimes\win-x64\native\mdplayer_spc.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/mdplayer_spc.dll</Link>
+    </None>
+    <None Include="..\..\runtimes\linux-x64\native\libmdplayer_opna.so"
+          Condition="Exists('..\..\runtimes\linux-x64\native\libmdplayer_opna.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/libmdplayer_opna.so</Link>
+    </None>
+    <None Include="..\..\runtimes\win-x64\native\mdplayer_opna.dll"
+          Condition="Exists('..\..\runtimes\win-x64\native\mdplayer_opna.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/mdplayer_opna.dll</Link>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\MDPlayer.Fmp.Application\MDPlayer.Fmp.Application.csproj" />
     <!-- The in-process preview session factory now lives in the application
          assembly (Fmp.Cli namespace) so the GUI does not reference the CLI
