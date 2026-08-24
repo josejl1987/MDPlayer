@@ -1,0 +1,134 @@
+{
+  "succeeded": true,
+  "input": {
+    "path": "/home/jose/MDPlayer/XA2020.OVI"
+  },
+  "render": {
+    "sampleRate": 48000,
+    "masterSamples": 5387040,
+    "loopCount": 2,
+    "fadeSeconds": 5,
+    "tailSeconds": 0.5
+  },
+  "channels": [
+    {
+      "name": "master",
+      "label": "Master",
+      "success": true,
+      "samples": 5387040,
+      "channels": 2,
+      "wav": "master.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm1",
+      "label": "FM1",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm1.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm2",
+      "label": "FM2",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm2.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm3",
+      "label": "FM3",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm3.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm4",
+      "label": "FM4",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm4.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm5",
+      "label": "FM5",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm5.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-fm6",
+      "label": "FM6",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-fm6.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-ssg1",
+      "label": "SSG1",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-ssg1.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-ssg2",
+      "label": "SSG2",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-ssg2.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-ssg3",
+      "label": "SSG3",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-ssg3.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-rhythm",
+      "label": "RHYTHM",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-rhythm.wav",
+      "error": ""
+    },
+    {
+      "name": "ym2608-adpcm",
+      "label": "ADPCM-B",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ym2608-adpcm.wav",
+      "error": ""
+    },
+    {
+      "name": "ppz8-01",
+      "label": "PCM",
+      "success": true,
+      "samples": 5387040,
+      "channels": 1,
+      "wav": "ppz8-01.wav",
+      "error": ""
+    }
+  ],
+  "completionReason": "loop_limit",
+  "lastError": ""
+}

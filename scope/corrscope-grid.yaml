@@ -1,0 +1,122 @@
+!Config
+
+master_audio: ../audio/master.wav
+fps: 30
+amplification: 1
+trigger_ms: 30
+render_ms: 16
+
+trigger:
+  !CorrelationTriggerConfig
+  mean_responsiveness: 0
+  edge_strength: 1.2
+  buffer_strength: 1
+  responsiveness: 0.8
+  buffer_falloff: 0.5
+  reset_below: 0.6
+  pitch_tracking:
+
+channels:
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm1.wav"
+  label: ""
+  amplification: 11.57
+  line_color: "#ff665c"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm2.wav"
+  label: ""
+  amplification: 12
+  line_color: "#ffb44c"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm3.wav"
+  label: ""
+  amplification: 5.37
+  line_color: "#f2df5b"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm4.wav"
+  label: ""
+  amplification: 12
+  line_color: "#44cc44"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm5.wav"
+  label: ""
+  amplification: 12
+  line_color: "#44aaff"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-fm6.wav"
+  label: ""
+  amplification: 12
+  line_color: "#aa44ff"
+- !ChannelConfig
+  wav_path: "../audio/ym2608-ssg1.wav"
+  label: ""
+  amplification: 12
+  line_color: "#62b8ff"
+  trigger:
+    edge_strength: 1.5
+    buffer_strength: 0.5
+    responsiveness: 1.0
+    reset_below: 0.5
+- !ChannelConfig
+  wav_path: "../audio/ym2608-ssg2.wav"
+  label: ""
+  amplification: 12
+  line_color: "#3399ee"
+  trigger:
+    edge_strength: 1.5
+    buffer_strength: 0.5
+    responsiveness: 1.0
+    reset_below: 0.5
+- !ChannelConfig
+  wav_path: "../audio/ym2608-ssg3.wav"
+  label: ""
+  amplification: 12
+  line_color: "#62b8ff"
+  trigger:
+    edge_strength: 1.5
+    buffer_strength: 0.5
+    responsiveness: 1.0
+    reset_below: 0.5
+- !ChannelConfig
+  wav_path: "../audio/ym2608-rhythm.wav"
+  label: ""
+  amplification: 7.22
+  render_width: 2
+  trigger_width: 2
+  line_color: "#db72ff"
+  trigger:
+    edge_strength: 2.5
+    buffer_strength: 0
+    responsiveness: 1
+    reset_below: 0
+
+default_label: !FileName
+
+layout:
+  !LayoutConfig
+  orientation: h
+  stereo_orientation: overlay
+  ncols: 5
+
+render:
+  !RendererConfig
+  width: 1920
+  height: 896
+  line_width: 2.2
+  line_outline_width: 0.6
+  grid_line_width: 0.5
+  global_line_outline_color: "#000000"
+  bg_color: "#080a0f00"
+  grid_color: "#10141c00"
+  midline_color: "#10141c00"
+  v_midline: false
+  h_midline: false
+  antialiasing: true
+  res_divisor: 1
+  label_font: !Font
+    size: 20
+    bold: true
+  label_position: !LabelPosition LeftTop
+  label_padding_ratio: 0.5
+  label_color_override: "#d8dee9"
+

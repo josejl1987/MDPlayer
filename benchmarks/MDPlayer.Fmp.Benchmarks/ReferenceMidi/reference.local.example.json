@@ -1,0 +1,13 @@
+{
+  "$schema": "./reference.local.schema.json",
+  "description": "Local machine paths. Copy to reference.local.json (gitignored) and edit. No absolute path in this template may end up in a versioned file.",
+  "localSourceRoots": [
+    "/home/jose/MDPlayer"
+  ],
+  "wine": "/home/jose/.local/bin/wine",
+  "winePrefix": "/home/jose/MDPlayer/artifacts/reference-midi/wine-prefix",
+  "fluidsynth": "/usr/bin/fluidsynth",
+  "soundFont": "",
+  "libvgmPlayer": "",
+  "extraVgmRoots": []
+}

@@ -278,7 +278,8 @@ public sealed class MidiAdversarialCorpusTests
             bool downbeat = index % tatumsPerBar == 0;
             bool secondary = meter.Denominator == 8
                 ? index % tatumsPerBar == tatumsPerBar / 2
-                : index % tatumsPerBar is tatumsPerBar / 4 or 3 * tatumsPerBar / 4;
+                : index % tatumsPerBar == tatumsPerBar / 4
+                    || index % tatumsPerBar == 3 * tatumsPerBar / 4;
             if (downbeat)
                 rhythm.Add(new RhythmEvent("kick", "kick", sample, 1.0f, 0));
             else if (secondary)

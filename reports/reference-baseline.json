@@ -1,0 +1,747 @@
+{
+  "schema": "mdplayer.reference-baseline/v1",
+  "mdPlayerCommit": "4bf5d7c5",
+  "toolLockHashes": {
+    "vgm2mid": "7e7d3ced\u2026",
+    "smps2mid": "5e93d3ef\u2026"
+  },
+  "songs": [
+    {
+      "songId": "md-arctic-wind",
+      "name": "arctic-wind",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/arctic-wind.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/arctic-wind.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 0,
+        "candidateAttacks": 833,
+        "matchedAttacks": 0,
+        "missingAttacks": 0,
+        "extraAttacks": 833,
+        "precision": 0,
+        "recall": 0,
+        "onsetErrorMsP95": 0,
+        "pitchErrorSemitonesP99": 0,
+        "durationDeltaMsP95": 0,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 6,
+        "referenceRetriggers": 0,
+        "candidateRetriggers": 26
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 131.0001
+      },
+      "divergenceCount": 3
+    },
+    {
+      "songId": "md-first-attack",
+      "name": "first-attack",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/first-attack.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/first-attack.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 0,
+        "candidateAttacks": 2211,
+        "matchedAttacks": 0,
+        "missingAttacks": 0,
+        "extraAttacks": 2211,
+        "precision": 0,
+        "recall": 0,
+        "onsetErrorMsP95": 0,
+        "pitchErrorSemitonesP99": 0,
+        "durationDeltaMsP95": 0,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 1,
+        "referenceRetriggers": 0,
+        "candidateRetriggers": 0
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 106.9999
+      },
+      "divergenceCount": 2
+    },
+    {
+      "songId": "md-master-ninja",
+      "name": "master-ninja",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/master-ninja.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/master-ninja.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 16386,
+        "candidateAttacks": 5824,
+        "matchedAttacks": 3300,
+        "missingAttacks": 13086,
+        "extraAttacks": 2524,
+        "precision": 0.5666208791208791,
+        "recall": 0.20139143170999635,
+        "onsetErrorMsP95": 959.6750000042675,
+        "pitchErrorSemitonesP99": 33.048828125,
+        "durationDeltaMsP95": 4229899.627083327,
+        "referenceBendsPerNote": 4,
+        "candidateBendsPerNote": 2,
+        "referenceRetriggers": 10854,
+        "candidateRetriggers": 660
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 81
+      },
+      "divergenceCount": 10
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "name": "ninja-yashiki",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/ninja-yashiki.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/ninja-yashiki.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 10378,
+        "candidateAttacks": 6152,
+        "matchedAttacks": 3038,
+        "missingAttacks": 7340,
+        "extraAttacks": 3114,
+        "precision": 0.49382314694408325,
+        "recall": 0.2927346309500867,
+        "onsetErrorMsP95": 737.2458333350096,
+        "pitchErrorSemitonesP99": 51.982421875,
+        "durationDeltaMsP95": 3745610.404166683,
+        "referenceBendsPerNote": 7,
+        "candidateBendsPerNote": 2,
+        "referenceRetriggers": 6005,
+        "candidateRetriggers": 218
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 112.0001
+      },
+      "divergenceCount": 9
+    },
+    {
+      "songId": "md-robotnik",
+      "name": "robotnik",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/robotnik.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/robotnik.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 24236,
+        "candidateAttacks": 994,
+        "matchedAttacks": 953,
+        "missingAttacks": 23283,
+        "extraAttacks": 41,
+        "precision": 0.9587525150905433,
+        "recall": 0.03932167024261429,
+        "onsetErrorMsP95": 834.8781250049342,
+        "pitchErrorSemitonesP99": 30.525390625,
+        "durationDeltaMsP95": 200486.61041666628,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 1,
+        "referenceRetriggers": 20048,
+        "candidateRetriggers": 7
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 224.9997
+      },
+      "divergenceCount": 8
+    },
+    {
+      "songId": "md-smoking-head",
+      "name": "smoking-head",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/smoking-head.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/smoking-head.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 16662,
+        "candidateAttacks": 940,
+        "matchedAttacks": 883,
+        "missingAttacks": 15779,
+        "extraAttacks": 57,
+        "precision": 0.9393617021276596,
+        "recall": 0.052994838554795344,
+        "onsetErrorMsP95": 2024.836458332402,
+        "pitchErrorSemitonesP99": 88.169921875,
+        "durationDeltaMsP95": 5167013.971875001,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 1,
+        "referenceRetriggers": 6606,
+        "candidateRetriggers": 5
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 180.0002
+      },
+      "divergenceCount": 9
+    },
+    {
+      "songId": "md-stranger",
+      "name": "stranger",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/stranger.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/stranger.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 15832,
+        "candidateAttacks": 6495,
+        "matchedAttacks": 1697,
+        "missingAttacks": 14135,
+        "extraAttacks": 4798,
+        "precision": 0.26127790608160123,
+        "recall": 0.10718797372410309,
+        "onsetErrorMsP95": 661.9645833296772,
+        "pitchErrorSemitonesP99": 33.796875,
+        "durationDeltaMsP95": 384456.0958333325,
+        "referenceBendsPerNote": 3,
+        "candidateBendsPerNote": 1,
+        "referenceRetriggers": 7246,
+        "candidateRetriggers": 544
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 188.8449
+      },
+      "divergenceCount": 10
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "name": "triumphal-arch",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/triumphal-arch.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/triumphal-arch.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 4000,
+        "candidateAttacks": 4199,
+        "matchedAttacks": 2367,
+        "missingAttacks": 1633,
+        "extraAttacks": 1832,
+        "precision": 0.5637056442010002,
+        "recall": 0.59175,
+        "onsetErrorMsP95": 1903.6093749917882,
+        "pitchErrorSemitonesP99": 94.45703125,
+        "durationDeltaMsP95": 1342382.3333333472,
+        "referenceBendsPerNote": 3,
+        "candidateBendsPerNote": 2,
+        "referenceRetriggers": 1794,
+        "candidateRetriggers": 8
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 131.0001
+      },
+      "divergenceCount": 9
+    },
+    {
+      "songId": "md-twilight-express",
+      "name": "twilight-express",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/twilight-express.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/twilight-express.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 13311,
+        "candidateAttacks": 1140,
+        "matchedAttacks": 1013,
+        "missingAttacks": 12298,
+        "extraAttacks": 127,
+        "precision": 0.8885964912280702,
+        "recall": 0.07610247163999699,
+        "onsetErrorMsP95": 4791.666666665861,
+        "pitchErrorSemitonesP99": 88.1728515625,
+        "durationDeltaMsP95": 5401041.666666664,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 2,
+        "referenceRetriggers": 10799,
+        "candidateRetriggers": 8
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 25
+      },
+      "divergenceCount": 9
+    },
+    {
+      "songId": "md-usa-ken-i",
+      "name": "usa-ken-i",
+      "referenceMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/vgm2mid/usa-ken-i.mid",
+      "candidateMidi": "/home/jose/MDPlayer/artifacts/reference-midi/midi/mdplayer/usa-ken-i.mid",
+      "comparisonComputed": false,
+      "metrics": {
+        "referenceAttacks": 2595,
+        "candidateAttacks": 3591,
+        "matchedAttacks": 2595,
+        "missingAttacks": 0,
+        "extraAttacks": 996,
+        "precision": 0.722639933166249,
+        "recall": 1,
+        "onsetErrorMsP95": 715.2406249986143,
+        "pitchErrorSemitonesP99": 1,
+        "durationDeltaMsP95": 997.1541666544681,
+        "referenceBendsPerNote": 0,
+        "candidateBendsPerNote": 0,
+        "referenceRetriggers": 0,
+        "candidateRetriggers": 500
+      },
+      "tempo": {
+        "referenceBpm": 120,
+        "candidateBpm": 93.5
+      },
+      "divergenceCount": 6
+    }
+  ],
+  "topDivergences": [
+    {
+      "songId": "md-master-ninja",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 16386,
+      "message": "missing 13086/16386 reference attacks"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 10378,
+      "message": "missing 7340/10378 reference attacks"
+    },
+    {
+      "songId": "md-robotnik",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 24236,
+      "message": "missing 23283/24236 reference attacks"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 16662,
+      "message": "missing 15779/16662 reference attacks"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 15832,
+      "message": "missing 14135/15832 reference attacks"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 4000,
+      "message": "missing 1633/4000 reference attacks"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D1",
+      "label": "missing-attacks",
+      "severity": 99,
+      "priority": 9,
+      "metric": 13311,
+      "message": "missing 12298/13311 reference attacks"
+    },
+    {
+      "songId": "md-arctic-wind",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 833,
+      "message": "extra 833/833 candidate attacks"
+    },
+    {
+      "songId": "md-first-attack",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 2211,
+      "message": "extra 2211/2211 candidate attacks"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 5824,
+      "message": "extra 2524/5824 candidate attacks"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 6152,
+      "message": "extra 3114/6152 candidate attacks"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 6495,
+      "message": "extra 4798/6495 candidate attacks"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 4199,
+      "message": "extra 1832/4199 candidate attacks"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 1140,
+      "message": "extra 127/1140 candidate attacks"
+    },
+    {
+      "songId": "md-usa-ken-i",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 94,
+      "priority": 8,
+      "metric": 3591,
+      "message": "extra 996/3591 candidate attacks"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D2",
+      "label": "extra-attacks",
+      "severity": 91,
+      "priority": 8,
+      "metric": 940,
+      "message": "extra 57/940 candidate attacks"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 33.0488,
+      "message": "gross pitch error p99=33.05 semitones"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 51.9824,
+      "message": "gross pitch error p99=51.98 semitones"
+    },
+    {
+      "songId": "md-robotnik",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 30.5254,
+      "message": "gross pitch error p99=30.53 semitones"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 88.1699,
+      "message": "gross pitch error p99=88.17 semitones"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 33.7969,
+      "message": "gross pitch error p99=33.80 semitones"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 94.457,
+      "message": "gross pitch error p99=94.46 semitones"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D3",
+      "label": "gross-pitch-error",
+      "severity": 80,
+      "priority": 7,
+      "metric": 88.1729,
+      "message": "gross pitch error p99=88.17 semitones"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.2014,
+      "message": "recall=0.201"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.2927,
+      "message": "recall=0.293"
+    },
+    {
+      "songId": "md-robotnik",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.0393,
+      "message": "recall=0.039"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.053,
+      "message": "recall=0.053"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.1072,
+      "message": "recall=0.107"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.5918,
+      "message": "recall=0.592"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D10",
+      "label": "recall-low",
+      "severity": 75,
+      "priority": 7,
+      "metric": 0.0761,
+      "message": "recall=0.076"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D9",
+      "label": "precision-low",
+      "severity": 62,
+      "priority": 6,
+      "metric": 0.5666,
+      "message": "precision=0.567"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D9",
+      "label": "precision-low",
+      "severity": 62,
+      "priority": 6,
+      "metric": 0.4938,
+      "message": "precision=0.494"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D9",
+      "label": "precision-low",
+      "severity": 62,
+      "priority": 6,
+      "metric": 0.2613,
+      "message": "precision=0.261"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D9",
+      "label": "precision-low",
+      "severity": 62,
+      "priority": 6,
+      "metric": 0.5637,
+      "message": "precision=0.564"
+    },
+    {
+      "songId": "md-usa-ken-i",
+      "category": "D9",
+      "label": "precision-low",
+      "severity": 62,
+      "priority": 6,
+      "metric": 0.7226,
+      "message": "precision=0.723"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 4229899.6271,
+      "message": "duration mismatch p95=4229899.6 ms"
+    },
+    {
+      "songId": "md-master-ninja",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.2972,
+      "message": "F1=0.297"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 3745610.4042,
+      "message": "duration mismatch p95=3745610.4 ms"
+    },
+    {
+      "songId": "md-ninja-yashiki",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.3676,
+      "message": "F1=0.368"
+    },
+    {
+      "songId": "md-robotnik",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 200486.6104,
+      "message": "duration mismatch p95=200486.6 ms"
+    },
+    {
+      "songId": "md-robotnik",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.0755,
+      "message": "F1=0.076"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 5167013.9719,
+      "message": "duration mismatch p95=5167014.0 ms"
+    },
+    {
+      "songId": "md-smoking-head",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.1003,
+      "message": "F1=0.100"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 384456.0958,
+      "message": "duration mismatch p95=384456.1 ms"
+    },
+    {
+      "songId": "md-stranger",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.152,
+      "message": "F1=0.152"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 1342382.3333,
+      "message": "duration mismatch p95=1342382.3 ms"
+    },
+    {
+      "songId": "md-triumphal-arch",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.5774,
+      "message": "F1=0.577"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 5401041.6667,
+      "message": "duration mismatch p95=5401041.7 ms"
+    },
+    {
+      "songId": "md-twilight-express",
+      "category": "D11",
+      "label": "f1-low",
+      "severity": 60,
+      "priority": 6,
+      "metric": 0.1402,
+      "message": "F1=0.140"
+    },
+    {
+      "songId": "md-usa-ken-i",
+      "category": "D4",
+      "label": "duration-mismatch",
+      "severity": 60,
+      "priority": 6,
+      "metric": 997.1542,
+      "message": "duration mismatch p95=997.2 ms"
+    }
+  ],
+  "listeningNotes": {
+    "status": "placeholder",
+    "note": "human listening pass pending"
+  },
+  "deterministic": true
+}

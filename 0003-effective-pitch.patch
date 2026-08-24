@@ -1,0 +1,57 @@
+diff --git a/Spc_Dsp.h b/Spc_Dsp.h
+--- a/Spc_Dsp.h
++++ b/Spc_Dsp.h
+@@ -126,6 +126,19 @@
+ 	void set_voice_taps( sample_t* taps [voice_count], int stride );
+ 	void set_echo_tap( sample_t* tap );
+ 	void clear_taps();
++
++	// PR 8 instrumentation (MDPlayer): optional effective-pitch capture.
++	// Points voice v's tap at the caller's int cell (NULL disables); the DSP
++	// writes the effective pitch (register pitch + PMON adjustment, spec
++	// sections 10.2/13.6) to *out for every rendered sample while the tap is
++	// set. out must remain valid for the duration of any run() call. Pure
++	// write to caller memory; the master stays bit-identical with or without
++	// taps (spec section 5.3).
++	void set_effective_pitch_out( int voice, int* out )
++	{
++		if ( (unsigned) voice < voice_count )
++			m.effective_pitch_out [voice] = out;
++	}
+ private:
+ 	struct state_t
+ 	{
+@@ -153,6 +166,15 @@
+ 
+ 		voice_t voices [voice_count];
+ 
++		// PR 8 instrumentation (MDPlayer): optional, off-by-default effective-
++		// pitch capture. When effective_pitch_out[v] is non-NULL the DSP stores
++		// the effective pitch (register pitch after the pitch-modulation
++		// adjustment, spec sections 10.2/13.6) into the caller's int cell on
++		// every rendered sample; when NULL the DSP executes byte-identical
++		// instructions. Pure write to caller memory that never touches
++		// emulation state, so the master output stays bit-identical to an
++		// uninstrumented render (spec section 5.3).
++		int* effective_pitch_out [voice_count];
+ 		unsigned* counter_select [32];
+ 
+ 		// non-emulation state
+diff --git a/Spc_Dsp.cpp b/Spc_Dsp.cpp
+--- a/Spc_Dsp.cpp
++++ b/Spc_Dsp.cpp
+@@ -259,6 +259,14 @@
+ 			if ( REG(pmon) & vbit )
+ 				pitch += ((pmon_input >> 5) * pitch) >> 10;
+ 
++			// PR 8 instrumentation (MDPlayer): optionally capture the effective
++			// pitch (register pitch after the PMON adjustment, spec sections
++			// 10.2/13.6) for this voice. Pure store to caller memory; when the
++			// tap is NULL the DSP executes identical instructions, so the
++			// master stays bit-identical to an uninstrumented render.
++			if ( int* const ep_tap = m.effective_pitch_out [v - m.voices] )
++				*ep_tap = pitch;
++
+ 			// KON phases
+ 			if ( --kon_delay >= 0 )
+ 			{

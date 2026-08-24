@@ -1,0 +1,135 @@
+diff --git a/Spc_Dsp.h b/Spc_Dsp.h
+--- a/Spc_Dsp.h
++++ b/Spc_Dsp.h
+@@ -115,6 +115,17 @@
+ 	// (spec section 5.3). See UPSTREAM.md "PR 3 local modifications".
+ 	const voice_t* voices() const { return m.voices; }
+ 	const uint8_t* regs()  const { return m.regs; }
++
++	// PR 6 instrumentation (MDPlayer): caller-owned capture destinations for
++	// per-voice post-envelope samples (spec section 8.2) and the audible
++	// echo-return signal (spec section 8.4). When a destination is NULL the
++	// DSP never writes to it and executes exactly the same instruction stream
++	// as the unpatched core, so the master output stays bit-identical with or
++	// without capture (spec sections 5.3/30.1). See UPSTREAM.md
++	// "PR 6 local modifications".
++	void set_voice_taps( sample_t* taps [voice_count], int stride );
++	void set_echo_tap( sample_t* tap );
++	void clear_taps();
+ private:
+ 	struct state_t
+ 	{
+@@ -153,6 +164,17 @@
+ 		sample_t* out_end;
+ 		sample_t* out_begin;
+ 		sample_t extra [extra_size];
++
++		// PR 6 tap capture state (spec sections 8.2/8.4). All-zero when
++		// capture is disabled. Pure write-only destinations for caller memory:
++		// the DSP never reads them back, so enabling capture cannot change
++		// emulation. Positioned after 'extra' because Spc_Dsp::load() only
++		// zeroes up to offsetof(state_t, ram) and must never clear these.
++		sample_t* voice_taps [voice_count]; // per-voice post-envelope PCM
++		int       voice_taps_on;            // 1 while any voice tap is armed
++		sample_t* echo_tap;                 // echo-return PCM (stereo)
++		int       tap_stride;               // sample stride between voice writes
++		int       tap_sample;               // current sample index in this output run
+ 	};
+ 	state_t m;
+ 
+@@ -221,6 +243,32 @@
+ 	m.echo_enable = !disable;
+ }
+ 
++inline void Spc_Dsp::set_voice_taps( sample_t* taps [voice_count], int stride )
++{
++	int any = 0;
++	for ( int i = 0; i < voice_count; i++ )
++	{
++		m.voice_taps [i] = taps ? taps [i] : NULL;
++		any |= m.voice_taps [i] != NULL;
++	}
++	m.voice_taps_on = any;
++	m.tap_stride    = stride > 0 ? stride : 1;
++}
++
++inline void Spc_Dsp::set_echo_tap( sample_t* tap )
++{
++	m.echo_tap = tap;
++}
++
++inline void Spc_Dsp::clear_taps()
++{
++	for ( int i = 0; i < voice_count; i++ )
++		m.voice_taps [i] = NULL;
++	m.voice_taps_on = 0;
++	m.echo_tap      = NULL;
++	m.tap_sample    = 0;
++}
++
+ #define SPC_NO_COPY_STATE_FUNCS 1
+ 
+ #define SPC_LESS_ACCURATE 1
+diff --git a/Spc_Dsp.cpp b/Spc_Dsp.cpp
+--- a/Spc_Dsp.cpp
++++ b/Spc_Dsp.cpp
+@@ -84,6 +84,7 @@
+ 	m.out_begin = out;
+ 	m.out       = out;
+ 	m.out_end   = out + size;
++	m.tap_sample = 0; // PR 6: per-output-run sample counter for tap capture
+ }
+ 
+ // Volume registers and efb are signed! Easy to forget int8_t cast.
+@@ -325,6 +326,22 @@
+ 					}
+ 
+ 					// Output
++					// PR 6: per-voice post-envelope tap (spec section 8.2):
++					// scope sample = output * max(abs(voll),abs(volr)) / 127.
++					// Pure write to caller memory; never modifies l/r/output.
++					if ( m.voice_taps_on )
++					{
++						int tap_vol_l = (int8_t) VREG(v_regs, voll);
++						int tap_vol_r = (int8_t) VREG(v_regs, volr);
++						if ( tap_vol_l < 0 ) tap_vol_l = -tap_vol_l;
++						if ( tap_vol_r < 0 ) tap_vol_r = -tap_vol_r;
++						if ( tap_vol_r > tap_vol_l ) tap_vol_l = tap_vol_r;
++						int tap = (output * tap_vol_l) / 127;
++						CLAMP16( tap );
++						sample_t* tap_dst = m.voice_taps [v - m.voices];
++						if ( tap_dst )
++							tap_dst [m.tap_sample * m.tap_stride] = (int16_t) tap;
++					}
+ 					int l = output * v->volume [0];
+ 					int r = output * v->volume [1];
+ 
+@@ -629,6 +646,19 @@
+ 		int l = (main_out_l * mvoll + echo_in_l * evoll) >> 14;
+ 		int r = (main_out_r * mvolr + echo_in_r * evolr) >> 14;
+ 
++		// PR 6: echo-return tap (spec section 8.4): the audible echo
++		// contribution (echo_in * evol) >> 14, clamped to int16, written to
++		// caller memory. Pure write; never modifies l/r/main_out/echo_out.
++		if ( m.echo_tap )
++		{
++			int el = (echo_in_l * evoll) >> 14;
++			int er = (echo_in_r * evolr) >> 14;
++			CLAMP16( el );
++			CLAMP16( er );
++			m.echo_tap [m.tap_sample * 2    ] = (int16_t) el;
++			m.echo_tap [m.tap_sample * 2 + 1] = (int16_t) er;
++		}
++
+ 		CLAMP16( l );
+ 		CLAMP16( r );
+ 
+@@ -641,6 +671,8 @@
+ 		sample_t* out = m.out;
+ 		WRITE_SAMPLES( l, r, out );
+ 		m.out = out;
++		if ( m.voice_taps_on || m.echo_tap )
++			m.tap_sample++; // PR 6: advance the per-sample tap index
+ 	}
+ 	while ( --count );
+ }

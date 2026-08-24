@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "description": "Documented, evidenced bugs/caveats in reference tools. A reference exception requires: tool, song, category, and concrete evidence — never 'seems wrong'. Reference outputs are never patched; exceptions only explain deviations.",
+  "exceptions": [
+    {
+      "tool": "vgm2mid",
+      "song": "all",
+      "category": "codepage/tempo",
+      "reason": "vgm2mid is codepage-sensitive: converting under Windows ANSI CP1252 vs CP932 yields different (non-identical) MIDI hashes for the same VGM. The VGMRips wiki warns that non-CP1252 codepages can corrupt timing. Demonstrated empirically (master-ninja): CP1252=9998eb62…, CP932=de0fde46…. The toolchain therefore pins en_US/CP1252 and treats that output as canonical; CP932 output is a documented reference anomaly, not ground truth.",
+      "evidence": "smoke/en1252/master-ninja.mid sha256=9998eb62f7ed70f756e0a01d1563d7e76e6874eb30ee49c9c08ae010425291b1; smoke/ja932/master-ninja.mid sha256=de0fde4620fd1a8d7152292076e7396968f822a00a26e715ea924c568d20caa9"
+    },
+    {
+      "tool": "vgm2mid",
+      "song": "md-arctic-wind, md-first-attack",
+      "category": "DAC/per-song-tiny-output",
+      "reason": "arctic-wind.mid (397 B) and first-attack.mid (414 B) are near-empty outputs (a handful of events). Hypothesis (to be confirmed): vgm2mid's DAC/rhythm or chip handling simplified these short songs, or the VGM uses 2A03/ADPCM paths vgm2mid maps to very few notes. Recorded as an exception pending note-count analysis; the same-input comparison treats these as low-density fixtures.",
+      "evidence": "midi/vgm2mid/arctic-wind.mid size=397; midi/vgm2mid/first-attack.mid size=414"
+    }
+  ]
+}

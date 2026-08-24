@@ -1,0 +1,43 @@
+diff --git a/Spc_Dsp.h b/Spc_Dsp.h
+--- a/Spc_Dsp.h
++++ b/Spc_Dsp.h
+@@ -109,4 +109,11 @@
+ 	int enabled;            // -1 if enabled, 0 if muted
+ 	};
++
++	// PR 3 instrumentation (MDPlayer): read-only accessors for the S-DSP's
++	// internal voice state. Pure reads of existing emulation state only; they
++	// never modify m, change register timing, or alter the master output
++	// (spec section 5.3). See UPSTREAM.md "PR 3 local modifications".
++	const voice_t* voices() const { return m.voices; }
++	const uint8_t* regs()  const { return m.regs; }
+ private:
+ 	struct state_t
+diff --git a/Snes_Spc.h b/Snes_Spc.h
+--- a/Snes_Spc.h
++++ b/Snes_Spc.h
+@@ -122,5 +122,9 @@
+ 	uint8_t* smp_ram() { return m.ram.ram; }
+ 
+ 	void run_until( time_t t ) { run_until_( t ); }
++
++	// PR 3 instrumentation (MDPlayer): read-only access to the S-DSP. See
++	// UPSTREAM.md "PR 3 local modifications".
++	Spc_Dsp& dsp_ref() { return dsp; }
+ public:
+ 	BLARGG_DISABLE_NOTHROW
+diff --git a/Spc_Emu.h b/Spc_Emu.h
+--- a/Spc_Emu.h
++++ b/Spc_Emu.h
+@@ -54,5 +54,11 @@
+ 	byte const* trailer() const; // use track_info()
+ 	long trailer_size() const;
++
++	// PR 3 instrumentation (MDPlayer): read-only access to the S-DSP and the
++	// Snes_Spc (for the RAM behind the DIR/sample state). See UPSTREAM.md
++	// "PR 3 local modifications".
++	Spc_Dsp&  dsp_ref() { return apu.dsp_ref(); }
++	Snes_Spc& apu_ref() { return apu; }
+ 
+ public:
+ 	Spc_Emu();

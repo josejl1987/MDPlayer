@@ -1,0 +1,5 @@
+[
+  "test_worker_contract.py::test_profile_is_silent_when_disabled",
+  "test_worker_contract.py::test_profile_records_are_json_and_monotonic",
+  "test_worker_contract.py::test_worker_compatibility_is_bumped_without_changing_output_schema"
+]
