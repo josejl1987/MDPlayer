@@ -19,6 +19,10 @@ internal sealed class TimelineBuilder
     private readonly Dictionary<string, string> _lastWaveformByVoice = new(StringComparer.Ordinal);
     private readonly List<SamplePlaybackEvent> _samplePlayback = [];
     private readonly HashSet<SamplePlaybackEvent> _samplePlaybackSeen = [];
+    private readonly List<DacActivityEvent> _dacActivity = [];
+    private readonly HashSet<DacActivityEvent> _dacActivitySeen = [];
+    private readonly List<DacHitEvent> _dacHits = [];
+    private readonly HashSet<DacHitEvent> _dacHitsSeen = [];
     private readonly HashSet<string> _sourceAttackIdsSeen = new(StringComparer.Ordinal);
     private long _nextSourceAttackOrdinal;
     private readonly List<SpcVoiceStateEvent> _spcVoiceStates = [];
@@ -285,6 +289,44 @@ internal sealed class TimelineBuilder
         _samplePlayback.Add(value);
     }
 
+    public void AddDacActivity(DacActivityEvent value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.StartSample < 0 || value.EndSample < value.StartSample)
+            throw new ArgumentOutOfRangeException(nameof(value));
+        if (string.IsNullOrWhiteSpace(value.VoiceId)
+            || string.IsNullOrWhiteSpace(value.SampleId)
+            || !float.IsFinite(value.Level)
+            || value.Level is < 0 or > 1)
+        {
+            throw new ArgumentException("Invalid DAC activity event.", nameof(value));
+        }
+        if (_dacActivitySeen.Add(value))
+            _dacActivity.Add(value);
+    }
+
+    public void AddDacHit(DacHitEvent value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.StartSample < 0
+            || value.EndSample < value.StartSample
+            || value.SourceStartOffset < 0
+            || value.SourceEndOffset <= value.SourceStartOffset
+            || string.IsNullOrWhiteSpace(value.VoiceId)
+            || string.IsNullOrWhiteSpace(value.SampleId)
+            || !Enum.IsDefined(value.Classification)
+            || !Enum.IsDefined(value.IdentityKind)
+            || !float.IsFinite(value.Confidence)
+            || value.Confidence is < 0 or > 1
+            || !float.IsFinite(value.PeakLevel)
+            || value.PeakLevel is < 0 or > 1)
+        {
+            throw new ArgumentException("Invalid DAC hit event.", nameof(value));
+        }
+        if (_dacHitsSeen.Add(value))
+            _dacHits.Add(value);
+    }
+
     public void AddSpcVoiceState(SpcVoiceStateEvent value)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -391,6 +433,10 @@ internal sealed class TimelineBuilder
             AddWaveformChange(NormalizeClock(value, convert));
         foreach (SamplePlaybackEvent value in timeline.SamplePlayback)
             AddSamplePlayback(NormalizeClock(value, convert));
+        foreach (DacActivityEvent value in timeline.DacActivity)
+            AddDacActivity(NormalizeClock(value, convert));
+        foreach (DacHitEvent value in timeline.DacHits)
+            AddDacHit(NormalizeClock(value, convert));
         foreach (SpcVoiceStateEvent value in timeline.SpcVoiceStates)
             AddSpcVoiceState(NormalizeClock(value, convert));
         foreach (NoiseStateEvent value in timeline.NoiseStates)
@@ -489,6 +535,24 @@ internal sealed class TimelineBuilder
             : value with { StartSample = start, EndSample = end };
     }
 
+    private DacActivityEvent NormalizeClock(DacActivityEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
+    private DacHitEvent NormalizeClock(DacHitEvent value, Func<long, long> convert)
+    {
+        long start = convert(value.StartSample);
+        long end = convert(value.EndSample);
+        return value.StartSample == start && value.EndSample == end
+            ? value
+            : value with { StartSample = start, EndSample = end };
+    }
+
     private SpcVoiceStateEvent NormalizeClock(SpcVoiceStateEvent value, Func<long, long> convert)
     {
         long sample = convert(value.SamplePosition);
@@ -549,6 +613,9 @@ internal sealed class TimelineBuilder
             throw new ArgumentOutOfRangeException(nameof(endSample));
         if (startSample < 0)
             throw new ArgumentOutOfRangeException(nameof(startSample));
+
+        foreach (DacActivityEvent value in DacActivityBuilder.Build(_samplePlayback, _samples))
+            AddDacActivity(value);
 
         foreach (ChipType external in _devices.Values
             .Select(device => device.Id.Type)
@@ -641,6 +708,19 @@ internal sealed class TimelineBuilder
                 .ThenBy(value => value.Gain)
                 .ThenBy(value => value.Pan)
                 .ThenBy(value => value.Retrigger)
+                .ToArray(),
+            DacActivity = _dacActivity
+                .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+                .ThenBy(value => value.StartSample)
+                .ThenBy(value => value.EndSample)
+                .ThenBy(value => value.SampleId, StringComparer.Ordinal)
+                .ToArray(),
+            DacHits = _dacHits
+                .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+                .ThenBy(value => value.StartSample)
+                .ThenBy(value => value.EndSample)
+                .ThenBy(value => value.SourceStartOffset)
+                .ThenBy(value => value.Classification)
                 .ToArray(),
             SpcVoiceStates = _spcVoiceStates
                 .OrderBy(value => value.VoiceId, StringComparer.Ordinal)

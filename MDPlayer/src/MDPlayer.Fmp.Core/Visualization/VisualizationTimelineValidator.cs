@@ -92,6 +92,36 @@ internal static class VisualizationTimelineValidator
                 || (playback.MidiPitch is double pitch && !double.IsFinite(pitch)))
                 throw new JsonException("Invalid sample playback event.");
         }
+        foreach (DacActivityEvent activity in timeline.DacActivity ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(activity.VoiceId)
+                || activity.StartSample < 0
+                || activity.EndSample < activity.StartSample
+                || !samples.ContainsKey(activity.SampleId)
+                || !float.IsFinite(activity.Level)
+                || activity.Level is < 0 or > 1)
+            {
+                throw new JsonException("Invalid DAC activity event.");
+            }
+        }
+        foreach (DacHitEvent hit in timeline.DacHits ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(hit.VoiceId)
+                || hit.StartSample < 0
+                || hit.EndSample < hit.StartSample
+                || hit.SourceStartOffset < 0
+                || hit.SourceEndOffset <= hit.SourceStartOffset
+                || !samples.ContainsKey(hit.SampleId)
+                || !Enum.IsDefined(hit.Classification)
+                || !Enum.IsDefined(hit.IdentityKind)
+                || !float.IsFinite(hit.Confidence)
+                || hit.Confidence is < 0 or > 1
+                || !float.IsFinite(hit.PeakLevel)
+                || hit.PeakLevel is < 0 or > 1)
+            {
+                throw new JsonException("Invalid DAC hit event.");
+            }
+        }
         foreach (NoiseStateEvent noise in timeline.NoiseStates ?? [])
         {
             if (string.IsNullOrWhiteSpace(noise.VoiceId)

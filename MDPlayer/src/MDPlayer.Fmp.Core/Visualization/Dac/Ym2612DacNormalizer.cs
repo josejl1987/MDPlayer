@@ -18,8 +18,11 @@ internal sealed class Ym2612DacNormalizer
     private readonly int _gapThresholdSamples;
     private bool _dacEnabled;
     private bool _playing;
+    private bool _explicitSession;
     private long _cursor;
     private long _lastTimestamp = -1;
+
+    public bool ExplicitSession => _explicitSession;
 
     public Ym2612DacNormalizer(int gapThresholdSamples = DefaultGapThresholdSamples)
     {
@@ -57,6 +60,30 @@ internal sealed class Ym2612DacNormalizer
             if (!_dacEnabled)
                 return;
 
+            if (_explicitSession)
+            {
+                if (!_playing)
+                {
+                    ops.Add(new DacOperation.DacPlaybackStarted(
+                        samplePosition,
+                        DacSourceId,
+                        Position: 0,
+                        DeclaredLength: null,
+                        RateHz: null));
+                    _playing = true;
+                    _cursor = 0;
+                }
+
+                ops.Add(new DacOperation.DacByteConsumed(
+                    samplePosition,
+                    DacSourceId,
+                    Position: _cursor,
+                    Value: (byte)value));
+                _cursor++;
+                _lastTimestamp = samplePosition;
+                return;
+            }
+
             // A long time gap between samples with no intervening write is a
             // separate burst (many tracks leave the DAC enabled across hits).
             if (_playing && _lastTimestamp >= 0 && samplePosition - _lastTimestamp > _gapThresholdSamples)
@@ -91,6 +118,61 @@ internal sealed class Ym2612DacNormalizer
     }
 
     /// <summary>
+    /// Starts an authoritative VGM DAC stream session. The marker is allowed
+    /// to arrive while the actual YM2612 DAC latch is off; in that case no
+    /// tracker operation is synthesized until a real 0x2B enable and 0x2A
+    /// write occur.
+    /// </summary>
+    public void BeginExplicitSession(
+        long samplePosition,
+        byte streamId,
+        double? rateHz,
+        List<DacOperation> ops)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        if (_playing)
+            ops.Add(new DacOperation.DacPlaybackStopped(samplePosition, DacStopReason.Retriggered));
+
+        _playing = false;
+        _explicitSession = true;
+        _cursor = 0;
+        _lastTimestamp = samplePosition;
+        if (!_dacEnabled)
+            return;
+
+        ops.Add(new DacOperation.DacPlaybackStarted(
+            samplePosition,
+            DacSourceId,
+            Position: 0,
+            DeclaredLength: null,
+            RateHz: rateHz));
+        _playing = true;
+    }
+
+    public void EndExplicitSession(
+        long samplePosition,
+        DacStopReason reason,
+        List<DacOperation> ops)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        if (_playing)
+            ops.Add(new DacOperation.DacPlaybackStopped(samplePosition, reason));
+        _playing = false;
+        _explicitSession = false;
+        _lastTimestamp = samplePosition;
+    }
+
+    public void ChangeExplicitRate(
+        long samplePosition,
+        double rateHz,
+        List<DacOperation> ops)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        if (_explicitSession && _playing)
+            ops.Add(new DacOperation.DacRateChanged(samplePosition, rateHz));
+    }
+
+    /// <summary>
     /// Closes any active playback at the end of the stream. Returns the
     /// terminating operation (or nothing) so the caller appends it last.
     /// </summary>
@@ -99,6 +181,7 @@ internal sealed class Ym2612DacNormalizer
         if (_playing)
         {
             _playing = false;
+            _explicitSession = false;
             _dacEnabled = false;
             ops.Add(new DacOperation.DacPlaybackStopped(endSample, DacStopReason.EndOfStream));
         }

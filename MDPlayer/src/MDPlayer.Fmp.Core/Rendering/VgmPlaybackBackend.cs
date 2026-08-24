@@ -5,12 +5,58 @@ using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Rendering;
 
+internal abstract record VgmExecutionEvent(long SourceSample, long Sequence);
+
 internal sealed record VgmRegisterWrite(
     long SourceSample,
     DeviceId Device,
     int Port,
     int Address,
-    int Data);
+    int Data,
+    long Sequence = 0) : VgmExecutionEvent(SourceSample, Sequence);
+
+internal sealed record VgmDacStreamControl(
+    long SourceSample,
+    DeviceId Device,
+    byte StreamId,
+    Ym2612DacStreamControlKind Kind,
+    double? RateHz = null,
+    long Sequence = 0) : VgmExecutionEvent(SourceSample, Sequence);
+
+internal sealed class VgmWriteCollection
+{
+    private readonly List<VgmRegisterWrite> _writes = [];
+    private readonly List<VgmExecutionEvent> _events = [];
+    private long _sequence;
+
+    public int Count => _writes.Count;
+    public VgmRegisterWrite this[Index index] => _writes[index];
+    public IReadOnlyList<VgmRegisterWrite> Writes => _writes;
+    public IReadOnlyList<VgmExecutionEvent> Events => _events;
+
+    public void Add(VgmRegisterWrite write)
+    {
+        VgmRegisterWrite sequenced = write with { Sequence = _sequence++ };
+        _writes.Add(sequenced);
+        _events.Add(sequenced);
+    }
+
+    public void AddControl(
+        long sourceSample,
+        DeviceId device,
+        byte streamId,
+        Ym2612DacStreamControlKind kind,
+        double? rateHz)
+    {
+        _events.Add(new VgmDacStreamControl(
+            sourceSample,
+            device,
+            streamId,
+            kind,
+            rateHz,
+            _sequence++));
+    }
+}
 
 internal sealed record VgmSampleAsset(
     DeviceId Device,
@@ -24,25 +70,31 @@ internal sealed class VgmDocument
     private VgmDocument(
         IReadOnlyList<DeviceDescriptor> devices,
         IReadOnlyList<VgmRegisterWrite> writes,
+        IReadOnlyList<VgmExecutionEvent> events,
         long endSample,
         long? loopSample,
         IReadOnlyList<VgmSampleAsset> assets,
-        IReadOnlyList<string> warnings)
+        IReadOnlyList<string> warnings,
+        byte okim6258Flags)
     {
         Devices = devices;
         Writes = writes;
+        Events = events;
         EndSample = endSample;
         LoopSample = loopSample;
         Assets = assets;
         Warnings = warnings;
+        Okim6258Flags = okim6258Flags;
     }
 
     public IReadOnlyList<DeviceDescriptor> Devices { get; }
     public IReadOnlyList<VgmRegisterWrite> Writes { get; }
+    public IReadOnlyList<VgmExecutionEvent> Events { get; }
     public long EndSample { get; }
     public long? LoopSample { get; }
     public IReadOnlyList<VgmSampleAsset> Assets { get; }
     public IReadOnlyList<string> Warnings { get; }
+    public byte Okim6258Flags { get; }
 
     public static VgmDocument Parse(ReadOnlyMemory<byte> input)
     {
@@ -60,19 +112,37 @@ internal sealed class VgmDocument
         if (dataStart < 0x40 || dataStart >= eof)
             throw new VgmPlaybackException("VGM data offset is outside the file");
 
+        // OKIM6258 flags live at absolute header offset 0x94 (immediately after
+        // the OKIM6258 clock at 0x90). They are only meaningful when the chip is
+        // present, so conservatively default to 0 (no flags) when out of range.
+        byte okim6258Flags = Read32(data, 0x90) != 0 && dataStart > 0x94
+            ? data[0x94]
+            : (byte)0;
+
         var devices = new Dictionary<DeviceId, DeviceDescriptor>();
         AddClockDevices(data, dataStart, devices);
-        var writes = new List<VgmRegisterWrite>();
+        var writes = new VgmWriteCollection();
         var assets = new List<VgmSampleAsset>();
         var warnings = new List<string>();
         long sourceSample = 0;
         long? loopSample = null;
         long loopAddress = Read32(data, 0x1C) == 0 ? -1 : 0x1C + Read32(data, 0x1C);
         int cursor = dataStart;
-        byte[] ym2612DacData = null;
-        int ym2612DacCursor = 0;
+        long legacyDacCursor = 0;
         bool warnedAboutMissingDacData = false;
+        var warnedCompressedDacBlocks = new HashSet<byte>();
         bool ended = false;
+        var dacStreams = new VgmDacStreamController(
+            warning => warnings.Add(warning),
+            writes.Add,
+            (kind, sample, streamId, device, rateHz) =>
+                writes.AddControl(sample, device, streamId, kind, rateHz));
+
+        void AdvanceTime(long delta)
+        {
+            dacStreams.AdvanceTime(sourceSample, delta);
+            sourceSample = checked(sourceSample + delta);
+        }
 
         while (cursor < eof)
         {
@@ -386,39 +456,40 @@ internal sealed class VgmDocument
                     break;
                 case 0x61:
                     Require(data, cursor, 2, eof, command);
-                    sourceSample += data[cursor] | (data[cursor + 1] << 8);
+                    AdvanceTime(data[cursor] | (data[cursor + 1] << 8));
                     cursor += 2;
                     break;
                 case 0x62:
-                    sourceSample += 735;
+                    AdvanceTime(735);
                     break;
                 case 0x63:
-                    sourceSample += 882;
+                    AdvanceTime(882);
                     break;
                 case 0x66:
                     ended = true;
                     cursor = (int)eof;
                     break;
                 case >= 0x70 and <= 0x7F:
-                    sourceSample += (command & 0x0F) + 1;
+                    AdvanceTime((command & 0x0F) + 1);
                     break;
                 case >= 0x80 and <= 0x8F:
                     EnsureDevice(devices, ChipType.Ym2612, 0, 7_670_454);
-                    if (ym2612DacData is not null && ym2612DacCursor < ym2612DacData.Length)
+                    if (dacStreams.TryReadLegacyByte(legacyDacCursor, out byte dacByte))
                     {
                         writes.Add(new VgmRegisterWrite(
                             sourceSample,
                             new DeviceId(ChipType.Ym2612, 0),
                             0,
                             0x2A,
-                            ym2612DacData[ym2612DacCursor++]));
+                            dacByte));
+                        legacyDacCursor++;
                     }
                     else if (!warnedAboutMissingDacData)
                     {
                         warnings.Add("YM2612 DAC stream command has no available type 0 data block");
                         warnedAboutMissingDacData = true;
                     }
-                    sourceSample += command & 0x0F;
+                    AdvanceTime(command & 0x0F);
                     break;
                 case 0x67:
                     Require(data, cursor, 6, eof, command);
@@ -427,18 +498,28 @@ internal sealed class VgmDocument
                     uint encodedBlockLength = Read32(data, cursor + 2);
                     int assetInstance = (encodedBlockLength & 0x8000_0000) != 0 ? 1 : 0;
                     uint blockLength = encodedBlockLength & 0x7FFF_FFFF;
-                    if (data[cursor + 1] == 0x00)
+                    byte blockType = data[cursor + 1];
+                    if (blockLength > int.MaxValue
+                        || cursor + 6L + blockLength > data.Length)
+                        throw new VgmPlaybackException("VGM data block exceeds the file");
+                    if (blockType <= 0x3F)
                     {
-                        if (blockLength > int.MaxValue
-                            || cursor + 6L + blockLength > data.Length)
-                            throw new VgmPlaybackException("YM2612 DAC data block exceeds the file");
-                        ym2612DacData = data.Slice(cursor + 6, (int)blockLength).ToArray();
-                        ym2612DacCursor = 0;
+                        dacStreams.AppendDataBlock(
+                            blockType,
+                            data.Slice(cursor + 6, (int)blockLength));
+                    }
+                    else if (blockType >= 0x40 && blockType <= 0x7E)
+                    {
+                        if (warnedCompressedDacBlocks.Add(blockType))
+                        {
+                            warnings.Add(
+                                $"VGM compressed DAC stream data block type 0x{blockType:X2} is unsupported; stream data was ignored");
+                        }
                     }
                     if (TryReadSampleAsset(
                         data,
                         cursor,
-                        data[cursor + 1],
+                        blockType,
                         blockLength,
                         assetInstance,
                         out VgmSampleAsset asset))
@@ -453,26 +534,65 @@ internal sealed class VgmDocument
                 case 0xE0:
                     Require(data, cursor, 4, eof, command);
                     uint dacOffset = Read32(data, cursor);
-                    ym2612DacCursor = dacOffset > int.MaxValue
-                        ? int.MaxValue
-                        : (int)dacOffset;
+                    legacyDacCursor = dacOffset;
                     cursor += 4;
                     break;
                 case 0x90:
-                    Skip(data, ref cursor, 4, eof, command);
+                    Require(data, cursor, 4, eof, command);
+                    byte setupStream = data[cursor];
+                    byte setupTarget = data[cursor + 1];
+                    if ((setupTarget & 0x7F) == 0x02)
+                        EnsureDevice(
+                            devices,
+                            ChipType.Ym2612,
+                            (setupTarget & 0x80) != 0 ? 1 : 0,
+                            7_670_454);
+                    dacStreams.TryHandleSetup(
+                        setupStream,
+                        setupTarget,
+                        data[cursor + 2],
+                        data[cursor + 3]);
+                    cursor += 4;
                     break;
                 case 0x91:
+                    Require(data, cursor, 4, eof, command);
+                    dacStreams.SetData(
+                        data[cursor],
+                        data[cursor + 1],
+                        data[cursor + 2],
+                        data[cursor + 3]);
+                    cursor += 4;
+                    break;
                 case 0x92:
-                    Skip(data, ref cursor, 5, eof, command);
+                    Require(data, cursor, 5, eof, command);
+                    dacStreams.SetFrequency(
+                        data[cursor],
+                        Read32(data, cursor + 1));
+                    cursor += 5;
                     break;
                 case 0x93:
-                    Skip(data, ref cursor, 10, eof, command);
+                    Require(data, cursor, 10, eof, command);
+                    dacStreams.Start(
+                        data[cursor],
+                        Read32(data, cursor + 1),
+                        data[cursor + 5],
+                        Read32(data, cursor + 6));
+                    cursor += 10;
                     break;
                 case 0x94:
-                    Skip(data, ref cursor, 1, eof, command);
+                    Require(data, cursor, 1, eof, command);
+                    dacStreams.Stop(data[cursor++]);
                     break;
                 case 0x95:
-                    Skip(data, ref cursor, 2, eof, command);
+                    Require(data, cursor, 4, eof, command);
+                    dacStreams.Start(
+                        data[cursor],
+                        0,
+                        data[cursor + 3],
+                        0,
+                        fastStart: true,
+                        blockId: (ushort)(data[cursor + 1] | (data[cursor + 2] << 8)));
+                    cursor += 4;
                     break;
                 default:
                     if (!TrySkipKnownCommand(data, ref cursor, command, eof))
@@ -487,6 +607,8 @@ internal sealed class VgmDocument
                 break;
         }
 
+        dacStreams.Complete();
+
         if (!ended)
             warnings.Add("VGM stream reached EOF without an explicit end command");
         if (sourceSample <= 0 && writes.Count > 0)
@@ -498,13 +620,23 @@ internal sealed class VgmDocument
             ? loopSample.Value
             : null;
 
+        VgmExecutionEvent[] orderedEvents = writes.Events
+            .OrderBy(@event => @event.SourceSample)
+            .ThenBy(@event => @event.Sequence)
+            .ToArray();
+        VgmRegisterWrite[] orderedWrites = orderedEvents
+            .OfType<VgmRegisterWrite>()
+            .ToArray();
+
         return new VgmDocument(
             devices.Values.OrderBy(device => device.Id.ToString(), StringComparer.Ordinal).ToArray(),
-            writes,
+            orderedWrites,
+            orderedEvents,
             sourceSample,
             normalizedLoop,
             assets,
-            warnings);
+            warnings,
+            okim6258Flags);
     }
 
     private static bool TryReadSampleAsset(
@@ -853,7 +985,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
         {
             Directory.CreateDirectory(
                 Path.GetDirectoryName(Path.GetFullPath(_options.OutputAudioPath)) ?? ".");
-            audio = new VgmAudioRenderer(_document.Devices, Timing.SampleRate, _document.Assets);
+            audio = new VgmAudioRenderer(_document.Devices, Timing.SampleRate, _document.Assets, okim6258Flags: _document.Okim6258Flags);
         }
         foreach (VgmSampleAsset asset in _document.Assets)
         {
@@ -881,24 +1013,37 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
             long fade = Math.Max(0, (long)Math.Round(_options.FadeSeconds * Timing.SampleRate));
             long fadeStart = Math.Max(0, baseEnd - fade);
             long rendered = 0;
-            foreach (VgmRegisterWrite write in ExpandWrites())
+            foreach (VgmExecutionEvent @event in ExpandEvents())
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (_stopped)
                     break;
 
-                long target = ScaleSample(write.SourceSample);
+                long target = ScaleSample(@event.SourceSample);
                 if (target >= baseEnd)
                     break;
                 RenderUntil(audio, writer, _renderBuffer, ref rendered, target, fadeStart, baseEnd);
-                var normalized = new TimedChipWrite(
-                    target,
-                    write.Device,
-                    write.Port,
-                    write.Address,
-                    write.Data);
-                _events.OnChipWrite(normalized);
-                audio?.Write(normalized);
+                if (@event is VgmRegisterWrite write)
+                {
+                    var normalized = new TimedChipWrite(
+                        target,
+                        write.Device,
+                        write.Port,
+                        write.Address,
+                        write.Data);
+                    _events.OnChipWrite(normalized);
+                    audio?.Write(normalized);
+                }
+                else if (@event is VgmDacStreamControl control)
+                {
+                    var normalized = new TimedYm2612DacStreamControl(
+                        target,
+                        control.Device,
+                        control.StreamId,
+                        control.Kind,
+                        control.RateHz);
+                    _events.OnYm2612DacStreamControl(normalized);
+                }
                 SamplePosition = target;
             }
 
@@ -917,7 +1062,7 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
 
     public void Dispose() => Stop();
 
-    private IEnumerable<VgmRegisterWrite> ExpandWrites()
+    private IEnumerable<VgmExecutionEvent> ExpandEvents()
     {
         long? loop = _document.LoopSample;
         long body = loop.HasValue ? _document.EndSample - loop.Value : 0;
@@ -932,13 +1077,13 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                 _events.OnLoopBoundary(new TimedLoopBoundary(ScaleSample(boundary), pass));
             }
 
-            foreach (VgmRegisterWrite write in _document.Writes)
+            foreach (VgmExecutionEvent @event in _document.Events)
             {
-                if (pass > 0 && write.SourceSample < loop.Value)
+                if (pass > 0 && @event.SourceSample < loop.Value)
                     continue;
                 yield return offset == 0
-                    ? write
-                    : write with { SourceSample = write.SourceSample + offset };
+                    ? @event
+                    : @event with { SourceSample = @event.SourceSample + offset };
             }
         }
     }
@@ -1035,6 +1180,7 @@ internal sealed class VgmAudioRenderer : IDisposable
     private readonly int _sampleRate;
     private readonly ChipType? _channelFilterType;
     private readonly int _channelFilter;
+    private readonly byte _okim6258Flags;
     private int[][] _opnaOutput;
     private int _hucSelectedChannel;
     private int _sn76489LatchedChannel;
@@ -1045,11 +1191,13 @@ internal sealed class VgmAudioRenderer : IDisposable
         int sampleRate,
         IReadOnlyList<VgmSampleAsset> assets = null,
         ChipType? channelFilterType = null,
-        int channelFilter = -1)
+        int channelFilter = -1,
+        byte okim6258Flags = 0)
     {
         _sampleRate = sampleRate;
         _channelFilterType = channelFilterType;
         _channelFilter = channelFilter;
+        _okim6258Flags = okim6258Flags;
         if (channelFilterType.HasValue && channelFilter < 0)
             throw new ArgumentOutOfRangeException(nameof(channelFilter));
         assets ??= [];
@@ -1444,7 +1592,7 @@ internal sealed class VgmAudioRenderer : IDisposable
                     SamplingRate = (uint)sampleRate,
                     Clock = (uint)Math.Max(1, device.ClockHz),
                     Volume = 0,
-                    Option = new object[] { 0 },
+                    Option = new object[] { (int)_okim6258Flags },
                 });
             }
             else if (device.Id.Type == ChipType.Okim6295)
@@ -1592,6 +1740,9 @@ internal sealed class VgmAudioRenderer : IDisposable
                 case ChipType.Okim6295:
                     WriteFilteredOkim6295(write);
                     break;
+                case ChipType.Okim6258:
+                    WriteFilteredOkim6258(write);
+                    break;
                 case ChipType.Ym2203:
                     WriteFilteredYm2203(write);
                     break;
@@ -1700,10 +1851,10 @@ internal sealed class VgmAudioRenderer : IDisposable
                 _mds.WriteGA20((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
                 break;
             case ChipType.Okim6258:
-                _mds.WriteOKIM6258((byte)write.Device.Instance, (byte)write.Port, (byte)write.Data);
+                _mds.WriteOKIM6258((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
                 break;
             case ChipType.Okim6295:
-                _mds.WriteOKIM6295((byte)write.Device.Instance, (byte)write.Port, (byte)write.Data);
+                _mds.WriteOKIM6295((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
                 break;
             case ChipType.MultiPcm:
                 _mds.WriteMultiPCM((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
@@ -1841,7 +1992,15 @@ internal sealed class VgmAudioRenderer : IDisposable
     {
         // OKIM6295 is a single sample/ADPCM voice: every write to the chip
         // belongs to the one isolated stem, so forward them all.
-        _mds.WriteOKIM6295((byte)write.Device.Instance, (byte)write.Port, (byte)write.Data);
+        _mds.WriteOKIM6295((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
+    }
+
+    private void WriteFilteredOkim6258(in TimedChipWrite write)
+    {
+        // OKIM6258 register writes use the VGM address as the MDSound port:
+        // 0=control, 1=ADPCM data, 2=pan.  The generic VGM write model keeps
+        // that value in Address because Port is reserved for chip bus ports.
+        _mds.WriteOKIM6258((byte)write.Device.Instance, (byte)write.Address, (byte)write.Data);
     }
 
     /// <summary>

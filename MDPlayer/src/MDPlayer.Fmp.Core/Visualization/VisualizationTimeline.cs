@@ -158,6 +158,49 @@ internal sealed record SamplePlaybackEvent(
     public string? SourceAttackId { get; init; }
 }
 
+/// <summary>
+/// Derived visualization-only activity slice for a DAC stream. It does not
+/// replace <see cref="SamplePlaybackEvent"/>: one continuous playback may
+/// produce many bounded activity slices.
+/// </summary>
+internal sealed record DacActivityEvent(
+    string VoiceId,
+    long StartSample,
+    long EndSample,
+    string SampleId,
+    float Level);
+
+internal enum DacHitClass
+{
+    Unknown,
+    Kick,
+    Snare,
+    Tom,
+}
+
+internal enum DacHitIdentityKind
+{
+    Inferred,
+    SourceDefined,
+}
+
+/// <summary>
+/// A bounded, visualization-oriented hit inferred from a DAC payload. It is
+/// intentionally separate from <see cref="SamplePlaybackEvent"/> because a
+/// single continuous stream can contain many audible hits.
+/// </summary>
+internal sealed record DacHitEvent(
+    string VoiceId,
+    long StartSample,
+    long EndSample,
+    string SampleId,
+    long SourceStartOffset,
+    long SourceEndOffset,
+    DacHitClass Classification,
+    DacHitIdentityKind IdentityKind,
+    float Confidence,
+    float PeakLevel);
+
 /// <summary>Authoritative S-DSP voice-state transition retained for SPC panels.</summary>
 internal sealed record SpcVoiceStateEvent(
     string VoiceId,
@@ -278,6 +321,8 @@ internal sealed class VisualizationTimeline
     public SampleDefinition[] Samples { get; init; } = [];
     public WaveformChangeEvent[] WaveformChanges { get; init; } = [];
     public SamplePlaybackEvent[] SamplePlayback { get; init; } = [];
+    public DacActivityEvent[] DacActivity { get; init; } = [];
+    public DacHitEvent[] DacHits { get; init; } = [];
     public SpcVoiceStateEvent[] SpcVoiceStates { get; init; } = [];
     public NoiseStateEvent[] NoiseStates { get; init; } = [];
     public AggregateHitEvent[] AggregateHits { get; init; } = [];

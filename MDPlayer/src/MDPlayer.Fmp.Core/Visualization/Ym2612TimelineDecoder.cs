@@ -28,6 +28,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     private readonly List<DacOperation> _dacOps = [];
     private readonly DeterministicIdentityTable _identityTable = new();
     private bool _dacEnabled;
+    private bool _warnedExplicitDacDisabled;
     private bool _completed;
 
     public ChipType ChipType => ChipType.Ym2612;
@@ -92,6 +93,41 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
             ApplyPitchChange(write.SamplePosition, write.Port, write.Address);
     }
 
+    public void ProcessDacStreamControl(in TimedYm2612DacStreamControl control)
+    {
+        if (_completed || control.Device != _device.Id)
+            return;
+
+        switch (control.Kind)
+        {
+            case Ym2612DacStreamControlKind.Start:
+            case Ym2612DacStreamControlKind.Retrigger:
+                _dacNormalizer.BeginExplicitSession(
+                    control.SamplePosition,
+                    control.StreamId,
+                    control.RateHz,
+                    _dacOps);
+                break;
+            case Ym2612DacStreamControlKind.Stop:
+                _dacNormalizer.EndExplicitSession(
+                    control.SamplePosition,
+                    DacStopReason.ExplicitStop,
+                    _dacOps);
+                break;
+            case Ym2612DacStreamControlKind.NaturalEnd:
+                _dacNormalizer.EndExplicitSession(
+                    control.SamplePosition,
+                    DacStopReason.NaturalEnd,
+                    _dacOps);
+                break;
+            case Ym2612DacStreamControlKind.RateChanged:
+                if (control.RateHz is double rate)
+                    _dacNormalizer.ChangeExplicitRate(control.SamplePosition, rate, _dacOps);
+                break;
+        }
+        DrainDacOperations();
+    }
+
     public void Complete(long endSample)
     {
         if (_completed)
@@ -117,12 +153,25 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     /// </summary>
     private void ProcessDacRegisters(long sample, int port, int address, int value)
     {
-        _dacNormalizer.Process(sample, port, address, value, _dacOps);
-        while (_dacOps.Count > 0)
+        if (port == 0
+            && address == 0x2A
+            && !_dacEnabled
+            && _dacNormalizer.ExplicitSession
+            && !_warnedExplicitDacDisabled)
         {
-            _dacTracker.Add(_dacOps[0]);
-            _dacOps.RemoveAt(0);
+            _timeline.AddWarning(
+                $"{_device.Id}: explicit YM2612 DAC stream wrote while DAC enable (0x2B bit 7) was off; chip write preserved and sample tracking skipped");
+            _warnedExplicitDacDisabled = true;
         }
+        _dacNormalizer.Process(sample, port, address, value, _dacOps);
+        DrainDacOperations();
+    }
+
+    private void DrainDacOperations()
+    {
+        for (int index = 0; index < _dacOps.Count; index++)
+            _dacTracker.Add(_dacOps[index]);
+        _dacOps.Clear();
     }
 
     private void Fm6DacGate(long sample)
@@ -150,6 +199,8 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         _dacTracker.Complete(endSample);
         var catalog = new DacSampleCatalog().Build(_dacTracker.Candidates);
         _dacTracker.ApplyAssetIds(catalog);
+        Dictionary<string, DacSampleAsset> assetsById = catalog.Assets
+            .ToDictionary(asset => asset.TimelineSampleId, StringComparer.Ordinal);
 
         foreach (DacSampleAsset asset in catalog.Assets)
         {
@@ -161,7 +212,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
                 LoopStart: null,
                 LoopEnd: null,
                 SampleLoopMode.None,
-                Array.Empty<WaveformEnvelopePoint>(),
+                DacWaveformPreviewBuilder.Build(asset.Payload.Span),
                 asset.StableName)
             {
                 IdentityKind = AssetIdentityKind.ContentHash,
@@ -171,15 +222,27 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
 
         foreach (DacPlaybackEvent evt in _dacTracker.PlaybackEvents)
         {
+            if (evt.SampleId is string sampleId
+                && assetsById.TryGetValue(sampleId, out DacSampleAsset asset))
+            {
+                foreach (DacHitEvent hit in DacHitDetector.Detect(
+                    asset.Payload.Span,
+                    evt.StartSample,
+                    Math.Max(evt.StartSample + 1, evt.EndSample),
+                    sampleId,
+                    evt.InitialRateHz,
+                    _timeline.SampleRate))
+                {
+                    _timeline.AddDacHit(hit);
+                }
+            }
+
             // An implicit register stream that spans the entire capture is an
             // activity placeholder, not a recognized sample trigger.
             if (evt.WasImplicit && evt.StartSample <= 0 && evt.EndSample >= endSample)
                 continue;
             if (evt.SampleId is null)
                 continue;
-            double playbackRate = evt.InitialRateHz is double rate && rate > 0
-                ? rate
-                : 1.0;
             bool retrigger = string.Equals(evt.SampleId, lastEmittedSampleId, StringComparison.Ordinal)
                 || evt.StopReason is DacStopReason.Retriggered or DacStopReason.SourceDiscontinuity;
             _timeline.AddSamplePlayback(new SamplePlaybackEvent(
@@ -188,7 +251,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
                 Math.Max(evt.StartSample + 1, evt.EndSample),
                 evt.SampleId,
                 MidiPitch: null,
-                playbackRate,
+                PlaybackRate: 1.0,
                 Gain: evt.Gain is double gain ? (float)gain : 1f,
                 Pan: evt.Pan is double pan ? (float)pan : 0f,
                 Retrigger: retrigger,

@@ -224,6 +224,17 @@ internal sealed class TimelineDecoderEventSink : IPlaybackEventSink
             decoder.Process(write);
     }
 
+    public void OnYm2612DacStreamControl(in TimedYm2612DacStreamControl control)
+    {
+        if (control.SamplePosition < 0)
+            throw new ArgumentOutOfRangeException(nameof(control));
+        if (_decoders.TryGetValue(control.Device, out IChipTimelineDecoder decoder)
+            && decoder is Ym2612TimelineDecoder ym2612)
+        {
+            ym2612.ProcessDacStreamControl(control);
+        }
+    }
+
     public void OnMidi(in TimedMidiMessage message)
     {
         message.Validate();

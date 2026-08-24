@@ -253,6 +253,22 @@ internal readonly record struct TimedChipWrite(
     }
 }
 
+internal enum Ym2612DacStreamControlKind
+{
+    Start,
+    Stop,
+    NaturalEnd,
+    Retrigger,
+    RateChanged,
+}
+
+internal readonly record struct TimedYm2612DacStreamControl(
+    long SamplePosition,
+    DeviceId Device,
+    byte StreamId,
+    Ym2612DacStreamControlKind Kind,
+    double? RateHz = null);
+
 internal enum MidiMessageType
 {
     NoteOn,
@@ -309,6 +325,7 @@ internal interface IPlaybackEventSink
 {
     void OnDevice(in DeviceDescriptor device);
     void OnChipWrite(in TimedChipWrite write);
+    void OnYm2612DacStreamControl(in TimedYm2612DacStreamControl control) { }
     void OnMidi(in TimedMidiMessage message);
     void OnSampleAsset(in TimedSampleAssetEvent asset);
     void OnLoopBoundary(in TimedLoopBoundary loop);

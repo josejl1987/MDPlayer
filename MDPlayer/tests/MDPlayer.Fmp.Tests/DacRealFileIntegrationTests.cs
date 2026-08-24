@@ -33,6 +33,8 @@ public sealed class DacRealFileIntegrationTests
             Assert.False(string.IsNullOrWhiteSpace(e.SampleId));
             Assert.Contains(timeline.Samples, s => s.Id == e.SampleId);
         });
+        Assert.All(timeline.Samples.Where(s => s.Family == "pcm"), sample =>
+            Assert.NotEmpty(sample.Preview));
 
         // Assets are the deduplicated set; the timeline exposes at least one.
         Assert.NotEmpty(timeline.Samples.Where(s => s.Family == "pcm"));

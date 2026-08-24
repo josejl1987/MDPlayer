@@ -25,6 +25,7 @@ public sealed class Ym2612DacTimelineTests
         SampleDefinition sample = Assert.Single(timeline.Samples);
         Assert.Equal(dac.SampleId, sample.Id);
         Assert.Equal("DAC S000", sample.DisplayName);
+        Assert.NotEmpty(sample.Preview);
 
         // No pitched PCM note remains: the placeholder is removed.
         Assert.DoesNotContain(timeline.Notes, note => note.Mode == VisualizationNoteMode.Pcm);
@@ -91,15 +92,58 @@ public sealed class Ym2612DacTimelineTests
         Assert.Single(timeline.SamplePlayback);
     }
 
-    private static VisualizationTimeline Decode(params TimedChipWrite[] writes)
+    [Fact]
+    public void Decoder_ExplicitSessionIgnoresLongWriteGap()
+    {
+        DeviceId device = new(ChipType.Ym2612, 0);
+        VisualizationTimeline timeline = Decode(
+            Write(0, 0x2B, 0x80),
+            new TimedYm2612DacStreamControl(0, device, 0, Ym2612DacStreamControlKind.Start, 1_000),
+            Write(1, 0x2A, 0x10),
+            Write(100, 0x2A, 0x20),
+            new TimedYm2612DacStreamControl(101, device, 0, Ym2612DacStreamControlKind.NaturalEnd));
+
+        SamplePlaybackEvent playback = Assert.Single(timeline.SamplePlayback);
+        SampleDefinition sample = Assert.Single(timeline.Samples);
+        Assert.Equal(2, sample.SourceLengthSamples);
+        Assert.Equal(101, playback.EndSample);
+    }
+
+    [Fact]
+    public void Decoder_ExplicitStartRetriggersSamePayloadWithoutNewDefinition()
+    {
+        DeviceId device = new(ChipType.Ym2612, 0);
+        VisualizationTimeline timeline = Decode(
+            Write(0, 0x2B, 0x80),
+            new TimedYm2612DacStreamControl(0, device, 0, Ym2612DacStreamControlKind.Start),
+            Write(1, 0x2A, 0x10),
+            new TimedYm2612DacStreamControl(2, device, 0, Ym2612DacStreamControlKind.Retrigger),
+            Write(3, 0x2A, 0x10),
+            new TimedYm2612DacStreamControl(4, device, 0, Ym2612DacStreamControlKind.NaturalEnd));
+
+        Assert.Equal(2, timeline.SamplePlayback.Length);
+        Assert.Single(timeline.Samples);
+        Assert.Equal(timeline.SamplePlayback[0].SampleId, timeline.SamplePlayback[1].SampleId);
+    }
+
+    private static VisualizationTimeline Decode(params object[] events)
     {
         var builder = new TimelineBuilder(44_100);
         var decoder = new Ym2612TimelineDecoder();
         DeviceDescriptor device = VisualizationDeviceCatalog.Ym2612();
         decoder.Initialize(device, builder);
-        foreach (TimedChipWrite write in writes)
-            decoder.Process(write);
-        long endSample = Math.Max(1, writes.Length == 0 ? 1 : writes.Max(write => write.SamplePosition) + 16);
+        foreach (object @event in events)
+        {
+            if (@event is TimedChipWrite write)
+                decoder.Process(write);
+            else
+                decoder.ProcessDacStreamControl((TimedYm2612DacStreamControl)@event);
+        }
+        long endSample = Math.Max(1, events.Length == 0
+            ? 1
+            : events.Max(@event => @event is TimedChipWrite write
+                ? write.SamplePosition
+                : ((TimedYm2612DacStreamControl)@event).SamplePosition) + 16);
         decoder.Complete(endSample);
         return builder.Build(endSample, "test");
     }

@@ -146,6 +146,19 @@ internal static class VisualizationJsonWriter
             .ThenBy(value => value.Pan)
             .ThenBy(value => value.Retrigger)
             .ToArray(),
+        DacActivity = (timeline.DacActivity ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.StartSample)
+            .ThenBy(value => value.EndSample)
+            .ThenBy(value => value.SampleId, StringComparer.Ordinal)
+            .ToArray(),
+        DacHits = (timeline.DacHits ?? [])
+            .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
+            .ThenBy(value => value.StartSample)
+            .ThenBy(value => value.EndSample)
+            .ThenBy(value => value.SourceStartOffset)
+            .ThenBy(value => value.Classification)
+            .ToArray(),
         SpcVoiceStates = (timeline.SpcVoiceStates ?? [])
             .OrderBy(value => value.VoiceId, StringComparer.Ordinal)
             .ThenBy(value => value.SamplePosition)

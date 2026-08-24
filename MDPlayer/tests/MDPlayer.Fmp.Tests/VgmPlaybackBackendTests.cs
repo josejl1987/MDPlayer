@@ -68,6 +68,77 @@ public sealed class VgmPlaybackBackendTests
     }
 
     [Fact]
+    public void Parse_DecodesOkim6258FlagsFromHeader()
+    {
+        VgmDocument document = VgmDocument.Parse(CreateVgmWithOkim6258(
+            flags: 0b1000_0011,
+            0xB7, 0x04, 0x32,
+            0x66));
+
+        Assert.Contains(document.Devices, device => device.Id.Type == ChipType.Okim6258);
+        Assert.Equal(0b1000_0011, document.Okim6258Flags);
+    }
+
+    [Fact]
+    public void Parse_DefaultsOkim6258FlagsToZeroWhenChipAbsentOrAddressUnavailable()
+    {
+        // No OKIM6258 clock -> no flags
+        VgmDocument withoutChip = VgmDocument.Parse(CreateVgm(
+            0x52, 0xA0, 0x35,
+            0x66));
+        Assert.Equal(0, withoutChip.Okim6258Flags);
+
+        // Clock and flags bytes present but dataStart (0x40) does not cover
+        // offset 0x94 -> flags default to 0 rather than throwing. The command
+        // walk is bounded by the EofOffset so the trailing header bytes at
+        // 0x90/0x94 are never interpreted as commands.
+        byte[] truncated = new byte[0x95];
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated.AsSpan(0x00, 4), 0x206D6756);
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated.AsSpan(0x04, 4), 0x3D); // eof = 0x41
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated.AsSpan(0x08, 4), 0x0000_0150);
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated.AsSpan(0x0C, 4), 3_579_545);
+        truncated[0x40] = 0x66; // end command at dataStart
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated.AsSpan(0x90, 4), 4_000_000);
+        truncated[0x94] = 0b1000_0011;
+        VgmDocument addressedEarly = VgmDocument.Parse(truncated);
+        Assert.Equal(0, addressedEarly.Okim6258Flags);
+    }
+
+    [Fact]
+    public void Capture_ForwardsOkim6258FlagsToRenderer()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-okim-{Guid.NewGuid():N}.vgm");
+        string wav = path + ".wav";
+        try
+        {
+            File.WriteAllBytes(path, CreateVgmWithOkim6258(
+                flags: 0b1000_0011,
+                0xB7, 0x04, 0x32,
+                0x66));
+
+            var backend = new VgmPlaybackBackend();
+            var sink = new TimelineDecoderEventSink(44_100);
+            using IPlaybackCaptureSession session = backend.Open(
+                new FileInfo(path),
+                new PlaybackOptions(LoopCount: 1, OutputAudioPath: wav, SampleRate: 44_100),
+                sink);
+
+            session.Run();
+            VisualizationTimeline timeline = sink.Complete(session.SamplePosition, "test");
+
+            Assert.True(session.IsComplete);
+            Assert.Contains(timeline.Devices, device => device.Id.Type == ChipType.Okim6258);
+            Assert.True(new FileInfo(wav).Length > 44);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(wav)) File.Delete(wav);
+            if (File.Exists(wav + ".tmp")) File.Delete(wav + ".tmp");
+        }
+    }
+
+    [Fact]
     public void Capture_ProducesMixedDeviceTimelineAndMasterWav()
     {
         string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-{Guid.NewGuid():N}.vgm");
@@ -471,6 +542,53 @@ public sealed class VgmPlaybackBackendTests
                 Assert.True(stem.Success, stem.Error);
                 Assert.True(File.Exists(stem.WavPath), stem.WavPath);
             });
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VgmScopeRenderer_RendersOkim6258AdpcmChannelStem()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-okim6258-{Guid.NewGuid():N}.vgm");
+        string output = Path.Combine(Path.GetTempPath(), $"mdplayer-vgm-scope-output-{Guid.NewGuid():N}");
+        string master = Path.Combine(output, "master.wav");
+        try
+        {
+            var commands = new List<byte>
+            {
+                0xB7, 0x00, 0x02, // control: start ADPCM playback
+            };
+            for (int index = 0; index < 256; index++)
+            {
+                commands.Add(0xB7);
+                commands.Add(0x01); // OKIM6258 data port
+                commands.Add((byte)(0x11 + (index & 0x0F)));
+            }
+            commands.AddRange([0x61, 0x88, 0x13]); // 5000 samples
+            commands.AddRange([0xB7, 0x00, 0x00]); // control: stop
+            commands.Add(0x66);
+            File.WriteAllBytes(path, CreateVgm(commands.ToArray()));
+
+            ScopeRenderer.ScopeResult result = VgmScopeRenderer.Render(
+                path,
+                output,
+                master,
+                sampleRate: 44_100,
+                loopCount: 1,
+                fadeSeconds: 0,
+                tailSeconds: 0,
+                maxDurationSeconds: 1);
+
+            Assert.True(result.Success, result.LastError);
+            ScopeRenderer.StemResult stem = Assert.Single(
+                result.Stems.Where(stem => stem.Name == "okim6258-sample"));
+            Assert.True(stem.Success, stem.Error);
+            Assert.True(File.Exists(stem.WavPath), stem.WavPath);
+            Assert.Contains(File.ReadAllBytes(stem.WavPath).Skip(44), sample => sample != 0);
         }
         finally
         {
@@ -1168,6 +1286,23 @@ public sealed class VgmPlaybackBackendTests
         byte[] data = CreateVgm(commands);
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x2C, 4), 0);
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x30, 4), 3_579_545);
+        return data;
+    }
+
+    private static byte[] CreateVgmWithOkim6258(byte flags, params byte[] commands)
+    {
+        // Data offset points past the fixed header so dataStart (0x114) covers
+        // the OKIM6258 clock at 0x90 and flags byte at 0x94.
+        const int dataStart = 0x114;
+        const uint dataOffset = dataStart - 0x34; // 0xE0
+        byte[] data = new byte[dataStart + commands.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x00, 4), 0x206D6756);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x08, 4), 0x0000_0150);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x0C, 4), 3_579_545);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x34, 4), dataOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0x90, 4), 4_000_000);
+        data[0x94] = flags;
+        commands.CopyTo(data, dataStart);
         return data;
     }
 

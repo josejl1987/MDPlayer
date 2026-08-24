@@ -60,6 +60,10 @@ internal static class VisualizationPresentationSupport
             .Where(evt => evt.StartSample < audioEndSample)
             .Select(evt => evt with { EndSample = Math.Min(evt.EndSample, audioEndSample) })
             .Where(evt => evt.EndSample > evt.StartSample).ToArray();
+        SamplePlaybackEvent[] samplePlayback = timeline.SamplePlayback
+            .Where(evt => evt.StartSample < audioEndSample)
+            .Select(evt => evt with { EndSample = Math.Min(evt.EndSample, audioEndSample) })
+            .Where(evt => evt.EndSample > evt.StartSample).ToArray();
 
         return new VisualizationTimeline
         {
@@ -75,7 +79,29 @@ internal static class VisualizationPresentationSupport
             Rhythm = rhythm,
             Ppz8 = ppz8,
             AdpcmB = adpcm,
+            Waveforms = timeline.Waveforms,
+            WaveformChanges = timeline.WaveformChanges
+                .Where(evt => evt.SamplePosition < audioEndSample).ToArray(),
+            Samples = timeline.Samples,
+            SamplePlayback = samplePlayback,
+            DacActivity = timeline.DacActivity
+                .Where(evt => evt.StartSample < audioEndSample)
+                .Select(evt => evt with { EndSample = Math.Min(evt.EndSample, audioEndSample) })
+                .Where(evt => evt.EndSample > evt.StartSample).ToArray(),
+            DacHits = timeline.DacHits
+                .Where(evt => evt.StartSample < audioEndSample)
+                .Select(evt => evt with { EndSample = Math.Min(evt.EndSample, audioEndSample) })
+                .Where(evt => evt.EndSample > evt.StartSample).ToArray(),
+            SpcVoiceStates = timeline.SpcVoiceStates
+                .Where(evt => evt.SamplePosition < audioEndSample).ToArray(),
+            NoiseStates = timeline.NoiseStates
+                .Where(evt => evt.StartSample < audioEndSample)
+                .Select(evt => evt with { EndSample = Math.Min(evt.EndSample, audioEndSample) })
+                .Where(evt => evt.EndSample > evt.StartSample).ToArray(),
+            AggregateHits = timeline.AggregateHits
+                .Where(evt => evt.SamplePosition < audioEndSample).ToArray(),
             Timing = timeline.Timing.Where(evt => evt.SamplePosition < audioEndSample).ToArray(),
+            Beats = timeline.Beats.Where(evt => evt.SamplePosition < audioEndSample).ToArray(),
             LoopMarkers = timeline.LoopMarkers.Where(marker => marker.SamplePosition < audioEndSample).ToArray(),
             Instruments = timeline.Instruments,
             Capabilities = timeline.Capabilities,

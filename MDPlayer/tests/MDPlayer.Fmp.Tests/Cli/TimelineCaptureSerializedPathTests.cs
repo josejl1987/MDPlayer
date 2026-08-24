@@ -96,6 +96,62 @@ public sealed class TimelineCaptureSerializedPathTests
     }
 
     [Fact]
+    public void AlignTimelineToAudio_PreservesPcmSamplesAndPlaybackEvents()
+    {
+        var sample = new SampleDefinition(
+            "dac:0",
+            "pcm",
+            4,
+            null,
+            null,
+            null,
+            SampleLoopMode.None,
+            [new WaveformEnvelopePoint(-1, 1)],
+            "DAC S000");
+        var source = new VisualizationTimeline
+        {
+            SampleRate = 44_100,
+            StartSample = 0,
+            EndSample = 1_000,
+            Voices =
+            [
+                new VoiceDescriptor(
+                    new VoiceId(new DeviceId(ChipType.Ym2612, 0), VoiceKind.Pcm, 0, Name: "dac"),
+                    "DAC",
+                    VoicePresentationKind.Pcm,
+                    10,
+                    false,
+                    false,
+                    false),
+            ],
+            Samples = [sample],
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent(
+                    "ym2612.0.pcm.dac",
+                    100,
+                    900,
+                    sample.Id,
+                    null,
+                    1.0,
+                    1f,
+                    0f,
+                    false,
+                    false),
+            ],
+        };
+
+        VisualizationTimeline aligned = VisualizationPresentationSupport.AlignTimelineToAudio(
+            source,
+            audioEndSample: 500);
+
+        Assert.Same(sample, Assert.Single(aligned.Samples));
+        SamplePlaybackEvent playback = Assert.Single(aligned.SamplePlayback);
+        Assert.Equal(100, playback.StartSample);
+        Assert.Equal(500, playback.EndSample);
+    }
+
+    [Fact]
     public void SerializedTimeline_AmbiguousClock_IsRejectedWithMusicalTimingException()
     {
         // A serialized timeline that lost (or never carried) its SampleRate

@@ -303,6 +303,24 @@ internal static class VgmScopeRenderer
                 $"okim6295.{instance}.pcm.1"));
         }
 
+        if (document.Devices.Count(device => device.Id.Type == ChipType.Okim6258) == 1)
+        {
+            // OKIM6258 is one continuous ADPCM stream, not a set of discrete
+            // percussion hits; keep it as one mono PCM stem.
+            int instance = FirstInstance(document, ChipType.Okim6258);
+            specs.Add(new StemSpec(
+                $"okim6258-sample",
+                "OKIM6258 ADPCM Sample",
+                ChipType.Okim6258,
+                0,
+                ScopeSemanticClass.Pcm,
+                41,
+                2,
+                1.0,
+                "#66cc66",
+                $"okim6258.{instance}.pcm.1"));
+        }
+
         if (document.Devices.Count(device => device.Id.Type == ChipType.Sn76489) == 1)
         {
             int instance = FirstInstance(document, ChipType.Sn76489);
