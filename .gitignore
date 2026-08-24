@@ -148,4 +148,7 @@ MDPlayer/packages/
 MDPlayer/test-video-output/
 MDPlayer/e2e-test.*
 MDPlayer/tests/Corpus/local/
+# Local benchmark/experiment video renders stay out of history; keep only
+# the scripts that produce them.
+*.mp4
 .kittify/skills-manifest.json
