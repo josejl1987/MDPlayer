@@ -83,6 +83,82 @@ internal sealed partial class PanelOverlayRenderer
                 : 0;
             DrawSamplePlayback(frame, panel, value, lane, currentSample, row, rowCount);
         }
+
+        DrawDacActivity(frame, panel, lane, currentSample, windowStart, windowEnd);
+        DrawDacHits(frame, panel, lane, currentSample, windowStart, windowEnd);
+    }
+
+    private void DrawDacActivity(
+        Span<byte> frame,
+        PanelData panel,
+        OverlayRect lane,
+        long currentSample,
+        long windowStart,
+        long windowEnd)
+    {
+        foreach (DacActivityEvent value in panel.Prepared.DacActivity)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+
+            double level = Math.Clamp(value.Level, 0, 1);
+            int height = Math.Clamp(
+                (int)Math.Round(Math.Max(2, lane.Height - 8) * level),
+                2,
+                Math.Max(2, lane.Height - 4));
+            int y = lane.Y + Math.Max(0, (lane.Height - height) / 2);
+            bool active = value.StartSample <= currentSample && currentSample < value.EndSample;
+            OverlayColor color = IdentityColor(value.SampleId, panel.Prepared.Accent)
+                .Lighten(active ? 0.25 : 0.08)
+                .WithAlpha((byte)Math.Clamp(95 + level * 110, 0, 220));
+            FillRectFractionalX(frame, left, right, y, height, color);
+        }
+    }
+
+    private void DrawDacHits(
+        Span<byte> frame,
+        PanelData panel,
+        OverlayRect lane,
+        long currentSample,
+        long windowStart,
+        long windowEnd)
+    {
+        foreach (DacHitEvent value in panel.Prepared.DacHits)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+
+            bool active = value.StartSample <= currentSample && currentSample < value.EndSample;
+            OverlayColor color = DacHitColor(value.Classification, panel.Prepared.Accent)
+                .WithAlpha((byte)(active ? 235 : 180));
+            int width = Math.Max(1, (int)Math.Ceiling(right - left));
+            int leftI = Math.Max(lane.X, (int)Math.Floor(left));
+            int height = Math.Clamp(
+                4 + (int)Math.Round(Math.Clamp(value.PeakLevel, 0, 1) * Math.Min(10, lane.Height - 6)),
+                4,
+                Math.Max(4, lane.Height - 2));
+            int y = lane.Y + Math.Max(0, (lane.Height - height) / 2);
+            FillRect(frame, new OverlayRect(leftI, y, Math.Min(width, lane.Right - leftI), height), color);
+            if (active)
+            {
+                StrokeRect(frame, new OverlayRect(leftI, y,
+                    Math.Min(width, lane.Right - leftI), height), BrightText.WithAlpha(220), 1);
+            }
+        }
     }
 
     private void DrawSamplePlayback(
@@ -101,9 +177,16 @@ internal sealed partial class PanelOverlayRenderer
 
         // Assign each distinct sample identity a horizontal row band within the
         // lane (spec §19: one row per unique sample).
-        int rowHeight = Math.Max(10, lane.Height / Math.Max(1, rowCount));
+        int rowHeight = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+            ? Math.Min(24, Math.Max(12, lane.Height / Math.Max(1, rowCount)))
+            : Math.Max(10, lane.Height / Math.Max(1, rowCount));
         int height = Math.Max(8, rowHeight - 2);
-        int y = lane.Y + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight + (rowHeight - height) / 2;
+        int y = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+            ? lane.Y + Math.Max(0, (lane.Height - rowCount * rowHeight) / 2)
+                + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight
+                + (rowHeight - height) / 2
+            : lane.Y + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight
+                + (rowHeight - height) / 2;
 
         OverlayColor accent = panel.Prepared.Accent;
         SampleDefinition sample = panel.Prepared.SamplesById.TryGetValue(value.SampleId, out SampleDefinition resolved)
@@ -273,9 +356,7 @@ internal sealed partial class PanelOverlayRenderer
     }
 
     private static string ShortAssetLabel(string displayName, string id)
-        => PresentationMetadata.OptionalLabel(displayName)
-            ?? PresentationMetadata.OptionalLabel(id)
-            ?? "";
+        => string.IsNullOrWhiteSpace(displayName) ? id : displayName;
 
     private static OverlayColor IdentityColor(string id, OverlayColor fallback)
     {
@@ -289,4 +370,13 @@ internal sealed partial class PanelOverlayRenderer
         byte b = (byte)(110 + (hash >> 16) % 100);
         return new OverlayColor(r, g, b, fallback.A);
     }
+
+    private static OverlayColor DacHitColor(DacHitClass classification, OverlayColor fallback)
+        => classification switch
+        {
+            DacHitClass.Kick => new OverlayColor(232, 128, 76, fallback.A),
+            DacHitClass.Snare => new OverlayColor(94, 185, 226, fallback.A),
+            DacHitClass.Tom => new OverlayColor(181, 126, 232, fallback.A),
+            _ => fallback.Lighten(0.10),
+        };
 }

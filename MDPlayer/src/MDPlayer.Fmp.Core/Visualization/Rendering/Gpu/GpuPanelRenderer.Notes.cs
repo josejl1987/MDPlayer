@@ -33,6 +33,8 @@ internal sealed partial class GpuPanelRenderer
                     break;
                 case PanelPresentationSchema.SampleLane:
                     DrawSamplePlaybackLane(panelIndex, panel, currentSample, windowStart, windowEnd);
+                    DrawDacActivityLane(panelIndex, panel, currentSample, windowStart, windowEnd);
+                    DrawDacHitsLane(panelIndex, panel, currentSample, windowStart, windowEnd);
                     break;
                 case PanelPresentationSchema.NoiseLane:
                     DrawNoiseLane(panelIndex, panel, currentSample, windowStart, windowEnd);
@@ -65,6 +67,12 @@ internal sealed partial class GpuPanelRenderer
         int playheadX = _layout.GetPlayheadX(panelIndex);
         PreparedNote[] notes = panel.MainNotes;
         int first = FindFirstVisibleNote(notes, windowStart);
+
+        // Inactive flat-note bodies batch into one path per fill color: a busy
+        // lane draws dozens of same-color bars, and every DrawRect is its own
+        // GPU command. Caps/markers still draw per note inside DrawNoteBar.
+        _flatBatchSlots.Clear();
+        bool anyVisible = false;
         for (int index = first; index < notes.Length; index++)
         {
             PreparedNote note = notes[index];
@@ -79,8 +87,38 @@ internal sealed partial class GpuPanelRenderer
             }
             if (_performance.Enabled)
                 _performance.VisibleNotesVisited++;
-            DrawNoteBar(panel, note, lane, currentSample, windowStart, windowEnd, minMidi, maxMidi, playheadX);
+            anyVisible = true;
+            bool active = note.StartSample <= currentSample && currentSample < note.EndSample;
+            DrawNoteBar(panel, note, lane, currentSample, windowStart, windowEnd,
+                minMidi, maxMidi, playheadX,
+                active || note.Pitch.Length > 0 ? null : _flatBatchSlots);
         }
+
+        foreach (FlatBodyBatch batch in _flatBatchSlots)
+        {
+            if (!batch.Path.IsEmpty)
+                DrawPathFill(batch.Path, batch.Fill);
+            ReturnPath(batch.Path);
+        }
+        _ = anyVisible;
+    }
+
+    private struct FlatBodyBatch
+    {
+        public OverlayColor Fill;
+        public SKPath Path;
+    }
+
+    private readonly List<FlatBodyBatch> _flatBatchSlots = new(4);
+    private readonly Stack<SKPath> _pathPool = new();
+
+    private SKPath RentPath()
+        => _pathPool.TryPop(out SKPath path) ? path : new SKPath();
+
+    private void ReturnPath(SKPath path)
+    {
+        path.Reset();
+        _pathPool.Push(path);
     }
 
     /// <summary>
@@ -97,7 +135,8 @@ internal sealed partial class GpuPanelRenderer
         long windowEnd,
         double minMidi,
         double maxMidi,
-        int playheadX)
+        int playheadX,
+        List<FlatBodyBatch> flatBodySink = null)
     {
         if (note.InitialMidiNote < 0)
             return;
@@ -131,7 +170,7 @@ internal sealed partial class GpuPanelRenderer
             {
                 FillRect(new OverlayRect(left, yTop, right - left, yBottom - yTop), ribbonFill);
                 if (active)
-                    StrokeRectOutline(left, yTop, right - 1, yBottom - 1, note.Accent.Lighten(0.42).WithAlpha(235));
+                    StrokeRectOutline(left, yTop, right - 1, yBottom - 1, panel.Accent.Lighten(0.35).WithAlpha(230));
             }
         }
         else
@@ -177,11 +216,7 @@ internal sealed partial class GpuPanelRenderer
             }
             AddRibbonSegment(ribbonPath, segStartX, rightX, prevPitch, minMidi, maxMidi, lane, half, ribbonHeight);
             if (!ribbonPath.IsEmpty)
-            {
                 DrawPathFill(ribbonPath, ribbonFill);
-                if (active)
-                    DrawPathOutline(ribbonPath, note.Accent.Lighten(0.42).WithAlpha(235));
-            }
             // Smooth center trace for vibrato: only for the active note at the
             // playhead (1–2 notes per frame) to keep cost bounded. Inactive past
             // notes keep the ZOH stepped ribbon (visible but not smoothed).
@@ -189,39 +224,22 @@ internal sealed partial class GpuPanelRenderer
                 DrawPitchTrace(note, lane, currentSample, left, right, minMidi, maxMidi, windowStart);
         }
 
-        // Onset cap (§8.5): bright opaque block with an accent border. The
-        // enlarged state lasts ~110 ms after the onset. Retriggers draw a thin
-        // accent bar before the block.
+        // Onset edge: one quiet lane-colored attack marker. Repeated cream
+        // blocks made every onset compete with the musical contour.
         bool onsetVisible = note.StartSample >= windowStart;
         int capX = (int)Math.Round(leftX);
         if (onsetVisible && capX >= lane.X && capX < lane.Right)
         {
-            int capWidth = Math.Max(3, lane.Width / 100);
-            long ageSamples = currentSample - note.StartSample;
-            bool enlarged = ageSamples >= 0 && ageSamples < (long)Math.Round(110 * _timeline.SampleRate / 1000.0);
-            int capHeight = ribbonHeight + (enlarged ? 4 : 2);
+            int capHeight = ribbonHeight;
             int capCentreY = MidiToY(NotePitchAt(note, note.StartSample), minMidi, maxMidi, lane);
             int capTop = Math.Clamp(capCentreY - capHeight / 2, lane.Y, lane.Bottom - 1);
             int capBottom = Math.Clamp(capCentreY + (capHeight - capHeight / 2), lane.Y, lane.Bottom);
             if (capBottom > capTop)
             {
-                int blockX = capX;
+                OverlayColor onsetEdge = panel.Accent.Lighten(0.15).WithAlpha(185);
+                DrawVerticalLine(capX, capTop, capBottom - 1, onsetEdge);
                 if (note.IsRetrigger)
-                {
-                    DrawVerticalLine(capX, capTop, capBottom - 1, panel.Accent);
-                    blockX = Math.Min(lane.Right - 1, capX + 1);
-                }
-                int capFillWidth = capWidth + (enlarged ? 1 : 0);
-                int blockLeft = Math.Max(lane.X, blockX);
-                int blockRight = Math.Min(lane.Right, blockX + capFillWidth);
-                if (blockRight > blockLeft)
-                {
-                    FillRect(new OverlayRect(blockLeft, capTop, blockRight - blockLeft, capBottom - capTop), note.CapFill);
-                    DrawHorizontalLine(blockLeft, blockRight - 1, capTop, panel.Accent);
-                    DrawHorizontalLine(blockLeft, blockRight - 1, capBottom - 1, panel.Accent);
-                    DrawVerticalLine(blockLeft, capTop, capBottom - 1, panel.Accent);
-                    DrawVerticalLine(blockRight - 1, capTop, capBottom - 1, panel.Accent);
-                }
+                    DrawVerticalLine(Math.Min(lane.Right - 1, capX + 1), capTop, capBottom - 1, onsetEdge);
             }
         }
 
@@ -238,9 +256,7 @@ internal sealed partial class GpuPanelRenderer
                     int endTop = Math.Clamp(endCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
                     int endBottom = Math.Clamp(endCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
                     if (endBottom > endTop)
-                        FillRect(
-                            new OverlayRect(endX, endTop, Math.Min(2, lane.Right - endX), endBottom - endTop),
-                            note.CapFill);
+                        DrawVerticalLine(endX, endTop, endBottom - 1, panel.Accent.WithAlpha(180));
                 }
             }
         }
@@ -250,10 +266,11 @@ internal sealed partial class GpuPanelRenderer
             int markerTop = Math.Clamp(markerCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
             int markerBottom = Math.Clamp(markerCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
             if (markerBottom > markerTop)
-                DrawVerticalLine(lane.Right - 1, markerTop, markerBottom - 1, note.CapFill.WithAlpha(130));
+                DrawVerticalLine(lane.Right - 1, markerTop, markerBottom - 1, panel.Accent.WithAlpha(130));
         }
 
-        // Active pitch marker at the playhead (small bright contact circle).
+        // Active ribbon contact: a short 1px outline at the playhead replaces
+        // the old 3px circle, which read as an isolated dot rather than a note.
         if (!IsSsgMode(note.Mode) && active)
         {
             double activeMidi = NotePitchAt(note, currentSample);
@@ -261,7 +278,13 @@ internal sealed partial class GpuPanelRenderer
             {
                 int markerY = MidiToY(activeMidi, minMidi, maxMidi, lane);
                 if (markerY >= lane.Y && markerY <= lane.Bottom && playheadX >= lane.X && playheadX < lane.Right)
-                    DrawCircle(playheadX, markerY, 3f, panel.Accent.Lighten(0.5));
+                {
+                    int top = Math.Max(lane.Y, markerY - half);
+                    int bottom = Math.Min(lane.Bottom - 1, markerY + (ribbonHeight - half));
+                    OverlayColor activeEdge = panel.Accent.Lighten(0.35).WithAlpha(230);
+                    DrawHorizontalLine(Math.Max(lane.X, playheadX - 4), Math.Min(lane.Right - 1, playheadX + 4), top, activeEdge);
+                    DrawHorizontalLine(Math.Max(lane.X, playheadX - 4), Math.Min(lane.Right - 1, playheadX + 4), bottom, activeEdge);
+                }
             }
         }
 
@@ -481,7 +504,15 @@ internal sealed partial class GpuPanelRenderer
         }
 
         if (current == null)
+        {
+            DrawTextAt(
+                "NO TABLE DATA",
+                viewport.X + 4,
+                viewport.Y + Math.Max(1, viewport.Height / 2 - 4),
+                TextSizeScale1,
+                MutedText);
             return;
+        }
 
         OverlayColor identity = IdentityColor(current.Id, panel.Accent);
         long changeAge = currentIndex >= 0 ? currentSample - changes[currentIndex].SamplePosition : long.MaxValue;
@@ -494,17 +525,12 @@ internal sealed partial class GpuPanelRenderer
         DrawHorizontalLine(viewport.X, viewport.Right - 1, viewport.Bottom - 1, frame);
         if (viewport.Bottom + 2 < timeline.Bottom)
         {
-            string label = PresentationMetadata.OptionalLabel(current.DisplayName)
-                ?? PresentationMetadata.OptionalLabel(current.Id);
-            if (label is not null)
-            {
-                DrawTextAt(
-                    label,
-                    viewport.X + 4,
-                    viewport.Bottom + 2,
-                    TextSizeScale1,
-                    BrightText.WithAlpha(210));
-            }
+            DrawTextAt(
+                current.DisplayName ?? current.Id,
+                viewport.X + 4,
+                viewport.Bottom + 2,
+                TextSizeScale1,
+                BrightText.WithAlpha(210));
         }
     }
 
@@ -590,25 +616,163 @@ internal sealed partial class GpuPanelRenderer
         double right = Math.Min(lane.Right, _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
         if (right <= left)
             return;
-        int rowHeight = Math.Max(10, lane.Height / Math.Max(1, rowCount));
-        int height = Math.Max(8, rowHeight - 2);
-        int y = lane.Y + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight + (rowHeight - height) / 2;
+        int rowHeight = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+            ? Math.Min(24, Math.Max(12, lane.Height / Math.Max(1, rowCount)))
+            : Math.Max(10, lane.Height / Math.Max(1, rowCount));
+        int height = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+            ? Math.Max(8, rowHeight - 2)
+            : Math.Max(8, rowHeight - 2);
+        int y = _layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+            ? lane.Y + Math.Max(0, (lane.Height - rowCount * rowHeight) / 2)
+                + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight
+                + (rowHeight - height) / 2
+            : lane.Y + Math.Min(rowCount - 1, Math.Max(0, rowIndex)) * rowHeight
+                + (rowHeight - height) / 2;
 
+        SampleDefinition sample = panel.SamplesById.TryGetValue(value.SampleId, out SampleDefinition resolved)
+            ? resolved
+            : null;
         OverlayColor identity = IdentityColor(value.SampleId, panel.Accent);
         int leftI = (int)Math.Round(left);
         int widthI = Math.Max(1, (int)Math.Round(right - left));
         FillRect(new OverlayRect(leftI, y, widthI, height), identity.WithAlpha(70));
         StrokeRectOutline(leftI, y, leftI + widthI - 1, y + height - 1, identity.WithAlpha(190));
 
+        if (sample?.Preview is { Length: > 0 } preview)
+        {
+            DrawSamplePreview(
+                new OverlayRect(leftI + 2, y + 2, Math.Max(1, widthI - 4), Math.Max(1, height - 4)),
+                preview,
+                identity.WithAlpha(210));
+        }
+
         int startX = (int)Math.Round(_layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
         if (startX >= lane.X && startX < lane.Right)
             DrawVerticalLine(startX, y - 1, Math.Min(lane.Bottom - 1, y + height), panel.Accent.Lighten(0.45));
 
-        string label = ShortAssetLabel(
-            panel.SamplesById.TryGetValue(value.SampleId, out SampleDefinition sample) ? sample.DisplayName : null,
-            value.SampleId);
+        string label = ShortAssetLabel(sample?.DisplayName, value.SampleId);
         if (widthI >= 28 && y + 1 < lane.Bottom - 1)
             DrawTextWithLimit(label, leftI + 3, y + 1, TextSizeScale1, BrightText.WithAlpha(210), Math.Min(lane.Right - 2, leftI + widthI - 2));
+    }
+
+    private void DrawDacActivityLane(
+        int panelIndex,
+        PreparedPanel panel,
+        long currentSample,
+        long windowStart,
+        long windowEnd)
+    {
+        if (panel.DacActivity.Length == 0)
+            return;
+
+        OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+        var lane = new OverlayRect(
+            timeline.X + _layout.PitchLabelWidth,
+            timeline.Y,
+            Math.Max(1, timeline.Width - _layout.PitchLabelWidth),
+            timeline.Height);
+        foreach (DacActivityEvent value in panel.DacActivity)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+
+            double level = Math.Clamp(value.Level, 0, 1);
+            int height = Math.Clamp(
+                (int)Math.Round(Math.Max(2, lane.Height - 8) * level),
+                2,
+                Math.Max(2, lane.Height - 4));
+            int y = lane.Y + Math.Max(0, (lane.Height - height) / 2);
+            bool active = value.StartSample <= currentSample && currentSample < value.EndSample;
+            OverlayColor color = IdentityColor(value.SampleId, panel.Accent)
+                .Lighten(active ? 0.25 : 0.08)
+                .WithAlpha((byte)Math.Clamp(95 + level * 110, 0, 220));
+            int leftI = Math.Max(lane.X, (int)Math.Floor(left));
+            int rightI = Math.Min(lane.Right, Math.Max(leftI + 1, (int)Math.Ceiling(right)));
+            FillRect(new OverlayRect(leftI, y, Math.Max(1, rightI - leftI), height), color);
+        }
+    }
+
+    private void DrawDacHitsLane(
+        int panelIndex,
+        PreparedPanel panel,
+        long currentSample,
+        long windowStart,
+        long windowEnd)
+    {
+        if (panel.DacHits.Length == 0)
+            return;
+
+        OverlayRect timeline = _layout.GetTimelineRect(panelIndex);
+        var lane = new OverlayRect(
+            timeline.X + _layout.PitchLabelWidth,
+            timeline.Y,
+            Math.Max(1, timeline.Width - _layout.PitchLabelWidth),
+            timeline.Height);
+        foreach (DacHitEvent value in panel.DacHits)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+
+            bool active = value.StartSample <= currentSample && currentSample < value.EndSample;
+            OverlayColor color = DacHitColor(value.Classification, panel.Accent)
+                .WithAlpha((byte)(active ? 235 : 180));
+            int leftI = Math.Max(lane.X, (int)Math.Floor(left));
+            int rightI = Math.Min(lane.Right, Math.Max(leftI + 1, (int)Math.Ceiling(right)));
+            int height = Math.Clamp(
+                4 + (int)Math.Round(Math.Clamp(value.PeakLevel, 0, 1) * Math.Min(10, lane.Height - 6)),
+                4,
+                Math.Max(4, lane.Height - 2));
+            int y = lane.Y + Math.Max(0, (lane.Height - height) / 2);
+            FillRect(new OverlayRect(leftI, y, Math.Max(1, rightI - leftI), height), color);
+            if (active)
+            {
+                StrokeRectOutline(leftI, y, rightI - 1, y + height - 1, BrightText.WithAlpha(220));
+            }
+        }
+    }
+
+    private void DrawSamplePreview(
+        OverlayRect viewport,
+        IReadOnlyList<WaveformEnvelopePoint> preview,
+        OverlayColor color)
+    {
+        if (preview.Count == 0 || viewport.Width <= 0 || viewport.Height <= 0)
+            return;
+
+        DrawHorizontalLine(
+            viewport.X,
+            viewport.Right - 1,
+            viewport.Y + viewport.Height / 2,
+            color.WithAlpha(90));
+        for (int index = 0; index < preview.Count; index++)
+        {
+            int x = viewport.X + (int)Math.Round(
+                index * (viewport.Width - 1.0) / Math.Max(1, preview.Count - 1));
+            int minimum = SamplePreviewY(preview[index].Minimum, viewport);
+            int maximum = SamplePreviewY(preview[index].Maximum, viewport);
+            DrawVerticalLine(x, Math.Min(minimum, maximum), Math.Max(minimum, maximum), color);
+        }
+    }
+
+    private static int SamplePreviewY(float value, OverlayRect viewport)
+    {
+        double normalized = Math.Clamp(value, -1, 1);
+        return viewport.Bottom - 1 - (int)Math.Round(
+            (normalized + 1) * 0.5 * Math.Max(0, viewport.Height - 1));
     }
 
     // ------------------------------------------------------------------
@@ -654,10 +818,13 @@ internal sealed partial class GpuPanelRenderer
             }
         }
 
-        string state = active && activeIndex >= 0 && activeIndex < panel.NoiseLabels.Length
-            ? panel.NoiseLabels[activeIndex]
-            : panel.HasTrackEvents ? "NOISE" : "SILENT";
-        DrawTextAt(state, lane.X + 6, lane.Bottom - 14, TextSizeScale1, active ? BrightText : MutedText);
+        if (_layout.Variant != VisualizationLayoutVariant.PerformanceLanes)
+        {
+            string state = active && activeIndex >= 0 && activeIndex < panel.NoiseLabels.Length
+                ? panel.NoiseLabels[activeIndex]
+                : panel.HasTrackEvents ? "NOISE" : "SILENT";
+            DrawTextAt(state, lane.X + 6, lane.Bottom - 14, TextSizeScale1, active ? BrightText : MutedText);
+        }
     }
 
     /// <summary>
@@ -1015,6 +1182,15 @@ internal sealed partial class GpuPanelRenderer
         return new OverlayColor(r, g, b, fallback.A);
     }
 
+    private static OverlayColor DacHitColor(DacHitClass classification, OverlayColor fallback)
+        => classification switch
+        {
+            DacHitClass.Kick => new OverlayColor(232, 128, 76, fallback.A),
+            DacHitClass.Snare => new OverlayColor(94, 185, 226, fallback.A),
+            DacHitClass.Tom => new OverlayColor(181, 126, 232, fallback.A),
+            _ => fallback.Lighten(0.10),
+        };
+
     /// <summary>First playback event whose end exceeds <paramref name="sample"/>.</summary>
     private static int LowerBoundPlaybackGpu(SamplePlaybackEvent[] events, long sample)
     {
@@ -1085,25 +1261,6 @@ internal sealed partial class GpuPanelRenderer
         DrawVerticalLine(right, top, bottom, color);
     }
 
-    private void DrawPathOutline(SKPath path, OverlayColor color)
-    {
-        SKPaintStyle previousStyle = _fillPaint.Style;
-        float previousWidth = _fillPaint.StrokeWidth;
-        bool previousAA = _fillPaint.IsAntialias;
-        SKColor previousColor = _fillPaint.Color;
-
-        _fillPaint.Style = SKPaintStyle.Stroke;
-        _fillPaint.StrokeWidth = 1.2f;
-        _fillPaint.IsAntialias = true;
-        _fillPaint.Color = ToSk(color);
-        Canvas.DrawPath(path, _fillPaint);
-
-        _fillPaint.Color = previousColor;
-        _fillPaint.Style = previousStyle;
-        _fillPaint.StrokeWidth = previousWidth;
-        _fillPaint.IsAntialias = previousAA;
-    }
-
     private void DrawHorizontalLine(int xLeft, int xRight, int y, OverlayColor color)
     {
         if (xRight < xLeft)
@@ -1112,11 +1269,4 @@ internal sealed partial class GpuPanelRenderer
         Canvas.DrawRect(new SKRect(xLeft, y, xRight + 1, y + 1), _fillPaint);
     }
 
-    private void DrawCircle(int cx, int cy, float radius, OverlayColor color)
-    {
-        if (radius <= 0)
-            return;
-        _fillPaint.Color = ToSk(color);
-        Canvas.DrawCircle(cx, cy, radius, _fillPaint);
-    }
 }

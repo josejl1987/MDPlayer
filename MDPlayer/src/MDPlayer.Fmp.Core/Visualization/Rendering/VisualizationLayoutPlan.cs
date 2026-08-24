@@ -165,9 +165,11 @@ internal sealed record VisualizationLayoutPlan(
             regions.Add(Region($"panel.{index + 1}.header", "header", layout.GetHeaderRect(index)));
             if (layout.HasRoll)
                 regions.Add(Region($"panel.{index + 1}.timeline", "semantic", layout.GetTimelineRect(index)));
-            if (layout.HasScopes)
+            if (layout.HasScopes && layout.Variant != VisualizationLayoutVariant.PerformanceLanes)
                 regions.Add(Region($"panel.{index + 1}.scope", "scope", layout.GetScopeRect(index)));
         }
+        if (layout.HasScopes && layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+            regions.Add(Region("master-waveform", "scope", layout.MasterWaveformRect));
 
         double frameRate = fpsNumerator / (double)Math.Max(1, fpsDenominator);
         long estimatedFrames = frameRate > 0 && timeline.SampleRate > 0

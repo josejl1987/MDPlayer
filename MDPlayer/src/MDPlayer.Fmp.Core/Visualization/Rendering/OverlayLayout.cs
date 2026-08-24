@@ -15,6 +15,14 @@ internal readonly record struct ResolvedPanelGrid(
     int Columns,
     int Rows);
 
+internal enum PerformanceLaneKind
+{
+    Pitched,
+    Sample,
+    Noise,
+    Compact,
+}
+
 /// <summary>
 /// Adaptive panel geometry shared by the musical overlay and the Corrscope
 /// compositor. The current single composition is the diagnostic full channel
@@ -80,7 +88,8 @@ internal sealed class OverlayLayout
         double? scopeRatioOverride = null,
         VisualizationScopePosition scopePosition = VisualizationScopePosition.Top,
         bool? showScopes = null,
-        bool? showRoll = null)
+        bool? showRoll = null,
+        IReadOnlyList<PerformanceLaneKind> performanceLaneKinds = null)
     {
         if (panelCount is < 1 or > 64)
             throw new ArgumentOutOfRangeException(nameof(panelCount), "Panel count must be between 1 and 64.");
@@ -125,12 +134,19 @@ internal sealed class OverlayLayout
         // and the bottom bar is then nudged so the remaining grid height is an
         // exact multiple of Rows — silent integer truncation is never allowed
         // because Corrscope and the overlay must agree on exact cell sizes.
-        int nominalTop = ClampBand((int)Math.Round(height * (DefaultTopBarHeight / 1080.0)), 32, 96);
-        int nominalBottom = ClampBand((int)Math.Round(height * (DefaultBottomBarHeight / 1080.0)), 24, 64);
+        bool performanceLanes = variant == VisualizationLayoutVariant.PerformanceLanes;
+        int nominalTop = performanceLanes
+            ? ClampBand((int)Math.Round(height * (55.0 / 1080.0)), 32, 72)
+            : ClampBand((int)Math.Round(height * (DefaultTopBarHeight / 1080.0)), 32, 96);
+        int nominalBottom = performanceLanes
+            ? ClampBand((int)Math.Round(height * (25.0 / 1080.0)), 20, 40)
+            : ClampBand((int)Math.Round(height * (DefaultBottomBarHeight / 1080.0)), 24, 64);
 
         int gridHeight = height - nominalTop - nominalBottom;
-        // Adjust the bottom bar so the grid divides evenly into Rows.
-        int remainder = gridHeight % RowCount;
+        // Diagnostic grids require equal Corrscope rows. Performance lanes use
+        // weighted bands, so their grid deliberately does not need to divide
+        // evenly by row count.
+        int remainder = performanceLanes ? 0 : gridHeight % RowCount;
         if (remainder != 0)
         {
             // Push the shortfall into the bottom bar so the top bar stays stable
@@ -141,7 +157,7 @@ internal sealed class OverlayLayout
 
         if (gridHeight <= 0)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the metadata bands and panel grid.");
-        if (gridHeight % RowCount != 0)
+        if (!performanceLanes && gridHeight % RowCount != 0)
             throw new ArgumentException($"Grid height ({gridHeight}) must be divisible by {RowCount}.", nameof(height));
         if (width < 480 && variant is VisualizationLayoutVariant.DiagnosticGrid
             or VisualizationLayoutVariant.PerformanceLanes)
@@ -162,7 +178,25 @@ internal sealed class OverlayLayout
         RowGap = 0;
 
         PanelWidth = width / ColumnCount;
-        PanelHeight = GridHeight / RowCount;
+        int uniformPanelHeight = GridHeight / RowCount;
+        MasterWaveformHeight = performanceLanes && HasScopes
+            ? Math.Clamp(
+                (int)Math.Round(height * (120.0 / 1080.0)),
+                16,
+                Math.Max(16, GridHeight - RowCount))
+            : 0;
+        PerformanceLaneHeights = performanceLanes
+            ? BuildPerformanceLaneHeights(
+                Math.Max(0, GridHeight - MasterWaveformHeight),
+                performanceLaneKinds,
+                RowCount)
+            : Array.Empty<int>();
+        PerformanceLaneOffsets = performanceLanes
+            ? BuildPerformanceLaneOffsets(PerformanceLaneHeights)
+            : Array.Empty<int>();
+        PanelHeight = performanceLanes
+            ? (PerformanceLaneHeights.Count == 0 ? 0 : PerformanceLaneHeights.Max())
+            : uniformPanelHeight;
         if (PanelWidth <= 0)
             throw new ArgumentOutOfRangeException(nameof(width), "Canvas is too narrow for the panel layout.");
 
@@ -181,10 +215,10 @@ internal sealed class OverlayLayout
         int maxHeaderForScope = PanelHeight - 2 * minimumScopeHeight;
         PanelHeaderHeight = Math.Clamp(PanelHeaderHeight, 12, Math.Max(12, maxHeaderForScope));
         PanelHeaderHeight = Math.Min(PanelHeaderHeight, 40);
-        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+        if (performanceLanes)
         {
-            // Lanes have no header chrome: the full band is the roll and the
-            // channel label lives in the left pitch gutter instead.
+            // Lanes have no header chrome: identity and current state live in
+            // the left gutter while the band remains available to the roll.
             PanelHeaderHeight = 0;
         }
 
@@ -194,7 +228,13 @@ internal sealed class OverlayLayout
         if (scopeHeightOverride is null && scopeRatioOverride is not null)
             defaultScopeHeight = Math.Max(16, (int)Math.Round(availableContentHeight * scopeRatioOverride.Value));
 
-        if (UsesIntegratedRoll)
+        if (performanceLanes)
+        {
+            DividerHeight = 0;
+            ScopeHeight = HasScopes ? MasterWaveformHeight : 0;
+            TimelineHeight = PanelHeight;
+        }
+        else if (UsesIntegratedRoll)
         {
             // DiagnosticGrid has one shared body below the header. Any legacy
             // timeline override describes the old stacked geometry and would
@@ -256,16 +296,16 @@ internal sealed class OverlayLayout
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the panel timeline area.");
         if (HasScopes && ScopeHeight < 1)
             throw new ArgumentOutOfRangeException(nameof(height), "Canvas is too small for the scope area.");
-        // The left lane gutter carries semantic channel identity and the
-        // current-note badge, with pitch-axis labels sharing its right edge.
-        // Keep it compact but stable at video sizes instead of letting the
-        // status area collapse into the graph.
-        PitchLabelWidth = Math.Clamp(
-            (int)Math.Round(width * (100.0 / 1920.0)),
-            90,
-            125);
-        // Internal padding for the lane gutter: identity/status text is
-        // left-aligned while pitch/rhythm labels remain right-aligned.
+        // Performance lanes need a real identity/status gutter. Diagnostic
+        // grids retain their older compact pitch-only gutter.
+        PitchLabelWidth = performanceLanes
+            ? Math.Clamp((int)Math.Round(width * (112.0 / 1920.0)), 84, 124)
+            : Math.Min(
+                56,
+                Math.Max(20, (int)Math.Round(width * (28.0 / 1920.0))));
+        // Internal padding for the pitch gutter: labels right-align within the
+        // gutter, keeping 6px clear of the panel boundary and 4px clear of the
+        // lane grid line.
         PitchLabelInsetLeft = Math.Max(3, PitchLabelWidth / 5);
         PitchLabelInsetRight = Math.Max(3, PitchLabelWidth / 7);
         if (PitchLabelInsetLeft + PitchLabelInsetRight > PitchLabelWidth)
@@ -290,6 +330,9 @@ internal sealed class OverlayLayout
     public int RowGap { get; }
     public int PanelWidth { get; }
     public int PanelHeight { get; }
+    public IReadOnlyList<int> PerformanceLaneHeights { get; }
+    public IReadOnlyList<int> PerformanceLaneOffsets { get; }
+    public int MasterWaveformHeight { get; }
     public int PanelHeaderHeight { get; }
     public int SafeHorizontalMargin { get; }
     public int SafeVerticalMargin { get; }
@@ -297,7 +340,9 @@ internal sealed class OverlayLayout
     public int DividerHeight { get; }
     public double WindowSeconds => PastSeconds + FutureSeconds;
     public double PlayheadFraction { get; }
-    public int CorrscopeGridHeight => ScopeHeight * RowCount;
+    public int CorrscopeGridHeight => Variant == VisualizationLayoutVariant.PerformanceLanes
+        ? MasterWaveformHeight
+        : ScopeHeight * RowCount;
     public int CorrscopeGridWidth => Width;
     public double PastSeconds { get; }
     public double FutureSeconds { get; }
@@ -326,6 +371,23 @@ internal sealed class OverlayLayout
     public OverlayRect TopBarRect => new(0, 0, Width, TopBarHeight);
 
     public OverlayRect BottomBarRect => new(0, Height - BottomBarHeight, Width, BottomBarHeight);
+
+    public OverlayRect MasterWaveformRect
+        => Variant == VisualizationLayoutVariant.PerformanceLanes && MasterWaveformHeight > 0
+            ? new(0, GridY + GridHeight - MasterWaveformHeight, Width, MasterWaveformHeight)
+            : new(0, 0, 0, 0);
+
+    public OverlayRect MasterWaveformPlotRect
+    {
+        get
+        {
+            OverlayRect master = MasterWaveformRect;
+            if (master.Height <= 0)
+                return master;
+            int gutter = Math.Min(PitchLabelWidth, master.Width);
+            return new(master.X + gutter, master.Y, master.Width - gutter, master.Height);
+        }
+    }
 
     /// <summary>Reserved lower band for the optional analysis harmony strip.</summary>
     public OverlayRect HarmonyStripRect
@@ -362,8 +424,18 @@ internal sealed class OverlayLayout
         int row = panelIndex / ColumnCount;
         int x = OuterMargin + (int)((long)Width * column / ColumnCount);
         int nextX = OuterMargin + (int)((long)Width * (column + 1) / ColumnCount);
-        int y = GridY + OuterMargin + row * (PanelHeight + RowGap);
-        return new OverlayRect(x, y, nextX - x, PanelHeight);
+        int y = GridY + OuterMargin;
+        int panelHeight = PanelHeight;
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            y += PerformanceLaneOffsets[row];
+            panelHeight = PerformanceLaneHeights[row];
+        }
+        else
+        {
+            y += row * (PanelHeight + RowGap);
+        }
+        return new OverlayRect(x, y, nextX - x, panelHeight);
     }
 
     public OverlayRect GetHeaderRect(int panelIndex)
@@ -383,6 +455,8 @@ internal sealed class OverlayLayout
     public OverlayRect GetScopeRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+            return new OverlayRect(panel.X, panel.Y, 0, 0);
         if (UsesIntegratedRoll)
         {
             OverlayRect body = GetTimelineRect(panelIndex);
@@ -411,19 +485,30 @@ internal sealed class OverlayLayout
 
         if (Variant == VisualizationLayoutVariant.PerformanceLanes)
         {
-            // The lane label is a compact caption at the top of the pitch
-            // gutter: left-aligned, clear of the right-aligned pitch/rhythm
-            // labels that share the same column. State/patch slots collapse —
-            // lanes render no live header text.
+            // The gutter is the lane header in performance mode. Keep the
+            // channel name, live pitch/state, and instrument identity stacked
+            // so the roll itself remains a clean shared time axis.
             OverlayRect timeline = GetTimelineRect(panelIndex);
             int gutter = Math.Min(PitchLabelWidth, Math.Max(0, timeline.Width));
+            int left = timeline.X + PitchLabelInsetLeft;
+            int usableWidth = Math.Max(0, gutter - PitchLabelInsetLeft - PitchLabelInsetRight);
+            int lineHeight = timeline.Height >= 24
+                ? Math.Max(8, Math.Min(16, timeline.Height / 3))
+                : Math.Max(0, timeline.Height);
             var name = new OverlayRect(
-                timeline.X + PitchLabelInsetLeft,
-                timeline.Y + 1,
-                Math.Max(0, gutter - PitchLabelInsetLeft - PitchLabelInsetRight),
-                Math.Min(12, Math.Max(0, timeline.Height)));
-            var empty = new OverlayRect(name.X, name.Y, 0, 0);
-            return new PanelHeaderLayout(name, empty, empty);
+                left,
+                timeline.Y + 2,
+                usableWidth,
+                lineHeight);
+            if (lineHeight == 0 || timeline.Height < 24)
+            {
+                var empty = new OverlayRect(left, timeline.Y, 0, 0);
+                return new PanelHeaderLayout(name, empty, empty);
+            }
+            return new PanelHeaderLayout(
+                name,
+                new OverlayRect(left, name.Bottom + 1, usableWidth, lineHeight),
+                new OverlayRect(left, name.Bottom + lineHeight + 2, usableWidth, lineHeight));
         }
 
         int usableLeft = header.X + accentBar + leftInset;
@@ -447,6 +532,8 @@ internal sealed class OverlayLayout
     public OverlayRect GetTimelineRect(int panelIndex)
     {
         OverlayRect panel = GetPanelRect(panelIndex);
+        if (Variant == VisualizationLayoutVariant.PerformanceLanes)
+            return panel;
         if (UsesIntegratedRoll)
             return new OverlayRect(panel.X, panel.Y + PanelHeaderHeight, panel.Width, TimelineHeight);
         int y = ScopePosition == VisualizationScopePosition.Bottom
@@ -501,6 +588,63 @@ internal sealed class OverlayLayout
 
     private static int ClampBand(int value, int min, int max)
         => Math.Clamp(value, min, max);
+
+    private static int[] BuildPerformanceLaneHeights(
+        int totalHeight,
+        IReadOnlyList<PerformanceLaneKind> laneKinds,
+        int laneCount)
+    {
+        if (laneCount <= 0 || totalHeight <= 0)
+            return new int[Math.Max(0, laneCount)];
+
+        int[] weights = new int[laneCount];
+        for (int index = 0; index < laneCount; index++)
+        {
+            PerformanceLaneKind kind = laneKinds is not null && index < laneKinds.Count
+                ? laneKinds[index]
+                : PerformanceLaneKind.Compact;
+            weights[index] = kind switch
+            {
+                PerformanceLaneKind.Pitched => 330,
+                PerformanceLaneKind.Sample => 90,
+                PerformanceLaneKind.Noise => 70,
+                _ => 70,
+            };
+        }
+
+        int weightTotal = weights.Sum();
+        var heights = new int[laneCount];
+        var fractional = new (double Fraction, int Index)[laneCount];
+        int assigned = 0;
+        for (int index = 0; index < laneCount; index++)
+        {
+            double exact = totalHeight * (weights[index] / (double)weightTotal);
+            heights[index] = (int)Math.Floor(exact);
+            fractional[index] = (exact - heights[index], index);
+            assigned += heights[index];
+        }
+
+        foreach ((double _, int index) in fractional.OrderByDescending(value => value.Fraction))
+        {
+            if (assigned >= totalHeight)
+                break;
+            heights[index]++;
+            assigned++;
+        }
+        return heights;
+    }
+
+    private static int[] BuildPerformanceLaneOffsets(IReadOnlyList<int> heights)
+    {
+        var offsets = new int[heights.Count];
+        int offset = 0;
+        for (int index = 0; index < heights.Count; index++)
+        {
+            offsets[index] = offset;
+            offset += heights[index];
+        }
+        return offsets;
+    }
 
     /// <summary>
     /// Searches candidate column counts and returns the panel grid whose every

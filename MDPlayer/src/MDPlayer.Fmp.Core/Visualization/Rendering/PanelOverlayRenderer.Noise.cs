@@ -48,10 +48,13 @@ internal sealed partial class PanelOverlayRenderer
             }
         }
 
-        string state = active && activeIndex >= 0
-            ? panel.Prepared.NoiseLabels[activeIndex]
-            : panel.Prepared.HasTrackEvents ? "NOISE" : "SILENT";
-        DrawText(frame, lane.X + 6, lane.Bottom - 14, state, active ? BrightText : MutedText, 1, lane.Right - 6);
+        if (_layout.Variant != VisualizationLayoutVariant.PerformanceLanes)
+        {
+            string state = active && activeIndex >= 0
+                ? panel.Prepared.NoiseLabels[activeIndex]
+                : panel.Prepared.HasTrackEvents ? "NOISE" : "SILENT";
+            DrawText(frame, lane.X + 6, lane.Bottom - 14, state, active ? BrightText : MutedText, 1, lane.Right - 6);
+        }
     }
 
     private static int LowerBoundNoise(NoiseStateEvent[] events, long sample)

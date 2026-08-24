@@ -94,6 +94,9 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// Covers MIDI 0–127, i.e. octaves -1 through 10.
     /// </summary>
     private static readonly string[] COctaveLabels = BuildCOctaveLabels();
+    private static readonly string[] PitchClassNames =
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    private static readonly string[] PitchLabels = BuildPitchLabels();
 
     private static string[] BuildCOctaveLabels()
     {
@@ -157,12 +160,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         _layout.TopBarRect.Right - _layout.SafeHorizontalMargin - _fullFallbackClockWidth - 40;
 
     /// <summary>
-    /// Notes are born with an enlarged onset cap for this many milliseconds
-    /// (§8.5: 80–140 ms — 110 is the deterministic midpoint).
-    /// </summary>
-    private const double OnsetCapEnlargedMs = 110;
-
-    /// <summary>
     /// Duration of the FM instrument-change overlay (§13.2): the ALG/FB/AMS/PMS
     /// text + operator bars replace the normal patch token for 800 ms.
     /// </summary>
@@ -177,9 +174,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// note continues past the visible window (§8.6 timeline clipping).
     /// </summary>
     private const byte ClippedEndMarkerAlpha = 130;
-
-    /// <summary>Width of the onset/end cap in lanes wider than 480 px.</summary>
-    private const int CapWidthDivisor = 100;
 
     private readonly VisualizationTimeline _timeline;
     private readonly Options _options;
@@ -217,7 +211,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     private readonly EffectsMode _effects;
     private readonly AnalysisOverlayScene _analysisOverlay;
     private readonly RenderPerformanceMetrics _performance;
-    private readonly CurrentLaneStateResolver _laneStateResolver;
     private SequentialRenderState? _activeSequentialState;
     internal bool TestDisableZohRuns { get; set; }
 
@@ -330,7 +323,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             noteColorMode: _options.NoteColor,
             palette: _options.Palette);
         _panels = BuildPanels();
-        _laneStateResolver = new CurrentLaneStateResolver(_scene.Panels);
         AssignPanelStreamIds();
         _laneBaseAlphas = new double[_panels.Length][];
         _laneGridCache = new byte[_panels.Length][];
@@ -693,6 +685,13 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     {
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
             DrawPlayhead(destination, panelIndex);
+
+        OverlayRect master = _layout.MasterWaveformPlotRect;
+        if (master.Height > 0)
+        {
+            int x = master.X + (int)Math.Round(master.Width * _layout.PlayheadFraction);
+            DrawVerticalLine(destination, x, master.Y, master.Bottom - 1, Playhead.WithAlpha(180));
+        }
     }
 
     private void RenderMotionBlurFrame(
@@ -1352,7 +1351,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             DrawEnergyScopeBorder(destination, panel.Index, currentSample);
         }
 
-        DrawLaneStatuses(destination, currentSample);
         DrawPresentationTransition(destination, currentSample);
     }
 
@@ -1716,6 +1714,8 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         var rects = new List<OverlayRect>(2 + _panels.Length * 4);
         rects.Add(_layout.TopBarRect);
         rects.Add(_layout.BottomBarRect);
+        if (_layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+            rects.Add(_layout.MasterWaveformRect);
         for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
         {
             rects.Add(_layout.GetHeaderRect(panelIndex));
@@ -1832,6 +1832,18 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
 
     private ScopeCopyPlan[] BuildScopeCopyPlans()
     {
+        if (_layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            OverlayRect plot = _layout.MasterWaveformPlotRect;
+            if (plot.Width <= 0 || plot.Height <= 0)
+                return Array.Empty<ScopeCopyPlan>();
+            return [new ScopeCopyPlan(
+                plot.X * 4,
+                (plot.Y * Width + plot.X) * 4,
+                plot.Width * 4,
+                plot.Height)];
+        }
+
         int sourceWidth = _layout.CorrscopeGridWidth;
         int sourceStride = sourceWidth * 4;
         int scopeHeight = _layout.ScopeHeight;
@@ -2140,6 +2152,31 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         return cameras;
     }
 
+    private void DrawStaticMasterWaveform(Span<byte> frame)
+    {
+        OverlayRect master = _layout.MasterWaveformRect;
+        if (master.Height <= 0)
+            return;
+
+        FillRect(frame, master, TimelineBackground);
+        StrokeRect(frame, master, Border, 1);
+        OverlayRect gutter = new(
+            master.X,
+            master.Y,
+            Math.Min(_layout.PitchLabelWidth, master.Width),
+            master.Height);
+        FillRect(frame, gutter, HeaderBackground);
+        DrawText(
+            frame,
+            master.X + _layout.PitchLabelInsetLeft,
+            master.Y + Math.Max(2, (master.Height - 7) / 2),
+            "MASTER",
+            PrimaryText,
+            1,
+            gutter.Right - _layout.PitchLabelInsetRight);
+        OverlayRect plot = _layout.MasterWaveformPlotRect;
+        DrawHorizontalLine(frame, plot.X, plot.Right - 1, plot.Y + plot.Height / 2, GridLine.WithAlpha(150));
+    }
 
     private void BuildStaticFrame(Span<byte> frame, bool drawFallbackText)
     {
@@ -2182,14 +2219,6 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
             ClearRect(frame, scope);
             if (!lanes)
                 StrokeRect(frame, scope, Border.WithAlpha(180), 1);
-            FillRect(
-                frame,
-                new OverlayRect(
-                    timeline.X,
-                    timeline.Y,
-                    Math.Min(_layout.PitchLabelWidth, Math.Max(0, timeline.Width)),
-                    timeline.Height),
-                HeaderBackground);
 
             if (!lanes)
             {
@@ -2210,6 +2239,25 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                         nameSlot.Right);
                 }
             }
+            else
+            {
+                // Lane label: compact scale-1 caption at the top of the pitch
+                // gutter, left-aligned so right-aligned pitch/rhythm labels in
+                // the same column stay readable.
+                OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
+                if (nameSlot.Width > 0)
+                {
+                    DrawText(
+                        frame,
+                        nameSlot.X,
+                        nameSlot.Y,
+                        Ellipsize(_panels[index].Label, 1, nameSlot.Width),
+                        PrimaryText,
+                        1,
+                        nameSlot.Right);
+                }
+            }
+
             switch (_panels[index].TrackKind)
             {
                 case VisualizationTrackKind.Pitched:
@@ -2251,14 +2299,33 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                     DrawStaticPcmLanes(frame, _panels[index], timeline);
                     if (!_panels[index].Prepared.HasTrackEvents)
                     {
-                        if (!HasEnergyEnvelope(index) || !HasAudioEnergy(index))
-                            DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4),
-                                "SILENT", MutedText, 1, timeline.Right - 8);
+                        string stateLabel = HasEnergyEnvelope(index)
+                            ? HasAudioEnergy(index)
+                                ? "AUDIO / EVENTS UNKNOWN"
+                                : "SILENT"
+                            : "NO DATA";
+                        DrawText(frame, timeline.X + 10, timeline.Y + Math.Max(2, timeline.Height / 2 - 4), stateLabel, MutedText, 1, timeline.Right - 8);
                     }
                     break;
             }
 
-            DrawStaticLaneIdentity(frame, _panels[index], timeline);
+            // Pitched/PCM/noise chrome paints the gutter after the generic lane
+            // setup above, so stamp the performance identity last.
+            if (lanes)
+            {
+                OverlayRect nameSlot = _layout.HeaderSlots(index).Name;
+                if (nameSlot.Width > 0)
+                {
+                    DrawText(
+                        frame,
+                        nameSlot.X,
+                        nameSlot.Y,
+                        Ellipsize(_panels[index].Label, 1, nameSlot.Width),
+                        _panelAccents[index].Lighten(0.12).WithAlpha(235),
+                        1,
+                        nameSlot.Right);
+                }
+            }
         }
 
         // Performance lanes: thin separators between adjacent bands instead of
@@ -2270,6 +2337,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
                 int separatorY = _layout.GetPanelRect(index).Y;
                 DrawHorizontalLine(frame, 0, Width - 1, separatorY - 1, Border);
             }
+            DrawStaticMasterWaveform(frame);
         }
 
         // Top and bottom metadata bars (chrome). The clock and progress bar are
@@ -2360,7 +2428,7 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
         int x = maxX - labelWidth;
         if (x < minX)
             x = minX;
-        DrawText(frame, x, labelY, label, TertiaryText.WithAlpha(105), 1, maxX);
+        DrawText(frame, x, labelY, label, TertiaryText, 1, maxX);
     }
 
     private void DrawPitchGridRange(Span<byte> frame, OverlayRect lane, OverlayRect timeline, double minMidi, double maxMidi, int panelIndex = -1)

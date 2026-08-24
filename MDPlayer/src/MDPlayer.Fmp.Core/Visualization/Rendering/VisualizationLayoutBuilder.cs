@@ -64,7 +64,8 @@ internal static class VisualizationLayoutBuilder
             settings.ScopeHeight,
             settings.TimelineHeight,
             settings.RollZoom,
-            settings.ScopeRatio);
+            settings.ScopeRatio,
+            settings.ScopesEnabled);
 
         if (VisualizationContentAvailability.HasRenderableContent(timeline))
             VisualizationLayoutValidator.Validate(layout.Geometry, topology);

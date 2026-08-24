@@ -45,6 +45,8 @@ internal sealed class PreparedPanel
     public required SampleDefinition[] Samples { get; init; }
     public required IReadOnlyDictionary<string, SampleDefinition> SamplesById { get; init; }
     public required SamplePlaybackEvent[] SamplePlayback { get; init; }
+    public required DacActivityEvent[] DacActivity { get; init; }
+    public required DacHitEvent[] DacHits { get; init; }
     public required SpcVoiceStateEvent[] SpcVoiceStates { get; init; }
     public required NoiseStateEvent[] Noise { get; init; }
     public required string[] NoiseLabels { get; init; }

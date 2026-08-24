@@ -14,11 +14,9 @@ internal sealed partial class GpuPanelRenderer
     private const float TextSizeScale1 = 9f;
     private const float TextSizeScale2 = 14f;
     private const float TextSizeScale3 = 21f;
-    private const float PitchAxisTextSize = 8f;
 
     /// <summary>Int glyph height used for vertical centering at scale 1.</summary>
     private const int TextSizeScale1Glyph = 9;
-    private const int PitchAxisTextGlyph = 8;
 
     private OverlayColor PrimaryTextColor => _primaryText;
     private OverlayColor SecondaryTextColor => _secondaryText;
@@ -77,6 +75,95 @@ internal sealed partial class GpuPanelRenderer
             FillRect(
                 new OverlayRect(bar.X, bar.Y, Math.Max(1, (int)Math.Round(progressRight - bar.X)), progressHeight),
                 new OverlayColor(122, 164, 255));
+    }
+
+    private void DrawLaneStatuses(long currentSample)
+    {
+        if (_layout.Variant != VisualizationLayoutVariant.PerformanceLanes)
+            return;
+
+        for (int panelIndex = 0; panelIndex < _panels.Length; panelIndex++)
+        {
+            PreparedPanel panel = _panels[panelIndex];
+            PanelHeaderLayout slots = _layout.HeaderSlots(panelIndex);
+            if (slots.State.Width <= 0)
+                continue;
+
+            PreparedNote active = FindActive(panel.MainNotes, currentSample);
+            string state = active is not null
+                ? FormatPitchWithCents(NotePitchAt(active, currentSample))
+                : panel.Kind == PreparedPanelKind.Noise
+                    ? CurrentNoiseLabel(panel, currentSample)
+                    : panel.Kind == PreparedPanelKind.PcmVoice
+                        ? CurrentSampleLabel(panel, currentSample)
+                        : "";
+            if (!string.IsNullOrEmpty(state))
+            {
+                DrawTextWithLimit(
+                    state,
+                    slots.State.X,
+                    slots.State.Y,
+                    TextSizeScale1,
+                    active is not null ? BrightText : SecondaryTextColor,
+                    slots.State.Right);
+            }
+
+            string patch = active?.Text.ShortLabel ?? "";
+            if (!string.IsNullOrEmpty(patch))
+            {
+                DrawTextWithLimit(
+                    patch,
+                    slots.Patch.X,
+                    slots.Patch.Y,
+                    TextSizeScale1,
+                    TertiaryTextColor,
+                    slots.Patch.Right);
+            }
+        }
+    }
+
+    private static string CurrentSampleLabel(PreparedPanel panel, long currentSample)
+    {
+        foreach (DacHitEvent hit in panel.DacHits)
+        {
+            if (hit.StartSample <= currentSample && currentSample < hit.EndSample)
+            {
+                string sample = panel.SamplesById.TryGetValue(hit.SampleId, out SampleDefinition definition)
+                    ? ShortAssetLabel(definition.DisplayName, hit.SampleId)
+                    : hit.SampleId;
+                return $"~{DacHitLabel(hit.Classification)} {sample}";
+            }
+        }
+        foreach (SamplePlaybackEvent value in panel.SamplePlayback)
+        {
+            if (value.StartSample <= currentSample && currentSample < value.EndSample)
+            {
+                return panel.SamplesById.TryGetValue(value.SampleId, out SampleDefinition sample)
+                    ? ShortAssetLabel(sample.DisplayName, value.SampleId)
+                    : ShortAssetLabel(null, value.SampleId);
+            }
+        }
+        return panel.HasTrackEvents ? "DAC" : "SILENT";
+    }
+
+    private static string DacHitLabel(DacHitClass classification)
+        => classification switch
+        {
+            DacHitClass.Kick => "KICK",
+            DacHitClass.Snare => "SNARE",
+            DacHitClass.Tom => "TOM",
+            _ => "HIT",
+        };
+
+    private static string CurrentNoiseLabel(PreparedPanel panel, long currentSample)
+    {
+        for (int index = 0; index < panel.Noise.Length; index++)
+        {
+            NoiseStateEvent value = panel.Noise[index];
+            if (value.StartSample <= currentSample && currentSample < value.EndSample)
+                return index < panel.NoiseLabels.Length ? panel.NoiseLabels[index] : "NOISE";
+        }
+        return panel.HasTrackEvents ? "NOISE" : "SILENT";
     }
 
     private string FormatClock(long currentSample)

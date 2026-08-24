@@ -28,7 +28,11 @@ internal sealed partial class PanelOverlayRenderer
             }
         }
         if (current == null)
+        {
+            DrawText(frame, viewport.X + 4, viewport.Y + Math.Max(1, viewport.Height / 2 - 4),
+                "NO TABLE DATA", MutedText, 1, viewport.Right - 4);
             return;
+        }
 
         OverlayColor identity = IdentityColor(current.Id, panel.Prepared.Accent);
         WaveformPreviewRenderer.DrawPeriodicWaveform(frame, Width, viewport, current.Preview,
@@ -36,10 +40,8 @@ internal sealed partial class PanelOverlayRenderer
         long changeAge = currentIndex >= 0 ? currentSample - changes[currentIndex].SamplePosition : long.MaxValue;
         bool emphasized = changeAge >= 0 && changeAge < (long)Math.Round(0.150 * _timeline.SampleRate);
         StrokeRect(frame, viewport, identity.WithAlpha(emphasized ? (byte)255 : (byte)150), emphasized ? 2 : 1);
-        string label = PresentationMetadata.OptionalLabel(current.DisplayName)
-            ?? PresentationMetadata.OptionalLabel(current.Id);
-        if (label is not null)
-            DrawText(frame, viewport.X + 4, viewport.Bottom + 2, label, BrightText.WithAlpha(210), 1, viewport.Right - 4);
+        string label = current.DisplayName ?? current.Id;
+        DrawText(frame, viewport.X + 4, viewport.Bottom + 2, label, BrightText.WithAlpha(210), 1, viewport.Right - 4);
     }
 
     private static WaveformDefinition FindWaveform(

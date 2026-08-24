@@ -255,13 +255,9 @@ internal sealed partial class PanelOverlayRenderer
             playheadX, windowStart, windowSamples / lane.Width);
 
         long decoStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
-        // Onset cap (§8.5): a bright, opaque, accent-bordered bar at the note
-        // start, enlarged for the first ~110 ms. Retriggers get a double cap
-        // (│▌) so repeated attacks on the same pitch remain visible. Caps are
-        // drawn only for onsets that occur inside the visible window — an
-        // onset that already happened off-screen must not fake a cap at the
-        // lane edge.
-        int capWidth = Math.Max(3, lane.Width / CapWidthDivisor);
+        // Onset edge: one quiet lane-colored attack marker. Repeated cream
+        // blocks made every onset compete with the musical contour. The edge
+        // is drawn only for onsets inside the visible window.
         if (onsetVisible)
         {
             double startMidi = note.StartMidiNote;
@@ -270,34 +266,18 @@ internal sealed partial class PanelOverlayRenderer
                 startMidi = PitchContour.PitchAtSample(
                     note, note.StartSample, _samplesPerFrame);
             }
-            double ageMs = (currentSample - note.StartSample) * 1000.0 / _timeline.SampleRate;
-            bool enlarged = ageMs >= 0 && ageMs < OnsetCapEnlargedMs;
             int capX = (int)Math.Round(
                 _layout.SampleToX(note.StartSample, currentSample, _timeline.SampleRate, lane));
-            int capHeight = ribbonHeight + (enlarged ? 4 : 2);
+            int capHeight = ribbonHeight;
             int capCentreY = MidiToY(startMidi, minMidi, maxMidi, lane);
             int capTop = Math.Clamp(capCentreY - capHeight / 2, lane.Y, lane.Bottom - 1);
             int capBottom = Math.Clamp(capCentreY + (capHeight - capHeight / 2), lane.Y, lane.Bottom);
             if (capBottom > capTop && capX >= lane.X && capX < lane.Right)
             {
-                int blockX = capX;
+                OverlayColor onsetEdge = accent.Lighten(0.15).WithAlpha(185);
+                DrawVerticalLine(frame, capX, capTop, capBottom - 1, onsetEdge);
                 if (note.IsRetrigger)
-                {
-                    // Thin accent bar (the "│"), then the bordered block.
-                    DrawVerticalLine(frame, capX, capTop, capBottom - 1, accent);
-                    blockX = Math.Min(lane.Right - 1, capX + 1);
-                }
-                int capFillWidth = capWidth + (enlarged ? 1 : 0);
-                int blockLeft = Math.Max(lane.X, blockX);
-                int blockRight = Math.Min(lane.Right, blockX + capFillWidth);
-                if (blockRight > blockLeft)
-                {
-                    FillRectOpaque(frame, blockLeft, blockRight, capTop, capBottom, note.CapFill);
-                    DrawHorizontalLine(frame, blockLeft, blockRight - 1, capTop, accent);
-                    DrawHorizontalLine(frame, blockLeft, blockRight - 1, capBottom - 1, accent);
-                    DrawVerticalLine(frame, blockLeft, capTop, capBottom - 1, accent);
-                    DrawVerticalLine(frame, blockRight - 1, capTop, capBottom - 1, accent);
-                }
+                    DrawVerticalLine(frame, Math.Min(lane.Right - 1, capX + 1), capTop, capBottom - 1, onsetEdge);
             }
 
             // Onset contact ripple (§9.2): two expanding rings centered at the
@@ -338,7 +318,7 @@ internal sealed partial class PanelOverlayRenderer
                     int endTop = Math.Clamp(endCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
                     int endBottom = Math.Clamp(endCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
                     if (endBottom > endTop)
-                        FillRectOpaque(frame, endX, Math.Min(lane.Right, endX + 2), endTop, endBottom, note.CapFill);
+                        DrawVerticalLine(frame, endX, endTop, endBottom - 1, accent.WithAlpha(180));
                 }
             }
         }
@@ -358,7 +338,7 @@ internal sealed partial class PanelOverlayRenderer
             int markerTop = Math.Clamp(markerCentreY - (ribbonHeight + 1) / 2 - 1, lane.Y, lane.Bottom - 1);
             int markerBottom = Math.Clamp(markerCentreY + (ribbonHeight + 2) / 2 + 1, lane.Y, lane.Bottom);
             if (markerBottom > markerTop)
-                DrawVerticalLine(frame, lane.Right - 1, markerTop, markerBottom - 1, note.CapFill.WithAlpha(ClippedEndMarkerAlpha));
+                DrawVerticalLine(frame, lane.Right - 1, markerTop, markerBottom - 1, accent.WithAlpha(ClippedEndMarkerAlpha));
         }
 
         // Edge indicator for a deliberately clipped ornament (§11.3). The
@@ -385,7 +365,7 @@ internal sealed partial class PanelOverlayRenderer
             double leftMidi = PitchContour.PitchAtSample(note, (long)Math.Round(sampleAtLeft), _samplesPerFrame);
             int labelY = Math.Clamp(MidiToY(leftMidi, minMidi, maxMidi, lane) - ribbonHeight / 2, lane.Y, lane.Bottom - 1);
             // The envelope token follows the onset cap so it is never covered.
-            int labelX = left + (onsetVisible ? capWidth + 2 : 2);
+            int labelX = left + (onsetVisible ? Math.Max(3, lane.Width / 100) + 2 : 2);
             DrawText(frame, labelX, labelY, "E", BrightText, 1, right - 1);
         }
 

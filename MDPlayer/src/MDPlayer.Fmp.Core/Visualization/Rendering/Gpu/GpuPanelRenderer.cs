@@ -53,7 +53,6 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
     private readonly VisualizationTimeGridLine[] _timeGrid;
     private readonly GpuSkiaContext _context;
     private readonly RenderPerformanceMetrics _performance;
-    private readonly CurrentLaneStateResolver _laneStateResolver;
     private readonly object _gate = new();
     private int _exportCapacity;
 
@@ -97,6 +96,12 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
     private OverlayColor _primaryText;
     private OverlayColor _secondaryText;
     private OverlayColor _tertiaryText;
+
+    private static readonly string[] PitchClassNames =
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    /// <summary>Prepared pitch labels ("C4", "C4 +50c", ...) for the header state slot.</summary>
+    private static readonly string[] PitchLabels = BuildPitchLabels();
 
     private static readonly HashSet<int> BlackPitchClasses = new() { 1, 3, 6, 8, 10 };
 
@@ -142,7 +147,6 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
             noteColorMode: _options.NoteColor,
             palette: _options.Palette);
         _panels = _scene.Panels;
-        _laneStateResolver = new CurrentLaneStateResolver(_panels);
         _scopePlans = BuildScopePlans();
         _sampleRowByPlayback = BuildSampleRowByPlayback();
 
@@ -198,6 +202,9 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
 
     /// <summary>Raw GL texture id of export ring slot <paramref name="slot"/>.</summary>
     internal int ExportTextureId(int slot) => _context.ExportTextureId(slot);
+
+    /// <summary>Explicit GL-ownership scope around GL/CUDA interop.</summary>
+    internal IDisposable MakeCurrentScope() => _context.MakeCurrentScope();
 
     public long TotalFrames
         => FrameSampleClock.FrameCount(
@@ -565,7 +572,11 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
         if (_performance.Enabled)
             _performance.GridLineTicks += Stopwatch.GetTimestamp() - gridStart;
 
-        // 3) ONE Corrscope texture upload + one DrawImage per panel.
+        // 3) Fixed playheads (before the scope/dynamic layers, matching the
+        //    CPU draw order).
+        DrawPlayheads();
+
+        // 4) ONE Corrscope texture upload + one DrawImage per panel.
         if (withScopes)
         {
             long scopeStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
@@ -574,17 +585,14 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
                 _performance.ScopeUploadTicks += Stopwatch.GetTimestamp() - scopeStart;
         }
 
-        // 4) Dynamic panel content and lane status badges.
+        // 5) Dynamic panel content + per-frame header state/patch text.
         long dynamicStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawDynamicPanels(currentSample);
         DrawLaneStatuses(currentSample);
-        // Keep the single playhead above the active-note highlight and scope
-        // texture so its core remains easy to follow at the intersection.
-        DrawPlayheads();
         if (_performance.Enabled)
             _performance.DynamicTicks += Stopwatch.GetTimestamp() - dynamicStart;
 
-        // 5) Dynamic metadata text (clock, loop label, progress).
+        // 6) Dynamic metadata text (clock, loop label, progress).
         long textStart = _performance.Enabled ? Stopwatch.GetTimestamp() : 0;
         DrawClock(currentSample);
         DrawLoopLabel(frameIndex);
@@ -719,6 +727,66 @@ internal sealed partial class GpuPanelRenderer : IFrameOverlayRenderer, IGpuExpo
                 high = middle;
         }
         return low;
+    }
+
+    /// <summary>
+    /// Index of the first note whose start is strictly after
+    /// <paramref name="sample"/> (upper-bound style). Used by
+    /// <see cref="FindActive"/> for the "most recent note at sample" lookup.
+    /// </summary>
+    private static int LowerBoundNotes(PreparedNote[] notes, long sample)
+    {
+        int low = 0;
+        int high = notes.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low) / 2;
+            if (notes[middle].StartSample <= sample)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
+    }
+
+    /// <summary>The most recent note active at <paramref name="sample"/> (or null).</summary>
+    private static PreparedNote FindActive(PreparedNote[] notes, long sample)
+    {
+        for (int index = LowerBoundNotes(notes, sample) - 1; index >= 0 && index >= LowerBoundNotes(notes, sample) - 2; index--)
+        {
+            PreparedNote note = notes[index];
+            if (note.StartSample <= sample && sample < note.EndSample)
+                return note;
+        }
+        return null;
+    }
+
+    private static string[] BuildPitchLabels()
+    {
+        const int CentsPerNote = 201;
+        var labels = new string[128 * CentsPerNote];
+        for (int midi = 0; midi < 128; midi++)
+        {
+            string baseName = PitchClassNames[midi % 12] + (midi / 12 - 1);
+            for (int cents = -100; cents <= 100; cents++)
+            {
+                labels[midi * CentsPerNote + cents + 100] = Math.Abs(cents) < 8
+                    ? baseName
+                    : baseName + " " + (cents > 0 ? "+" : "") + cents + "c";
+            }
+        }
+        return labels;
+    }
+
+    private static string FormatPitchWithCents(double actualMidi)
+    {
+        if (!double.IsFinite(actualMidi) || actualMidi < 0)
+            return "";
+        int nearestMidi = (int)Math.Round(actualMidi);
+        if ((uint)nearestMidi >= 128u)
+            return "";
+        int cents = Math.Clamp((int)Math.Round((actualMidi - nearestMidi) * 100), -100, 100);
+        return PitchLabels[nearestMidi * 201 + cents + 100];
     }
 
     private static string FormatTime(double seconds)

@@ -66,7 +66,8 @@ internal static class VisualizationLayoutResolver
         int? scopeHeightOverride,
         int? timelineHeightOverride,
         double rollZoom,
-        double? scopeRatioOverride)
+        double? scopeRatioOverride,
+        bool scopesEnabled = true)
     {
         ArgumentNullException.ThrowIfNull(topology);
         if (mode == VisualizationLayoutMode.Performance)
@@ -85,7 +86,8 @@ internal static class VisualizationLayoutResolver
                 scopeHeightOverride,
                 timelineHeightOverride,
                 rollZoom,
-                scopeRatioOverride);
+                scopeRatioOverride,
+                scopesEnabled);
         }
 
         if (mode != VisualizationLayoutMode.Diagnostic)
@@ -198,7 +200,8 @@ internal static class VisualizationLayoutResolver
         int? scopeHeightOverride,
         int? timelineHeightOverride,
         double rollZoom,
-        double? scopeRatioOverride)
+        double? scopeRatioOverride,
+        bool scopesEnabled = true)
     {
         // One full-width lane per panel; rows always follow the topology so a
         // stale caller-supplied panel count can never skew the band height.
@@ -220,15 +223,27 @@ internal static class VisualizationLayoutResolver
             rollZoom,
             scopeRatioOverride,
             scopePosition,
-            showScopes: false,
-            showRoll: true);
+            showScopes: scopesEnabled,
+            showRoll: true,
+            performanceLaneKinds: topology.Panels
+                .Select(panel => panel.Schema switch
+                {
+                    PanelPresentationSchema.PitchedLane
+                        or PanelPresentationSchema.FmOperatorGroup
+                        or PanelPresentationSchema.WaveTableLane => PerformanceLaneKind.Pitched,
+                    PanelPresentationSchema.SampleLane => PerformanceLaneKind.Sample,
+                    PanelPresentationSchema.NoiseLane => PerformanceLaneKind.Noise,
+                    _ => PerformanceLaneKind.Compact,
+                })
+                .ToArray());
         (VisualizationLayoutDensity density, VisualizationLayoutCapabilities caps) =
             Decide(
                 geometry.PanelWidth,
                 geometry.PanelHeight,
                 geometry.ScopeHeight,
                 rollPossible: true,
-                scopesPossible: false);
+                scopesPossible: scopesEnabled);
+        caps = caps with { ShowScopes = scopesEnabled, ShowRoll = true };
         return new ResolvedVisualizationLayout(
             mode,
             VisualizationLayoutVariant.PerformanceLanes,

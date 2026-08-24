@@ -50,7 +50,7 @@ internal sealed partial class PanelOverlayRenderer
         int x = maxX - labelWidth;
         if (x < minX)
             x = minX;
-        DrawText(frame, x, y, label, TertiaryText.WithAlpha(105), 1, maxX);
+        DrawText(frame, x, y, label, TertiaryText, 1, maxX);
     }
 
     private void DrawClock(Span<byte> frame, long currentSample)
@@ -143,6 +143,12 @@ internal sealed partial class PanelOverlayRenderer
 
     private void DrawDynamicPanelHeader(Span<byte> frame, PanelData panel, long currentSample)
     {
+        if (_layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            DrawPerformanceLaneStatus(frame, panel, currentSample);
+            return;
+        }
+
         OverlayRect header = _layout.GetHeaderRect(panel.Index);
         if (header.Height <= 0)
             return;
@@ -183,16 +189,16 @@ internal sealed partial class PanelOverlayRenderer
 
         string patch = showOverlay
             ? ""
-            : PresentationMetadata.OptionalLabel(active?.Text.ShortLabel) ?? "";
+            : active?.Text.ShortLabel ?? "";
         string badges = showOverlay
-            ? PresentationMetadata.OptionalLabel(changeNote.Text.ChangeLabel) ?? ""
-            : PresentationMetadata.OptionalLabel(active?.Text.BadgeLabel) ?? "";
+            ? changeNote.Text.ChangeLabel
+            : active?.Text.BadgeLabel ?? "";
 
         if (!showOverlay
             && ChipPanelHeaderBuilder.TryBuild(
                 panel.Prepared, currentSample, _chipHeaderCursors[panel.Index], out PanelHeaderData chipHeader))
         {
-            patch = PresentationMetadata.OptionalLabel(chipHeader.Label) ?? "";
+            patch = chipHeader.Label;
             badges = "";
         }
 
@@ -284,6 +290,110 @@ internal sealed partial class PanelOverlayRenderer
         {
             DrawOperatorBars(frame, header, def, slots.Patch.Right, panel.Index);
         }
+    }
+
+    private void DrawPerformanceLaneStatus(Span<byte> frame, PanelData panel, long currentSample)
+    {
+        PanelHeaderLayout slots = _layout.HeaderSlots(panel.Index);
+        if (slots.State.Width <= 0)
+            return;
+
+        PreparedNote active = FindActive(panel.Prepared.MainNotes, panel.MainNoteStreamId, currentSample);
+        if (active == null && panel.TrackKind == VisualizationTrackKind.FmOperatorGroup)
+        {
+            int operatorCount = Math.Min(
+                panel.Prepared.OperatorNotes.Length, panel.OperatorNoteStreamIds.Length);
+            for (int operatorIndex = 0; operatorIndex < operatorCount; operatorIndex++)
+            {
+                active = FindActive(
+                    panel.Prepared.OperatorNotes[operatorIndex],
+                    panel.OperatorNoteStreamIds[operatorIndex],
+                    currentSample);
+                if (active != null)
+                    break;
+            }
+        }
+
+        string state = active is not null
+            ? FormatPitchWithCents(PitchContour.PitchAtSample(active, currentSample, _samplesPerFrame))
+            : panel.TrackKind == VisualizationTrackKind.Noise
+                ? CurrentPerformanceNoiseLabel(panel, currentSample)
+                : panel.TrackKind == VisualizationTrackKind.Sample
+                    ? CurrentPerformanceSampleLabel(panel, currentSample)
+                    : "";
+        if (!string.IsNullOrEmpty(state))
+        {
+            DrawText(
+                frame,
+                slots.State.X,
+                slots.State.Y,
+                Ellipsize(state, 1, slots.State.Width),
+                active is not null ? BrightText : SecondaryText,
+                1,
+                slots.State.Right);
+        }
+
+        string patch = active?.Text.ShortLabel ?? "";
+        if (!string.IsNullOrEmpty(patch))
+        {
+            DrawText(
+                frame,
+                slots.Patch.X,
+                slots.Patch.Y,
+                Ellipsize(patch, 1, slots.Patch.Width),
+                TertiaryText,
+                1,
+                slots.Patch.Right);
+        }
+    }
+
+    private static string CurrentPerformanceSampleLabel(PanelData panel, long currentSample)
+    {
+        foreach (DacHitEvent hit in panel.Prepared.DacHits)
+        {
+            if (hit.StartSample <= currentSample && currentSample < hit.EndSample)
+            {
+                string sample = panel.Prepared.SamplesById.TryGetValue(hit.SampleId, out SampleDefinition definition)
+                    ? ShortAssetLabel(definition.DisplayName, hit.SampleId)
+                    : hit.SampleId;
+                return $"~{DacHitLabel(hit.Classification)} {sample}";
+            }
+        }
+        foreach (SamplePlaybackEvent value in panel.Prepared.SamplePlayback)
+        {
+            if (value.StartSample <= currentSample && currentSample < value.EndSample)
+            {
+                return ShortAssetLabel(
+                    panel.Prepared.SamplesById.TryGetValue(value.SampleId, out SampleDefinition sample)
+                        ? sample.DisplayName
+                        : null,
+                    value.SampleId);
+            }
+        }
+        return panel.Prepared.HasTrackEvents ? "DAC" : "SILENT";
+    }
+
+    private static string DacHitLabel(DacHitClass classification)
+        => classification switch
+        {
+            DacHitClass.Kick => "KICK",
+            DacHitClass.Snare => "SNARE",
+            DacHitClass.Tom => "TOM",
+            _ => "HIT",
+        };
+
+    private static string CurrentPerformanceNoiseLabel(PanelData panel, long currentSample)
+    {
+        NoiseStateEvent[] events = panel.Prepared.Noise;
+        for (int index = 0; index < events.Length; index++)
+        {
+            NoiseStateEvent value = events[index];
+            if (value.StartSample <= currentSample && currentSample < value.EndSample)
+                return index < panel.Prepared.NoiseLabels.Length
+                    ? panel.Prepared.NoiseLabels[index]
+                    : "NOISE";
+        }
+        return panel.Prepared.HasTrackEvents ? "NOISE" : "SILENT";
     }
 
     /// <summary>Centres mono text of a given scale within a header rect.</summary>

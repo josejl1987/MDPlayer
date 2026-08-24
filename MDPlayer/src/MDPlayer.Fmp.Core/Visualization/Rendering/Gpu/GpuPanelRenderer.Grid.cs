@@ -79,6 +79,13 @@ internal sealed partial class GpuPanelRenderer
             if (x + 1 < timeline.Right)
                 DrawVerticalLine(x + 1, timeline.Y, timeline.Bottom - 1, PlayheadColor.WithAlpha(55));
         }
+
+        OverlayRect master = _layout.MasterWaveformPlotRect;
+        if (master.Height > 0)
+        {
+            int x = master.X + (int)Math.Round(master.Width * _layout.PlayheadFraction);
+            DrawVerticalLine(x, master.Y, master.Bottom - 1, PlayheadColor.WithAlpha(180));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -106,6 +113,19 @@ internal sealed partial class GpuPanelRenderer
 
     private ScopePlan[] BuildScopePlans()
     {
+        if (_layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            OverlayRect plot = _layout.MasterWaveformPlotRect;
+            if (plot.Width <= 0 || plot.Height <= 0)
+                return Array.Empty<ScopePlan>();
+            return [new ScopePlan(
+                plot.X * 4,
+                plot.X,
+                plot.Y,
+                plot.Width * 4,
+                plot.Height)];
+        }
+
         int sourceWidth = _layout.CorrscopeGridWidth;
         int sourceStride = sourceWidth * 4;
         int scopeHeight = _layout.ScopeHeight;

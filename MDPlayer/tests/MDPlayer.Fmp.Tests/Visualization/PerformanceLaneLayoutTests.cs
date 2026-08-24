@@ -33,7 +33,8 @@ public sealed class PerformanceLaneLayoutTests
             Assert.Equal(expectedY, band.Y);
             expectedY = band.Bottom;
         }
-        Assert.Equal(layout.Geometry.GridY + layout.Geometry.GridHeight, expectedY);
+        Assert.Equal(layout.Geometry.MasterWaveformRect.Y, expectedY);
+        Assert.Equal(layout.Geometry.BottomBarRect.Y, layout.Geometry.MasterWaveformRect.Bottom);
     }
 
     [Fact]
@@ -54,7 +55,9 @@ public sealed class PerformanceLaneLayoutTests
 
         Assert.Equal(0, layout.Geometry.PanelHeaderHeight);
         Assert.True(layout.Geometry.HasRoll);
-        Assert.False(layout.Geometry.HasScopes);
+        Assert.True(layout.Geometry.HasScopes);
+        Assert.Equal(layout.Geometry.MasterWaveformHeight, layout.Geometry.CorrscopeGridHeight);
+        Assert.Equal(112, layout.Geometry.PitchLabelWidth);
 
         for (int i = 0; i < layout.Geometry.PanelCount; i++)
         {
@@ -64,11 +67,60 @@ public sealed class PerformanceLaneLayoutTests
             Assert.Equal(band.Y, roll.Y);
             Assert.Equal(band.Height, roll.Height);
 
-            // Label caption lives inside the pitch gutter; state/patch collapse.
+            // Identity, live state, and patch text live inside the pitch gutter.
             PanelHeaderLayout slots = layout.Geometry.HeaderSlots(i);
-            Assert.True(slots.State.Width == 0 && slots.Patch.Width == 0);
+            Assert.True(slots.State.Width > 0 && slots.Patch.Width > 0);
             Assert.True(slots.Name.X >= roll.X && slots.Name.Right <= roll.X + layout.Geometry.PitchLabelWidth);
         }
+    }
+
+    [Fact]
+    public void MixedContent_WeightsPitchedLanesAboveSampleAndNoise()
+    {
+        var topology = new VisualizationTopology(
+        [
+            new VisualizationPanel("fm3", "FM3", PreparedPanelKind.Fm3, PanelContentKind.SingleVoice, 0, ["fm3"], [])
+            {
+                Schema = PanelPresentationSchema.FmOperatorGroup,
+            },
+            new VisualizationPanel("fm5", "FM5", PreparedPanelKind.Pitched, PanelContentKind.SingleVoice, 1, ["fm5"], [])
+            {
+                Schema = PanelPresentationSchema.PitchedLane,
+            },
+            new VisualizationPanel("dac", "DAC", PreparedPanelKind.PcmVoice, PanelContentKind.SingleVoice, 2, ["dac"], [])
+            {
+                Schema = PanelPresentationSchema.SampleLane,
+            },
+            new VisualizationPanel("noise", "NOISE", PreparedPanelKind.Noise, PanelContentKind.SingleVoice, 3, ["noise"], [])
+            {
+                Schema = PanelPresentationSchema.NoiseLane,
+            },
+        ]);
+
+        ResolvedVisualizationLayout layout = VisualizationLayoutResolver.ComposePerformance(
+            Width,
+            Height,
+            0.75,
+            2.25,
+            VisualizationLayoutMode.Performance,
+            topology,
+            VisualizationScopePosition.Bottom,
+            null,
+            null,
+            1.0,
+            null,
+            scopesEnabled: true);
+
+        int[] heights = layout.Geometry.PerformanceLaneHeights.ToArray();
+        Assert.Equal(4, heights.Length);
+        Assert.True(heights[0] > heights[2]);
+        Assert.True(heights[1] > heights[3]);
+        Assert.Equal(55, layout.Geometry.TopBarHeight);
+        Assert.Equal(25, layout.Geometry.BottomBarHeight);
+        Assert.Equal(120, layout.Geometry.MasterWaveformHeight);
+        Assert.Equal(
+            layout.Geometry.GridHeight,
+            heights.Sum() + layout.Geometry.MasterWaveformHeight);
     }
 
     [Fact]

@@ -358,6 +358,14 @@ internal sealed class MasterWaveformFrameSource : IScopeFrameSource
 
     private static ScopeCell[] BuildCells(OverlayLayout layout, int gridWidth, int gridHeight)
     {
+        if (layout.Variant == VisualizationLayoutVariant.PerformanceLanes)
+        {
+            OverlayRect plot = layout.MasterWaveformPlotRect;
+            return plot.Width > 0 && plot.Height > 0
+                ? [new ScopeCell(plot.X, 0, plot.Width, plot.Height, 0)]
+                : Array.Empty<ScopeCell>();
+        }
+
         int scopeHeight = layout.ScopeHeight;
         var cells = new ScopeCell[layout.PanelCount];
         int cellCount = 0;

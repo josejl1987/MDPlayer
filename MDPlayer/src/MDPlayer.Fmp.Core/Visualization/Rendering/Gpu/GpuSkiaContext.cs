@@ -609,6 +609,24 @@ internal sealed class GpuSkiaContext : IDisposable
     /// <summary>Ensures the GL context is current before texture uploads.</summary>
     public void MakeCurrent() => _window.MakeCurrent();
 
+    /// <summary>
+    /// Acquires the GL context for the calling thread and releases it on
+    /// <see cref="IDisposable.Dispose"/>. Explicit ownership is required around
+    /// GL/CUDA interop so it is obvious which thread holds which context.
+    /// </summary>
+    public IDisposable MakeCurrentScope()
+    {
+        _window.MakeCurrent();
+        return new CurrentScope(this);
+    }
+
+    private sealed class CurrentScope : IDisposable
+    {
+        private readonly GpuSkiaContext _owner;
+        public CurrentScope(GpuSkiaContext owner) => _owner = owner;
+        public void Dispose() => _owner.ReleaseCurrent();
+    }
+
     private static string SafeGetString(StringName name)
     {
         try

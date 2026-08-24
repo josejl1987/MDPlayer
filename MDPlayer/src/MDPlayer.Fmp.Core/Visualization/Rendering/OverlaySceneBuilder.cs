@@ -171,6 +171,25 @@ internal static class OverlaySceneBuilder
                 .OrderBy(value => value.Id, StringComparer.Ordinal)
                 .ToArray();
 
+            DacActivityEvent[] dacActivity = timeline.DacActivity
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.EndSample > timeline.StartSample
+                    && value.StartSample < timeline.EndSample
+                    && value.EndSample > value.StartSample)
+                .OrderBy(value => value.StartSample)
+                .ThenBy(value => value.EndSample)
+                .ThenBy(value => value.SampleId, StringComparer.Ordinal)
+                .ToArray();
+            DacHitEvent[] dacHits = timeline.DacHits
+                .Where(value => voiceIdSet.Contains(value.VoiceId)
+                    && value.EndSample > timeline.StartSample
+                    && value.StartSample < timeline.EndSample
+                    && value.EndSample > value.StartSample)
+                .OrderBy(value => value.StartSample)
+                .ThenBy(value => value.EndSample)
+                .ThenBy(value => value.SourceStartOffset)
+                .ToArray();
+
             NoiseStateEvent[] noise = timeline.NoiseStates
                 .Where(value => voiceIdSet.Contains(value.VoiceId)
                     && value.EndSample > timeline.StartSample
@@ -232,7 +251,7 @@ internal static class OverlaySceneBuilder
                 PreparedPanelKind.Rhythm =>
                     rhythm.Length > 0,
                 PreparedPanelKind.PcmVoice =>
-                    samplePlayback.Length > 0 || mainNotes.Length > 0,
+                    samplePlayback.Length > 0 || dacActivity.Length > 0 || dacHits.Length > 0 || mainNotes.Length > 0,
                 PreparedPanelKind.Noise => noise.Length > 0 || mainNotes.Length > 0,
                 PreparedPanelKind.Aggregate => aggregateHits.Length > 0,
                 PreparedPanelKind.Generic => mainNotes.Length > 0
@@ -274,6 +293,8 @@ internal static class OverlaySceneBuilder
                 Samples = samples,
                 SamplesById = sampleById.ToFrozenDictionary(StringComparer.Ordinal),
                 SamplePlayback = samplePlayback,
+                DacActivity = dacActivity,
+                DacHits = dacHits,
                 SpcVoiceStates = spcVoiceStates,
                 Noise = noise,
                 NoiseLabels = noiseLabels,

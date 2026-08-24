@@ -84,7 +84,8 @@ public sealed class ScratchGpuSplitBenchmark
                 $"flush={s.GpuFlushSyncSeconds / s.Frames * 1000,6:F2} " +
                 $"read={s.GpuReadbackSeconds / s.Frames * 1000,6:F2} " +
                 $"scope={s.ScopeUploadSeconds / s.Frames * 1000,6:F2} " +
-                $"TOTAL={(s.GpuDrawSeconds + s.GpuFlushSyncSeconds + s.GpuReadbackSeconds) / s.Frames * 1000,6:F2}");
+                $"TOTAL={(s.GpuDrawSeconds + s.GpuFlushSyncSeconds + s.GpuReadbackSeconds) / s.Frames * 1000,6:F2} " +
+                $"GPU={s.GpuFrameSeconds / s.Frames * 1000,6:F2}");
         }
 
         Row("A", a);
@@ -105,6 +106,7 @@ public sealed class ScratchGpuSplitBenchmark
         _out.WriteLine($"scope upload         ~{scopeMs,6:F2} ms   (case C ScopeUploadTicks)");
         _out.WriteLine($"draw w/o scopes      ~{dDraw,6:F2} ms   (case D)");
         _out.WriteLine($"scope draw delta     ~{cDraw - dDraw,6:F2} ms   (case C draw − case D draw)");
+        _out.WriteLine($"C GPU time (ring)    ~{c.GpuFrameSeconds / c.Frames * 1000,6:F2} ms   (real GL_TIMESTAMP span: render+readback)");
         _out.WriteLine($"C total check        ~{cTotal,6:F2} ms   vs A+B-partial cross-check");
         _out.WriteLine($"C total from metrics ~{(c.GpuDrawSeconds + c.GpuFlushSyncSeconds + c.GpuReadbackSeconds) / c.Frames * 1000,6:F2} ms");
         _out.WriteLine("GPU SPLIT END");

@@ -78,23 +78,14 @@ internal static class VisualizationFrameRendererFactory
         ArgumentNullException.ThrowIfNull(workspace);
         ArgumentNullException.ThrowIfNull(runtime);
 
-        // Corrscope startup imports Matplotlib and can take hundreds of
-        // milliseconds. It is independent of the CPU overlay construction, so
-        // start it after its YAML is ready and let the pipe provide bounded
-        // backpressure while the static layer is built below.
+        // Build the shared overlay first. Performance lanes use a deterministic
+        // master source below; diagnostic production renders may still start
+        // Corrscope after their scope configuration is ready.
         IScopeFrameSource? scope = null;
+        IFrameOverlayRenderer? overlay = null;
         try
         {
-            if (scopePolicy == ScopeFrameSourcePolicy.Production)
-            {
-                int scopeFrameByteCount = checked(
-                    prepared.Layout.Geometry.CorrscopeGridWidth
-                    * prepared.Layout.Geometry.CorrscopeGridHeight * 4);
-                scope = CreateProductionScopeSource(
-                    prepared, workspace, runtime, scopeFrameByteCount);
-            }
-
-            IFrameOverlayRenderer overlay = VisualizationComposition.CreateRenderer(
+            overlay = VisualizationComposition.CreateRenderer(
                 prepared.Timeline,
                 prepared.Layout,
                 VisualizationRendererOptions.Build(
@@ -103,6 +94,28 @@ internal static class VisualizationFrameRendererFactory
                     introOutro,
                     prepared.Energy),
                 runtime.RenderBackend);
+
+            if (scopePolicy == ScopeFrameSourcePolicy.Production
+                && prepared.Layout.Variant == VisualizationLayoutVariant.PerformanceLanes
+                && prepared.Layout.Geometry.HasScopes)
+            {
+                // Performance has one deliberately compact master strip, not a
+                // per-channel Corrscope grid. Keep its source deterministic and
+                // aligned with preview/review even when isolated stems exist.
+                scope = MasterWaveformFrameSource.TryCreate(
+                    overlay,
+                    prepared.MasterAudioPath,
+                    overlay.FpsNumerator,
+                    overlay.FpsDenominator);
+            }
+            else if (scopePolicy == ScopeFrameSourcePolicy.Production)
+            {
+                int scopeFrameByteCount = checked(
+                    prepared.Layout.Geometry.CorrscopeGridWidth
+                    * prepared.Layout.Geometry.CorrscopeGridHeight * 4);
+                scope = CreateProductionScopeSource(
+                    prepared, workspace, runtime, scopeFrameByteCount);
+            }
 
             if (scopePolicy == ScopeFrameSourcePolicy.Interactive)
                 scope = CreateInteractiveScopeSource(prepared, overlay);
@@ -139,6 +152,7 @@ internal static class VisualizationFrameRendererFactory
             // If overlay construction fails after the external process starts,
             // do not leave a producer process or pipe behind.
             scope?.Dispose();
+            overlay?.Dispose();
             throw;
         }
     }
