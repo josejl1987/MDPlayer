@@ -406,6 +406,15 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     public int Height => _layout.Height;
     internal VisualizationTopology Topology => _topology;
 
+    /// <summary>Test seam: the active precise pitch range of one panel's
+    /// camera at a sample (null when the panel has no camera).</summary>
+    internal (double MinMidi, double MaxMidi)? PitchRangeAt(int panelIndex, long sample)
+    {
+        if (panelIndex < 0 || panelIndex >= _cameras.Length || _cameras[panelIndex] == null)
+            return null;
+        return _cameras[panelIndex].GetPreciseRange(sample);
+    }
+
     /// <summary>Test seam (§39): the identity rows of one prepared panel.
     /// Structural layouts assert on this instead of golden screenshots.</summary>
     internal string[] SampleRowLabelsOf(int panelIndex)
