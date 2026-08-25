@@ -61,7 +61,7 @@ public sealed class SpcFrameDumpProbeTests
         File.WriteAllBytes("/tmp/spc-probe-frame.rgba", frame);
 
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"frameIndex={frameIndex} sample={sample} rate={timeline.SampleRate} " +
+        sb.AppendLine($"[synthetic scene] frameIndex={frameIndex} sample={sample} rate={timeline.SampleRate} " +
                       $"past={layout.Geometry.PastSeconds} future={layout.Geometry.FutureSeconds} " +
                       $"window=[{layout.Geometry.WindowStartSample(sample, timeline.SampleRate)}," +
                       $"{layout.Geometry.WindowEndSample(sample, timeline.SampleRate)}]");
@@ -69,7 +69,12 @@ public sealed class SpcFrameDumpProbeTests
         sb.AppendLine("topology:");
         for (int i = 0; i < renderer.Topology.Panels.Count; i++)
             sb.AppendLine($"  [{i}] {renderer.Topology.Panels[i].Id} {renderer.Topology.Panels[i].Kind}");
-        sb.AppendLine($"scene panels: {OverlaySceneBuilder.Build(timeline, layout.Geometry).Panels.Length}");
+        OverlayScene scene = OverlaySceneBuilder.Build(timeline, layout.Geometry);
+        PreparedNote note0 = scene.Panels[0].MainNotes[0];
+        sb.AppendLine($"note0 fill={note0.Fill} accent={scene.Panels[0].Accent} " +
+                      $"label='{note0.SampleDisplayLabel}' instrument={note0.InstrumentId}");
+        sb.AppendLine($"sample playback [0]: midiPitch={scene.Panels[0].SamplePlayback[0].MidiPitch} " +
+                      $"semantics={scene.Panels[0].SamplePlayback[0].Semantics}");
         sb.AppendLine("notes:");
         foreach (NoteEvent n in timeline.Notes)
         {
@@ -84,6 +89,61 @@ public sealed class SpcFrameDumpProbeTests
             sb.AppendLine($"  [{i}] {(r.HasValue ? $"{r.Value.MinMidi:F2}..{r.Value.MaxMidi:F2}" : "no camera")}");
         }
         File.WriteAllText("/tmp/spc-probe-state.txt", sb.ToString());
+
+        // ---- REAL FILE DIAGNOSTIC ----
+        string realTimelinePath = Environment.GetEnvironmentVariable("SPC_PROBE_TIMELINE");
+        if (!string.IsNullOrWhiteSpace(realTimelinePath) && File.Exists(realTimelinePath))
+        {
+            string json = File.ReadAllText(realTimelinePath);
+            VisualizationTimeline real = VisualizationJsonWriter.Read(realTimelinePath);
+            var realLayout = RendererTestLayout.Build(real, width: 1280, height: 720);
+            using var realRenderer = new PanelOverlayRenderer(
+                real,
+                realLayout,
+                new PanelOverlayRenderer.Options
+                {
+                    FpsNumerator = 30,
+                    FpsDenominator = 1,
+                    EnablePerformanceMetrics = true,
+                });
+            long realSample = 800_000; // t=25s into the capture
+            int realFrame = (int)(realSample * 30 / real.SampleRate);
+            byte[] realFrameBytes = realRenderer.RenderFrame(realFrame);
+            File.WriteAllBytes("/tmp/spc-real-frame.rgba", realFrameBytes);
+            var rsb = new System.Text.StringBuilder();
+            rsb.AppendLine($"[real file] sampleRate={real.SampleRate} sample={realSample} " +
+                           $"window=[{realLayout.Geometry.WindowStartSample(realSample, real.SampleRate)}," +
+                           $"{realLayout.Geometry.WindowEndSample(realSample, real.SampleRate)}] " +
+                           $"notes={real.Notes.Count} samplePlayback={real.SamplePlayback.Length}");
+            rsb.AppendLine($"metrics: {realRenderer.Performance}");
+            rsb.AppendLine("notes in window:");
+            long ws = realLayout.Geometry.WindowStartSample(realSample, real.SampleRate);
+            long we = realLayout.Geometry.WindowEndSample(realSample, real.SampleRate);
+            foreach (NoteEvent n in real.Notes)
+            {
+                if (n.EndSample <= ws || n.StartSample >= we)
+                    continue;
+                rsb.AppendLine($"  {n.ChannelId} {n.StartSample}..{n.EndSample} midi={n.InitialMidiNote:F2} " +
+                              $"pitchPts={n.Pitch.Count} fill?");
+            }
+            rsb.AppendLine("camera ranges:");
+            for (int i = 0; i < realRenderer.Topology.Panels.Count; i++)
+            {
+                var r = realRenderer.PitchRangeAt(i, realSample);
+                rsb.AppendLine($"  [{i}] {(r.HasValue ? $"{r.Value.MinMidi:F2}..{r.Value.MaxMidi:F2}" : "no camera")}");
+            }
+            rsb.AppendLine("panel fill colors:");
+            OverlayScene realScene = OverlaySceneBuilder.Build(real, realLayout.Geometry);
+            for (int i = 0; i < realScene.Panels.Length; i++)
+            {
+                var notes = realScene.Panels[i].MainNotes;
+                rsb.AppendLine($"  [{i}] {realScene.Panels[i].Id} notes={notes.Length} " +
+                               $"accent={realScene.Panels[i].Accent} " +
+                               (notes.Length > 0 ? $"firstFill={notes[0].Fill} firstMidi={notes[0].StartMidiNote:F2} " +
+                                   $"firstLabel={notes[0].SampleDisplayLabel ?? "-"}" : "no notes"));
+            }
+            File.WriteAllText("/tmp/spc-real-state.txt", rsb.ToString());
+        }
         Assert.NotNull(frame);
     }
 }

@@ -32,6 +32,12 @@ internal sealed partial class GpuPanelRenderer
                     DrawFm3OperatorNotes(panelIndex, panel, currentSample, windowStart, windowEnd);
                     break;
                 case PanelPresentationSchema.SampleLane:
+                    // §19/§20: pitched sample playback (S-DSP BRR voices) draws
+                    // as pitched notes on the hardware voice lane, reusing the
+                    // pitched-note grammar; only unpitched sample events get
+                    // identity rows / playback bars below.
+                    if (panel.MainNotes.Length > 0)
+                        DrawPitchedNotes(panelIndex, panel, currentSample, windowStart, windowEnd);
                     DrawSamplePlaybackLane(panelIndex, panel, currentSample, windowStart, windowEnd);
                     DrawDacActivityLane(panelIndex, panel, currentSample, windowStart, windowEnd);
                     DrawDacHitsLane(panelIndex, panel, currentSample, windowStart, windowEnd);

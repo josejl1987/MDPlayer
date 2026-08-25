@@ -121,7 +121,12 @@ internal sealed partial class GpuPanelRenderer
                 DrawRhythmRowsChrome(panelIndex);
                 break;
             case PanelPresentationSchema.SampleLane:
-                DrawPcmLanesChrome(panelIndex);
+                // Pitched sample playback (S-DSP BRR voices) uses the pitch
+                // grid; unpitched sample lanes keep per-sample row chrome.
+                if (_panels[panelIndex].MainNotes.Length > 0)
+                    DrawPitchGrid(panelIndex);
+                else
+                    DrawPcmLanesChrome(panelIndex);
                 break;
             default:
                 DrawEmptyLaneChrome(panelIndex);
