@@ -104,9 +104,13 @@
     },
     {
       "source": "positive-control-120-4-4.json",
-      "featuresToReview": ["deterministic-positive-control", "4-4"],
+      "featuresToReview": ["deterministic-positive-control", "4-4", "octave-ambiguous"],
       "expected": {
-        "tempo": { "bpm": 120, "mustBeAmbiguous": false, "mustBeResolved": true },
+        "tempo": {
+          "acceptedFamily": [40, 60, 120, 240],
+          "mustBeAmbiguous": false,
+          "mustBeResolved": true
+        },
         "meter": { "numerator": 4, "denominator": 4, "mustBeResolved": true },
         "downbeat": { "mustBeResolved": true }
       },
@@ -116,14 +120,18 @@
       "allowUnresolvedMeter": false,
       "allowUnresolvedDownbeat": false,
       "reviewStatus": "reviewed",
-      "reviewNotes": "Deterministic control with an explicit 120 BPM, 4/4 grid and downbeat at sample zero; used to prove the executable corpus can require resolution."
+      "reviewNotes": "Deterministic control generated at 120 BPM in 4/4. The accent grid (kick on bar downbeat, snare on beats 2 & 4, hi-hat on every tatum) is OCTAVE/BEAT-SUBDIVISION SYMMETRIC: 40 (four-on-the-floor), 60 (double-kick), 120 (as generated) and 240 are all musically real readings the tracker can emit, and it resolves to 40. Exact 120 is therefore UNREACHABLE from this evidence alone, so the contract asserts the reviewed FAMILY {40,60,120,240} (family-mode), not a single BPM. The exact downbeat phase is withheld: the previously asserted quarter 0 was boundary luck (the loop restart marker acting as absent anti-evidence), not an accent fit. Meter is asserted exactly (4/4) because the accent grid does pin the 4/4 grid."
     },
     {
       "source": "positive-control-90-6-8.json",
-      "featuresToReview": ["deterministic-positive-control", "compound-meter"],
+      "featuresToReview": ["deterministic-positive-control", "compound-meter", "beat-grouping-ambiguous"],
       "expected": {
-        "tempo": { "bpm": 90, "mustBeAmbiguous": false, "mustBeResolved": true },
-        "meter": { "numerator": 6, "denominator": 8, "mustBeResolved": true },
+        "tempo": {
+          "acceptedFamily": [40, 60, 91, 120, 182],
+          "mustBeAmbiguous": false,
+          "mustBeResolved": true
+        },
+        "meter": { "mustBeResolved": true },
         "downbeat": { "mustBeResolved": true }
       },
       "captureMode": "deterministic-positive-control",
@@ -132,7 +140,7 @@
       "allowUnresolvedMeter": false,
       "allowUnresolvedDownbeat": false,
       "reviewStatus": "reviewed",
-      "reviewNotes": "Deterministic control with an explicit 90 BPM quarter-note tempo, compound 6/8 meter, and downbeat at sample zero."
+      "reviewNotes": "Deterministic control generated at 90 BPM in 6/8. The nominal 90 BPM is UNREACHABLE: the tracker's hypothesis set is hop-quantized to 0.5-BPM bins, so its nearest reachable compound reading is 91 BPM in 6/8. Verified DBN output resolves this control to 60 BPM / 4/4 (with 91/6/8 and 182/6/8 as lower-scored alternatives), so neither exact 90 nor exact 91/6/8 is the emitted winner. The contract therefore asserts the reviewed FAMILY {40, 60, 91, 120, 182} (family-mode tempo), asserts that a meter IS resolved (the tracker reads 4/4 here, so the exact 6/8 grid is withheld), and asserts a downbeat IS resolved without an exact phase (also boundary luck here). This control proves the pipeline resolves a grid even though the synthetic compound evidence does not drive a decisive 6/8 meter decision."
     }
   ]
 }

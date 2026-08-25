@@ -63,7 +63,13 @@ internal static class DbnMetricalDecoder
         SurfaceOffbeatProbability: 0.20,
         AccentDownbeatProbability: 0.92,
         AccentCompoundProbability: 0.68,
-        AccentSecondaryProbability: 0.46,
+        // Secondary must be > 0.5 so an accented secondary (e.g. a snare
+        // backbeat on beats 2/4 of 4/4) is REWARDED over an unaccented one.
+        // With 0.46, BernoulliLikelihood made an accented secondary a
+        // penalty (0.245 < 0.283), so the model preferred readings that
+        // concentrated every accent on the downbeat — i.e. the fastest
+        // octave of a dense grid (240 > 120 for the same physical pattern).
+        AccentSecondaryProbability: 0.72,
         AccentOffbeatProbability: 0.22,
         BoundaryDownbeatProbability: 0.95,
         BoundaryOtherProbability: 0.08);
@@ -102,15 +108,34 @@ internal static class DbnMetricalDecoder
                 meter => 0.55 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
                     + 0.45 * MeterPatternScore(
                         meter, tempo, streams, sampleRate, startSample));
-            Meter meter = meterEvidence
-                .OrderByDescending(pair => pair.Value)
-                .ThenByDescending(pair => pair.Key.QuartersPerBar)
-                .First().Key;
-            double[] phaseScores = PhaseScores(
-                meter, tempo, streams, sampleRate, startSample, endSample, structuralBoundaries);
-            int phase = Array.IndexOf(phaseScores, phaseScores.Max());
-            double downbeatScore = phaseScores[phase];
-            double downbeatMargin = phaseScores
+            // Pick the (meter, phase) pair that maximizes the metrical terms of
+            // the full score together. Choosing the meter first and the phase
+            // second lets a near-tied meter choice (2/4 vs 4/4 at 120 BPM on a
+            // backbeat grid) land the downbeat frames on unaccented positions
+            // and sink a hypothesis that is metrically correct.
+            Meter meter = SupportedMeters[0];
+            int phase = 0;
+            double downbeatScore = 0;
+            double[]? phaseScores = null;
+            double bestMetrical = double.NegativeInfinity;
+            foreach (Meter candidateMeter in SupportedMeters)
+            {
+                double[] candidatePhases = PhaseScores(
+                    candidateMeter, tempo, streams, sampleRate,
+                    startSample, endSample, structuralBoundaries);
+                int bestPhase = Array.IndexOf(candidatePhases, candidatePhases.Max());
+                double metrical = 0.25 * candidatePhases[bestPhase]
+                    + 0.20 * meterEvidence[candidateMeter];
+                if (metrical > bestMetrical)
+                {
+                    bestMetrical = metrical;
+                    meter = candidateMeter;
+                    phase = bestPhase;
+                    downbeatScore = candidatePhases[bestPhase];
+                    phaseScores = candidatePhases;
+                }
+            }
+            double downbeatMargin = phaseScores!
                 .Where((_, index) => index != phase)
                 .DefaultIfEmpty(0)
                 .Max(value => downbeatScore - value);
@@ -127,9 +152,12 @@ internal static class DbnMetricalDecoder
             double score = 0.55 * joint.TempoScores[tempoIndex]
                 + 0.25 * downbeatScore
                 + 0.20 * meterPatternScore;
+            if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
+            {
+                Console.WriteLine($"DBG_DBN tempo={tempo.Bpm:0.###} joint={joint.TempoScores[tempoIndex]:0.###} downbeat={downbeatScore:0.###} meterPat={meterPatternScore:0.###} meter={meter} phase={phase} full={score:0.###} meterEv={string.Join(";", meterEvidence.Select(kv => $"{kv.Key}={kv.Value:0.###}"))}");
+            }
             long downbeat = DownbeatAtOrBefore(
                 tempo.PhaseSample,
-                FirstFrameFor(tempo, sampleRate, startSample),
                 startSample, tempo.Bpm, meter, phase, sampleRate);
             candidates.Add(new DbnMetricalCandidate(
                 tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin));
@@ -141,8 +169,11 @@ internal static class DbnMetricalDecoder
             .ThenBy(candidate => candidate.Meter.Numerator)
             .ThenBy(candidate => candidate.DownbeatPhase)
             .ToList();
-        DbnMetricalCandidate selected = candidates.Single(
-            candidate => candidate.Tempo == validTempos[joint.SelectedTempoIndex]);
+        DbnMetricalCandidate selected = candidates.First();
+        // The joint pass owns the tempo PATH (it may legitimately change tempo
+        // mid-track); the full metrical score owns the tempo SELECTION so a
+        // hypothesis whose meter/downbeat reading is incoherent cannot win on
+        // the joint likelihood alone.
         DbnMetricalCandidate? alternative = candidates
             .Where(candidate => candidate != selected)
             .OrderByDescending(candidate => candidate.Score)
@@ -283,10 +314,18 @@ internal static class DbnMetricalDecoder
 
                 if (!double.IsNegativeInfinity(best))
                 {
-                    scores[nodeIndex, currentStateIndex] = best + LogObservation(
+                    double logObs = LogObservation(
                         ObservationAt(
                             currentState, currentNode.Sample, streams,
                             currentNode.Step, structuralBoundaries));
+                    if (Environment.GetEnvironmentVariable("DBG_DBN") == "1"
+                        && currentNode.Sample < 44100 * 2
+                        && (currentNode.TempoIndex is 0 or 4
+                            || Math.Abs(tempos[currentNode.TempoIndex].Bpm - 120) < 0.01))
+                    {
+                        Console.WriteLine($"DBG_DBN_OBS tempoIdx={currentNode.TempoIndex} bpm={tempos[currentNode.TempoIndex].Bpm:0.###} sample={currentNode.Sample} state={currentState.Meter}/{currentState.BeatInBar} logObs={logObs:0.###}");
+                    }
+                    scores[nodeIndex, currentStateIndex] = best + logObs;
                     previousNodes[nodeIndex, currentStateIndex] = bestPreviousNode;
                     previousStates[nodeIndex, currentStateIndex] = bestPreviousState;
                 }
@@ -312,25 +351,23 @@ internal static class DbnMetricalDecoder
             int finalNodeIndex = tempoNodes
                 .OrderBy(nodeIndex => Math.Abs(nodes[nodeIndex].Sample - endSample))
                 .First();
-            int finalFrameCount = Math.Max(
-                1, (int)Math.Round((endSample - startSample) / steps[tempoIndex]));
-            double tempoRawScore = double.NegativeInfinity;
-            var meterScores = new Dictionary<Meter, double>();
-            foreach (Meter meter in SupportedMeters)
-            {
-                double meterRawScore = double.NegativeInfinity;
-                for (int stateIndex = 0; stateIndex < stateCount; stateIndex++)
-                {
-                    if (states[stateIndex].Meter != meter)
-                        continue;
-                    double value = scores[finalNodeIndex, stateIndex];
-                    meterRawScore = Math.Max(meterRawScore, value);
-                    tempoRawScore = Math.Max(tempoRawScore, value);
-                }
-                meterScores[meter] = NormalizeScore(meterRawScore, finalFrameCount);
-            }
-            tempoScores[tempoIndex] = 0.65 * NormalizeScore(tempoRawScore, finalFrameCount)
+            // Score each tempo hypothesis on ITS OWN grid. The joint grid lets
+            // the global optimum hop between tempo grids, so a "best path ending
+            // at tempo X" was typically 21 nodes of the sparse 40 BPM grid plus a
+            // short tail on X — every tempo then scored almost identically, and
+            // the fastest octave won on the tail's grid density. A constrained
+            // same-tempo Viterbi measures each hypothesis on the grid it claims.
+            (double tempoRawScore, int pathLength, Dictionary<Meter, double> meterScores) =
+                RunConstrainedTempoViterbi(
+                    tempoIndex, tempoNodes, nodes, states, stateCount,
+                    tempos, streams, startSample, structuralBoundaries);
+            double normalized = NormalizeScore(tempoRawScore, Math.Max(1, pathLength));
+            tempoScores[tempoIndex] = 0.65 * normalized
                 + 0.35 * Math.Clamp(tempos[tempoIndex].PriorScore, 0, 1);
+            if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
+            {
+                Console.WriteLine($"DBG_DBN tempo={tempos[tempoIndex].Bpm:0.###} rawNorm={normalized:0.###} prior={tempos[tempoIndex].PriorScore:0.###} joint={tempoScores[tempoIndex]:0.###} pathLen={pathLength} jointMeterEv={string.Join(";", meterScores.Select(kv => $"{kv.Key}={kv.Value:0.###}"))}");
+            }
             tempoMeterScores[tempoIndex] = meterScores;
             if (tempoScores[tempoIndex] > selectedRawScore)
             {
@@ -360,6 +397,10 @@ internal static class DbnMetricalDecoder
             state = previousState;
         }
         reversePath.Reverse();
+        if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
+        {
+            Console.WriteLine($"DBG_DBN_PATH selTempoIdx={selectedTempoIndex} bpm={tempos[selectedTempoIndex].Bpm:0.###} pathNodes={reversePath.Count} rawScore={selectedRawScore:0.###} avgLog={selectedRawScore / Math.Max(1, reversePath.Count):0.###} meterMix={string.Join(";", reversePath.GroupBy(n => n.TempoIndex).Select(g => $"{tempos[g.Key].Bpm:0.###}={g.Count()}"))}");
+        }
 
         var tempoPath = new List<DbnTempoRun>();
         if (reversePath.Count > 0)
@@ -403,6 +444,129 @@ internal static class DbnMetricalDecoder
     private static bool IsInitialNode(GridNode node, long startSample) =>
         node.Sample >= startSample - node.Step * 2.5
         && node.Sample <= startSample + node.Step;
+
+    /// <summary>
+    /// Forward Viterbi restricted to ONE tempo's grid, used to score each tempo
+    /// hypothesis on the grid it claims (see the scoring loop). Transitions may
+    /// only move within this tempo's own nodes, so the result is the hypothesis'
+    /// own fit — not a foreign-grid path that merely ends on this tempo.
+    /// </summary>
+    private static (double RawScore, int PathLength, Dictionary<Meter, double> MeterScores)
+        RunConstrainedTempoViterbi(
+            int tempoIndex,
+            IReadOnlyList<int> tempoNodes,
+            GridNode[] nodes,
+            State[] states,
+            int stateCount,
+            IReadOnlyList<DbnTempoHypothesis> tempos,
+            IReadOnlyList<BeatFeatureStream> streams,
+            long startSample,
+            IReadOnlyList<long> structuralBoundaries)
+    {
+        int count = tempoNodes.Count;
+        var localByGlobal = new Dictionary<int, int>(count);
+        for (int local = 0; local < count; local++)
+            localByGlobal[tempoNodes[local]] = local;
+
+        var scores = new double[count, stateCount];
+        var previousNodes = new int[count, stateCount];
+        var previousStates = new int[count, stateCount];
+        for (int local = 0; local < count; local++)
+        {
+            GridNode currentNode = nodes[tempoNodes[local]];
+            for (int stateIndex = 0; stateIndex < stateCount; stateIndex++)
+            {
+                State currentState = states[stateIndex];
+                double best = IsInitialNode(currentNode, startSample)
+                    ? InitialScore(tempos[tempoIndex])
+                    : double.NegativeInfinity;
+                int bestPreviousNode = -1;
+                int bestPreviousState = -1;
+
+                double tolerance = currentNode.Step * 0.45;
+                int previousGlobal = FindPreviousNode(
+                    nodes, tempoNodes, currentNode.Sample - currentNode.Step,
+                    currentNode.Sample, tolerance);
+                if (previousGlobal >= 0
+                    && localByGlobal.TryGetValue(previousGlobal, out int previousLocal))
+                {
+                    for (int previousStateIndex = 0;
+                         previousStateIndex < stateCount;
+                         previousStateIndex++)
+                    {
+                        double previousScore = scores[previousLocal, previousStateIndex];
+                        if (double.IsNegativeInfinity(previousScore))
+                            continue;
+                        double transition = TransitionScore(
+                            states[previousStateIndex], currentState,
+                            tempoIndex, tempoIndex, tempos);
+                        if (double.IsNegativeInfinity(transition))
+                            continue;
+                        double value = previousScore + transition;
+                        if (value > best)
+                        {
+                            best = value;
+                            bestPreviousNode = previousLocal;
+                            bestPreviousState = previousStateIndex;
+                        }
+                    }
+                }
+
+                if (!double.IsNegativeInfinity(best))
+                {
+                    scores[local, stateIndex] = best + LogObservation(
+                        ObservationAt(
+                            currentState, currentNode.Sample, streams,
+                            currentNode.Step, structuralBoundaries));
+                    previousNodes[local, stateIndex] = bestPreviousNode;
+                    previousStates[local, stateIndex] = bestPreviousState;
+                }
+                else
+                {
+                    scores[local, stateIndex] = double.NegativeInfinity;
+                    previousNodes[local, stateIndex] = -1;
+                    previousStates[local, stateIndex] = -1;
+                }
+            }
+        }
+
+        // tempoNodes are in sample order, so the final node is the last one.
+        int finalLocal = count - 1;
+        double rawScore = double.NegativeInfinity;
+        int bestFinalState = 0;
+        var meterScores = new Dictionary<Meter, double>();
+        foreach (Meter meter in SupportedMeters)
+        {
+            double meterRawScore = double.NegativeInfinity;
+            for (int stateIndex = 0; stateIndex < stateCount; stateIndex++)
+            {
+                if (states[stateIndex].Meter != meter)
+                    continue;
+                double value = scores[finalLocal, stateIndex];
+                if (value > meterRawScore)
+                    meterRawScore = value;
+                if (value > rawScore)
+                {
+                    rawScore = value;
+                    bestFinalState = stateIndex;
+                }
+            }
+            meterScores[meter] = NormalizeScore(meterRawScore, count);
+        }
+
+        int pathLength = 1;
+        int pathLocal = finalLocal;
+        int pathState = bestFinalState;
+        while (previousNodes[pathLocal, pathState] >= 0)
+        {
+            int previousLocal = previousNodes[pathLocal, pathState];
+            int previousState = previousStates[pathLocal, pathState];
+            pathLocal = previousLocal;
+            pathState = previousState;
+            pathLength++;
+        }
+        return (rawScore, pathLength, meterScores);
+    }
 
     private static double InitialScore(
         DbnTempoHypothesis tempo)
@@ -468,25 +632,40 @@ internal static class DbnMetricalDecoder
         IReadOnlyList<long> structuralBoundaries)
     {
         int units = Units(meter);
-        double[] scores = new double[units];
+        // The Ellis phase sample is arbitrary (any sample, not necessarily on
+        // the beat grid), so the downbeat search needs sub-step resolution;
+        // integer step shifts cannot recover a half-step phase offset. 12
+        // substeps per step reach any offset within the observation tolerance.
+        const int substeps = 12;
+        double[] scores = new double[units * substeps];
         double quarterSamples = sampleRate * 60.0 / tempo.Bpm;
         double stepSamples = quarterSamples / 2.0;
-        long firstFrame = (long)Math.Floor((startSample - tempo.PhaseSample) / stepSamples) - 2;
-        long lastFrame = (long)Math.Ceiling((endSample - tempo.PhaseSample) / stepSamples) + 2;
+        double fineStep = stepSamples / substeps;
+        long firstFrame = (long)Math.Floor((startSample - tempo.PhaseSample) / fineStep) - 2;
+        long lastFrame = (long)Math.Ceiling((endSample - tempo.PhaseSample) / fineStep) + 2;
         int count = (int)Math.Clamp(lastFrame - firstFrame + 1, 1, 250_000);
-        for (int phase = 0; phase < units; phase++)
+        int cycle = units * substeps;
+        for (int phase = 0; phase < scores.Length; phase++)
         {
             double total = 0;
+            int downbeatCount = 0;
             for (int frame = 0; frame < count; frame++)
             {
-                int beatInBar = (int)PositiveModulo(phase + frame, units);
+                int beatInBar = (int)PositiveModulo(phase + frame, cycle);
                 if (beatInBar != 0)
                     continue;
-                long sample = SampleAt(tempo.PhaseSample, firstFrame + frame, stepSamples);
-                total += ObservationAt(
+                downbeatCount++;
+                long sample = SampleAt(tempo.PhaseSample, firstFrame + frame, fineStep);
+                double obs = ObservationAt(
                     new State(meter, beatInBar), sample, streams, stepSamples, structuralBoundaries);
+                total += obs;
+                if (Environment.GetEnvironmentVariable("DBG_DBN") == "1"
+                    && Math.Abs(tempo.Bpm - 120) < 0.01 && meter.Numerator == 4 && meter.Denominator == 4 && phase == 94)
+                {
+                    Console.WriteLine($"DBG_DBN_PS bpm={tempo.Bpm:0.###} phase={phase} sample={sample} obs={obs:0.###} ps={tempo.PhaseSample}");
+                }
             }
-            scores[phase] = count > 0 ? total / Math.Max(1, count / units) : 0;
+            scores[phase] = count > 0 ? total / Math.Max(1, count / cycle) : 0;
         }
         return scores;
     }
@@ -515,7 +694,12 @@ internal static class DbnMetricalDecoder
                 long frame = (long)Math.Round((sample - tempo.PhaseSample) / step,
                     MidpointRounding.AwayFromZero);
                 int beat = (int)PositiveModulo(frame - phase, units);
-                double activation = strength <= 0 ? 0 : strength / (1.0 + strength);
+                // Raw clamped strength, matching the observation model in
+                // ObservationAt: a kick (strength 1.0) must read as a near-certain
+                // accent, not as the ~0.5 probability that strength/(1+strength)
+                // produced — the flattened mapping made every expectation ~0.5
+                // and destroyed downbeat/secondary discrimination.
+                double activation = Math.Clamp(strength, 0, 1);
                 double expected = ExpectedAccentProbability(meter, beat);
                 logLikelihood += strength
                     * Math.Log(BernoulliLikelihood(activation, expected));
@@ -555,7 +739,13 @@ internal static class DbnMetricalDecoder
             double nearest = Nearest(stream.Onsets, sample, stepSamples * 0.32);
             signal += stream.Weight * nearest;
             signalWeight += stream.Weight;
-            if (stream.Name is "percussion" or "accent")
+            // Accent evidence is the strong downbeat-marking stream (kick/snare)
+            // ONLY. The percussion stream also carries hi-hat and other
+            // subdivisions; folding them into the accent term makes a hi-hat on
+            // every sixteenth look like accent evidence everywhere, which
+            // flattens the downbeat/secondary contrast and lets a faster
+            // octave win the joint path on raw grid density.
+            if (stream.Name == "accent")
                 accent = Math.Max(accent, nearest);
         }
         signal = signalWeight > 0 ? Math.Clamp(signal / signalWeight, 0, 1) : 0;
@@ -602,10 +792,8 @@ internal static class DbnMetricalDecoder
             return false;
 
         double step = sampleRate * 60.0 / selected.Tempo.Bpm / 2.0;
-        long firstFrame = FirstFrameFor(selected.Tempo, sampleRate, startSample);
         long downbeat = DownbeatAtOrBefore(
             selected.Tempo.PhaseSample,
-            firstFrame,
             startSample,
             selected.Tempo.Bpm,
             selected.Meter,
@@ -709,7 +897,6 @@ internal static class DbnMetricalDecoder
 
     private static long DownbeatAtOrBefore(
         long phaseSample,
-        long firstFrame,
         long startSample,
         double bpm,
         Meter meter,
@@ -718,9 +905,14 @@ internal static class DbnMetricalDecoder
     {
         double step = sampleRate * 60.0 / bpm / 2.0;
         int units = Units(meter);
+        // PhaseScores searches at substep resolution; recover the same grid
+        // here so the reported downbeat sample matches the scored alignment.
+        const int substeps = 12;
+        double fineStep = step / substeps;
+        long firstFrame = (long)Math.Floor((startSample - phaseSample) / fineStep) - 2;
         long downbeat = phaseSample
             + (long)Math.Round(
-                (firstFrame + PositiveModulo(-beatInBar, units)) * step,
+                (firstFrame + PositiveModulo(-beatInBar, units * substeps)) * fineStep,
                 MidpointRounding.AwayFromZero);
         long bar = Math.Max(1, (long)Math.Round(units * step, MidpointRounding.AwayFromZero));
         while (downbeat > startSample)
