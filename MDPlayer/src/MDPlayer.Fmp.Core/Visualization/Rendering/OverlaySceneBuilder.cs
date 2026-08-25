@@ -87,7 +87,8 @@ internal static class OverlaySceneBuilder
                     index,
                     noteColorMode,
                     instrumentById,
-                    palette)
+                    palette,
+                    sampleById)
                 : Array.Empty<PreparedNote>();
 
             var operatorNotes = kind == PreparedPanelKind.Fm3
@@ -251,7 +252,7 @@ internal static class OverlaySceneBuilder
                 PreparedPanelKind.Rhythm =>
                     rhythm.Length > 0,
                 PreparedPanelKind.PcmVoice =>
-                    samplePlayback.Length > 0 || dacActivity.Length > 0 || dacHits.Length > 0 || mainNotes.Length > 0,
+                    samplePlayback.Length > 0 || dacActivity.Length > 0 || dacHits.Length > 0 || mainNotes.Length > 0 || noise.Length > 0,
                 PreparedPanelKind.Noise => noise.Length > 0 || mainNotes.Length > 0,
                 PreparedPanelKind.Aggregate => aggregateHits.Length > 0,
                 PreparedPanelKind.Generic => mainNotes.Length > 0
@@ -568,7 +569,8 @@ internal static class OverlaySceneBuilder
         int panelIndex,
         NoteColorMode noteColorMode,
         IReadOnlyDictionary<string, InstrumentDefinition> instruments,
-        VisualizationPalette palette)
+        VisualizationPalette palette,
+        IReadOnlyDictionary<string, SampleDefinition> samples = null)
     {
         NoteEvent[] ordered = source
             .Where(IsNoteValid)
@@ -597,7 +599,8 @@ internal static class OverlaySceneBuilder
                 panelIndex,
                 noteColorMode,
                 instruments,
-                palette);
+                palette,
+                samples);
         }
         return prepared;
     }
@@ -676,7 +679,8 @@ internal static class OverlaySceneBuilder
         int panelIndex = 0,
         NoteColorMode noteColorMode = NoteColorMode.Instrument,
         IReadOnlyDictionary<string, InstrumentDefinition> instruments = null,
-        VisualizationPalette palette = null)
+        VisualizationPalette palette = null,
+        IReadOnlyDictionary<string, SampleDefinition> samples = null)
     {
         var fill = (palette ?? VisualizationPalette.Default).ResolveNote(
             noteColorMode,
@@ -697,6 +701,8 @@ internal static class OverlaySceneBuilder
                 note.InitialMidiNote, pitch, note.EndSample),
             Mode = note.Mode,
             InstrumentId = note.InstrumentId,
+            SampleId = note.SampleId,
+            SampleDisplayLabel = ResolveSampleDisplayLabel(note.SampleId, samples),
             Text = PrepareInstrumentText(note.InstrumentId, instruments),
             IsRetrigger = note.IsRetrigger,
             IsDenseOnset = isDenseOnset,
@@ -709,6 +715,25 @@ internal static class OverlaySceneBuilder
             Accent = fill.Lighten(0.5),
             Pitch = pitch,
         };
+    }
+
+    /// <summary>
+    /// Compact display label for a pitched note's sample identity (e.g.
+    /// "BRR 02df5"). Prefers the registered sample display name; falls back
+    /// to the compact id suffix. Null when the note carries no sample.
+    /// </summary>
+    private static string ResolveSampleDisplayLabel(
+        string? sampleId,
+        IReadOnlyDictionary<string, SampleDefinition> samples)
+    {
+        if (string.IsNullOrWhiteSpace(sampleId))
+            return null;
+        if (samples != null
+            && samples.TryGetValue(sampleId, out SampleDefinition definition)
+            && !string.IsNullOrWhiteSpace(definition.DisplayName))
+            return definition.DisplayName;
+        int separator = sampleId.LastIndexOf(':');
+        return separator >= 0 ? sampleId[(separator + 1)..] : sampleId;
     }
 
     private static PreparedInstrumentText PrepareInstrumentText(

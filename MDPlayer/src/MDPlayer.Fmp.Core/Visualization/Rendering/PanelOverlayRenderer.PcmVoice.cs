@@ -78,14 +78,64 @@ internal sealed partial class PanelOverlayRenderer
                 break;
             if (value.EndSample <= windowStart)
                 continue;
+            // §19/§21: pitched sample playback is drawn as the pitched note
+            // above (its BRR identity is note metadata); only unpitched sample
+            // events get identity rows / playback bars in this lane.
+            if (value.Semantics == SamplePlaybackSemantics.Pitched)
+                continue;
             int row = index < panel.SampleRowByPlaybackIndex.Length
                 ? panel.SampleRowByPlaybackIndex[index]
                 : 0;
             DrawSamplePlayback(frame, panel, value, lane, currentSample, row, rowCount);
         }
 
+        DrawVoiceNoisePeriods(frame, panel, lane, currentSample);
         DrawDacActivity(frame, panel, lane, currentSample, windowStart, windowEnd);
         DrawDacHits(frame, panel, lane, currentSample, windowStart, windowEnd);
+    }
+
+    /// <summary>
+    /// §24: unpitched noise periods inside a sample/voice lane render as a
+    /// compact noise block within the same hardware voice — never as a fake
+    /// pitched note and never as an extra subordinate lane.
+    /// </summary>
+    private void DrawVoiceNoisePeriods(
+        Span<byte> frame,
+        PanelData panel,
+        OverlayRect lane,
+        long currentSample)
+    {
+        NoiseStateEvent[] events = panel.Prepared.Noise;
+        if (events.Length == 0)
+            return;
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        int first = LowerBoundNoise(events, windowStart);
+        if (first > 0)
+            first--;
+        for (int index = first; index < events.Length; index++)
+        {
+            NoiseStateEvent value = events[index];
+            if (value.EndSample <= windowStart)
+                continue;
+            if (value.StartSample >= windowEnd)
+                break;
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+            int stripHeight = Math.Clamp(lane.Height / 14, 4, 8);
+            var band = new OverlayRect(
+                (int)Math.Floor(left),
+                lane.Bottom - stripHeight - 1,
+                Math.Max(1, (int)Math.Ceiling(right - left)),
+                stripHeight);
+            DrawNoiseTexture(
+                frame, band, panel.Id, value.StartSample, currentSample,
+                Math.Clamp(value.Level, 0, 1), value.Mode, value.CentreFrequencyHz);
+        }
     }
 
     private void DrawDacActivity(
@@ -297,6 +347,10 @@ internal sealed partial class PanelOverlayRenderer
         foreach (SamplePlaybackEvent value in panel.Prepared.SamplePlayback)
         {
             if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+            // Pitched sample playback is already drawn as the note bars
+            // above; only unpitched events render playback detail here.
+            if (value.Semantics == SamplePlaybackSemantics.Pitched)
                 continue;
             DrawSamplePlayback(frame, panel, value, lane, currentSample);
         }

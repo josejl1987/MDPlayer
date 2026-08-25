@@ -24,6 +24,20 @@ internal sealed class PreparedNote
     /// <summary>Instrument ID, retained for header/instrument formatting.</summary>
     public required string InstrumentId { get; init; }
 
+    /// <summary>
+    /// Stable sample identity for pitched sample playback (BRR source on an
+    /// S-DSP voice). Metadata attached to the pitched note — it never
+    /// determines vertical position.
+    /// </summary>
+    public string? SampleId { get; init; }
+
+    /// <summary>
+    /// Compact display label for <see cref="SampleId"/> (e.g. "BRR 02df5"),
+    /// pre-resolved so the per-frame hot path performs no dictionary lookup.
+    /// Null when the note carries no sample identity.
+    /// </summary>
+    public string? SampleDisplayLabel { get; init; }
+
     /// <summary>Prepared header strings; populated by the scene builder.</summary>
     public PreparedInstrumentText Text { get; init; } = PreparedInstrumentText.Empty;
 

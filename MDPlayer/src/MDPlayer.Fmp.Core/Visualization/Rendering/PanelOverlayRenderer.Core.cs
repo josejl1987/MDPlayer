@@ -405,6 +405,20 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     public int Width => _layout.Width;
     public int Height => _layout.Height;
     internal VisualizationTopology Topology => _topology;
+
+    /// <summary>Test seam (§39): the identity rows of one prepared panel.
+    /// Structural layouts assert on this instead of golden screenshots.</summary>
+    internal string[] SampleRowLabelsOf(int panelIndex)
+    {
+        if (panelIndex < 0 || panelIndex >= _panels.Length)
+            return Array.Empty<string>();
+        return _panels[panelIndex].SampleRowLabels;
+    }
+
+    /// <summary>Test seam (§39): whether one panel has a pitch camera (pitched
+    /// lanes map Y from musical pitch; unpitched lanes have none).</summary>
+    internal bool HasPitchCamera(int panelIndex) =>
+        panelIndex >= 0 && panelIndex < _cameras.Length && _cameras[panelIndex] != null;
     public int FrameByteCount => checked(Width * Height * 4);
     public int ScopeFrameByteCount => checked(
         _layout.CorrscopeGridWidth * _layout.CorrscopeGridHeight * 4);
@@ -2070,12 +2084,18 @@ internal sealed partial class PanelOverlayRenderer : IDisposable
     /// One preparation pass over the playback events: hash-based uniqueness,
     /// one sort, and a label → row dictionary. O(S log S) instead of the
     /// previous quadratic Contains/IndexOf scans.
+    /// Pitched sample playback (§21) never creates identity rows: its sample
+    /// identity is metadata on the pitched note and the hardware voice is the
+    /// lane. Only unpitched sample events (DAC, rhythm, S-DSP noise) receive
+    /// one horizontal row per distinct sample identity.
     /// </summary>
     private static SampleRowTable BuildSampleRowTable(PreparedPanel prepared)
     {
         var distinct = new HashSet<string>(StringComparer.Ordinal);
         foreach (SamplePlaybackEvent e in prepared.SamplePlayback)
         {
+            if (e.Semantics == SamplePlaybackSemantics.Pitched)
+                continue;
             if (string.IsNullOrEmpty(e.SampleId))
                 continue;
             string label = ShortAssetLabel(

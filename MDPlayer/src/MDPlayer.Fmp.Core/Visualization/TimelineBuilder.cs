@@ -124,6 +124,7 @@ internal sealed class TimelineBuilder
         {
             Domain = new SourceDomainKey(voice.Device, voice.Kind, voice.Index),
             SourceAttackId = sourceAttackId,
+            SampleId = sampleId,
         });
         AddGenericPcmPlayback(
             voice.ToString(), startSample, endSample, initialMidiNote, instrumentId, isRetrigger,
@@ -151,14 +152,16 @@ internal sealed class TimelineBuilder
         {
             AddGenericPcmPlayback(
                 note.ChannelId, note.StartSample, note.EndSample,
-                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId);
+                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId,
+                note.SampleId);
             return;
         }
         _notes.Add(note);
         if (voice != null)
         {
             AddGenericPcmPlayback(note.ChannelId, note.StartSample, note.EndSample,
-                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId);
+                note.InitialMidiNote, note.InstrumentId, note.IsRetrigger, sourceAttackId,
+                note.SampleId);
         }
 
     }

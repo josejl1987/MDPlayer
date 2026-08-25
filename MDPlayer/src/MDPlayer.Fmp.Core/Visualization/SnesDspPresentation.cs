@@ -107,13 +107,12 @@ internal sealed class SnesDspPresentation
         PanelW: 360, PanelH: 314, HeaderH: 18, ScopeH: 116, DividerH: 2, PitchLaneH: 164);
 
     /// <summary>
-    /// Builds the panel header for one voice (§21.4). Token format:
-    /// 'V1  SRC 23 · A1B2C3  [PM] [N] [E]  L◀●▶R'. Only the badges that are
-    /// actually active are emitted, in the fixed order PM, N, E. The pan
-    /// value follows §17: pan=(rightEnergy-leftEnergy)/max(1,leftEnergy+rightEnergy)
-    /// with energy=|volume|. The label keeps the literal 'L◀●▶R' pan scale
-    /// and appends the phase marker 'Ø' when VOLL/VOLR have opposite signs
-    /// (surround).
+    /// Builds the panel header for one voice (§17/§32). Primary label is the
+    /// hardware voice ('VOICE 1'); the current BRR short hash is appended when
+    /// a sample is sounding ('VOICE 1 · BRR a1b2c3'). Only the noise badge
+    /// survives as state text — it changes the musical semantics of the lane
+    /// (unpitched). Register diagnostics ([PM]/[E], pan scale) are not primary
+    /// musical text and are intentionally omitted from the normal view.
     /// </summary>
     public static SnesDspPanelHeader BuildHeader(
         int voiceIndex,
@@ -131,22 +130,21 @@ internal sealed class SnesDspPresentation
             throw new ArgumentOutOfRangeException(nameof(sourceNumber));
         ArgumentNullException.ThrowIfNull(shortHash);
 
-        var badges = new List<string>(3);
-        if (pitchMod)
-            badges.Add("[PM]");
+        var badges = new List<string>(2);
         if (noise)
             badges.Add("[N]");
-        if (echoSend)
-            badges.Add("[E]");
-        string badgeText = string.Join(" ", badges);
+        string badgeText = badges.Count > 0 ? "  " + string.Join(" ", badges) : "";
 
         int leftEnergy = Math.Abs((int)volLeft);
         int rightEnergy = Math.Abs((int)volRight);
         double pan = (rightEnergy - leftEnergy) / (double)Math.Max(1, leftEnergy + rightEnergy);
         bool phaseMarker = volLeft != 0 && volRight != 0 && (volLeft < 0) != (volRight < 0);
-        string panSegment = phaseMarker ? "L◀●▶RØ" : "L◀●▶R";
 
-        string label = $"V{voiceIndex + 1}  SRC {sourceNumber:D2} · {shortHash}  {badgeText}  {panSegment}";
+        string voiceToken = $"VOICE {voiceIndex + 1}";
+        string sampleToken = string.IsNullOrEmpty(shortHash)
+            ? ""
+            : $"  ·  {shortHash}";
+        string label = $"{voiceToken}{sampleToken}{badgeText}";
 
         return new SnesDspPanelHeader(label, badges, pan, phaseMarker);
     }

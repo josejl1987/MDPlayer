@@ -43,6 +43,15 @@ internal sealed record NoteEvent(
     [JsonPropertyName("sourceAttackId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SourceAttackId { get; init; }
+
+    /// <summary>
+    /// Stable sample identity for pitched sample playback (e.g. the BRR
+    /// source playing on an S-DSP voice). It is metadata on the pitched
+    /// note — it never determines vertical position.
+    /// </summary>
+    [JsonPropertyName("sampleId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SampleId { get; init; }
 }
 
 internal sealed record RhythmEvent(
@@ -156,6 +165,34 @@ internal sealed record SamplePlaybackEvent(
     [JsonPropertyName("sourceAttackId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SourceAttackId { get; init; }
+
+    /// <summary>
+    /// Semantic classification: sample playback is <em>pitched</em> only when
+    /// the decoder/emulator produced a meaningful musical pitch for it. A
+    /// null/non-finite midi pitch means the playback is unpitched
+    /// (YM2612 DAC, rhythm samples, S-DSP noise), regardless of chip or of
+    /// the PCM/sample encoding. The renderer branches on this classification,
+    /// never on chip type.
+    /// </summary>
+    public SamplePlaybackSemantics Semantics
+        => MidiPitch is { } midi && double.IsFinite(midi)
+            ? SamplePlaybackSemantics.Pitched
+            : SamplePlaybackSemantics.Unpitched;
+}
+
+/// <summary>
+/// The explicit pitched-vs-unpitched distinction consumed by the renderer.
+/// <see cref="SamplePlaybackEvent.Semantics"/> derives from decoder-produced
+/// musical pitch only — sample identity alone never implies pitched, and a
+/// PCM encoding never implies unpitched.
+/// </summary>
+internal enum SamplePlaybackSemantics
+{
+    /// <summary>Sample/event playback with no meaningful musical pitch (DAC, rhythm, S-DSP noise).</summary>
+    Unpitched,
+
+    /// <summary>Sample playback with a decoder-produced musical pitch (pitched BRR/S-DSP voices).</summary>
+    Pitched,
 }
 
 /// <summary>

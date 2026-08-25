@@ -145,10 +145,20 @@ internal static class ChipPanelHeaderBuilder
                 SamplePlaybackEvent playback = playbackEvents[cursor.PlaybackIndex];
                 if (playback.StartSample <= currentSample && currentSample < playback.EndSample)
                 {
-                int hashSeparator = playback.SampleId.LastIndexOf(':');
-                shortHash = hashSeparator >= 0
-                    ? playback.SampleId[(hashSeparator + 1)..]
-                    : playback.SampleId;
+                // §13: prefer the established sample display name (e.g.
+                // "BRR 02df5") over the raw id suffix.
+                if (panel.SamplesById.TryGetValue(playback.SampleId, out SampleDefinition definition)
+                    && !string.IsNullOrWhiteSpace(definition.DisplayName))
+                {
+                    shortHash = definition.DisplayName;
+                }
+                else
+                {
+                    int hashSeparator = playback.SampleId.LastIndexOf(':');
+                    shortHash = hashSeparator >= 0
+                        ? playback.SampleId[(hashSeparator + 1)..]
+                        : playback.SampleId;
+                }
                 }
             }
             cursor.PlaybackIdentityIndex = cursor.PlaybackIndex;

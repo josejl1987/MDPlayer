@@ -410,6 +410,34 @@ internal sealed partial class PanelOverlayRenderer
                     DrawChevron(frame, playheadX, lane.Bottom - 1, false, accent.Lighten(0.5), lane);
             }
         }
+
+        // §12: the sample identity of pitched sample playback is note
+        // metadata (e.g. "BRR 02df5"). It labels the note block when there is
+        // enough horizontal/vertical space and is suppressed otherwise, so
+        // labels never make note geometry unreadable.
+        if (!operatorRibbon
+            && !string.IsNullOrEmpty(note.SampleDisplayLabel)
+            && right - left >= 40
+            && ribbonHeight >= 12)
+        {
+            double labelMidi = note.StartMidiNote;
+            if (double.IsNaN(labelMidi))
+                labelMidi = PitchContour.PitchAtSample(
+                    note, note.StartSample, _samplesPerFrame);
+            int labelY = Math.Clamp(
+                MidiToY(labelMidi, minMidi, maxMidi, lane) - ribbonHeight / 2,
+                lane.Y,
+                lane.Bottom - 9);
+            DrawText(
+                frame,
+                left + 3,
+                labelY + 1,
+                note.SampleDisplayLabel,
+                BrightText.WithAlpha(205),
+                1,
+                right - 4);
+        }
+
         if (_performance.Enabled)
             _performance.RibbonDecorationTicks += Stopwatch.GetTimestamp() - decoStart;
     }

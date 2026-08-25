@@ -133,7 +133,7 @@ public class SnesDspTimelineDecoderTests
         SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
 
         decoder.Process(SpcSemanticEvent.KeyOn(0, 0, effectivePitch: 0x1000));
-        decoder.Process(SpcSemanticEvent.PitchChanged(100, 0, 0x1000));
+        decoder.Process(SpcSemanticEvent.PitchChanged(100, 0, 0x1100));
         decoder.Process(SpcSemanticEvent.PitchChanged(200, 0, 0x1200));
         decoder.Process(SpcSemanticEvent.PitchChanged(150, 0, 0x1400)); // out of order -> dropped
         decoder.Process(SpcSemanticEvent.PitchChanged(200, 0, 0x1800)); // equal position -> dropped
@@ -319,11 +319,13 @@ public class SnesDspTimelineDecoderTests
         // the natural sample rate: 0 relative semitones.
         SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
 
-        decoder.Process(SpcSemanticEvent.KeyOn(0, 0, effectivePitch: 0x1000));
+        decoder.Process(SpcSemanticEvent.KeyOn(0, 0, effectivePitch: 0x1800));
         decoder.Process(SpcSemanticEvent.PitchChanged(100, 0, 0));
         decoder.Process(SpcSemanticEvent.VoiceEnd(200, 0));
 
         NoteEvent note = Assert.Single(timeline.Build(1000).Notes);
+        // The natural-rate fallback (69) differs from the initial pitch
+        // (0x1800 ≈ +7.02 st), so it must surface as a trajectory point.
         Assert.Equal(69.0, Assert.Single(note.Pitch).MidiNote, 3);
     }
 
@@ -372,6 +374,108 @@ public class SnesDspTimelineDecoderTests
         Assert.Equal(50L, point.SamplePosition);
         double expected = 69.0 + 12.0 * Math.Log2(0x1800 / (double)0x1000);
         Assert.Equal(expected, point.MidiNote, 3);
+    }
+
+    [Fact]
+    public void KeyOn_WhileNoiseEnabled_EmitsNoisePeriodNotPitchedNote()
+    {
+        // §24/§35: an S-DSP voice using noise has no meaningful pitch. A KON
+        // in noise mode must produce an unpitched noise block within the
+        // hardware voice, never a fake pitched note.
+        SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
+
+        decoder.Process(new SpcSemanticEvent(
+            0, 2, SpcSemanticEventKind.NoiseChanged, Value: 1));
+        decoder.Process(SpcSemanticEvent.KeyOn(100, 2, sourceNumber: 3, effectivePitch: 0x1000));
+        decoder.Process(SpcSemanticEvent.VoiceEnd(500, 2));
+
+        VisualizationTimeline result = timeline.Build(1000);
+        Assert.Empty(result.Notes);
+        Assert.Empty(result.SamplePlayback);
+        NoiseStateEvent noise = Assert.Single(result.NoiseStates);
+        Assert.Equal("snesdsp.0.pcmvoice.3", noise.VoiceId);
+        Assert.Equal(100L, noise.StartSample);
+        Assert.Equal(500L, noise.EndSample);
+        Assert.Equal(NoiseMode.HardwareDefined, noise.Mode);
+    }
+
+    [Fact]
+    public void NoiseTogglesMidVoice_SplitsPitchedNote_IntoNoisePeriod()
+    {
+        // §24: a pitched BRR period is a piano-roll note; the noise period
+        // on the same hardware voice is an unpitched noise block. The pitched
+        // note is split at the noise transition, not merged with it.
+        SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
+
+        decoder.Process(SpcSemanticEvent.KeyOn(0, 0, sourceNumber: 1, effectivePitch: 0x1000));
+        decoder.Process(new SpcSemanticEvent(
+            200, 0, SpcSemanticEventKind.NoiseChanged, Value: 1));
+        decoder.Process(new SpcSemanticEvent(
+            300, 0, SpcSemanticEventKind.NoiseChanged, Value: 0));
+        decoder.Process(SpcSemanticEvent.VoiceEnd(500, 0));
+
+        VisualizationTimeline result = timeline.Build(1000);
+        NoteEvent note = Assert.Single(result.Notes);
+        Assert.Equal(0L, note.StartSample);
+        Assert.Equal(200L, note.EndSample);
+        NoiseStateEvent noise = Assert.Single(result.NoiseStates);
+        Assert.Equal(200L, noise.StartSample);
+        Assert.Equal(300L, noise.EndSample);
+    }
+
+    [Fact]
+    public void PitchWrites_WithNoEffectiveChange_CollapseToSinglePoint()
+    {
+        // §30: repeated pitch-register writes that do not change the
+        // effective pitch are collapsed; the trajectory keeps the minimum
+        // representation and no phantom movement is drawn.
+        SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
+
+        decoder.Process(SpcSemanticEvent.KeyOn(0, 0, effectivePitch: 0x1000));
+        decoder.Process(SpcSemanticEvent.PitchChanged(100, 0, 0x1000));
+        decoder.Process(SpcSemanticEvent.PitchChanged(150, 0, 0x1000));
+        decoder.Process(SpcSemanticEvent.PitchChanged(200, 0, 0x1800));
+        decoder.Process(SpcSemanticEvent.PitchChanged(250, 0, 0x1800));
+        decoder.Process(SpcSemanticEvent.VoiceEnd(400, 0));
+
+        NoteEvent note = Assert.Single(timeline.Build(1000).Notes);
+        PitchChange point = Assert.Single(note.Pitch);
+        Assert.Equal(200L, point.SamplePosition);
+        Assert.Equal(69.0 + 12.0 * Math.Log2(0x1800 / (double)0x1000), point.MidiNote, 3);
+    }
+
+    [Fact]
+    public void PitchedNote_CarriesStableSampleIdentity()
+    {
+        // §3.2/§12/§13: the pitched BRR event carries its stable sample
+        // identity as note metadata (used for labels/colors) without ever
+        // becoming its vertical position.
+        SnesDspTimelineDecoder decoder = CreateDecoder(out TimelineBuilder timeline);
+        byte[] encoded = new byte[9];
+        encoded[0] = 0x01; // one terminal BRR block
+        decoder.SetSamples([
+            new SpcSampleEntry(
+                "abcdef0123456789",
+                "abcdef01",
+                [3],
+                0x2000,
+                0x2000,
+                false,
+                encoded,
+                "relative",
+                null,
+                0),
+        ]);
+
+        decoder.Process(SpcSemanticEvent.KeyOn(100, 2, sourceNumber: 3, effectivePitch: 0x1000));
+        decoder.Process(SpcSemanticEvent.VoiceEnd(500, 2));
+
+        VisualizationTimeline result = timeline.Build(1000);
+        NoteEvent note = Assert.Single(result.Notes);
+        Assert.Equal("sample:abcdef01", note.SampleId);
+        SamplePlaybackEvent playback = Assert.Single(result.SamplePlayback);
+        Assert.Equal("sample:abcdef01", playback.SampleId);
+        Assert.Equal(SamplePlaybackSemantics.Pitched, playback.Semantics);
     }
 
     [Fact]

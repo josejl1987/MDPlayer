@@ -15,6 +15,9 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
     private const int VoiceCount = 8;
 
     private readonly SpcActiveNote?[] _notes = new SpcActiveNote?[VoiceCount];
+    private readonly SpcNoisePeriod?[] _noisePeriods = new SpcNoisePeriod?[VoiceCount];
+    private readonly bool[] _voiceActive = new bool[VoiceCount];
+    private readonly bool[] _noiseEnabled = new bool[VoiceCount];
     private readonly int[] _latchedSources = new int[VoiceCount];
     private readonly Dictionary<int, double> _rootOffsetBySource = new();
     private readonly Dictionary<int, string> _sampleIdBySource = new();
@@ -70,6 +73,9 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
                 break;
             case SpcSemanticEventKind.SourceLatched:
                 _latchedSources[@event.Voice] = @event.Value;
+                break;
+            case SpcSemanticEventKind.NoiseChanged:
+                OnNoiseChanged(@event);
                 break;
             default:
                 break;
@@ -197,8 +203,9 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
     private void OnKeyOn(in SpcSemanticEvent @event)
     {
         int voice = @event.Voice;
-        bool retrigger = _notes[voice] != null;
+        bool retrigger = _notes[voice] != null || _noisePeriods[voice] != null;
         Close(voice, @event.SamplePosition);
+        _voiceActive[voice] = true;
 
         // Native KEY_ON events carry an authoritative source number, including
         // SRCN 0. Synthetic events may explicitly omit it and use the last
@@ -215,6 +222,16 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         _timeline.AddInstrument(new InstrumentDefinition(
             instrument, "pcm", null, null, null, null, Array.Empty<FmOperatorDefinition>()));
 
+        // §24: while the voice uses noise rather than pitched BRR playback,
+        // the S-DSP pitch register is not a meaningful musical pitch. A KON
+        // in noise mode starts an unpitched noise period within this hardware
+        // voice instead of a pitched note.
+        if (_noiseEnabled[voice])
+        {
+            StartNoisePeriod(voice, @event.SamplePosition);
+            return;
+        }
+
         _notes[voice] = new SpcActiveNote
         {
             Active = true,
@@ -226,6 +243,68 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
             InitialSemitones = SoundingSemitones(source, @event.EffectivePitch),
             IsRetrigger = retrigger,
         };
+    }
+
+    /// <summary>
+    /// §24: noise periods are unpitched. When noise turns on mid-voice, any
+    /// active pitched note is split at the transition and the noise period is
+    /// represented as an unpitched noise block within the same hardware voice.
+    /// No fake pitch is derived for noise.
+    /// </summary>
+    private void OnNoiseChanged(in SpcSemanticEvent @event)
+    {
+        int voice = @event.Voice;
+        bool enabled = @event.Value != 0;
+        if (_noiseEnabled[voice] == enabled)
+            return;
+
+        if (enabled)
+        {
+            _noiseEnabled[voice] = true;
+            bool sounding = _voiceActive[voice] || _notes[voice] != null;
+            if (_notes[voice] != null)
+            {
+                // Split the pitched note at the noise transition.
+                Close(voice, @event.SamplePosition);
+            }
+            if (sounding)
+                StartNoisePeriod(voice, @event.SamplePosition);
+        }
+        else
+        {
+            _noiseEnabled[voice] = false;
+            CloseNoisePeriod(voice, @event.SamplePosition);
+        }
+    }
+
+    private void StartNoisePeriod(int voice, long sample)
+    {
+        if (_noisePeriods[voice] != null)
+        {
+            // A retrigger within an ongoing noise period closes it first so
+            // each noise block stays bounded.
+            CloseNoisePeriod(voice, sample);
+        }
+        _noisePeriods[voice] = new SpcNoisePeriod(sample);
+    }
+
+    private void CloseNoisePeriod(int voice, long endSample)
+    {
+        SpcNoisePeriod? period = _noisePeriods[voice];
+        if (period == null)
+            return;
+        _noisePeriods[voice] = null;
+        if (endSample > period.StartSample)
+        {
+            _timeline.AddNoiseState(new NoiseStateEvent(
+                new VoiceId(_device.Id, VoiceKind.PcmVoice, voice).ToString(),
+                period.StartSample,
+                endSample,
+                CentreFrequencyHz: null,
+                Period: null,
+                Level: 1.0f,
+                Mode: NoiseMode.HardwareDefined));
+        }
     }
 
     private void OnReleaseStart(in SpcSemanticEvent @event)
@@ -251,15 +330,22 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
         if (pitch.Count > 0 && @event.SamplePosition <= pitch[^1].SamplePosition)
             return;
         double semitones = SoundingSemitones(note.SourceNumber, @event.EffectivePitch);
-        pitch.Add(new PitchChange(@event.SamplePosition, FrequencyHz(semitones), A4Anchor + semitones));
+        double midiNote = A4Anchor + semitones;
+        // §30: collapse adjacent redundant pitch writes with no effective
+        // pitch change (including against the note's initial pitch); the
+        // trajectory keeps the minimum representation.
+        double lastMidi = pitch.Count > 0
+            ? pitch[^1].MidiNote
+            : A4Anchor + note.InitialSemitones;
+        if (Math.Abs(lastMidi - midiNote) < 1e-9)
+            return;
+        pitch.Add(new PitchChange(@event.SamplePosition, FrequencyHz(semitones), midiNote));
     }
 
     private void Close(int voice, long endSample)
     {
         SpcActiveNote? note = _notes[voice];
-        if (note == null)
-            return;
-        if (endSample > note.StartSample)
+        if (note != null && endSample > note.StartSample)
         {
             _timeline.AddNote(
                 new VoiceId(_device.Id, VoiceKind.PcmVoice, voice),
@@ -274,6 +360,8 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
                 _sampleIdBySource.TryGetValue(note.SourceNumber, out string sampleId) ? sampleId : null);
         }
         _notes[voice] = null;
+        CloseNoisePeriod(voice, endSample);
+        _voiceActive[voice] = false;
     }
 
     /// <summary>
@@ -303,4 +391,11 @@ internal sealed class SnesDspTimelineDecoder : IChipTimelineDecoder
     /// </summary>
     internal static double FrequencyHz(double relativeSemitones) =>
         440.0 * Math.Pow(2.0, relativeSemitones / 12.0);
+
+    /// <summary>
+    /// An open unpitched noise period on one S-DSP voice. The S-DSP pitch
+    /// register is meaningless while the voice uses noise, so periods are
+    /// represented as unpitched noise blocks within the hardware voice.
+    /// </summary>
+    private sealed record SpcNoisePeriod(long StartSample);
 }

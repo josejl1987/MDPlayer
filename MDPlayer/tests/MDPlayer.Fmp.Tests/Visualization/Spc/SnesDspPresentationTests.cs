@@ -42,14 +42,17 @@ public sealed class SnesDspPresentationTests
     }
 
     [Fact]
-    public void BuildHeader_OnlyActiveBadgesAppear_InFixedOrder()
+    public void BuildHeader_OnlyNoiseBadgeSurvives_RegisterBadgesDropped()
     {
+        // §32/§17: register diagnostics ([PM]/[E]) are not primary musical
+        // text; only the noise badge survives because it changes the lane's
+        // musical semantics (unpitched).
         SnesDspPanelHeader header = SnesDspPresentation.BuildHeader(
             voiceIndex: 0, sourceNumber: 23, shortHash: "A1B2C3",
-            noise: true, pitchMod: true, echoSend: false,
+            noise: true, pitchMod: true, echoSend: true,
             volLeft: 127, volRight: 127);
 
-        Assert.Equal(new[] { "[PM]", "[N]" }, header.Badges);
+        Assert.Equal(new[] { "[N]" }, header.Badges);
     }
 
     [Fact]
@@ -96,23 +99,39 @@ public sealed class SnesDspPresentationTests
     }
 
     [Fact]
-    public void BuildHeader_Label_MatchesTokenFormat()
+    public void BuildHeader_Label_BuildsVoiceAndSampleIdentity()
     {
+        // §17: 'VOICE N' primary; BRR short hash appended when a sample is
+        // sounding.
         SnesDspPanelHeader header = SnesDspPresentation.BuildHeader(
             voiceIndex: 0, sourceNumber: 23, shortHash: "A1B2C3",
             noise: true, pitchMod: true, echoSend: true,
             volLeft: 127, volRight: 127);
-        Assert.Equal("V1  SRC 23 · A1B2C3  [PM] [N] [E]  L◀●▶R", header.Label);
+        Assert.Equal("VOICE 1  ·  A1B2C3  [N]", header.Label);
     }
 
     [Fact]
-    public void BuildHeader_Label_AppendsPhaseMarkerForSurround()
+    public void BuildHeader_Label_OmitsSampleWhenNoneSounding()
     {
+        SnesDspPanelHeader header = SnesDspPresentation.BuildHeader(
+            voiceIndex: 2, sourceNumber: 0, shortHash: "",
+            noise: false, pitchMod: false, echoSend: false,
+            volLeft: 127, volRight: 127);
+        Assert.Equal("VOICE 3", header.Label);
+    }
+
+    [Fact]
+    public void BuildHeader_PanAndPhaseStillComputed_ForBalanceUse()
+    {
+        // The pan value is retained on the header data (used by balance
+        // overlays) even though it is no longer rendered as register text.
         SnesDspPanelHeader header = SnesDspPresentation.BuildHeader(
             voiceIndex: 3, sourceNumber: 5, shortHash: "1A2B3C",
             noise: true, pitchMod: false, echoSend: false,
             volLeft: 127, volRight: -127);
-        Assert.Equal("V4  SRC 05 · 1A2B3C  [N]  L◀●▶RØ", header.Label);
+        Assert.Equal("VOICE 4  ·  1A2B3C  [N]", header.Label);
+        Assert.True(header.PhaseMarker);
+        Assert.Equal(0.0, header.Pan, 10);
     }
 
     [Fact]

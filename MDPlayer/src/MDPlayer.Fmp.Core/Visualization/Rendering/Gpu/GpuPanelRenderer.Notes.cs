@@ -300,6 +300,22 @@ internal sealed partial class GpuPanelRenderer
             if (labelX < right - 8)
                 DrawTextAt("E", labelX, labelY, TextSizeScale1, BrightText);
         }
+
+        // §12: the sample identity of pitched sample playback is note
+        // metadata (e.g. "BRR 02df5"). It labels the note block when there is
+        // enough horizontal/vertical space and is suppressed otherwise, so
+        // labels never make note geometry unreadable.
+        if (!string.IsNullOrEmpty(note.SampleDisplayLabel)
+            && right - left >= 40
+            && ribbonHeight >= 12)
+        {
+            int labelY = Math.Clamp(
+                MidiToY(NotePitchAt(note, note.StartSample), minMidi, maxMidi, lane)
+                    - ribbonHeight / 2,
+                lane.Y,
+                lane.Bottom - 9);
+            DrawTextWithLimit(note.SampleDisplayLabel, left + 3, labelY + 1, TextSizeScale1, BrightText.WithAlpha(205), right - 2);
+        }
     }
 
     /// <summary>
@@ -556,6 +572,10 @@ internal sealed partial class GpuPanelRenderer
             var labels = new List<string>();
             for (int i = 0; i < playback.Length; i++)
             {
+                // §21: pitched sample playback never creates identity rows;
+                // only unpitched sample events (DAC, rhythm, S-DSP noise) do.
+                if (playback[i].Semantics == SamplePlaybackSemantics.Pitched)
+                    continue;
                 if (string.IsNullOrEmpty(playback[i].SampleId))
                     continue;
                 string label = SampleRowLabel(panel, playback[i].SampleId);
@@ -599,8 +619,50 @@ internal sealed partial class GpuPanelRenderer
                 break;
             if (value.EndSample <= windowStart)
                 continue;
+            // §19/§21: pitched sample playback is drawn as the pitched note
+            // above (its BRR identity is note metadata); only unpitched sample
+            // events get identity rows / playback bars in this lane.
+            if (value.Semantics == SamplePlaybackSemantics.Pitched)
+                continue;
             int row = rows != null && index < rows.Length ? rows[index] : 0;
             DrawSamplePlaybackRow(panel, value, lane, currentSample, row, rowCount);
+        }
+
+        DrawVoiceNoisePeriodsGpu(panel, lane, currentSample);
+    }
+
+    /// <summary>
+    /// §24: unpitched noise periods inside a sample/voice lane render as a
+    /// compact noise block within the same hardware voice — never as a fake
+    /// pitched note and never as an extra subordinate lane.
+    /// </summary>
+    private void DrawVoiceNoisePeriodsGpu(
+        PreparedPanel panel,
+        OverlayRect lane,
+        long currentSample)
+    {
+        if (panel.Noise.Length == 0 || lane.Height <= 0)
+            return;
+        long windowStart = _layout.WindowStartSample(currentSample, _timeline.SampleRate);
+        long windowEnd = _layout.WindowEndSample(currentSample, _timeline.SampleRate);
+        int stripHeight = Math.Clamp(lane.Height / 14, 4, 8);
+        int bandY = lane.Bottom - stripHeight - 1;
+        foreach (NoiseStateEvent value in panel.Noise)
+        {
+            if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+            double left = Math.Max(lane.X,
+                _layout.SampleToX(value.StartSample, currentSample, _timeline.SampleRate, lane));
+            double right = Math.Min(lane.Right,
+                _layout.SampleToX(value.EndSample, currentSample, _timeline.SampleRate, lane));
+            if (right <= left)
+                continue;
+            int leftI = (int)Math.Floor(left);
+            int widthI = Math.Max(1, (int)Math.Ceiling(right - left));
+            OverlayColor noiseFill = panel.Accent.WithAlpha(150);
+            FillRect(new OverlayRect(leftI, bandY, widthI, stripHeight), noiseFill);
+            for (int x = leftI; x < leftI + widthI; x += 4)
+                DrawVerticalLine(x, bandY, bandY + stripHeight - 1, BrightText.WithAlpha(150));
         }
     }
 
@@ -1089,6 +1151,10 @@ internal sealed partial class GpuPanelRenderer
         foreach (SamplePlaybackEvent value in panel.SamplePlayback)
         {
             if (value.EndSample <= windowStart || value.StartSample >= windowEnd)
+                continue;
+            // Pitched sample playback is already drawn as the note bars
+            // above; only unpitched events render playback detail here.
+            if (value.Semantics == SamplePlaybackSemantics.Pitched)
                 continue;
             DrawSamplePlaybackRow(panel, value, lane, currentSample, 0, 1);
         }
