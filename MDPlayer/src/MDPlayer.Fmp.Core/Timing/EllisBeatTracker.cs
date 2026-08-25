@@ -341,6 +341,8 @@ internal static class EllisBeatTracker
         if (sampleRate <= 0 || hopSamples <= 0 || bpm <= 0 || onsetEnvelope.Count < 2)
             throw new ArgumentOutOfRangeException();
 
+        // librosa.beat.__beat_tracker: "frames_per_beat = np.round(frame_rate *
+        // 60.0 / bpm)" using banker's rounding (MidpointRounding.ToEven).
         int framesPerBeat = Math.Max(1, (int)Math.Round(
             sampleRate / (double)hopSamples * 60.0 / bpm,
             MidpointRounding.ToEven));
@@ -356,8 +358,9 @@ internal static class EllisBeatTracker
                 break;
         }
         frames.Reverse();
-        if (trim)
-            TrimWeakEdges(frames, localScore);
+        // librosa always runs __trim_beats, even when trim=False; only the
+        // threshold differs (see TrimBeats below).
+        TrimBeats(frames, localScore, trim);
         return new EllisReferenceBeatPath(frames, localScore, cumulative[tail]);
     }
 
@@ -365,29 +368,91 @@ internal static class EllisBeatTracker
         IReadOnlyList<double> onsetEnvelope,
         int framesPerBeat)
     {
-        double mean = onsetEnvelope.Average();
-        double variance = onsetEnvelope.Count > 1
-            ? onsetEnvelope.Sum(value => (value - mean) * (value - mean))
-                / (onsetEnvelope.Count - 1)
+        // librosa.__normalize_onsets divides by "onsets.std(ddof=1) +
+        // util.tiny(onsets)": the tiny epsilon is ALWAYS added, so an
+        // all-zero envelope normalizes to all zeros instead of being passed
+        // through unscaled. numpy computes mean and variance with PAIRWISE
+        // summation (see NumpyPairwiseSum); sequential summation diverges by
+        // ulps and flips knife-edge dynamic-program decisions.
+        double[] values = onsetEnvelope.ToArray();
+        double mean = values.Length > 0 ? NumpyPairwiseSum(values) / values.Length : 0;
+        double variance = values.Length > 1
+            ? NumpyPairwiseSum(values.Select(value => (value - mean) * (value - mean)).ToArray())
+                / (values.Length - 1)
             : 0;
-        double scale = Math.Sqrt(variance);
-        var normalized = onsetEnvelope
-            .Select(value => scale > 1e-12 ? value / scale : value)
+        double scale = Math.Sqrt(variance) + 2.2250738585072014e-308;
+        var normalized = values
+            .Select(value => value / scale)
             .ToArray();
         var local = new double[normalized.Length];
-        for (int frame = 0; frame < normalized.Length; frame++)
+        int count = normalized.Length;
+        int windowLength = 2 * framesPerBeat + 1;
+        var window = new double[windowLength];
+        // librosa.__beat_local_score static-tempo branch:
+        // window = exp(-0.5 * (arange(-fpb, fpb+1) * 32.0 / fpb)**2)
+        for (int tap = 0; tap < windowLength; tap++)
         {
-            for (int offset = -framesPerBeat; offset <= framesPerBeat; offset++)
+            double offset = (tap - framesPerBeat) * 32.0 / framesPerBeat;
+            window[tap] = Math.Exp(-0.5 * offset * offset);
+        }
+        for (int frame = 0; frame < count; frame++)
+        {
+            // Exact librosa accumulation bounds ("essentially a same-mode
+            // convolution", but with the kernel's edge semantics preserved):
+            // for k in range(max(0, i + K//2 - N + 1), min(i + K//2, K)).
+            int firstTap = Math.Max(0, frame + framesPerBeat - count + 1);
+            int lastExclusiveTap = Math.Min(frame + framesPerBeat, windowLength);
+            double sum = 0;
+            for (int tap = firstTap; tap < lastExclusiveTap; tap++)
             {
-                int source = frame - offset;
-                if (source < 0 || source >= normalized.Length)
-                    continue;
-                double window = Math.Exp(-0.5 * Math.Pow(
-                    offset * 32.0 / framesPerBeat, 2));
-                local[frame] += window * normalized[source];
+                sum += window[tap]
+                    * normalized[frame + framesPerBeat - tap];
             }
+            local[frame] = sum;
         }
         return local;
+    }
+
+    /// <summary>
+    /// Bit-compatible reimplementation of numpy's pairwise summation
+    /// (numpy/core/src/umath/loops.c, pairwise_sum): sequential below 8
+    /// elements, an 8-lane unrolled accumulator up to 128, and recursive
+    /// bisection at a multiple-of-8 midpoint beyond that. This is required so
+    /// mean/std reductions match librosa bit-for-bit.
+    /// </summary>
+    internal static double NumpyPairwiseSum(double[] values) =>
+        NumpyPairwiseSum(values, 0, values.Length);
+
+    private static double NumpyPairwiseSum(double[] values, int start, int count)
+    {
+        if (count < 8)
+        {
+            double result = 0;
+            for (int index = start; index < start + count; index++)
+                result += values[index];
+            return result;
+        }
+        if (count <= 128)
+        {
+            Span<double> lanes = stackalloc double[8];
+            for (int lane = 0; lane < 8; lane++)
+                lanes[lane] = values[start + lane];
+            int index = 8;
+            for (; index < count - (count % 8); index += 8)
+            {
+                for (int lane = 0; lane < 8; lane++)
+                    lanes[lane] += values[start + index + lane];
+            }
+            double result = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+                + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+            for (; index < count; index++)
+                result += values[start + index];
+            return result;
+        }
+        int half = count / 2;
+        half -= half % 8;
+        return NumpyPairwiseSum(values, start, half)
+            + NumpyPairwiseSum(values, start + half, count - half);
     }
 
     private static (int[] Backlink, double[] Cumulative) RunEllisDynamicProgram(
@@ -439,44 +504,115 @@ internal static class EllisBeatTracker
         return (backlink, cumulative);
     }
 
+    /// <summary>
+    /// Mirrors librosa.beat.__last_beat: local maxima per librosa.util.localmax
+    /// (strictly greater than the previous frame, greater-or-equal than the
+    /// next; the first frame is never a maximum and the last frame requires a
+    /// strictly greater value), thresholded at half the true median of the
+    /// maxima scores (numpy median averages the two middle values for an even
+    /// count). The tail is the LAST frame that is both a local maximum and at
+    /// or above the threshold; when nothing qualifies (including the NaN
+    /// threshold of an all-flat cumulative score) the selector defaults to the
+    /// final frame.
+    /// </summary>
     private static int LastBeat(IReadOnlyList<double> cumulative)
     {
-        var maxima = new List<int>();
-        for (int index = 0; index < cumulative.Count; index++)
+        int count = cumulative.Count;
+        var isMaximum = new bool[count];
+        // librosa.util.localmax stencil.
+        for (int index = 1; index < count - 1; index++)
         {
-            bool left = index == 0 || cumulative[index] >= cumulative[index - 1];
-            bool right = index == cumulative.Count - 1
-                || cumulative[index] >= cumulative[index + 1];
-            if (left && right)
-                maxima.Add(index);
+            isMaximum[index] = cumulative[index] > cumulative[index - 1]
+                && cumulative[index] >= cumulative[index + 1];
         }
-        if (maxima.Count == 0)
+        if (count >= 2)
+            isMaximum[count - 1] = cumulative[count - 1] > cumulative[count - 2];
+
+        var maximaValues = new List<double>();
+        for (int index = 0; index < count; index++)
         {
-            int best = 0;
-            for (int index = 1; index < cumulative.Count; index++)
-                if (cumulative[index] > cumulative[best])
-                    best = index;
-            return best;
+            if (isMaximum[index])
+                maximaValues.Add(cumulative[index]);
         }
-        double[] values = maxima.Select(index => cumulative[index]).OrderBy(value => value).ToArray();
-        double threshold = 0.5 * values[values.Length / 2];
-        for (int index = maxima.Count - 1; index >= 0; index--)
-            if (cumulative[maxima[index]] >= threshold)
-                return maxima[index];
-        return maxima[^1];
+        maximaValues.Sort();
+        // np.ma.median over the masked scores. With no maxima the masked
+        // median is NaN and every threshold comparison fails, which makes the
+        // scan below fall through to the librosa default tail (last frame).
+        double median = maximaValues.Count == 0
+            ? double.NaN
+            : maximaValues.Count % 2 == 1
+                ? maximaValues[maximaValues.Count / 2]
+                : 0.5 * (maximaValues[maximaValues.Count / 2 - 1]
+                    + maximaValues[maximaValues.Count / 2]);
+        double threshold = 0.5 * median;
+
+        // __last_beat_selector scans backwards from the end and keeps the last
+        // qualifying local maximum; out defaults to the final frame.
+        for (int index = count - 1; index >= 0; index--)
+        {
+            if (isMaximum[index] && cumulative[index] >= threshold)
+                return index;
+        }
+        return count - 1;
     }
 
-    private static void TrimWeakEdges(List<int> frames, IReadOnlyList<double> localScore)
+    /// <summary>
+    /// Mirrors librosa.beat.__trim_beats exactly. The edge suppression ALWAYS
+    /// runs: with trim=False the threshold is 0.0, so only beats sitting on
+    /// frames whose local score is zero or negative are discarded ("preserve
+    /// old behavior and always discard beats detected with oenv==0"). With
+    /// trim=True the threshold is half the RMS of the beat-local-score signal
+    /// smoothed by a length-5 Hann window, including librosa's quirky full
+    /// convolution slice [len(w)//2 : len(localscore)+len(w)//2].
+    /// </summary>
+    private static void TrimBeats(List<int> frames, IReadOnlyList<double> localScore, bool trim)
     {
-        if (frames.Count == 0)
-            return;
-        double[] beatScores = frames.Select(frame => localScore[frame]).ToArray();
-        double rms = Math.Sqrt(beatScores.Select(value => value * value).Average());
-        double threshold = 0.5 * rms;
-        while (frames.Count > 0 && localScore[frames[0]] <= threshold)
-            frames.RemoveAt(0);
-        while (frames.Count > 0 && localScore[frames[^1]] <= threshold)
-            frames.RemoveAt(frames.Count - 1);
+        double threshold;
+        if (trim && frames.Count > 0)
+        {
+            // np.hanning(5) == [0, 0.5, 1, 0.5, 0].
+            double[] window = { 0.0, 0.5, 1.0, 0.5, 0.0 };
+            double[] beatScores = frames.Select(frame => localScore[frame]).ToArray();
+            var convolution = new double[beatScores.Length + window.Length - 1];
+            for (int index = 0; index < convolution.Length; index++)
+            {
+                double sum = 0;
+                for (int tap = Math.Max(0, index - window.Length + 1);
+                     tap <= Math.Min(index, beatScores.Length - 1);
+                     tap++)
+                {
+                    sum += beatScores[tap] * window[index - tap];
+                }
+                convolution[index] = sum;
+            }
+            // numpy slicing clamps, so the slice never exceeds the array.
+            int start = window.Length / 2;
+            int end = Math.Min(localScore.Count + start, convolution.Length);
+            var smoothed = new double[Math.Max(0, end - start)];
+            for (int index = start; index < end; index++)
+                smoothed[index - start] = convolution[index];
+            threshold = smoothed.Length > 0
+                ? 0.5 * Math.Sqrt(NumpyPairwiseSum(
+                    smoothed.Select(value => value * value).ToArray()) / smoothed.Length)
+                : 0;
+        }
+        else
+        {
+            threshold = 0.0;
+        }
+
+        // librosa's suppression loops walk consecutive FRAME indices from both
+        // ends and stop at the FIRST frame whose local score exceeds the
+        // threshold — even when that frame is not a beat. Beats beyond that
+        // stop point survive even if their own local score is low, so the
+        // suppression must not simply pop weak beats off the path.
+        int front = 0;
+        while (front < localScore.Count && localScore[front] <= threshold)
+            front++;
+        int back = localScore.Count - 1;
+        while (back >= 0 && localScore[back] <= threshold)
+            back--;
+        frames.RemoveAll(frame => frame < front || frame > back);
     }
 
     private static double PathStrength(IReadOnlyList<double> localScore, IReadOnlyList<int> frames)
