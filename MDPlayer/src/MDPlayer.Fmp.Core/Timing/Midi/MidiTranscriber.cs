@@ -95,7 +95,7 @@ internal sealed class MidiTranscriber
         int uniqueAudibleAttackCount = CountUniqueAudibleAttacks(
             notes,
             rhythm,
-            timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>(),
+            ExpandDacHits(timeline, timeline.SamplePlayback ?? Array.Empty<SamplePlaybackEvent>()),
             out IReadOnlyList<SamplePlaybackEvent> samples);
         IndexedNote[] indexed = notes
             .Select((note, index) =>
@@ -334,6 +334,57 @@ internal sealed class MidiTranscriber
         }
     }
 
+    /// <summary>
+    /// Expands the continuous YM2612 DAC sample playback into one trigger per
+    /// audible hit. The timeline's <see cref="DacHitEvent"/> list is the
+    /// per-trigger view ("one continuous stream can contain many audible
+    /// hits"); without it, a whole song's DAC stream would serialize as a
+    /// single NoteOn. Each expanded trigger is identified by the hit's
+    /// CONTENT hash (SHA-256 of the hit slice), not the stream asset id: two
+    /// byte-identical slices are the same underlying sample and share one MIDI
+    /// note, while different content maps to a different note. Non-DAC
+    /// playbacks (NES DPCM, Oki) are kept as-is.
+    /// </summary>
+    private static IReadOnlyList<SamplePlaybackEvent> ExpandDacHits(
+        VisualizationTimeline timeline,
+        IReadOnlyList<SamplePlaybackEvent> sourceSamples)
+    {
+        if (timeline.DacHits is null || timeline.DacHits.Length == 0)
+            return sourceSamples;
+        var expanded = new List<SamplePlaybackEvent>();
+        foreach (SamplePlaybackEvent sample in sourceSamples)
+        {
+            if (!sample.SampleId.StartsWith("dac:", StringComparison.Ordinal))
+            {
+                expanded.Add(sample);
+                continue;
+            }
+            bool anyHit = false;
+            foreach (DacHitEvent hit in timeline.DacHits)
+            {
+                if (!string.Equals(hit.SampleId, sample.SampleId, StringComparison.Ordinal))
+                    continue;
+                anyHit = true;
+                expanded.Add(new SamplePlaybackEvent(
+                    sample.VoiceId,
+                    hit.StartSample,
+                    hit.EndSample,
+                    hit.ContentHash,
+                    MidiPitch: null,
+                    PlaybackRate: 1.0,
+                    Gain: hit.PeakLevel,
+                    Pan: 0f,
+                    Retrigger: false,
+                    Looping: false));
+            }
+            // Identity with no inferred hits: keep the playback as-is so the
+            // trigger is not silently lost.
+            if (!anyHit)
+                expanded.Add(sample);
+        }
+        return expanded;
+    }
+
     private static int CountUniqueAudibleAttacks(
         IReadOnlyList<NoteEvent> notes,
         IReadOnlyList<RhythmEvent> rhythm,
@@ -500,12 +551,17 @@ internal sealed class MidiTranscriber
     /// those map gain through the same curve as native rhythm hits. The YM2612
     /// DAC decoder does NOT capture per-trigger amplitude (its gain is a
     /// constant 1f sentinel), so DAC velocity is the fixed default; the sample
-    /// identity is unchanged either way.
+    /// identity is unchanged either way. Hit-expanded DAC events carry their
+    /// inferred peak level as Gain, which is a reliable per-trigger amplitude.
     /// </summary>
     private static int SampleVelocity(SamplePlaybackEvent sample)
     {
         if (sample.SampleId.StartsWith("dac:", StringComparison.Ordinal))
-            return DefaultVelocity;
+        {
+            return sample.Gain > 0f && sample.Gain < 1f
+                ? DrumVelocity(sample.Gain)
+                : DefaultVelocity;
+        }
         return DrumVelocity(sample.Gain);
     }
 

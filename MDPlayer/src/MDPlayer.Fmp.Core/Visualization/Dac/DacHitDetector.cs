@@ -83,7 +83,9 @@ internal static class DacHitDetector
             int sourceStart = frames[first].Start;
             int sourceEnd = Math.Max(sourceStart + 1, frames[last].End);
             sourceEnd = Math.Min(payload.Length, sourceEnd);
-            Feature feature = Measure(payload[sourceStart..sourceEnd]);
+            ReadOnlySpan<byte> slice = payload[sourceStart..sourceEnd];
+            Feature feature = Measure(slice);
+            DacHash256 contentHash = DacHash256.Of(slice);
             (DacHitClass classification, float confidence) = Classify(feature);
             long startSample = timelineStart + (long)Math.Round(
                 (timelineEnd - timelineStart) * (sourceStart / (double)payload.Length));
@@ -96,6 +98,7 @@ internal static class DacHitDetector
                 startSample,
                 endSample,
                 sampleId,
+                contentHash.Hex,
                 sourceStart,
                 sourceEnd,
                 classification,

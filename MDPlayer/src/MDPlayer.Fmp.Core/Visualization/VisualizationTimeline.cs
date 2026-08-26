@@ -231,6 +231,7 @@ internal sealed record DacHitEvent(
     long StartSample,
     long EndSample,
     string SampleId,
+    string ContentHash,
     long SourceStartOffset,
     long SourceEndOffset,
     DacHitClass Classification,
