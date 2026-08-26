@@ -70,12 +70,13 @@ public sealed class MainWindowViewModelTests
         Harness h = Harness.Create();
         try
         {
-            Assert.Equal(960, h.VM.MidiPpq);
-            Assert.Contains(960, h.VM.MidiPpqOptions);
-
-            // The musical vocabulary was removed from the surface. Only PPQ
-            // survives; everything tied to tempo/meter/quantization/voice
-            // projection is gone and must not be resolvable.
+            // The raw transcription transport is fixed (PPQ 960 / 120 BPM) and
+            // is an internal invariant validated by the serialized-SMF fidelity
+            // suite, not a user-resolvable surface. The musical vocabulary was
+            // removed from the surface; nothing tied to tempo/meter/quantization
+            // /voice projection must be resolvable, including the old PPQ knob.
+            Assert.DoesNotContain("MidiPpq", h.VM.GetType().GetProperties().Select(p => p.Name));
+            Assert.DoesNotContain("MidiPpqOptions", h.VM.GetType().GetProperties().Select(p => p.Name));
             Assert.DoesNotContain("MidiTempoSource", h.VM.GetType().GetProperties().Select(p => p.Name));
             Assert.DoesNotContain("MidiMeter", h.VM.GetType().GetProperties().Select(p => p.Name));
             Assert.DoesNotContain("MidiQuantize", h.VM.GetType().GetProperties().Select(p => p.Name));
