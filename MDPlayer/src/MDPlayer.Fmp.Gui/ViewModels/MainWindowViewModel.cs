@@ -1281,8 +1281,10 @@ public sealed class MainWindowViewModel : ObservableObject
             }
 
             File.WriteAllBytes(outputPath, result.Bytes);
+            string reportPath = outputPath + ".report.txt";
+            File.WriteAllLines(reportPath, result.Report ?? Array.Empty<string>());
             MidiExportNotice =
-                $"MIDI export complete: {result.Bytes.Length:N0} bytes → {outputPath}";
+                $"MIDI export complete: {result.Bytes.Length:N0} bytes → {outputPath} (report: {reportPath})";
             MidiExportNoticeIsError = false;
         }
         catch (Exception ex)
