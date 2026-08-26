@@ -4,10 +4,10 @@ namespace Fmp.Core.Midi;
 
 /// <summary>
 /// A serialized MIDI event with an explicit tick so events can be ordered
-/// deterministically and independently of the track layout. Absolute ticks are
-/// pre-computed through the <see cref="Fmp.Core.Timing.MusicalTimeMap"/> so
-/// timing never accumulates rounding drift. <see cref="Tick"/> is mutable to
-/// permit optional grid quantization after conversion.
+/// deterministically and independently of the track layout. Absolute
+/// source-relative MIDI tick: for raw transcription this is obtained directly
+/// from source sample time on the fixed transport (no musical map, no grid
+/// quantization, no accumulated rounding drift).
 /// </summary>
 internal abstract record MidiEventBase
 {

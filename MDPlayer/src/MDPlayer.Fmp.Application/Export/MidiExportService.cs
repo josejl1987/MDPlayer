@@ -103,6 +103,8 @@ public sealed class MidiExportService
             lines.AddRange(performance.ToHumanReadable());
         lines.AddRange(diagnostics.BendRangeDiagnostics
             .Select(warning => "pitch-diagnostic: " + warning));
+        lines.AddRange(diagnostics.SampleIdentityMappings
+            .Select(mapping => "sample-identity: " + mapping));
         return lines;
     }
 }

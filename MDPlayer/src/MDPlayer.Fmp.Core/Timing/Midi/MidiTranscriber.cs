@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Globalization;
 using Fmp.Core.Visualization;
 
 namespace Fmp.Core.Midi;
@@ -19,13 +20,23 @@ internal sealed record MidiTranscriptionDiagnostics(
     int OneTickNotes,
     int UniqueAudibleAttackCount,
     IReadOnlyList<string>? BendRangeDiagnostics = null,
-    int QuantizationCollapsedNotes = 0,
     int EffectivePpq = 0,
     int QuantizationLossyEventCount = 0,
-    double MaxQuantizationLossTicks = 0)
+    double MaxQuantizationLossTicks = 0,
+    int SampleIdentityCount = 0,
+    IReadOnlyList<string>? SampleIdentityMappings = null)
 {
     public IReadOnlyList<string> BendRangeDiagnostics { get; init; } =
         BendRangeDiagnostics ?? Array.Empty<string>();
+
+    /// <summary>
+    /// One line per deduplicated DAC sample identity:
+    /// <c>sampleId -&gt; port P ch N note NN (name, ordinal O, K playbacks)</c>.
+    /// The ordinal is the dedup ordinal in this export; the note is the stable
+    /// sample-trigger note assigned to it (channel 10, never a pitch estimate).
+    /// </summary>
+    public IReadOnlyList<string> SampleIdentityMappings { get; init; } =
+        SampleIdentityMappings ?? Array.Empty<string>();
 }
 
 /// <summary>
@@ -42,6 +53,19 @@ internal sealed class MidiTranscriber
 
     private const int PercussionChannel = 9;
     private const int UnknownNativeDrumNote = 60;
+
+    /// <summary>DAC sample-trigger channel: MIDI channel 10 (zero-based 9).</summary>
+    private const int DacChannel = 9;
+
+    /// <summary>
+    /// Reserved identity range base: sample ordinal 0 maps to note 36 (36..95
+    /// holds the first 60 unique DAC samples). The note is a stable trigger
+    /// label, never a pitch estimate.
+    /// </summary>
+    private const int DacBaseNote = 36;
+
+    /// <summary>Each (port, channel 10) lane can label 128 unique samples.</summary>
+    private const int DacNotesPerLane = 128;
 
     private readonly int _ppq;
     private int _quantizationLossyEventCount;
@@ -83,7 +107,6 @@ internal sealed class MidiTranscriber
         IndexedSample[] indexedSamples = samples
             .Select((sample, index) => new IndexedSample(sample, index))
             .ToArray();
-        Dictionary<string, DacNoteAssignment> sampleAssignments = SampleAssignments(samples);
 
         _quantizationLossyEventCount = 0;
         _maxQuantizationLossTicks = 0m;
@@ -91,7 +114,6 @@ internal sealed class MidiTranscriber
         int collisions = CountSameTickAttacks(timeline, indexed);
         int oneTickNotes = 0;
         var tracks = new List<MidiTrack>();
-        int quantizationCollapsedNotes = 0;
 
         IGrouping<string, IndexedNote>[] voices = indexed
             .GroupBy(n => n.Voice, StringComparer.Ordinal)
@@ -108,8 +130,6 @@ internal sealed class MidiTranscriber
             PlannedNote[] notePlans = voiceNotes
                 .Select(source => PlanNote(timeline, source, ref oneTickNotes))
                 .ToArray();
-            notePlans = DropQuantizedAttackCollisions(
-                notePlans, ref quantizationCollapsedNotes);
             int bendRange = BendRange(notePlans);
             Dictionary<string, int> instrumentPrograms = InstrumentPrograms(voiceNotes);
 
@@ -183,56 +203,75 @@ internal sealed class MidiTranscriber
             tracks.Add(track);
         }
 
-        IGrouping<string, IndexedSample>[] sampleVoices = indexedSamples
-            .GroupBy(sample => sample.Event.VoiceId, StringComparer.Ordinal)
-            .OrderBy(group => group.Key, StringComparer.Ordinal)
-            .ToArray();
-        for (int sampleVoiceIndex = 0; sampleVoiceIndex < sampleVoices.Length; sampleVoiceIndex++)
+        // DAC sample-trigger compiler (separate from melodic FM CH1-6 pitch
+        // conversion): every playback emits exactly one NoteOn with its stable
+        // identity note on channel 10 plus a matching NoteOff. No pitch bend,
+        // no melodic pitch derivation, no bank select.
+        Dictionary<string, DacTriggerAssignment> sampleAssignments = samples.Count == 0
+            ? new Dictionary<string, DacTriggerAssignment>(StringComparer.Ordinal)
+            : SampleAssignments(samples, rhythm.Count > 0);
+        if (indexedSamples.Length > 0)
         {
-            IndexedSample[] sampleEvents = sampleVoices[sampleVoiceIndex]
-                .OrderBy(sample => sample.SourceIndex)
-                .ToArray();
-            int endpointIndex = voices.Length + sampleVoiceIndex;
-            MidiEndpoint endpoint = MelodicEndpoint(endpointIndex);
-            int trackIndex = tracks.Count;
-
-            var track = new MidiTrack(sampleEvents.Length * 3)
+            var laneSamples = new Dictionary<byte, List<IndexedSample>>();
+            foreach (IndexedSample source in indexedSamples)
             {
-                Name = "Sample " + sampleEvents[0].Event.VoiceId,
-                SourceVoiceId = sampleEvents[0].Event.VoiceId,
-                Endpoint = endpoint,
-            };
-            var plan = new List<Planned>(sampleEvents.Length * 3);
-
-            foreach (IndexedSample source in sampleEvents)
-            {
-                SamplePlaybackEvent sample = source.Event;
-                ValidateSample(timeline, sample);
-                DacNoteAssignment identity = sampleAssignments[sample.SampleId];
-                long onTick = SampleToTick(timeline, sample.StartSample);
-                long offTick = SampleToTick(timeline, sample.EndSample);
-                if (offTick <= onTick)
+                DacTriggerAssignment assignment = sampleAssignments[source.Event.SampleId];
+                if (!laneSamples.TryGetValue(assignment.Port, out List<IndexedSample>? lane))
                 {
-                    offTick = checked(onTick + 1);
-                    oneTickNotes++;
+                    lane = new List<IndexedSample>();
+                    laneSamples.Add(assignment.Port, lane);
                 }
-
-                // Sample-trigger compiler: a DAC sample is triggered by its
-                // identity note only; its source pitch is deliberately ignored.
-                plan.Add(new Planned(offTick, sample.EndSample, source.SourceIndex, 0, 0,
-                    PackedMidiEvent.Note(
-                        offTick, trackIndex, endpoint.Channel,
-                        identity.Note, DefaultVelocity, noteOn: false)));
-                plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 0,
-                    PackedMidiEvent.Bank(onTick, trackIndex, endpoint.Channel, identity.Bank)));
-                plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 2, 0,
-                    PackedMidiEvent.Note(
-                        onTick, trackIndex, endpoint.Channel,
-                        identity.Note, DefaultVelocity, noteOn: true)));
+                lane.Add(source);
             }
 
-            FinishTrack(track, plan);
-            tracks.Add(track);
+            foreach (byte port in laneSamples.Keys.OrderBy(value => value))
+            {
+                List<IndexedSample> lane = laneSamples[port]
+                    .OrderBy(sample => sample.SourceIndex)
+                    .ToList();
+                string[] laneVoices = lane
+                    .Select(sample => sample.Event.VoiceId)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(value => value, StringComparer.Ordinal)
+                    .ToArray();
+                int trackIndex = tracks.Count;
+                var track = new MidiTrack(lane.Count * 2)
+                {
+                    Name = laneVoices.Length == 1 ? "Sample " + laneVoices[0] : "Sample Triggers",
+                    SourceVoiceId = string.Join("+", laneVoices),
+                    Endpoint = new MidiEndpoint(port, DacChannel),
+                };
+                var plan = new List<Planned>(lane.Count * 2);
+
+                foreach (IndexedSample source in lane)
+                {
+                    SamplePlaybackEvent sample = source.Event;
+                    ValidateSample(timeline, sample);
+                    DacTriggerAssignment identity = sampleAssignments[sample.SampleId];
+                    long onTick = SampleToTick(timeline, sample.StartSample);
+                    long offTick = SampleToTick(timeline, sample.EndSample);
+                    if (offTick <= onTick)
+                    {
+                        offTick = checked(onTick + 1);
+                        oneTickNotes++;
+                    }
+                    int velocity = SampleVelocity(sample);
+
+                    // NoteOff is planned before NoteOn so a same-tick retrigger
+                    // serializes as off-then-on (MidiEventOrder rank 0 vs 4).
+                    plan.Add(new Planned(offTick, sample.EndSample, source.SourceIndex, 0, 0,
+                        PackedMidiEvent.Note(
+                            offTick, trackIndex, identity.Channel,
+                            identity.Note, velocity, noteOn: false)));
+                    plan.Add(new Planned(onTick, sample.StartSample, source.SourceIndex, 1, 0,
+                        PackedMidiEvent.Note(
+                            onTick, trackIndex, identity.Channel,
+                            identity.Note, velocity, noteOn: true)));
+                }
+
+                FinishTrack(track, plan);
+                tracks.Add(track);
+            }
         }
 
         if (rhythm.Count > 0)
@@ -242,12 +281,14 @@ internal sealed class MidiTranscriber
             .SelectMany(track => track.Events)
             .OfType<MidiNoteEvent>()
             .Count(note => note.NoteOn);
-        int expectedSerializedAttackCount = uniqueAudibleAttackCount - quantizationCollapsedNotes;
-        if (serializedNoteOnCount != expectedSerializedAttackCount)
+        // Strict attack conservation: every unique audible source attack must
+        // survive tick quantization as exactly one serialized NoteOn. Two
+        // attacks that quantize to the same tick are emitted sequentially at
+        // that tick; a source NoteEvent is never deleted.
+        if (serializedNoteOnCount != uniqueAudibleAttackCount)
         {
             throw new InvalidOperationException(
                 $"MIDI attack conservation failed: source attacks={uniqueAudibleAttackCount}, " +
-                $"quantization-collapsed={quantizationCollapsedNotes}, " +
                 $"serialized NoteOn events={serializedNoteOnCount}.");
         }
 
@@ -261,10 +302,11 @@ internal sealed class MidiTranscriber
                 notes.Count, rhythm.Count, samples.Count, collisions, oneTickNotes,
                 uniqueAudibleAttackCount,
                 BendRangeDiagnostics(tracks),
-                quantizationCollapsedNotes,
                 _ppq,
                 _quantizationLossyEventCount,
-                (double)_maxQuantizationLossTicks),
+                (double)_maxQuantizationLossTicks,
+                sampleAssignments.Count,
+                SampleIdentityMappings(timeline, sampleAssignments, samples)),
         };
     }
 
@@ -347,23 +389,124 @@ internal sealed class MidiTranscriber
             new(family, attackId, attackId is null ? localIndex : -1);
     }
 
-    private static Dictionary<string, DacNoteAssignment> SampleAssignments(
-        IReadOnlyList<SamplePlaybackEvent> samples)
+    /// <summary>
+    /// Deduplicates sample playbacks by their stable timeline identity
+    /// (<see cref="SamplePlaybackEvent.SampleId"/>) and assigns each identity a
+    /// deterministic sample-trigger note. The dedup happens BEFORE note
+    /// allocation: playbacks are never counted per instance, and start offset,
+    /// playback length or extraction differences cannot mint a new identity.
+    ///
+    /// Ordinals: YM2612 DAC identities ("dac:{catalogOrdinal}") carry the
+    /// content-dedup ordinal produced by <see cref="DacSampleCatalog"/> (by
+    /// first use, then sequence, then hash), so their MIDI note is stable
+    /// across exports of the same capture. All other identities (NES DPCM, Oki
+    /// ADPCM, ...) are ordered by first appearance after the DAC identities.
+    /// </summary>
+    private static Dictionary<string, DacTriggerAssignment> SampleAssignments(
+        IReadOnlyList<SamplePlaybackEvent> samples,
+        bool rhythmPresent)
     {
-        var assignments = new Dictionary<string, DacNoteAssignment>(StringComparer.Ordinal);
-        DacNoteMapper mapper = new();
-        foreach (string sampleId in samples
-            .Select(sample => sample.SampleId)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(value => value, StringComparer.Ordinal))
+        var assignments = new Dictionary<string, DacTriggerAssignment>(StringComparer.Ordinal);
+        SampleIdentity[] identities = samples
+            .Select((sample, index) => (sample.SampleId, index))
+            .GroupBy(pair => pair.SampleId, StringComparer.Ordinal)
+            .Select(group => new SampleIdentity(
+                group.Key,
+                TryDacCatalogOrdinal(group.Key),
+                group.Min(pair => pair.index)))
+            .OrderBy(identity => identity.CatalogOrdinal ?? int.MaxValue)
+            .ThenBy(identity => identity.FirstIndex)
+            .ToArray();
+        int nextOrdinal = (identities
+            .Select(identity => identity.CatalogOrdinal)
+            .Where(ordinal => ordinal.HasValue)
+            .DefaultIfEmpty(-1)
+            .Max() ?? -1) + 1;
+        foreach (SampleIdentity identity in identities)
         {
-            int ordinal = assignments.Count;
-            if (ordinal >= 128 * 128)
-                throw new InvalidOperationException(
-                    "MIDI sample identity table exceeds the representable bank/note range.");
-            assignments.Add(sampleId, mapper.Map(ordinal));
+            int ordinal = identity.CatalogOrdinal ?? nextOrdinal++;
+            assignments.Add(identity.SampleId, MapDacOrdinal(ordinal, rhythmPresent));
         }
         return assignments;
+    }
+
+    /// <summary>
+    /// Extracts the catalog dedup ordinal from a YM2612 DAC identity
+    /// ("dac:{N}"); null for any other identity namespace.
+    /// </summary>
+    private static int? TryDacCatalogOrdinal(string sampleId)
+    {
+        if (!sampleId.StartsWith("dac:", StringComparison.Ordinal))
+            return null;
+        return int.TryParse(
+            sampleId.AsSpan(4),
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out int value)
+            ? value
+            : null;
+    }
+
+    /// <summary>
+    /// Deterministic identity-note assignment: <c>note = DacBaseNote + ordinal</c>
+    /// (sample #0 -&gt; 36, #1 -&gt; 37, ...). The reserved 36..95 range holds the
+    /// first 60 identities; beyond that the note extends across the usable
+    /// 0..127 range ((36 + slot) mod 128), and once a (port, channel 10) lane
+    /// holds 128 identities the next lane spills to the next port on the same
+    /// channel 10. Identities are NEVER merged because the namespace fills.
+    /// </summary>
+    private static DacTriggerAssignment MapDacOrdinal(int ordinal, bool rhythmPresent)
+    {
+        if (ordinal < 0)
+            throw new ArgumentOutOfRangeException(nameof(ordinal), "DAC sample ordinal must be non-negative.");
+        int lane = ordinal / DacNotesPerLane;
+        // Channel 10 is the DAC trigger channel; the native-rhythm track also
+        // owns (port 0, channel 10) when present, so the DAC lanes start on
+        // port 1 in that case. The channel is always 10 (0-based 9).
+        int port = lane + (rhythmPresent ? 1 : 0);
+        if (port >= 128)
+            throw new InvalidOperationException(
+                $"DAC sample identities require MIDI port {port}; the port meta (0x21) is 7-bit.");
+        int note = (DacBaseNote + (ordinal % DacNotesPerLane)) % 128;
+        return new DacTriggerAssignment((byte)port, DacChannel, note, ordinal);
+    }
+
+    private static string[] SampleIdentityMappings(
+        VisualizationTimeline timeline,
+        IReadOnlyDictionary<string, DacTriggerAssignment> assignments,
+        IReadOnlyList<SamplePlaybackEvent> samples)
+    {
+        Dictionary<string, string> displayNames = (timeline.Samples ?? Array.Empty<SampleDefinition>())
+            .ToDictionary(sample => sample.Id, sample => sample.DisplayName, StringComparer.Ordinal);
+        return assignments
+            .OrderBy(pair => pair.Value.Ordinal)
+            .Select(pair =>
+            {
+                int playbacks = samples.Count(sample => string.Equals(
+                    sample.SampleId, pair.Key, StringComparison.Ordinal));
+                string name = displayNames.TryGetValue(pair.Key, out string? display)
+                    ? display
+                    : pair.Key;
+                DacTriggerAssignment assignment = pair.Value;
+                return $"{pair.Key} -> port {assignment.Port} ch {assignment.Channel + 1} " +
+                    $"note {assignment.Note} ({name}, ordinal {assignment.Ordinal}, {playbacks} playbacks)";
+            })
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Amplitude to velocity. A reliable per-trigger amplitude is carried by
+    /// producers such as NES DPCM and Oki ADPCM (<see cref="SamplePlaybackEvent.Gain"/>);
+    /// those map gain through the same curve as native rhythm hits. The YM2612
+    /// DAC decoder does NOT capture per-trigger amplitude (its gain is a
+    /// constant 1f sentinel), so DAC velocity is the fixed default; the sample
+    /// identity is unchanged either way.
+    /// </summary>
+    private static int SampleVelocity(SamplePlaybackEvent sample)
+    {
+        if (sample.SampleId.StartsWith("dac:", StringComparison.Ordinal))
+            return DefaultVelocity;
+        return DrumVelocity(sample.Gain);
     }
 
     private static Dictionary<string, int> InstrumentPrograms(
@@ -449,6 +592,10 @@ internal sealed class MidiTranscriber
         long offTick = SampleToTick(timeline, pitchNote.EndSample);
         if (offTick <= onTick)
         {
+            // Representational floor, not source release fidelity: MIDI cannot
+            // express a release at or before the attack tick, so a sub-tick
+            // source note is serialized as off = on + 1. No source note is
+            // ever deleted to avoid this.
             offTick = checked(onTick + 1);
             oneTickNotes++;
         }
@@ -475,31 +622,6 @@ internal sealed class MidiTranscriber
         int baseNote = ClampMidiNote(
             (long)Math.Round(pitchNote.InitialMidiNote, MidpointRounding.AwayFromZero));
         return new PlannedNote(source, onTick, offTick, baseNote, states);
-    }
-
-    private static PlannedNote[] DropQuantizedAttackCollisions(
-        PlannedNote[] notes,
-        ref int quantizationCollapsedNotes)
-    {
-        if (notes.Length < 2)
-            return notes;
-
-        var kept = new List<PlannedNote>(notes.Length);
-        foreach (PlannedNote note in notes)
-        {
-            if (kept.Count > 0 && kept[^1].OnTick == note.OnTick)
-            {
-                // Two monophonic source attacks cannot both be represented at one
-                // MIDI tick while preserving NoteOff-before-NoteOn ordering. Keep
-                // the later attack and report the earlier one explicitly dropped;
-                // neither source attack is moved in time.
-                kept[^1] = note;
-                quantizationCollapsedNotes++;
-                continue;
-            }
-            kept.Add(note);
-        }
-        return kept.ToArray();
     }
 
     private static SourcePitchNote Canonicalize(NoteEvent note, string sourceVoiceId)
@@ -692,6 +814,12 @@ internal sealed class MidiTranscriber
         int SourceIndex,
         string Voice);
     private sealed record IndexedSample(SamplePlaybackEvent Event, int SourceIndex);
+
+    /// <summary>Stable sample-trigger destination for one deduplicated identity.</summary>
+    private sealed record DacTriggerAssignment(byte Port, int Channel, int Note, int Ordinal);
+
+    private sealed record SampleIdentity(string SampleId, int? CatalogOrdinal, int FirstIndex);
+
     private sealed record Planned(
         long Tick, long SourceSample, int SourceIndex, int Phase, int LocalOrder, PackedMidiEvent Event);
 }

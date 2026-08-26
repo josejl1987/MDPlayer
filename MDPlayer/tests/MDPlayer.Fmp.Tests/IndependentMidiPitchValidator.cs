@@ -67,6 +67,7 @@ internal static class IndependentMidiPitchValidator
             var state = new ChannelState();
             var observed = new SortedDictionary<long, double>();
             SourcePitchNote? activeSource = null;
+            var awaitingOff = new Queue<SourcePitchNote>();
             int activeBase = 0;
             int sourceIndex = 0;
             int bendsAtTick = 0;
@@ -108,7 +109,21 @@ internal static class IndependentMidiPitchValidator
 
                     case ParsedKind.NoteOn:
                         if (activeSource is not null)
-                            throw new InvalidOperationException("A physical MIDI domain has overlapping notes.");
+                        {
+                            // Two attacks quantized to the same tick are emitted
+                            // sequentially at that tick (NoteOff then the new
+                            // attack bend then NoteOn). A NoteOn on a LATER tick
+                            // while a note is still sounding is a real overlap.
+                            if (evt.Tick != SourceTick(activeSource.StartSample))
+                                throw new InvalidOperationException("A physical MIDI domain has overlapping notes.");
+                            // Same-tick supersession: the active note is a
+                            // sub-tick attack whose serialized NoteOff (onTick + 1)
+                            // arrives later; its pitch window is empty, so the
+                            // validation below is a no-op.
+                            ValidateNote(activeSource, activeBase, state.BendRange, observed, SourceTick);
+                            activeSource = null;
+                            observed.Clear();
+                        }
                         if (sourceIndex >= expectedNotes.Count)
                             throw new InvalidOperationException("Serialized NoteOn count exceeds source-note count.");
 
@@ -127,18 +142,35 @@ internal static class IndependentMidiPitchValidator
                         if (bendRange > 0)
                             RequireRange(bendRange, state);
                         observed[evt.Tick] = DecodePitch(activeBase, state.Bend, state.BendRange);
+                        awaitingOff.Enqueue(source);
                         break;
 
                     case ParsedKind.NoteOff:
-                        if (activeSource is SourcePitchNote closing)
+                        if (awaitingOff.Count == 0)
+                            throw new InvalidOperationException(
+                                $"Serialized NoteOff at track {trackIndex + 1}, tick {evt.Tick} has no source note.");
+                        SourcePitchNote closing = awaitingOff.Dequeue();
+                        if (SourceTick(closing.EndSample) > SourceTick(closing.StartSample))
                         {
-                            // Transcriber floor: offTick = max(SourceTick(end), onTick + 1).
-                            long expectedOffTick = Math.Max(
-                                SourceTick(closing.EndSample),
-                                SourceTick(closing.StartSample) + 1);
-                            if (evt.Tick != expectedOffTick)
+                            // Exact source->tick match: the release quantizes to a
+                            // tick strictly after the attack tick.
+                            if (evt.Tick != SourceTick(closing.EndSample))
                                 throw new InvalidOperationException(
-                                    $"Source NoteOff tick {expectedOffTick} became serialized tick {evt.Tick}.");
+                                    $"Source NoteOff tick {SourceTick(closing.EndSample)} became serialized tick {evt.Tick}.");
+                        }
+                        else
+                        {
+                            // Documented representational floor: a sub-tick source
+                            // note (release quantizes to the same tick as its
+                            // attack) is serialized as off = on + 1. This floor is
+                            // a MIDI representational limit, NOT source release
+                            // fidelity.
+                            if (evt.Tick != SourceTick(closing.StartSample) + 1)
+                                throw new InvalidOperationException(
+                                    $"Source NoteOff floor tick {SourceTick(closing.StartSample) + 1} became serialized tick {evt.Tick}.");
+                        }
+                        if (ReferenceEquals(closing, activeSource))
+                        {
                             ValidateNote(closing, activeBase, state.BendRange, observed, SourceTick);
                             activeSource = null;
                             observed.Clear();
@@ -147,8 +179,8 @@ internal static class IndependentMidiPitchValidator
                 }
             }
 
-            if (activeSource is SourcePitchNote last)
-                ValidateNote(last, activeBase, state.BendRange, observed, SourceTick);
+            if (awaitingOff.Count != 0)
+                throw new InvalidOperationException("Serialized NoteOff count does not conserve source notes.");
             if (sourceIndex != expectedNotes.Count)
                 throw new InvalidOperationException("Serialized NoteOn count does not conserve source notes.");
             if (bendRange > 0 && rangeSetCountAtEnd != 1)

@@ -82,8 +82,12 @@ internal static class MidiCommand
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +
+            $"sample-playbacks={result.Diagnostics.SamplePlaybackCount}; " +
+            $"sample-identities={result.Diagnostics.SampleIdentityCount}; " +
             $"same-tick-attacks={result.Diagnostics.SameTickAttackCollisions}; " +
             $"one-tick-notes={result.Diagnostics.OneTickNotes}");
+        foreach (string mapping in result.Diagnostics.SampleIdentityMappings)
+            output.WriteLine("sample-identity: " + mapping);
 
         if (!string.IsNullOrWhiteSpace(options.PitchReport))
             WriteRawPitchReport(options.PitchReport, result);

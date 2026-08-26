@@ -53,6 +53,12 @@ public sealed class MidiTranscriberFidelityTests
     private static IReadOnlyList<(long Tick, MidiEvent Event)> Track(byte[] bytes, int trackIndex) =>
         MidiRoundTrip.TimedEvents(bytes, trackIndex);
 
+    private static int NoteOnCount(MidiTranscriptionResult result) =>
+        result.Tracks
+            .SelectMany(track => track.Events)
+            .OfType<MidiNoteEvent>()
+            .Count(note => note.NoteOn);
+
     [Fact]
     public void Transport_FixedAt120Bpm_SingleTempoEventAtTickZero()
     {
@@ -413,22 +419,124 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
-    public void SameTickAttackCollisions_CountedInDiagnostics()
+    public void SameTickAttacks_BothSurvive_AndAreCountedInDiagnostics()
     {
+        // Two attacks quantizing to the same MIDI tick must NEVER cause a
+        // source note to be deleted: both NoteOns survive, sequentially, at
+        // that tick.
         VisualizationTimeline timeline = Timeline(
             Note("0", 0, 0, 60.0),
             Note("0", 0, Sr, 62.0));
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
 
         Assert.Equal(1, result.Diagnostics.SameTickAttackCollisions);
-        Assert.Equal(1, result.Diagnostics.QuantizationCollapsedNotes);
         Assert.Equal(2, result.Diagnostics.UniqueAudibleAttackCount);
 
         IndependentMidiPitchValidator.Validate(timeline, result);
         IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(result.Bytes, 1);
-        Assert.Single(voice.Where(e => e.Event is NoteOnEvent));
-        Assert.Single(voice.Where(e => e.Event is NoteOffEvent));
-        Assert.Equal(0L, voice.First(e => e.Event is NoteOnEvent).Tick);
+        Assert.Equal(2, voice.Count(e => e.Event is NoteOnEvent));
+        Assert.Equal(2, voice.Count(e => e.Event is NoteOffEvent));
+        Assert.All(
+            voice.Where(e => e.Event is NoteOnEvent),
+            e => Assert.Equal(0L, e.Tick));
+    }
+
+    [Fact]
+    public void SameTickBoundaryRetrigger_PreservesBothAttacks_OffPrecedesOn_WithAttackBend()
+    {
+        // Adversarial: note A ends at source sample X and note B starts at
+        // X+1, with A's release and B's attack quantizing to the same MIDI
+        // tick. Assert ALL of: both NoteOns survive; NoteOff A precedes
+        // NoteOn B at the shared tick; NoteOn B carries the correct attack
+        // bend; source attack count == serialized NoteOn count.
+        // A second voice repeats the literal same-tick ATTACK case (a sub-tick
+        // blip A2 followed by B2 at the same sample): the old
+        // collision-dropping behavior deleted one of these attacks; both must
+        // now survive.
+        long x = 30;   // tick(30) == 1
+        long bx = 31;  // tick(31) == 1 (X + 1)
+        long y = 45;   // tick(45) == 2
+        VisualizationTimeline timeline = Timeline(
+            Note("0", 0, x, 60.0),
+            Note("0", bx, bx + Sr, 60.4, retrigger: true),
+            Note("1", 40, y, 60.0),
+            Note("1", y, y + Sr, 60.4, retrigger: true));
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+
+        // Strict attack conservation: unique source attacks == serialized NoteOns.
+        Assert.Equal(4, result.Diagnostics.UniqueAudibleAttackCount);
+        Assert.Equal(4, NoteOnCount(result));
+        IndependentMidiPitchValidator.Validate(timeline, result);
+
+        // Voice 0: A ends at sample 30 (tick 1), B starts at sample 31 (tick 1).
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice0 = Track(result.Bytes, 1);
+        Assert.Equal(2, voice0.Count(e => e.Event is NoteOnEvent));
+        Assert.Equal(2, voice0.Count(e => e.Event is NoteOffEvent));
+        var boundary = voice0.Where(e => e.Tick == 1).ToList();
+        Assert.Equal(3, boundary.Count); // NoteOff A, attack bend, NoteOn B
+        Assert.IsType<NoteOffEvent>(boundary[0].Event); // NoteOff A first
+        Assert.IsType<PitchBendEvent>(boundary[1].Event);
+        Assert.IsType<NoteOnEvent>(boundary[2].Event); // then NoteOn B
+        var noteOnB = (NoteOnEvent)boundary[2].Event;
+        Assert.Equal(60, (int)noteOnB.NoteNumber);
+        int bendRange = result.Tracks[0].Events
+            .OfType<MidiBendRangeEvent>()
+            .Select(evt => evt.Semitones)
+            .Single();
+        Assert.Equal(1, bendRange);
+        double decoded = MidiPitchCompiler.DecodePitch(
+            60, ((PitchBendEvent)boundary[1].Event).PitchValue, bendRange);
+        Assert.InRange(decoded, 60.399, 60.401);
+
+        // Voice 1: both attacks at tick 2 (A2 = [40, 45], B2 starts at 45).
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice1 = Track(result.Bytes, 2);
+        Assert.Equal(2, voice1.Count(e => e.Event is NoteOnEvent));
+        Assert.Equal(2, voice1.Count(e => e.Event is NoteOffEvent));
+        var sameTickAttacks = voice1.Where(e => e.Tick == 2).ToList();
+        // ProgramChange (first note of the voice) + attack bend + two NoteOns.
+        Assert.Single(sameTickAttacks, e => e.Event is ProgramChangeEvent);
+        Assert.Single(sameTickAttacks, e => e.Event is PitchBendEvent);
+        Assert.Equal(2, sameTickAttacks.Count(e => e.Event is NoteOnEvent));
+        Assert.Equal(1, voice1.Count(e => e.Tick == 3 && e.Event is NoteOffEvent)); // A2 off at on+1
+    }
+
+    [Fact]
+    public void OneTickFloor_IsRepresentational_NotSourceReleaseFidelity()
+    {
+        // Sub-tick source note: the release quantizes to the SAME tick as the
+        // attack (sourceOffTick == sourceOnTick), so the serialized off is
+        // floored to sourceOnTick + 1. The floor is a MIDI representational
+        // limit and is explicitly NOT an exact source->tick match.
+        long start = 0, end = 5; // tick(0) == tick(5) == 0
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(Note("0", start, end, 60.0)));
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(result.Bytes, 1);
+        long on = voice.First(e => e.Event is NoteOnEvent).Tick;
+        long off = voice.First(e => e.Event is NoteOffEvent).Tick;
+        long sourceOn = MidiTransportClock.SampleToTick(0, start, Sr, Ppq);
+        long sourceOff = MidiTransportClock.SampleToTick(0, end, Sr, Ppq);
+        Assert.Equal(0, sourceOn);
+        Assert.Equal(0, sourceOff);
+        Assert.Equal(sourceOff, sourceOn); // release quantizes to the attack tick
+        Assert.Equal(on, sourceOn);
+        Assert.Equal(sourceOn + 1, off);   // the one-tick representational floor
+        Assert.NotEqual(sourceOff, off);   // NOT exact source release fidelity
+    }
+
+    [Fact]
+    public void ExactSourceRelease_MapsExactlyToSourceTick()
+    {
+        // A note whose release quantizes strictly after its attack tick is
+        // serialized at the exact source tick (sourceOffTick == midiOffTick).
+        long start = 0, end = Sr;
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(Note("0", start, end, 60.0)));
+        IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(result.Bytes, 1);
+        long on = voice.First(e => e.Event is NoteOnEvent).Tick;
+        long off = voice.First(e => e.Event is NoteOffEvent).Tick;
+        long sourceOn = MidiTransportClock.SampleToTick(0, start, Sr, Ppq);
+        long sourceOff = MidiTransportClock.SampleToTick(0, end, Sr, Ppq);
+        Assert.Equal(sourceOn, on);
+        Assert.Equal(1920, off);
+        Assert.Equal(sourceOff, off);
     }
 
     [Fact]
@@ -444,7 +552,7 @@ public sealed class MidiTranscriberFidelityTests
         }
     }
     [Fact]
-    public void SamplePlayback_UsesDeterministicIdentityBankAndExactTicks()
+    public void SamplePlayback_DeterministicChannel10IdentityNotes_ExactTicks()
     {
         var timeline = new VisualizationTimeline
         {
@@ -453,22 +561,269 @@ public sealed class MidiTranscriberFidelityTests
             EndSample = Sr,
             SamplePlayback =
             [
-                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "sample-z", null, 1.0, 1.0f, 0, false, false),
-                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "sample-a", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "dac:1", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "dac:0", null, 1.0, 1.0f, 0, false, false),
             ],
         };
 
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
         Assert.Equal(2, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(2, result.Diagnostics.SampleIdentityCount);
         Assert.Equal(2, MidiRoundTrip.TrackChunks(result.Bytes).Count);
+        Assert.Single(result.Tracks);
+        Assert.Equal(new MidiEndpoint(0, 9), result.Tracks[0].Endpoint);
         IReadOnlyList<(long Tick, MidiEvent Event)> track = Track(result.Bytes, 1);
         var ons = track.Where(e => e.Event is NoteOnEvent).ToArray();
         Assert.Equal(2, ons.Length);
         Assert.Equal(0, ons[0].Tick);
         Assert.Equal(960, ons[1].Tick);
-        Assert.Equal(1, ((NoteOnEvent)ons[0].Event).NoteNumber);
-        Assert.Equal(0, ((NoteOnEvent)ons[1].Event).NoteNumber);
-        Assert.Equal(0, ((ControlChangeEvent)track.First(e => e.Event is ControlChangeEvent).Event).ControlValue);
+        // dac:{catalogOrdinal} -> note = 36 + catalogOrdinal on channel 10.
+        Assert.Equal(36, ((NoteOnEvent)ons[1].Event).NoteNumber);
+        Assert.Equal(37, ((NoteOnEvent)ons[0].Event).NoteNumber);
+        Assert.Equal(9, ((NoteOnEvent)ons[0].Event).Channel);
+        Assert.Equal(9, ((NoteOnEvent)ons[1].Event).Channel);
+        Assert.DoesNotContain(track, e => e.Event is ControlChangeEvent); // no bank select
+    }
+
+    [Fact]
+    public void DacSample_SameIdentity_AlwaysSameMidiNote()
+    {
+        // The same kick played 500 times must map to one stable note. Three
+        // playbacks of dac:0 at different offsets/times -> three NoteOns, all
+        // note 36.
+        var playbacks = new SamplePlaybackEvent[3];
+        for (int i = 0; i < playbacks.Length; i++)
+        {
+            long start = i * Sr / 4;
+            playbacks[i] = new SamplePlaybackEvent(
+                "ym2612.0.pcm.dac", start, start + Sr / 8, "dac:0", null, 1.0, 1.0f, 0, false, false);
+        }
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback = playbacks,
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(3, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(1, result.Diagnostics.SampleIdentityCount);
+        var ons = Track(result.Bytes, 1).Where(e => e.Event is NoteOnEvent)
+            .Select(e => (NoteOnEvent)e.Event).ToArray();
+        Assert.Equal(3, ons.Length);
+        Assert.All(ons, on => Assert.Equal(36, on.NoteNumber));
+    }
+
+    [Fact]
+    public void DacSample_DifferentIdentity_DifferentMidiNote()
+    {
+        // dac:0, dac:1, dac:2 -> notes 36, 37, 38 in catalog ordinal order.
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr * 3 / 2,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "dac:2", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "dac:0", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr, Sr * 3 / 2, "dac:1", null, 1.0, 1.0f, 0, false, false),
+            ],
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(3, result.Diagnostics.SampleIdentityCount);
+        var ons = Track(result.Bytes, 1).Where(e => e.Event is NoteOnEvent)
+            .Select(e => (NoteOnEvent)e.Event).ToArray();
+        Assert.Equal(new[] { 38, 36, 37 }, ons.Select(on => (int)on.NoteNumber));
+    }
+
+    [Fact]
+    public void DacSample_PlaybackCountEqualsSerializedNoteOnCount()
+    {
+        // 500 playbacks of one identity plus 12 of another: every playback must
+        // serialize exactly one NoteOn and one matching NoteOff.
+        var playbacks = new List<SamplePlaybackEvent>();
+        for (int i = 0; i < 500; i++)
+        {
+            long start = i * 80;
+            playbacks.Add(new SamplePlaybackEvent(
+                "ym2612.0.pcm.dac", start, start + 40, "dac:0", null, 1.0, 1.0f, 0, false, false));
+        }
+        for (int i = 0; i < 12; i++)
+        {
+            long start = 40_000 + i * 80;
+            playbacks.Add(new SamplePlaybackEvent(
+                "ym2612.0.pcm.dac", start, start + 40, "dac:1", null, 1.0, 1.0f, 0, false, false));
+        }
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = 45_000,
+            SamplePlayback = playbacks.ToArray(),
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(512, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(512, result.Diagnostics.UniqueAudibleAttackCount);
+        var track = Track(result.Bytes, 1);
+        Assert.Equal(512, track.Count(e => e.Event is NoteOnEvent));
+        Assert.Equal(512, track.Count(e => e.Event is NoteOffEvent));
+    }
+
+    [Fact]
+    public void DacTrack_HasZeroPitchBendEvents()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "dac:0", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "dac:1", 60.5, 1.0, 1.0f, 0, false, false),
+            ],
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        IReadOnlyList<(long Tick, MidiEvent Event)> track = Track(result.Bytes, 1);
+        Assert.DoesNotContain(track, e => e.Event is PitchBendEvent);
+        Assert.DoesNotContain(track, e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6);
+        Assert.DoesNotContain(track, e => e.Event is ControlChangeEvent cc2 && (int)cc2.ControlNumber is 0 or 32);
+    }
+
+    [Fact]
+    public void DacSample_DedupIsIdentityBased_NotInstanceBased()
+    {
+        // Two playback instances of the SAME identity at different volumes:
+        // one note, different velocity. Instance count must never mint notes.
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("nes.pcm.dpcm", 0, Sr / 2, "sample:nes-apu:dpcm", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("nes.pcm.dpcm", Sr / 2, Sr, "sample:nes-apu:dpcm", null, 1.0, 0.3f, 0, false, false),
+            ],
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(2, result.Diagnostics.SamplePlaybackCount);
+        Assert.Equal(1, result.Diagnostics.SampleIdentityCount);
+        var ons = Track(result.Bytes, 1).Where(e => e.Event is NoteOnEvent)
+            .Select(e => (NoteOnEvent)e.Event).ToArray();
+        Assert.Equal(2, ons.Length);
+        Assert.Equal(ons[0].NoteNumber, ons[1].NoteNumber);
+        Assert.NotEqual(ons[0].Velocity, ons[1].Velocity);
+    }
+
+    [Fact]
+    public void DacSample_ReservedRange36To95_ThenExtendsThenSpillsPort()
+    {
+        // Ordinals 0..59 land on the reserved 36..95. The mapping then extends
+        // across the usable 0..127 range: ordinal 60 -> 96, ordinal 91 -> 127,
+        // ordinal 92 -> 0. Once a lane holds 128 identities (ordinal 128), the
+        // next identity spills to port 1 on the same channel 10.
+        long step = 60;
+        var playbacks = new List<SamplePlaybackEvent>();
+        for (int ordinal = 0; ordinal <= 128; ordinal++)
+        {
+            long start = ordinal * step;
+            playbacks.Add(new SamplePlaybackEvent(
+                "ym2612.0.pcm.dac", start, start + 30, $"dac:{ordinal}", null, 1.0, 1.0f, 0, false, false));
+        }
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = 129 * step,
+            SamplePlayback = playbacks.ToArray(),
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(129, result.Diagnostics.SampleIdentityCount);
+        Assert.Equal(2, result.Tracks.Count); // lane 0 on port 0, lane 1 on port 1
+        Assert.Equal(new MidiEndpoint(0, 9), result.Tracks[0].Endpoint);
+        Assert.Equal(new MidiEndpoint(1, 9), result.Tracks[1].Endpoint);
+
+        var lane0 = Track(result.Bytes, 1).Where(e => e.Event is NoteOnEvent)
+            .Select(e => (NoteOnEvent)e.Event).ToArray();
+        var lane1 = Track(result.Bytes, 2).Where(e => e.Event is NoteOnEvent)
+            .Select(e => (NoteOnEvent)e.Event).ToArray();
+        Assert.Equal(128, lane0.Length);
+        Assert.Single(lane1);
+        Assert.Equal(36, lane0[0].NoteNumber);       // dac:0 -> 36
+        Assert.Equal(95, lane0[59].NoteNumber);      // dac:59 -> 95 (reserved range end)
+        Assert.Equal(96, lane0[60].NoteNumber);      // extend across 0..127
+        Assert.Equal(127, lane0[91].NoteNumber);
+        Assert.Equal(0, lane0[92].NoteNumber);       // wraps to the usable 0..35
+        Assert.Equal(35, lane0[127].NoteNumber);     // lane 0 full
+        Assert.Equal(36, lane1[0].NoteNumber);       // spill: port 1, ch 10, note 36
+        Assert.All(lane1, on => Assert.Equal(9, on.Channel));
+    }
+
+    [Fact]
+    public void DacSample_DacAndRhythmShareChannel10_OnDistinctPorts()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "dac:0", null, 1.0, 1.0f, 0, false, false),
+            ],
+            Rhythm = new[]
+            {
+                new RhythmEvent("kick", "kick", 0, 1.0f, 0),
+            },
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(2, result.Tracks.Count);
+        Assert.Equal(new MidiEndpoint(0, 9), result.Tracks[1].Endpoint); // native rhythm
+        Assert.Equal(new MidiEndpoint(1, 9), result.Tracks[0].Endpoint); // DAC keeps ch 10, port 1
+        var dacOn = Track(result.Bytes, 1).Single(e => e.Event is NoteOnEvent);
+        Assert.Equal(9, ((NoteOnEvent)dacOn.Event).Channel);
+        var rhythmOn = Track(result.Bytes, 2).Single(e => e.Event is NoteOnEvent);
+        Assert.Equal(9, ((NoteOnEvent)rhythmOn.Event).Channel);
+    }
+
+    [Fact]
+    public void DacSample_IdentityMapping_EmittedInDiagnostics()
+    {
+        var timeline = new VisualizationTimeline
+        {
+            SampleRate = Sr,
+            StartSample = 0,
+            EndSample = Sr,
+            SamplePlayback =
+            [
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 2, "dac:0", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", Sr / 2, Sr, "dac:0", null, 1.0, 1.0f, 0, false, false),
+                new SamplePlaybackEvent("ym2612.0.pcm.dac", 0, Sr / 3, "dac:3", null, 1.0, 1.0f, 0, false, false),
+            ],
+            Samples = new[]
+            {
+                new SampleDefinition("dac:0", "pcm", 64, null, null, null, SampleLoopMode.None,
+                    [new WaveformEnvelopePoint(0, 0.5f)], "DAC S000"),
+                new SampleDefinition("dac:3", "pcm", 64, null, null, null, SampleLoopMode.None,
+                    [new WaveformEnvelopePoint(0, 0.5f)], "DAC S003"),
+            },
+        };
+
+        MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
+        Assert.Equal(2, result.Diagnostics.SampleIdentityCount);
+        string[] mappings = result.Diagnostics.SampleIdentityMappings.ToArray();
+        Assert.Equal(2, mappings.Length);
+        Assert.Contains(mappings, m => m.Contains("dac:0 -> port 0 ch 10 note 36 (DAC S000, ordinal 0, 2 playbacks)", StringComparison.Ordinal));
+        Assert.Contains(mappings, m => m.Contains("dac:3 -> port 0 ch 10 note 39 (DAC S003, ordinal 3, 1 playbacks)", StringComparison.Ordinal));
     }
 
     [Fact]

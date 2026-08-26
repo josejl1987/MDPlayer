@@ -177,8 +177,14 @@ public sealed class MidiFivePropertyAcceptanceTests
                         break;
                     case NoteOffEvent noteOff when active is not null:
                         properties.Releases++;
-                        long expectedRelease = Math.Max(
-                            SourceTick(active.EndSample), SourceTick(active.StartSample) + 1);
+                        // Exact source->tick match OR the documented one-tick
+                        // representational floor: a sub-tick source note (release
+                        // quantizes to the same tick as its attack) serializes as
+                        // off = on + 1. The floor is never treated as source
+                        // release fidelity.
+                        long expectedRelease = SourceTick(active.EndSample) > SourceTick(active.StartSample)
+                            ? SourceTick(active.EndSample)
+                            : SourceTick(active.StartSample) + 1;
                         properties.MaxReleaseTickDelta = Math.Max(
                             properties.MaxReleaseTickDelta,
                             Math.Abs(expectedRelease - tick));
