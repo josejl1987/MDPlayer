@@ -1,44 +1,14 @@
 namespace Fmp.Core.Midi;
 
-internal enum MidiBendRangeClassification
-{
-    Zero,
-    Ordinary,
-    Wide,
-    VeryWide,
-    StrictCompatibilityFailure,
-}
-
 /// <summary>Exact, receiver-compatible pitch math for the MIDI compiler.</summary>
 internal static class MidiPitchCompiler
 {
-    public static int SelectMinimaxBaseNote(IReadOnlyList<SourcePitchPoint> curve)
-    {
-        ArgumentNullException.ThrowIfNull(curve);
-        if (curve.Count == 0)
-            throw new InvalidOperationException("A source pitch curve cannot be empty.");
-
-        double minimum = double.PositiveInfinity;
-        double maximum = double.NegativeInfinity;
-        foreach (SourcePitchPoint point in curve)
-        {
-            if (!double.IsFinite(point.MidiNote))
-                throw new InvalidOperationException("Source pitch is not finite.");
-            minimum = Math.Min(minimum, point.MidiNote);
-            maximum = Math.Max(maximum, point.MidiNote);
-        }
-
-        double midpoint = (minimum + maximum) / 2.0;
-        int lower = ClampMidiNote((long)Math.Floor(midpoint));
-        int upper = ClampMidiNote((long)Math.Ceiling(midpoint));
-        double lowerError = Excursion(minimum, maximum, lower);
-        double upperError = Excursion(minimum, maximum, upper);
-
-        // Equal minimax errors are resolved toward the lower note so the result
-        // remains deterministic at half-semitone boundaries.
-        return lowerError <= upperError ? lower : upper;
-    }
-
+    /// <summary>
+    /// The smallest pitch-bend range (in semitones) that can encode every curve
+    /// point as a bend relative to its base note. Zero means the voice is
+    /// pitch-flat and needs no RPN setup. Ranges over 127 are unrepresentable
+    /// and rejected: the source is reported, not rescued.
+    /// </summary>
     public static int RequiredBendRange(
         IEnumerable<(IReadOnlyList<SourcePitchPoint> Curve, int BaseNote)> notes)
     {
@@ -62,20 +32,6 @@ internal static class MidiPitchCompiler
             throw new InvalidOperationException(
                 $"Required pitch-bend excursion {maximum:0.###} exceeds MIDI's 127-semitone RPN limit.");
         return checked((int)Math.Ceiling(maximum));
-    }
-
-    public static MidiBendRangeClassification ClassifyBendRange(int bendRange)
-    {
-        if (bendRange < 0)
-            throw new ArgumentOutOfRangeException(nameof(bendRange));
-        return bendRange switch
-        {
-            0 => MidiBendRangeClassification.Zero,
-            <= 12 => MidiBendRangeClassification.Ordinary,
-            <= 48 => MidiBendRangeClassification.Wide,
-            <= 96 => MidiBendRangeClassification.VeryWide,
-            _ => MidiBendRangeClassification.StrictCompatibilityFailure,
-        };
     }
 
     /// <summary>
@@ -127,9 +83,4 @@ internal static class MidiPitchCompiler
         double denominator = signed < 0 ? 8192.0 : 8191.0;
         return baseNote + signed / denominator * bendRange;
     }
-
-    private static double Excursion(double minimum, double maximum, int baseNote) =>
-        Math.Max(Math.Abs(minimum - baseNote), Math.Abs(maximum - baseNote));
-
-    private static int ClampMidiNote(long value) => (int)Math.Clamp(value, 0L, 127L);
 }

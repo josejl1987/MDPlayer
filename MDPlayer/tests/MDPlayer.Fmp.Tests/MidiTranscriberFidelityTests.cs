@@ -193,31 +193,42 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
-    public void BaseNote_UsesTheWholePitchCurve()
+    public void BaseNote_IsTheRoundedAttackPitch()
     {
+        // Patch 2: the base note is the attack pitch rounded to the nearest
+        // semitone (no minimax search). 60.25 -> base 60, with a bend range that
+        // covers the whole curve (max excursion |61.75 - 60| = 1.75 -> range 2).
         MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(Note("0", 0, Sr, 60.25,
             pitch: new[] { Pitch(Sr / 2, 61.75) })));
 
         NoteOnEvent noteOn = (NoteOnEvent)Track(result.Bytes, 1)
             .First(e => e.Event is NoteOnEvent).Event;
-        Assert.Equal(61, (int)noteOn.NoteNumber);
-        Assert.Equal(1, result.Tracks[0].VoiceDomain!.Value.BendRange);
+        Assert.Equal(60, (int)noteOn.NoteNumber);
+        ControlChangeEvent range = Track(result.Bytes, 1)
+            .Select(e => e.Event)
+            .OfType<ControlChangeEvent>()
+            .Single(cc => cc.ControlNumber == 6);
+        Assert.Equal(2, range.ControlValue);
     }
 
     [Fact]
-    public void BendRange_IsOneGlobalValueAcrossTheSourceDomain()
+    public void BendRange_IsOneGlobalValueAcrossTheSourceVoice()
     {
+        // One physical voice = one channel = one bend range: the max excursion
+        // over ALL its notes (|64.75 - 62| = 2.75 -> range 3), configured once.
         MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
             Note("0", 0, Sr, 60.25,
                 pitch: new[] { Pitch(Sr / 2, 60.75) }),
             Note("0", Sr, 2 * Sr, 62.25,
                 pitch: new[] { Pitch(Sr + Sr / 2, 64.75) })));
 
-        MidiVoiceDomain domain = result.Tracks[0].VoiceDomain!.Value;
-        Assert.Equal(2, domain.BendRange);
-        Assert.Equal(2, domain.Notes.Count);
-        Assert.Equal(1, Track(result.Bytes, 1)
-            .Count(e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6));
+        ControlChangeEvent[] ranges = Track(result.Bytes, 1)
+            .Select(e => e.Event)
+            .OfType<ControlChangeEvent>()
+            .Where(cc => cc.ControlNumber == 6)
+            .ToArray();
+        Assert.Single(ranges);
+        Assert.Equal(3, ranges[0].ControlValue);
     }
 
     [Fact]
@@ -297,13 +308,7 @@ public sealed class MidiTranscriberFidelityTests
 
         Assert.Equal(4, MidiRoundTrip.TrackChunks(bytes).Count); // conductor + 3 voices
         Assert.Equal(3, result.Tracks.Count);
-        Assert.All(result.Tracks, track =>
-        {
-            Assert.NotNull(track.ChannelProgram);
-            Assert.Same(track.Events, track.ChannelProgram!.OrderedEvents);
-            Assert.Equal(track.Endpoint.Channel, track.ChannelProgram.MidiChannel);
-        });
-        Assert.Equal(3, result.Tracks.Select(track => track.ChannelProgram!.MidiChannel).Distinct().Count());
+        Assert.Equal(3, result.Tracks.Select(track => track.Endpoint.Channel).Distinct().Count());
         for (int track = 1; track <= 3; track++)
         {
             var noteOn = (NoteOnEvent)Track(bytes, track).First(e => e.Event is NoteOnEvent).Event;
@@ -362,6 +367,40 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
+    public void GridAlignedOnsets_KeepRequestedPpq_AndReportZeroQuantizationLoss()
+    {
+        // 8th-note grid at 120 BPM / 44.1 kHz: samples are multiples of
+        // 11025, which 960 PPQ already represents exactly. Raise-first must
+        // not change the PPQ, and the loss diagnostic must be zero.
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
+            Note("1", 0, 11025, 60),
+            Note("1", 11025, 22050, 62),
+            Note("2", 11025, 22050, 64),
+            Note("2", 22050, 33075, 65)));
+
+        Assert.Equal(Ppq, result.Diagnostics.EffectivePpq);
+        Assert.Equal(0, result.Diagnostics.QuantizationLossyEventCount);
+        Assert.Equal(0, result.Diagnostics.MaxQuantizationLossTicks);
+    }
+
+    [Fact]
+    public void OffGridOnsets_KeepFixedPpq_AndReportQuantizationLoss()
+    {
+        // Patch 4: no PPQ raising. Onsets at samples 1000 and 2000 are not exact
+        // ticks on the 960-PPQ grid, so they quantize (round-half-away) and the
+        // loss is reported — never silently rescued by a different PPQ.
+        MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(
+            Note("1", 1000, 2000, 60),
+            Note("2", 2000, 3000, 62)));
+
+        Assert.Equal(Ppq, result.Diagnostics.EffectivePpq);
+        // on(1000), off(2000), on(2000), off(3000): all four note events are
+        // off the 960-PPQ grid, so all four are reported as lossy.
+        Assert.Equal(4, result.Diagnostics.QuantizationLossyEventCount);
+        Assert.True(result.Diagnostics.MaxQuantizationLossTicks > 0);
+    }
+
+    [Fact]
     public void ZeroLengthNote_ForcedToOneTick_CountedInDiagnostics()
     {
         MidiTranscriptionResult result = Transcriber.Transcribe(Timeline(Note("0", 0, 0, 60.0)));
@@ -385,7 +424,7 @@ public sealed class MidiTranscriberFidelityTests
         Assert.Equal(1, result.Diagnostics.QuantizationCollapsedNotes);
         Assert.Equal(2, result.Diagnostics.UniqueAudibleAttackCount);
 
-        IndependentMidiPitchValidator.Validate(timeline, result, Ppq);
+        IndependentMidiPitchValidator.Validate(timeline, result);
         IReadOnlyList<(long Tick, MidiEvent Event)> voice = Track(result.Bytes, 1);
         Assert.Single(voice.Where(e => e.Event is NoteOnEvent));
         Assert.Single(voice.Where(e => e.Event is NoteOffEvent));
@@ -455,8 +494,10 @@ public sealed class MidiTranscriberFidelityTests
     }
 
     [Fact]
-    public void SamplePlayback_PitchedIdentityEmitsBend()
+    public void SamplePlayback_IgnoresSourcePitch()
     {
+        // Patch 5: a DAC sample is triggered by its identity note only; the
+        // source pitch of the sample event is deliberately not encoded.
         var timeline = new VisualizationTimeline
         {
             SampleRate = Sr,
@@ -468,7 +509,9 @@ public sealed class MidiTranscriberFidelityTests
             ],
         };
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
-        Assert.Contains(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
+        Assert.DoesNotContain(Track(result.Bytes, 1), e => e.Event is PitchBendEvent);
+        Assert.DoesNotContain(Track(result.Bytes, 1),
+            e => e.Event is ControlChangeEvent cc && cc.ControlNumber == 6);
     }
     [Fact]
     public void TonalPcmParallelViews_ShareIdentityAndEmitOneAttack()

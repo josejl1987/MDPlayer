@@ -134,7 +134,6 @@ internal static class Program
 
         var request = new MidiExportRequest
         {
-            Ppq = ppq,
             EnablePerformanceReceipts = true,
             PerformanceFixture = Path.GetFileName(fixture),
         };
@@ -157,10 +156,10 @@ internal static class Program
             sourceEvents = CountSourceEvents(timeline),
             emittedMidiEvents = allEvents.Length,
             phases = new object[] { new { phase = "capture", wallMilliseconds = captureWatch.ElapsedMilliseconds, cpuMilliseconds = 0L, allocatedBytes = captureBytes, eventCount = CountSourceEvents(timeline) } }.Concat(events.Cast<object>()),
-            semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = allEvents.OfType<MidiControlChangeEvent>().Count(), tracks = tracks.Count },
+            semantic = new { notesOn = allEvents.OfType<MidiNoteEvent>().Count(e => e.NoteOn), notesOff = allEvents.OfType<MidiNoteEvent>().Count(e => !e.NoteOn), pitchBends = allEvents.OfType<MidiPitchBendEvent>().Count(), controllers = 0, tracks = tracks.Count },
             performance = export.Performance?.ToHumanReadable(),
             output = new { sha256 = outputHash, sizeBytes = export.Bytes.Length },
-            configuration = new { request.Ppq },
+            configuration = new { ppq = MidiTranscriber.DefaultPpq },
             environment = new { runtime = Environment.Version.ToString(), os = Environment.OSVersion.ToString(), processorCount = Environment.ProcessorCount },
             comparison = new { status = "baseline-unavailable", baseline = (object?)null, candidate = (object?)null, targetSpeedupClaim = (double?)null },
         };
@@ -334,7 +333,7 @@ internal static class Program
     private static MidiScaleMeasurement MeasureMidi(int sourceEvents)
     {
         VisualizationTimeline timeline = BuildMidiTimeline(sourceEvents);
-        var transcriber = new MidiTranscriber(960);
+        var transcriber = new MidiTranscriber();
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();

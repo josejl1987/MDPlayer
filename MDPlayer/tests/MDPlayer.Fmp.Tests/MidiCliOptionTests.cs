@@ -1,12 +1,11 @@
 using Fmp.Cli;
-using Fmp.Core.Timing;
 using Xunit;
 
 namespace MDPlayer.Fmp.Tests;
 
 /// <summary>
-/// MIDI export option surface. Raw transport remains the default, while explicit
-/// musical overrides opt into the source-time-preserving musical map.
+/// MIDI export option surface. The transport is fixed (120 BPM / 960 PPQ) and
+/// every musical-inference override is rejected as unknown.
 /// </summary>
 public sealed class MidiCliOptionTests
 {
@@ -14,69 +13,14 @@ public sealed class MidiCliOptionTests
 
     private static MidiOptions Parse(params string[] args) => MidiOptionsParser.Parse(args);
 
-    [Fact]
-    public void Ppq_DefaultsTo960()
-    {
-        MidiOptions o = Parse("--output", "out.mid", Input);
-        Assert.Equal(960, o.Ppq);
-    }
-
-    [Fact]
-    public void MusicalGrid_IsExplicitlyOptIn()
-    {
-        MidiOptions o = Parse("--musical-grid", "--output", "out.mid", Input);
-        Assert.True(o.MusicalGrid);
-    }
-
-    [Fact]
-    public void MusicalOverrides_AreAcceptedAndEnableGridMode()
-    {
-        MidiOptions o = Parse(
-            "--bpm", "112",
-            "--meter", "4/4",
-            "--beat-offset", "-22050",
-            "--strict-timing",
-            "--output", "out.mid", Input);
-
-        Assert.True(o.MusicalGrid);
-        Assert.Equal(112, o.FixedBpm);
-        Assert.Equal(new Meter(4, 4), o.Meter);
-        Assert.Equal(-22050, o.BeatOffsetSamples);
-        Assert.True(o.StrictTiming);
-    }
-
     [Theory]
-    [InlineData(1)]
-    [InlineData(480)]
-    [InlineData(960)]
-    [InlineData(32767)]
-    public void Ppq_PositiveMidiValid_Accepted(int ppq)
-    {
-        MidiOptions o = Parse("--ppq", ppq.ToString(), "--output", "out.mid", Input);
-        Assert.Equal(ppq, o.Ppq);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void Ppq_NonPositive_Rejected(int ppq)
-    {
-        ArgumentException ex = Assert.Throws<ArgumentException>(() =>
-            Parse("--ppq", ppq.ToString(), "--output", "out.mid", Input));
-        Assert.Contains("--ppq", ex.Message);
-    }
-
-    [Theory]
-    [InlineData(32768)]
-    [InlineData(65535)]
-    public void Ppq_AboveMidiMax_Rejected(int ppq)
-    {
-        ArgumentException ex = Assert.Throws<ArgumentException>(() =>
-            Parse("--ppq", ppq.ToString(), "--output", "out.mid", Input));
-        Assert.Contains("32767", ex.Message);
-    }
-
-    [Theory]
+    [InlineData("--ppq")]
+    [InlineData("--musical-grid")]
+    [InlineData("--bpm")]
+    [InlineData("--meter")]
+    [InlineData("--beat-offset")]
+    [InlineData("--strict-timing")]
+    [InlineData("--timing-report")]
     [InlineData("--tempo-source")]
     [InlineData("--first-downbeat-sample")]
     [InlineData("--quantize")]
@@ -94,10 +38,14 @@ public sealed class MidiCliOptionTests
     }
 
     [Theory]
+    [InlineData("--bpm", "112")]
+    [InlineData("--meter", "4/4")]
+    [InlineData("--beat-offset", "-22050")]
     [InlineData("--tempo-source", "auto")]
     [InlineData("--quantize", "1/8")]
     [InlineData("--track-layout", "physical")]
     [InlineData("--pitch-normalization", "fidelity")]
+    [InlineData("--timing-report", "timing.txt")]
     public void RemovedMusicalTransformOption_WithValue_IsRejected(string option, string value)
     {
         ArgumentException ex = Assert.Throws<ArgumentException>(() =>
@@ -107,11 +55,17 @@ public sealed class MidiCliOptionTests
     }
 
     [Fact]
-    public void RawReports_SurviveAsPaths()
+    public void PitchReport_SurvivesAsPath()
     {
-        MidiOptions o = Parse("--timing-report", "timing.txt", "--pitch-report", "pitch.txt", "--output", "out.mid", Input);
-        Assert.Equal("timing.txt", o.TimingReport);
+        MidiOptions o = Parse("--pitch-report", "pitch.txt", "--output", "out.mid", Input);
         Assert.Equal("pitch.txt", o.PitchReport);
+    }
+
+    [Fact]
+    public void Channels_IsAcceptedAsFlag()
+    {
+        MidiOptions o = Parse("--channels", "--output", "out.mid", Input);
+        Assert.True(o.Channels);
     }
 
     [Fact]

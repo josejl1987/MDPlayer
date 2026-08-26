@@ -408,16 +408,8 @@
             <StackPanel Spacing="8">
               <TextBlock Classes="section-title" Text="MIDI EXPORT"/>
               <TextBlock Classes="caption"
-                         Text="Raw transcription preserves source timing and pitch. The MIDI transport is fixed at 120 BPM; no tempo, meter, quantization, marker or instrument inference is applied."
+                         Text="Raw transcription preserves source timing and pitch. The MIDI transport is fixed at 120 BPM and 960 PPQ; no tempo, meter, quantization, marker or instrument inference is applied."
                          TextWrapping="Wrap"/>
-              <Grid ColumnDefinitions="110,*" ColumnSpacing="12" RowSpacing="8"
-                    RowDefinitions="Auto">
-                <TextBlock Grid.Row="0" Grid.Column="0" Classes="field-label" Text="PPQ"
-                           VerticalAlignment="Center"/>
-                <ComboBox Grid.Row="0" Grid.Column="1" Classes="compact"
-                          SelectedItem="{Binding MidiPpq}"
-                          ItemsSource="{Binding MidiPpqOptions}"/>
-              </Grid>
             </StackPanel>
 
           </StackPanel>

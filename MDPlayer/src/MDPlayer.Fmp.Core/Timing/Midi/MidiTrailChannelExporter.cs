@@ -50,7 +50,7 @@ internal sealed class MidiTrailChannelsResult
 /// base. The visualization pipeline never consumes these files.
 ///
 /// Transport parity invariant (same as the all-channel file):
-///   - SMF Format 1, division = <paramref name="ppq"/> (960 by default)
+///   - SMF Format 1, division = 960 PPQ (fixed transport)
 ///   - tempo map: a single fixed 120 BPM Set Tempo at tick 0, no time signatures
 ///   - lead-in: the conductor holds tempo at tick 0 (no artificial delay)
 ///   - total duration: a trailing End marker on the conductor pins every channel
@@ -60,14 +60,12 @@ internal sealed class MidiTrailChannelsResult
 /// </summary>
 internal static class MidiTrailChannelExporter
 {
-    public const int DefaultPpq = MidiTranscriber.DefaultPpq;
-
-    public static MidiTrailChannelsResult Export(VisualizationTimeline timeline, int ppq = DefaultPpq)
+    public static MidiTrailChannelsResult Export(VisualizationTimeline timeline)
     {
         ArgumentNullException.ThrowIfNull(timeline);
 
-        MidiTranscriptionResult transcript = new MidiTranscriber(ppq).Transcribe(timeline);
-        long totalEndTick = MaxEndTick(transcript.Tracks, ppq);
+        MidiTranscriptionResult transcript = new MidiTranscriber().Transcribe(timeline);
+        long totalEndTick = MaxEndTick(transcript.Tracks);
 
         var channels = new List<MidiTrailChannelExport>();
         foreach (IGrouping<string, MidiTrack> group in transcript.Tracks
@@ -82,7 +80,7 @@ internal static class MidiTrailChannelExporter
                 .OrderBy(track => track.Name, StringComparer.Ordinal)
                 .ToArray();
 
-            byte[] bytes = BuildChannelFile(ppq, totalEndTick, voiceTracks);
+            byte[] bytes = BuildChannelFile(totalEndTick, voiceTracks);
             channels.Add(new MidiTrailChannelExport
             {
                 SourceVoiceId = group.Key,
@@ -105,13 +103,13 @@ internal static class MidiTrailChannelExporter
     /// this channel's own tracks. Conductor events therefore carry the transport
     /// parity; channel tracks carry only their own musical events.
     /// </summary>
-    private static byte[] BuildChannelFile(int ppq, long totalEndTick, IReadOnlyList<MidiTrack> voiceTracks)
+    private static byte[] BuildChannelFile(long totalEndTick, IReadOnlyList<MidiTrack> voiceTracks)
     {
         IReadOnlyList<MidiEventBase> conductor = MidiConductor.FixedTransport(totalEndTick);
-        return new MidiFileWriter(ppq).Write(conductor, voiceTracks);
+        return new MidiFileWriter(MidiTranscriber.DefaultPpq).Write(conductor, voiceTracks);
     }
 
-    private static long MaxEndTick(IReadOnlyList<MidiTrack> tracks, int ppq)
+    private static long MaxEndTick(IReadOnlyList<MidiTrack> tracks)
     {
         long max = 0;
         foreach (MidiTrack track in tracks)
@@ -122,16 +120,8 @@ internal static class MidiTrailChannelExporter
     private static long EndTick(MidiTrack track)
     {
         long max = 0;
-        if (track.UsesPackedEvents)
-        {
-            foreach (PackedMidiEvent evt in track.PackedEvents)
-                max = Math.Max(max, evt.Tick);
-        }
-        else
-        {
-            foreach (MidiEventBase evt in track.Events)
-                max = Math.Max(max, evt.Tick);
-        }
+        foreach (PackedMidiEvent evt in track.PackedEvents)
+            max = Math.Max(max, evt.Tick);
         return max;
     }
 

@@ -53,33 +53,11 @@ internal sealed record MidiProgramEvent(long TickIn, int Track, int Channel, int
 /// <summary>Bank select (control change 0 / 32) plus optional program.</summary>
 internal sealed record MidiBankEvent(long TickIn, int Track, int Channel, int Bank) : MidiEventBase(TickIn);
 
-/// <summary>Generic control change (Bn): controller number and 7-bit value.</summary>
-internal sealed record MidiControlChangeEvent(
-    long TickIn,
-    int Track,
-    int Channel,
-    int Control,
-    int Value) : MidiEventBase(TickIn);
-
 /// <summary>Pitch bend (E0), 14-bit signed value in [-8192, 8191].</summary>
 internal sealed record MidiPitchBendEvent(long TickIn, int Track, int Channel, int Bend) : MidiEventBase(TickIn);
 
-/// <summary>RPN-based pitch-bend range (controller 101/100 + value) — Batch 4.</summary>
+/// <summary>RPN-based pitch-bend range (controller 101/100 + value).</summary>
 internal sealed record MidiBendRangeEvent(long TickIn, int Track, int Channel, int Semitones) : MidiEventBase(TickIn);
-
-/// <summary>
-/// RPN-based channel tuning (controller 101/100 + CC6/CC38 data entry): fine
-/// tuning in cents (RPN 0x0002) plus optional coarse semitones (RPN 0x0001) for
-/// biases beyond ±100c. Emitted at tick 0, null-RPN terminated, at most one per
-/// endpoint (D10/D11). Fidelity mode restores the accepted domain bias through
-/// this event; DAW-friendly mode emits none.
-/// </summary>
-internal sealed record MidiTuningEvent(
-    long TickIn,
-    int Track,
-    int Channel,
-    int CoarseSemitones,
-    int FineCents) : MidiEventBase(TickIn);
 
 /// <summary>
 /// Compact production MIDI IR. Ordinary channel events carry only fixed-width
@@ -96,8 +74,6 @@ internal enum PackedMidiEventKind : byte
     Program,
     BendRange,
     PitchBend,
-    Tuning,
-    ControlChange,
 }
 
 internal struct PackedMidiEvent
@@ -132,17 +108,6 @@ internal struct PackedMidiEvent
             Kind = PackedMidiEventKind.Bank,
         };
 
-    public static PackedMidiEvent ControlChange(long tick, int track, int channel, int control, int value)
-        => new()
-        {
-            Tick = tick,
-            Track = track,
-            Channel = channel,
-            A = control,
-            B = value,
-            Kind = PackedMidiEventKind.ControlChange,
-        };
-
     public static PackedMidiEvent Program(long tick, int track, int channel, int program)
         => new()
         {
@@ -171,18 +136,6 @@ internal struct PackedMidiEvent
             Channel = channel,
             A = semitones,
             Kind = PackedMidiEventKind.BendRange,
-        };
-
-    public static PackedMidiEvent Tuning(
-        long tick, int track, int channel, int coarseSemitones, int fineCents)
-        => new()
-        {
-            Tick = tick,
-            Track = track,
-            Channel = channel,
-            A = coarseSemitones,
-            B = fineCents,
-            Kind = PackedMidiEventKind.Tuning,
         };
 
     public static PackedMidiEvent Tempo(long tick, int microsecondsPerQuarter)
@@ -215,10 +168,8 @@ internal static class MidiEventOrder
             MidiBankEvent => 1,
             MidiProgramEvent => 1,
             MidiBendRangeEvent => 2,
-            MidiTuningEvent => 2,
             MidiPitchBendEvent => 3,
             MidiNoteEvent => 4,
-            MidiControlChangeEvent => 5,
             MidiTempoEvent => 6,
             MidiTimeSignatureEvent => 6,
             MidiMarkerEvent => 6,
@@ -251,10 +202,8 @@ internal static class MidiEventOrder
         PackedMidiEventKind.Bank => 1,
         PackedMidiEventKind.Program => 1,
         PackedMidiEventKind.BendRange => 2,
-        PackedMidiEventKind.Tuning => 2,
         PackedMidiEventKind.PitchBend => 3,
         PackedMidiEventKind.NoteOn => 4,
-        PackedMidiEventKind.ControlChange => 5,
         PackedMidiEventKind.Tempo => 6,
         PackedMidiEventKind.TimeSignature => 6,
         _ => 7,

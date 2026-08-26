@@ -243,14 +243,6 @@ public sealed class MainWindowViewModel : ObservableObject
 
     /* ---- MIDI export options ---- */
 
-    private int _midiPpq = 960;
-
-    /// <summary>MIDI pulses-per-quarter-note resolution for raw transcription.</summary>
-    public int MidiPpq { get => _midiPpq; set => SetProperty(ref _midiPpq, Math.Clamp(value, 96, 9600)); }
-
-    public IReadOnlyList<int> MidiPpqOptions { get; } =
-        new[] { 240, 480, 960, 1920, 3840 };
-
     public string InputTitle => _input?.Title ?? _input?.DisplayName ?? "No input open";
 
     public string InputSummary
@@ -1263,13 +1255,9 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            // Musical MIDI still compiles directly from the captured source
-            // timeline; the inferred map only supplies serialized transport.
-            var request = new MidiExportRequest
-            {
-                Ppq = MidiPpq,
-                TimingMode = MidiExportTimingMode.MusicalTimeMap,
-            };
+            // Raw MIDI compiles directly from the captured source timeline on
+            // the fixed 120 BPM / 960 PPQ transport.
+            var request = new MidiExportRequest();
             MidiExportResult result;
             if (_session is null)
             {

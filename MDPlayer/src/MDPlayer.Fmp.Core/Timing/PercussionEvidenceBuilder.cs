@@ -117,6 +117,23 @@ internal static class PercussionEvidenceBuilder
             .ToList();
     }
 
+    // SCRATCH-DEBUG
+    public static void DumpRoles(VisualizationTimeline timeline)
+    {
+        if (timeline?.Rhythm is null)
+            return;
+        var byRole = timeline.Rhythm
+            .Take(3000)
+            .GroupBy(r => RhythmRoleClassifier.Classify(r))
+            .Select(g => $"{g.Key}={g.Count()}")
+            .ToArray();
+        Console.WriteLine($"[DBN-SCRATCH] rhythmRoles={string.Join(",", byRole)}");
+        foreach (RhythmEvent r in timeline.Rhythm.Take(5))
+            Console.WriteLine($"[DBN-SCRATCH]   rhythm voice='{r.Voice}' ch='{r.ChannelId}' inst='{r.InstrumentId}' parent='{r.ParentVoiceId}' domain={r.Domain} strength={r.Strength:0.###}");
+        foreach (PercussiveOnset o in Build(timeline).Take(10))
+            Console.WriteLine($"[DBN-SCRATCH]   onset role={o.Role} voice={o.VoiceId} strength={o.Strength:0.###} kind={o.EvidenceKind}");
+    }
+
     private static InstrumentDefinition? FindInstrument(VisualizationTimeline timeline, string instrumentId)
     {
         if (timeline.Instruments is null || string.IsNullOrEmpty(instrumentId))

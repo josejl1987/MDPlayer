@@ -33,8 +33,11 @@ internal static class MidiRoundTrip
 
     /// <summary>Parsed (absolute tick, event) pairs of a chunk in serialized order.</summary>
     public static IReadOnlyList<(long Tick, MidiEvent Event)> TimedEvents(byte[] bytes, int trackIndex)
+        => TimedEvents(TrackChunks(bytes)[trackIndex]);
+
+    /// <summary>Parsed (absolute tick, event) pairs of a chunk in serialized order.</summary>
+    public static IReadOnlyList<(long Tick, MidiEvent Event)> TimedEvents(TrackChunk chunk)
     {
-        var chunk = TrackChunks(bytes)[trackIndex];
         var result = new List<(long, MidiEvent)>();
         long tick = 0;
         foreach (MidiEvent evt in chunk.Events)

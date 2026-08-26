@@ -58,7 +58,7 @@ public sealed class MidiTrailChannelExporterTests
         MidiRoundTrip.TimedEvents(bytes, trackIndex);
 
     private static IReadOnlyList<TrackChunk> AllChannelFile(VisualizationTimeline timeline) =>
-        MidiRoundTrip.TrackChunks(new MidiTranscriber(Ppq).Transcribe(timeline).Bytes);
+        MidiRoundTrip.TrackChunks(new MidiTranscriber().Transcribe(timeline).Bytes);
 
     [Fact]
     public void SplitsIntoOneFilePerSourceVoice()
@@ -70,7 +70,7 @@ public sealed class MidiTrailChannelExporterTests
             Note("2", 0, Sr / 2, 64.0),
             Note("3", Sr / 2, Sr, 67.0));
 
-        var result = MidiTrailChannelExporter.Export(timeline, Ppq);
+        var result = MidiTrailChannelExporter.Export(timeline);
 
         Assert.Equal(3, result.Channels.Count);
         Assert.Contains(result.Channels, c => c.SourceVoiceId == Fm1);
@@ -87,7 +87,7 @@ public sealed class MidiTrailChannelExporterTests
             Note("1", 0, 2 * Sr, 60.0),
             Note("2", 0, Sr, 64.0));
 
-        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, Ppq);
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline);
         long totalEndTick = MidiTransportClock.SampleToTick(0, 2 * Sr, Sr, Ppq);
 
         Assert.Equal(totalEndTick, result.TotalEndTick);
@@ -120,7 +120,7 @@ public sealed class MidiTrailChannelExporterTests
             Note("1", 0, Sr, 60.0),
             Note("2", 0, Sr, 64.0));
 
-        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, Ppq);
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline);
 
         MidiTrailChannelExport fm1 = result.Channels.Single(c => c.SourceVoiceId == Fm1);
         MidiTrailChannelExport fm2 = result.Channels.Single(c => c.SourceVoiceId == Fm2);
@@ -148,7 +148,7 @@ public sealed class MidiTrailChannelExporterTests
             Note("1", 0, 2 * Sr, 60.0),
             Note("2", 0, Sr, 64.0));
 
-        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, Ppq);
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline);
         long totalEndTick = MidiTransportClock.SampleToTick(0, 2 * Sr, Sr, Ppq);
 
         MidiTrailChannelExport fm2 = result.Channels.Single(c => c.SourceVoiceId == Fm2);
@@ -170,7 +170,7 @@ public sealed class MidiTrailChannelExporterTests
             Note("2", 0, 3 * Sr, 64.0),
             Note("3", Sr, 2 * Sr, 67.0));
 
-        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, Ppq);
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline);
 
         foreach (MidiTrailChannelExport channel in result.Channels)
         {

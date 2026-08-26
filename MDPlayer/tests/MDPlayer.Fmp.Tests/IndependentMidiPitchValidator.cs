@@ -1,10 +1,21 @@
 using Fmp.Core.Midi;
-using Fmp.Core.Timing;
 using Fmp.Core.Visualization;
 
 namespace MDPlayer.Fmp.Tests;
+
+/// <summary>
+/// Independent serialized-bytes oracle for the raw-fidelity MIDI exporter.
+/// Reads the SMF back with its own parser (no DryWetMidi), reconstructs each
+/// channel's RPN/bend state exactly as a synthesizer observes it, and verifies
+/// source timing, attack pitch and continuous pitch against the fixed 120 BPM /
+/// 960 PPQ transport. The exported model is: one voice = one track = one
+/// channel = one bend range, attack bends always emitted, base note = the
+/// rounded attack pitch.
+/// </summary>
 internal static class IndependentMidiPitchValidator
 {
+    private static int Ppq => MidiTranscriber.DefaultPpq;
+
     public static void ValidateSerializedNoteState(MidiTranscriptionResult export)
     {
         IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
@@ -14,17 +25,12 @@ internal static class IndependentMidiPitchValidator
 
     public static void Validate(
         VisualizationTimeline timeline,
-        MidiTranscriptionResult export,
-        int ppq,
-        MusicalTimeMap? timeMap = null)
+        MidiTranscriptionResult export)
     {
-        if (timeMap is not null && (timeMap.SampleRate != timeline.SampleRate
-            || timeMap.StartSample != timeline.StartSample))
-            throw new InvalidOperationException("Pitch validator received a mismatched musical time map.");
-        long SourceTick(long sample) => timeMap is null
-            ? MidiTransportClock.SampleToTick(
-                timeline.StartSample, sample, timeline.SampleRate, ppq)
-            : timeMap.SampleToElapsedTick(sample, ppq);
+        ArgumentNullException.ThrowIfNull(timeline);
+        ArgumentNullException.ThrowIfNull(export);
+        long SourceTick(long sample) => MidiTransportClock.SampleToTick(
+            timeline.StartSample, sample, timeline.SampleRate, Ppq);
 
         IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
         if (parsed.Count != export.Tracks.Count + 1)
@@ -51,12 +57,14 @@ internal static class IndependentMidiPitchValidator
         for (int trackIndex = 0; trackIndex < export.Tracks.Count; trackIndex++)
         {
             MidiTrack track = export.Tracks[trackIndex];
-            if (track.VoiceDomain is not MidiVoiceDomain domain || domain.Notes.Count == 0)
+            IReadOnlyList<SourcePitchNote>? expectedNotes = track.SourceNotes;
+            if (expectedNotes is null || expectedNotes.Count == 0)
                 continue;
 
             ParsedTrack serialized = parsed[trackIndex + 1];
+            int channel = track.Endpoint.Channel;
+            int bendRange = BendRangeOf(track);
             var state = new ChannelState();
-            var expectedNotes = domain.Notes;
             var observed = new SortedDictionary<long, double>();
             SourcePitchNote? activeSource = null;
             int activeBase = 0;
@@ -67,7 +75,7 @@ internal static class IndependentMidiPitchValidator
 
             foreach (ParsedEvent evt in serialized.Events)
             {
-                if (evt.Channel != domain.MidiChannel)
+                if (evt.Channel != channel)
                     continue;
                 if (evt.Tick != currentTick)
                 {
@@ -94,7 +102,7 @@ internal static class IndependentMidiPitchValidator
                                 $"Multiple same-tick pitch bends at track {trackIndex + 1}, tick {evt.Tick}.");
                         if (activeSource is null)
                             continue;
-                        RequireRange(domain, state);
+                        RequireRange(bendRange, state);
                         observed[evt.Tick] = DecodePitch(activeBase, state.Bend, state.BendRange);
                         break;
 
@@ -112,16 +120,25 @@ internal static class IndependentMidiPitchValidator
 
                         activeSource = source;
                         activeBase = evt.Data1;
-                        if (activeBase != MidiPitchCompiler.SelectMinimaxBaseNote(source.PitchCurve))
-                            throw new InvalidOperationException("Serialized NoteOn does not use the minimax base note.");
-                        if (domain.BendRange > 0)
-                            RequireRange(domain, state);
+                        if (activeBase != ExpectedBaseNote(source))
+                            throw new InvalidOperationException(
+                                $"Serialized NoteOn base note {activeBase} does not match the rounded " +
+                                $"attack pitch {ExpectedBaseNote(source)}.");
+                        if (bendRange > 0)
+                            RequireRange(bendRange, state);
                         observed[evt.Tick] = DecodePitch(activeBase, state.Bend, state.BendRange);
                         break;
 
                     case ParsedKind.NoteOff:
                         if (activeSource is SourcePitchNote closing)
                         {
+                            // Transcriber floor: offTick = max(SourceTick(end), onTick + 1).
+                            long expectedOffTick = Math.Max(
+                                SourceTick(closing.EndSample),
+                                SourceTick(closing.StartSample) + 1);
+                            if (evt.Tick != expectedOffTick)
+                                throw new InvalidOperationException(
+                                    $"Source NoteOff tick {expectedOffTick} became serialized tick {evt.Tick}.");
                             ValidateNote(closing, activeBase, state.BendRange, observed, SourceTick);
                             activeSource = null;
                             observed.Clear();
@@ -134,23 +151,24 @@ internal static class IndependentMidiPitchValidator
                 ValidateNote(last, activeBase, state.BendRange, observed, SourceTick);
             if (sourceIndex != expectedNotes.Count)
                 throw new InvalidOperationException("Serialized NoteOn count does not conserve source notes.");
-            if (domain.BendRange > 0 && rangeSetCountAtEnd != 1)
+            if (bendRange > 0 && rangeSetCountAtEnd != 1)
                 throw new InvalidOperationException("Serialized domain did not initialize one bend range.");
-            if (domain.BendRange == 0 && rangeSetCountAtEnd != 0)
+            if (bendRange == 0 && rangeSetCountAtEnd != 0)
                 throw new InvalidOperationException("Zero-range domain emitted bend-range configuration.");
-            state.ValidateRangeSequence(domain.BendRange > 0);
+            state.ValidateRangeSequence(bendRange > 0);
         }
     }
 
+    /// <summary>
+    /// Verifies absolute source timing of every serialized attack on the fixed
+    /// transport (120 BPM / <see cref="Ppq"/>), with no musical map involved.
+    /// </summary>
     public static void ValidateAbsoluteTiming(
         VisualizationTimeline timeline,
-        MidiTranscriptionResult export,
-        int ppq)
+        MidiTranscriptionResult export)
     {
         ArgumentNullException.ThrowIfNull(timeline);
         ArgumentNullException.ThrowIfNull(export);
-        if (ppq <= 0)
-            throw new ArgumentOutOfRangeException(nameof(ppq));
 
         IReadOnlyList<ParsedTrack> parsed = Read(export.Bytes);
         (long Tick, int MicrosecondsPerQuarter)[] tempos = parsed[0].Events
@@ -160,51 +178,33 @@ internal static class IndependentMidiPitchValidator
             .ToArray();
         if (tempos.Length == 0 || tempos[0].Tick != 0)
             throw new InvalidOperationException("Serialized conductor has no tick-zero tempo.");
+        if (tempos.Any(tempo => tempo.MicrosecondsPerQuarter != 500_000))
+            throw new InvalidOperationException(
+                "Serialized conductor is not the fixed 120 BPM transport.");
 
-        double TickToSeconds(long tick)
-        {
-            long previousTick = 0;
-            int microseconds = tempos[0].MicrosecondsPerQuarter;
-            double seconds = 0;
-            foreach ((long tempoTick, int nextMicroseconds) in tempos)
-            {
-                if (tempoTick > tick)
-                    break;
-                if (tempoTick > previousTick)
-                {
-                    seconds += (tempoTick - previousTick) * microseconds
-                        / 1_000_000.0 / ppq;
-                    previousTick = tempoTick;
-                }
-                microseconds = nextMicroseconds;
-            }
-            return seconds + (tick - previousTick) * microseconds / 1_000_000.0 / ppq;
-        }
+        double TickToSeconds(long tick) =>
+            tick * tempos[0].MicrosecondsPerQuarter / 1_000_000.0 / Ppq;
 
         for (int trackIndex = 0; trackIndex < export.Tracks.Count; trackIndex++)
         {
-            if (export.Tracks[trackIndex].VoiceDomain is not MidiVoiceDomain domain
-                || domain.Notes.Count == 0)
+            IReadOnlyList<SourcePitchNote>? expectedNotes = export.Tracks[trackIndex].SourceNotes;
+            if (expectedNotes is null || expectedNotes.Count == 0)
                 continue;
 
-            SourcePitchNote[] expectedNotes = domain.Notes.ToArray();
+            int channel = export.Tracks[trackIndex].Endpoint.Channel;
             ParsedEvent[] noteOns = parsed[trackIndex + 1].Events
-                .Where(evt => evt.Kind == ParsedKind.NoteOn && evt.Channel == domain.MidiChannel)
+                .Where(evt => evt.Kind == ParsedKind.NoteOn && evt.Channel == channel)
                 .ToArray();
-            if (expectedNotes.Length != noteOns.Length)
+            if (expectedNotes.Count != noteOns.Length)
                 throw new InvalidOperationException(
                     $"Serialized NoteOn count {noteOns.Length} does not match source count "
-                    + $"{expectedNotes.Length} on track {trackIndex + 1}.");
-            for (int index = 0; index < expectedNotes.Length; index++)
+                    + $"{expectedNotes.Count} on track {trackIndex + 1}.");
+            for (int index = 0; index < expectedNotes.Count; index++)
             {
                 double sourceSeconds = (expectedNotes[index].StartSample - timeline.StartSample)
                     / (double)timeline.SampleRate;
                 double midiSeconds = TickToSeconds(noteOns[index].Tick);
-                int microseconds = tempos
-                    .Where(tempo => tempo.Tick <= noteOns[index].Tick)
-                    .Select(tempo => tempo.MicrosecondsPerQuarter)
-                    .Last();
-                double halfTickSeconds = microseconds / 1_000_000.0 / ppq / 2.0;
+                double halfTickSeconds = 500_000 / 1_000_000.0 / Ppq / 2.0;
                 if (Math.Abs(sourceSeconds - midiSeconds) > halfTickSeconds + 1e-9)
                 {
                     throw new InvalidOperationException(
@@ -214,6 +214,23 @@ internal static class IndependentMidiPitchValidator
                 }
             }
         }
+    }
+
+    internal static int ExpectedBaseNote(SourcePitchNote source)
+    {
+        double attack = source.InitialMidiNote;
+        if (double.IsNaN(attack))
+            throw new InvalidOperationException("Source note has an empty pitch curve.");
+        return Math.Clamp((int)Math.Round(attack, MidpointRounding.AwayFromZero), 0, 127);
+    }
+
+    private static int BendRangeOf(MidiTrack track)
+    {
+        int range = track.Events
+            .OfType<MidiBendRangeEvent>()
+            .Select(evt => evt.Semitones)
+            .SingleOrDefault();
+        return range;
     }
 
     private static void ValidateConductor(ParsedTrack conductor)
@@ -270,6 +287,7 @@ internal static class IndependentMidiPitchValidator
         ParsedKind.ControlChange => 5,
         _ => 6,
     };
+
     private static void ValidateNote(
         SourcePitchNote source,
         int baseNote,
@@ -303,11 +321,12 @@ internal static class IndependentMidiPitchValidator
                     + $"{Math.Abs(actual.Value.Value - sourcePitch):0.########}, allowed {allowed:0.########}.");
         }
     }
-    private static void RequireRange(MidiVoiceDomain domain, ChannelState state)
+
+    private static void RequireRange(int expected, ChannelState state)
     {
-        if (state.BendRange != domain.BendRange)
+        if (state.BendRange != expected)
             throw new InvalidOperationException(
-                $"Serialized event uses bend range {state.BendRange}, expected {domain.BendRange}.");
+                $"Serialized event uses bend range {state.BendRange}, expected {expected}.");
     }
 
     private static double DecodePitch(int baseNote, int signedBend, int bendRange)

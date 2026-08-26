@@ -69,7 +69,7 @@ public sealed class MidiPitchRoundTripPropertyTests
 
             try
             {
-                IndependentMidiPitchValidator.Validate(timeline, export, Ppq);
+                IndependentMidiPitchValidator.Validate(timeline, export);
             }
             catch (Exception error)
             {

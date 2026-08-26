@@ -66,23 +66,7 @@ internal static class MidiCommand
             output.WriteLine($"timeline written: {timelineOut}");
         }
 
-        MusicalTimeMapBuildResult? timing = options.MusicalGrid
-            ? MusicalTimeMapBuilder.Build(timeline, new MusicalTimeMapOptions
-            {
-                FixedBpm = options.FixedBpm,
-                Meter = options.Meter,
-                BeatOffsetSamples = options.BeatOffsetSamples,
-                StrictTiming = options.StrictTiming,
-                EnableStructuralGridSelection = false,
-                EnableLegacyHierarchyInference = false,
-            })
-            : null;
-        if (options.Channels && timing is not null)
-            throw new InvalidOperationException(
-                "--channels cannot be combined with --musical-grid or musical timing overrides.");
-        MidiTranscriptionResult result = timing is null
-            ? new MidiTranscriber(options.Ppq).Transcribe(timeline)
-            : new MidiTranscriber(options.Ppq, timing.Map).Transcribe(timeline);
+        MidiTranscriptionResult result = new MidiTranscriber().Transcribe(timeline);
 
         if (options.Channels)
             return WriteChannels(options, timeline, result);
@@ -94,28 +78,12 @@ internal static class MidiCommand
         fileWatch.Stop();
 
         output.WriteLine($"wrote {System.IO.Path.GetFullPath(options.Output)} ({result.Bytes.Length} bytes)");
-        output.WriteLine(timing is null
-            ? $"midi mode: raw-fidelity; transport: 120 BPM; ppq: {options.Ppq}"
-            : $"midi mode: musical-time-map; tempo: {timing.Map.Segments[0].BeatsPerMinute:0.###} BPM; "
-                + $"tempo-resolved: {timing.Diagnostics.GridSelection?.TempoResolved ?? timing.Diagnostics.TempoResolved}; "
-                + $"meter: {timing.Map.Meter?.ToString() ?? "unresolved"}; "
-                + $"meter-resolved: {timing.Diagnostics.GridSelection?.MeterResolved ?? timing.Map.Meter is not null}; "
-                + $"downbeat-resolved: {timing.Map.FirstDownbeatQuarter is not null}; ppq: {options.Ppq}");
-        if (timing is not null)
-        {
-            output.WriteLine($"source-quarter-at-start: {timing.Map.Segments[0].QuarterPositionAtStart:R}");
-            output.WriteLine($"tempo-evidence: {timing.Diagnostics.TempoAgreeingStreamCount}/" +
-                $"{timing.Diagnostics.TempoEvidenceStreamCount} independent streams");
-        }
+        output.WriteLine($"midi mode: raw-fidelity; transport: 120 BPM; ppq: {MidiTranscriber.DefaultPpq}");
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Diagnostics.SourceNoteCount}; " +
             $"native-rhythm={result.Diagnostics.NativeRhythmHitCount}; " +
             $"same-tick-attacks={result.Diagnostics.SameTickAttackCollisions}; " +
             $"one-tick-notes={result.Diagnostics.OneTickNotes}");
-
-        if (!string.IsNullOrWhiteSpace(options.TimingReport))
-            WriteRawTimingReport(options.TimingReport, timeline, result, options.Ppq,
-                captureWatch.Elapsed.TotalSeconds, fileWatch.Elapsed.TotalSeconds);
 
         if (!string.IsNullOrWhiteSpace(options.PitchReport))
             WriteRawPitchReport(options.PitchReport, result);
@@ -129,7 +97,7 @@ internal static class MidiCommand
         MidiTranscriptionResult ignored)
     {
         TextWriter output = options.OutputWriter ?? Console.Out;
-        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline, options.Ppq);
+        MidiTrailChannelsResult result = MidiTrailChannelExporter.Export(timeline);
 
         string outputDir = Path.GetFullPath(options.Output);
         Directory.CreateDirectory(outputDir);
@@ -143,7 +111,7 @@ internal static class MidiCommand
         }
 
         output.WriteLine($"wrote {result.Channels.Count} per-channel .mid files to {outputDir}");
-        output.WriteLine($"transport parity: fixed 120 BPM; ppq: {options.Ppq}; common end tick: {result.TotalEndTick}");
+        output.WriteLine($"transport parity: fixed 120 BPM; ppq: {MidiTranscriber.DefaultPpq}; common end tick: {result.TotalEndTick}");
         output.WriteLine($"source: {timeline.StartSample}-{timeline.EndSample} samples @ {timeline.SampleRate} Hz");
         output.WriteLine($"events: notes={result.Channels.Count}; sampling from single transcript");
         return 0;
@@ -173,38 +141,6 @@ internal static class MidiCommand
                 pitchBends = track.Events.Count(e => e is MidiPitchBendEvent),
                 noteOns = track.Events.Count(e => e is MidiNoteEvent n && n.NoteOn),
             }).ToArray(),
-        };
-        string json = System.Text.Json.JsonSerializer.Serialize(
-            report,
-            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".");
-        File.WriteAllText(path, json);
-    }
-
-    private static void WriteRawTimingReport(
-        string path,
-        VisualizationTimeline timeline,
-        MidiTranscriptionResult export,
-        int ppq,
-        double captureSeconds,
-        double fileWriteSeconds)
-    {
-        var report = new
-        {
-            mode = "raw-fidelity",
-            sampleRate = timeline.SampleRate,
-            ppq,
-            transportBpm = 120,
-            transportMicrosecondsPerQuarter = MidiTranscriber.TransportMicrosecondsPerQuarter,
-            startSample = timeline.StartSample,
-            endSample = timeline.EndSample,
-            sourceNotes = export.Diagnostics.SourceNoteCount,
-            nativeRhythmHits = export.Diagnostics.NativeRhythmHitCount,
-            sameTickAttackCollisions = export.Diagnostics.SameTickAttackCollisions,
-            oneTickNotes = export.Diagnostics.OneTickNotes,
-            musicalGridInferred = false,
-            captureSeconds,
-            fileWriteSeconds,
         };
         string json = System.Text.Json.JsonSerializer.Serialize(
             report,

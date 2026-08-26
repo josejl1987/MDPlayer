@@ -195,8 +195,8 @@ internal static class RawMidiCorpusReporter
             // Fresh capture every run: the raw oracle measures the pipeline, so a
             // cached timeline would hide capture regressions.
             VisualizationTimeline timeline = TimelineCaptureService.Capture(fixture, null, settings);
-            MidiTranscriptionResult first = new MidiTranscriber(Ppq).Transcribe(timeline);
-            MidiTranscriptionResult second = new MidiTranscriber(Ppq).Transcribe(timeline);
+            MidiTranscriptionResult first = new MidiTranscriber().Transcribe(timeline);
+            MidiTranscriptionResult second = new MidiTranscriber().Transcribe(timeline);
             bool deterministic = first.Bytes.SequenceEqual(second.Bytes);
             DecodeResult decoded = DecodeOnly(first.Bytes);
             SourceOwnership ownership = AnalyzeOwnership(timeline);

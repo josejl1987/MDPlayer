@@ -24,6 +24,7 @@ public sealed class MidiAdversarialCorpusTests
             ["32 Arctic Wind.vgz"] = "corpus/32-arctic-wind.vgz",
             ["positive-control-120-4-4.json"] = "midi/positive-control-120-4-4.json",
             ["positive-control-90-6-8.json"] = "midi/positive-control-90-6-8.json",
+            ["positive-control-100-3-4.json"] = "midi/positive-control-100-3-4.json",
         };
 
     [Fact]
@@ -112,6 +113,58 @@ public sealed class MidiAdversarialCorpusTests
         }
     }
 
+    [Fact]
+    public void RealAudioPositiveControls_DocumentObservedTempoEvidence()
+    {
+        // Every real-track abstention must be backed by the tracker's actual
+        // observed output, so "unresolved" is a documented verdict, not a lazy
+        // escape hatch. The reviewNotes must cite the observed tempo and its
+        // alternative (when one exists); if the tracker ever starts resolving
+        // these, the reviewNotes stop matching and the human must re-review.
+        string manifestPath = Path.Combine(
+            AppContext.BaseDirectory, "testfixtures", "midi", "adversarial-manifest.json");
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        foreach (JsonElement entry in document.RootElement.GetProperty("entries").EnumerateArray())
+        {
+            string source = entry.GetProperty("source").GetString()!;
+            if (source.StartsWith("positive-control-", StringComparison.Ordinal))
+                continue;
+
+            string linked = FixtureLinks[source];
+            string fixture = Path.Combine(
+                AppContext.BaseDirectory, "testfixtures", linked.Replace('/', Path.DirectorySeparatorChar));
+            CorpusExecution execution = Execute(fixture, entry);
+            double? observed = execution.Timing.Diagnostics.SelectedBpm;
+            double? alternative = execution.Timing.Diagnostics.AlternativeBpm;
+            string notes = entry.GetProperty("reviewNotes").GetString()!;
+
+            if (observed is double tempo)
+                Assert.True(notes.Contains(FormatBpm(tempo), StringComparison.Ordinal),
+                    $"{source}: reviewNotes must cite the observed tempo {tempo:0.###}.");
+            if (alternative is double alt)
+                Assert.True(notes.Contains(FormatBpm(alt), StringComparison.Ordinal),
+                    $"{source}: reviewNotes must cite the observed alternative {alt:0.###}.");
+            // Abstention is only legal when the manifest explicitly allows it:
+            // either the entry is still unresolved, or it declares the reviewed
+            // abstention expectation (e.g. the sparse Stranger control). Reviewed
+            // exact controls (U.S.A., Smash Up) must NOT allow unresolved fields.
+            bool abstaining = entry.GetProperty("reviewStatus").GetString() == "unresolved"
+                || (entry.TryGetProperty("expectedAbstention", out JsonElement expectedAbstention)
+                    && expectedAbstention.GetBoolean());
+            if (abstaining)
+            {
+                Assert.True(
+                    entry.GetProperty("allowUnresolvedTempo").GetBoolean()
+                    && entry.GetProperty("allowUnresolvedMeter").GetBoolean()
+                    && entry.GetProperty("allowUnresolvedDownbeat").GetBoolean(),
+                    $"{source}: real-track abstention must allow unresolved tempo/meter/downbeat.");
+            }
+        }
+    }
+
+    private static string FormatBpm(double bpm) =>
+        bpm == Math.Round(bpm) ? bpm.ToString("0") : bpm.ToString("0.###");
+
     private static CorpusExecution Execute(string fixture, JsonElement entry)
     {
         string wav = Path.Combine(Path.GetTempPath(), $"mdplayer-corpus-{Guid.NewGuid():N}.wav");
@@ -146,10 +199,11 @@ public sealed class MidiAdversarialCorpusTests
             MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(
                 timeline,
                 new MusicalTimeMapOptions { DetectTempoChanges = true });
-            MidiTranscriptionResult export = new MidiTranscriber(960, timing.Map)
-                .Transcribe(timeline);
-            IndependentMidiPitchValidator.Validate(timeline, export, 960, timing.Map);
-            IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export, 960);
+            // The export uses the fixed transport only; the frozen musical map
+            // stays on the timing-contract side (G3 gate) and never feeds MIDI.
+            MidiTranscriptionResult export = new MidiTranscriber().Transcribe(timeline);
+            IndependentMidiPitchValidator.Validate(timeline, export);
+            IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export);
             if (string.Equals(Environment.GetEnvironmentVariable("MDPLAYER_CORPUS_TRACE"), "1", StringComparison.Ordinal))
             {
                 Console.WriteLine($"CORPUS {entry.GetProperty("source").GetString()}: samples={timeline.StartSample}..{timeline.EndSample}, "
@@ -390,6 +444,7 @@ public sealed class MidiAdversarialCorpusTests
         int sampleRate = control.GetProperty("sampleRate").GetInt32();
         double bpm = control.GetProperty("bpm").GetDouble();
         Meter meter = Meter.TryParse(control.GetProperty("meter").GetString())!;
+        string source = entry.GetProperty("source").GetString()!;
         long quarterSamples = (long)Math.Round(sampleRate * 60.0 / bpm);
         const int tatumsPerQuarter = 4;
         int tatumsPerBar = meter.Denominator == 8
@@ -397,32 +452,68 @@ public sealed class MidiAdversarialCorpusTests
             : meter.Numerator * tatumsPerQuarter;
         int tatumCount = tatumsPerBar * 8;
         long tatumSamples = (long)Math.Round(quarterSamples / (double)tatumsPerQuarter);
-        var notes = Enumerable.Range(0, tatumCount)
-            .Select(index => new NoteEvent(
+
+        // Evidence designs reviewed per control: each pattern must drive the
+        // DBN to a single resolved reading (asymmetric beats kill the half/double
+        // alternatives; bar-periodic accents with no 4/4 backbeat symmetry pin the
+        // downbeat). The tempo/meter/downbeat expectations live in the manifest.
+        (int Tatum, float Strength, string Kind)[] rhythm = source switch
+        {
+            "positive-control-120-4-4.json" => new[]
+            {
+                (0, 2.0f, "kick"), (4, 1.0f, "snare"), (12, 0.25f, "snare"),
+                (0, 0.35f, "hi-hat"), (2, 0.35f, "hi-hat"), (4, 0.35f, "hi-hat"),
+                (6, 0.35f, "hi-hat"), (8, 0.35f, "hi-hat"), (10, 0.35f, "hi-hat"),
+                (12, 0.35f, "hi-hat"), (14, 0.35f, "hi-hat"),
+            },
+            "positive-control-90-6-8.json" => new[]
+            {
+                (0, 1.5f, "kick"), (6, 0.8f, "kick"),
+                (0, 0.5f, "hi-hat"), (2, 0.5f, "hi-hat"), (4, 0.5f, "hi-hat"),
+                (6, 0.5f, "hi-hat"), (8, 0.5f, "hi-hat"), (10, 0.5f, "hi-hat"),
+            },
+            "positive-control-100-3-4.json" => new[]
+            {
+                (0, 2.0f, "kick"), (4, 1.0f, "snare"), (8, 1.0f, "snare"),
+                (0, 0.6f, "hi-hat"), (2, 0.35f, "hi-hat"), (4, 0.6f, "hi-hat"),
+                (6, 0.35f, "hi-hat"), (8, 0.6f, "hi-hat"), (10, 0.35f, "hi-hat"),
+            },
+            _ => throw new InvalidOperationException($"Unhandled positive control {source}"),
+        };
+        int[] bassTatums = source switch
+        {
+            "positive-control-120-4-4.json" => new[] { 0 },
+            "positive-control-90-6-8.json" => new[] { 0, 6 },
+            "positive-control-100-3-4.json" => new[] { 0 },
+            _ => Array.Empty<int>(),
+        };
+        int[] noteTatums = source switch
+        {
+            "positive-control-120-4-4.json" => new[] { 0 },
+            "positive-control-90-6-8.json" => new[] { 0, 6 },
+            "positive-control-100-3-4.json" => new[] { 0 },
+            _ => Array.Empty<int>(),
+        };
+        var notes = noteTatums
+            .Select(tatum => new NoteEvent(
                 "positive-control.voice",
-                index * tatumSamples,
-                index * tatumSamples + Math.Max(1, tatumSamples / 2),
-                440.0 * Math.Pow(2.0, ((60 + (index % 4)) - 69) / 12.0),
-                60 + (index % 4),
+                tatum * tatumSamples,
+                tatum * tatumSamples + Math.Max(1, tatumSamples / 2),
+                440.0 * Math.Pow(2.0, ((bassTatums.Contains(tatum) ? 36 : 60 + (tatum % 4)) - 69) / 12.0),
+                bassTatums.Contains(tatum) ? 36 : 60 + (tatum % 4),
                 "positive-control",
                 VisualizationNoteMode.Fm,
                 false,
                 Array.Empty<PitchChange>()))
             .ToArray();
-        var rhythm = new List<RhythmEvent>(tatumCount + tatumCount / 4);
-        for (int index = 0; index < tatumCount; index++)
+        var rhythmEvents = new List<RhythmEvent>(tatumCount + tatumCount / 4);
+        foreach ((int tatum, float strength, string kind) in rhythm)
         {
-            long sample = index * tatumSamples;
-            rhythm.Add(new RhythmEvent("hi-hat", "hi-hat", sample, 0.35f, 0));
-            bool downbeat = index % tatumsPerBar == 0;
-            bool secondary = meter.Denominator == 8
-                ? index % tatumsPerBar == tatumsPerBar / 2
-                : index % tatumsPerBar == tatumsPerBar / 4
-                    || index % tatumsPerBar == 3 * tatumsPerBar / 4;
-            if (downbeat)
-                rhythm.Add(new RhythmEvent("kick", "kick", sample, 1.0f, 0));
-            else if (secondary)
-                rhythm.Add(new RhythmEvent("snare", "snare", sample, 0.9f, 0));
+            for (int index = tatum; index < tatumCount; index += tatumsPerBar)
+            {
+                rhythmEvents.Add(new RhythmEvent(
+                    kind, kind, index * tatumSamples, strength, 0));
+            }
         }
         long barSamples = checked(tatumSamples * tatumsPerBar);
         var timeline = new VisualizationTimeline
@@ -431,7 +522,7 @@ public sealed class MidiAdversarialCorpusTests
             StartSample = 0,
             EndSample = checked(tatumCount * tatumSamples),
             Notes = notes,
-            Rhythm = rhythm,
+            Rhythm = rhythmEvents.ToArray(),
             LoopMarkers = new[]
             {
                 new LoopMarker(0, LoopMarkerKind.Start, 0),
@@ -444,9 +535,9 @@ public sealed class MidiAdversarialCorpusTests
         MusicalTimeMapBuildResult timing = MusicalTimeMapBuilder.Build(
             timeline,
             new MusicalTimeMapOptions { DetectTempoChanges = true });
-        MidiTranscriptionResult export = new MidiTranscriber(960, timing.Map).Transcribe(timeline);
-        IndependentMidiPitchValidator.Validate(timeline, export, 960, timing.Map);
-        IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export, 960);
+        MidiTranscriptionResult export = new MidiTranscriber().Transcribe(timeline);
+        IndependentMidiPitchValidator.Validate(timeline, export);
+        IndependentMidiPitchValidator.ValidateAbsoluteTiming(timeline, export);
         return new CorpusExecution(timeline, timing, export, "deterministic-positive-control");
     }
 
@@ -487,95 +578,214 @@ public sealed class MidiAdversarialCorpusTests
         string BackendKind);
 
     /// <summary>
-    /// The REAL-music positive controls this corpus requires (reviewed
-    /// audio-derived fixtures, never synthesized stand-ins). The repository
-    /// currently contains NO reviewed real-music audio assets, so these are
-    /// documented BLOCKED items awaiting reviewer-provided files; fabricating
-    /// stand-ins labeled as real would violate the integrity rule.
+    /// The FOUR human-confirmed REAL-music controls this corpus requires
+    /// (reviewed audio-derived fixtures, never synthesized stand-ins). Each is
+    /// wired into <see cref="RealAudioPositiveControls_ArePresentReviewedAndExact"/>
+    /// as a MANDATORY gate member — no skip, ever. The ternary 3/4-or-6/8 slot
+    /// is NOT here: it is still OPEN and is tracked separately by
+    /// <see cref="RealCompoundControl_TernarySlot_RequiresRealAsset"/> so it
+    /// stays visible without being silently merged into this gate.
     /// </summary>
-    internal static readonly IReadOnlyList<(string Id, string Requirement)>
-        RequiredRealAudioControls = new[]
+    internal enum RealControlKind { ExactTiming, FamilyAmbiguous, ExpectedAbstention }
+
+    internal static readonly IReadOnlyList<(string Id, string Source, RealControlKind Kind)>
+        ConfirmedRealAudioControls = new[]
         {
             ("real-4-4-a",
-                "Resolved 4/4 track #1: unambiguous tempo, meter, and downbeat "
-                + "phase confirmed by human review."),
+                "18 U.S.A. (Ken) I.vgz",
+                RealControlKind.ExactTiming),
             ("real-4-4-b",
-                "Resolved 4/4 track #2: independent confirmation at a "
-                + "different tempo."),
-            ("real-compound",
-                "Resolved 3/4 or 6/8 track: compound/triple meter with "
-                + "reviewed downbeat phase."),
+                "120 Smash Up.spc",
+                RealControlKind.ExactTiming),
             ("real-half-double-ambiguous",
-                "True half/double-tempo ambiguous case: review confirms BOTH "
-                + "tempos are defensible and the tracker must abstain or "
-                + "retain the family."),
+                "20 Ninja Yashiki ~ Their Secrets Die With Them.vgz",
+                RealControlKind.FamilyAmbiguous),
             ("real-sparse-unresolved",
-                "True sparse/unresolved case: review confirms the evidence is "
-                + "insufficient and the pipeline must abstain explicitly."),
+                "02 Stranger ~ Wandering Swordsman.vgz",
+                RealControlKind.ExpectedAbstention),
         };
 
     /// <summary>
-    /// Validation contract for REAL-audio positive controls. When reviewer-
-    /// provided assets exist, each manifest entry marked with captureMode
-    /// "real-audio-positive-control" MUST be reviewed, MUST be exact (exact
-    /// tempo, exact meter, and exact downbeat quarter phase — decisive,
-    /// human-reviewed audio is never family-level or resolved-only), and its
-    /// audio asset MUST be present. Until every required control exists, the
-    /// test skips with the precise list of needed assets so the gap stays
-    /// visible without blocking CI on assets nobody has supplied yet.
+    /// The OPEN ternary (3/4 or 6/8) real-control slot. Kept SEPARATE from the
+    /// four-control gate: a real asset is still required, and fabricating or
+    /// substituting a synthetic control for it is forbidden. The requirement
+    /// stays visible as its own test that skips with this message until a real
+    /// reviewed asset lands.
     /// </summary>
-    [SkippableFact]
+    internal const string OpenTernaryControlRequirement =
+        "real-compound: resolved 3/4 or 6/8 real track with reviewed downbeat "
+        + "phase. OPEN — a real asset is still required; do NOT fabricate or "
+        + "substitute a synthetic control for this slot.";
+
+    /// <summary>
+    /// MANDATORY gate for the four human-confirmed real controls. It asserts
+    /// each control is present in the manifest, is human-reviewed, and meets
+    /// its EXACT documented timing expectations — by running the real capture
+    /// pipeline, not by trusting the sidecar. This gate does NOT skip.
+    /// U.S.A. and Smash Up are currently RED because the tracker abstains on
+    /// all real tracks (TempoResolved/MeterKnown/DownbeatKnown false); that red
+    /// is the honest driver for the next algorithm-fix stream — the assertions
+    /// must not be tuned to paper over it.
+    /// </summary>
+    [Fact]
     public void RealAudioPositiveControls_ArePresentReviewedAndExact()
     {
         string manifestPath = Path.Combine(
             AppContext.BaseDirectory, "testfixtures", "midi", "adversarial-manifest.json");
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        Dictionary<string, JsonElement> bySource = document.RootElement
+            .GetProperty("entries").EnumerateArray()
+            .ToDictionary(entry => entry.GetProperty("source").GetString()!);
 
-        var presentIds = new List<string>();
-        foreach (JsonElement entry in document.RootElement.GetProperty("entries").EnumerateArray())
+        foreach ((string id, string source, RealControlKind kind) in ConfirmedRealAudioControls)
         {
-            if (!entry.TryGetProperty("captureMode", out JsonElement captureMode)
-                || captureMode.GetString() != "real-audio-positive-control")
-                continue;
-
-            string source = entry.GetProperty("source").GetString()!;
-            string id = entry.TryGetProperty("controlId", out JsonElement controlId)
-                ? controlId.GetString()!
-                : source;
+            Assert.True(bySource.TryGetValue(source, out JsonElement entry),
+                $"{id}: confirmed real control '{source}' is missing from the manifest.");
+            Assert.Equal(id, entry.GetProperty("controlId").GetString());
             Assert.Equal("reviewed", entry.GetProperty("reviewStatus").GetString());
             Assert.True(
-                TryParsePositiveControlExpectation(entry, out PositiveControlExpectation expectation)
-                    && expectation.IsExact,
-                $"{source}: real-audio positive control must pin exact tempo, "
-                + "exact meter, and exact downbeat quarter phase (decisive, "
-                + "human-reviewed audio is never family-level or resolved-only).");
-            JsonElement expected = entry.GetProperty("expected");
-            Assert.True(
-                expected.GetProperty("tempo").GetProperty("mustBeResolved").GetBoolean()
-                || entry.TryGetProperty("expectedAbstention", out JsonElement abstention)
-                && abstention.GetBoolean(),
-                $"{source}: control must either require resolution or declare "
-                + "expectedAbstention=true explicitly.");
+                entry.TryGetProperty("reviewNotes", out JsonElement notes)
+                && notes.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(notes.GetString()),
+                $"{source}: reviewed control must carry reviewNotes documenting the human confirmation.");
 
-            string linked = FixtureLinks.TryGetValue(source, out string? link)
-                ? link
-                : $"corpus/real-audio/{source}";
-            string asset = Path.Combine(AppContext.BaseDirectory,
-                ("testfixtures/" + linked).Replace('/', Path.DirectorySeparatorChar));
-            Assert.True(File.Exists(asset),
-                $"{source}: reviewed real-audio control is present in the manifest "
-                + $"but its audio asset is missing: {asset}");
-            presentIds.Add(id);
+            string linked = FixtureLinks[source];
+            string fixture = Path.Combine(
+                AppContext.BaseDirectory, "testfixtures", linked.Replace('/', Path.DirectorySeparatorChar));
+            Assert.True(File.Exists(fixture),
+                $"{id}: reviewed real control is present in the manifest but its audio asset is missing: {fixture}");
+
+            AssertReviewedControlShape(entry, kind, source);
+
+            CorpusExecution execution = Execute(fixture, entry);
+            switch (kind)
+            {
+                case RealControlKind.ExactTiming:
+                case RealControlKind.FamilyAmbiguous:
+                    AssertTimingContract(entry, execution.Timing, source);
+                    break;
+                case RealControlKind.ExpectedAbstention:
+                    AssertExpectedAbstention(execution.Timing, source);
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unhandled control kind {kind}");
+            }
         }
+    }
 
-        var missing = RequiredRealAudioControls
-            .Where(required => !presentIds.Contains(required.Id))
-            .Select(required => $"{required.Id}: {required.Requirement}")
-            .ToList();
-        Skip.IfNot(missing.Count == 0,
-            "BLOCKED on reviewer-provided REAL music assets. The repository "
-            + "contains no reviewed real-music audio; synthesizing stand-ins "
-            + "labeled as real is forbidden. Required controls:\n"
-            + string.Join("\n", missing));
+    /// <summary>
+    /// SEPARATE, clearly-named requirement for the still-OPEN ternary slot. It
+    /// must not be merged into the four-control gate: until a real reviewed
+    /// 3/4 or 6/8 asset exists this test skips with the requirement message so
+    /// the gap stays visible in CI. When a real asset lands, the slot entry
+    /// must satisfy the same reviewed + exact-timing contract as the four.
+    /// </summary>
+    [SkippableFact]
+    public void RealCompoundControl_TernarySlot_RequiresRealAsset()
+    {
+        string manifestPath = Path.Combine(
+            AppContext.BaseDirectory, "testfixtures", "midi", "adversarial-manifest.json");
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        JsonElement open = document.RootElement.GetProperty("entries").EnumerateArray()
+            .FirstOrDefault(entry => entry.TryGetProperty("controlId", out JsonElement controlId)
+                && controlId.GetString() == "real-compound");
+
+        if (open.ValueKind == JsonValueKind.Undefined)
+            Skip.If(true, "OPEN REQUIREMENT: " + OpenTernaryControlRequirement);
+
+        // A real asset landed: enforce the same mandatory contract as the four.
+        string source = open.GetProperty("source").GetString()!;
+        Assert.Equal("reviewed", open.GetProperty("reviewStatus").GetString());
+        Assert.True(FixtureLinks.ContainsKey(source),
+            $"{source}: ternary control must be registered in FixtureLinks.");
+        string linked = FixtureLinks[source];
+        string fixture = Path.Combine(
+            AppContext.BaseDirectory, "testfixtures", linked.Replace('/', Path.DirectorySeparatorChar));
+        Assert.True(File.Exists(fixture),
+            $"{source}: ternary control is present in the manifest but its audio asset is missing: {fixture}");
+        CorpusExecution execution = Execute(fixture, open);
+        AssertTimingContract(open, execution.Timing, source);
+    }
+
+    /// <summary>
+    /// Pins the manifest's DOCUMENTED expectation shape per control kind, so a
+    /// sidecar edit cannot silently downgrade a confirmed control (e.g. turn an
+    /// exact-tempo control into a family-level one) without this gate failing.
+    /// </summary>
+    private static void AssertReviewedControlShape(
+        JsonElement entry,
+        RealControlKind kind,
+        string source)
+    {
+        JsonElement expected = entry.GetProperty("expected");
+        switch (kind)
+        {
+            case RealControlKind.ExactTiming:
+            {
+                JsonElement tempo = expected.GetProperty("tempo");
+                Assert.True(tempo.TryGetProperty("bpm", out _),
+                    $"{source}: exact control must declare an exact tempo BPM.");
+                Assert.True(tempo.GetProperty("mustBeResolved").GetBoolean(),
+                    $"{source}: exact control must require tempo resolution.");
+                Assert.False(tempo.GetProperty("mustBeAmbiguous").GetBoolean(),
+                    $"{source}: exact control must not be tempo-ambiguous.");
+                JsonElement meter = expected.GetProperty("meter");
+                Assert.True(meter.TryGetProperty("numerator", out _)
+                        && meter.TryGetProperty("denominator", out _),
+                    $"{source}: exact control must declare an exact meter grid.");
+                Assert.True(meter.GetProperty("mustBeResolved").GetBoolean(),
+                    $"{source}: exact control must require meter resolution.");
+                Assert.True(expected.GetProperty("downbeat").GetProperty("mustBeResolved").GetBoolean(),
+                    $"{source}: exact control must require a resolved downbeat (phase "
+                    + "may be resolved-only when the capture cannot establish it).");
+                Assert.False(entry.GetProperty("allowUnresolvedTempo").GetBoolean()
+                        || entry.GetProperty("allowUnresolvedMeter").GetBoolean()
+                        || entry.GetProperty("allowUnresolvedDownbeat").GetBoolean(),
+                    $"{source}: exact control must not allow unresolved tempo/meter/downbeat.");
+                break;
+            }
+            case RealControlKind.FamilyAmbiguous:
+            {
+                JsonElement tempo = expected.GetProperty("tempo");
+                Assert.True(tempo.TryGetProperty("acceptedFamily", out JsonElement family)
+                        && family.GetArrayLength() >= 2,
+                    $"{source}: family-ambiguous control must declare an acceptedFamily of at least two members.");
+                Assert.True(tempo.GetProperty("mustBeAmbiguous").GetBoolean(),
+                    $"{source}: family-ambiguous control must be mustBeAmbiguous=true.");
+                Assert.False(tempo.GetProperty("mustBeResolved").GetBoolean(),
+                    $"{source}: family-ambiguous control must not require resolution.");
+                Assert.True(tempo.GetProperty("preferred").ValueKind == JsonValueKind.Number,
+                    $"{source}: family-ambiguous control must document a preferred member.");
+                break;
+            }
+            case RealControlKind.ExpectedAbstention:
+                Assert.True(
+                    entry.TryGetProperty("expectedAbstention", out JsonElement abstention)
+                    && abstention.GetBoolean(),
+                    $"{source}: abstention control must declare expectedAbstention=true.");
+                Assert.True(expected.GetProperty("tempo").ValueKind == JsonValueKind.Null
+                        && expected.GetProperty("meter").ValueKind == JsonValueKind.Null
+                        && expected.GetProperty("downbeat").ValueKind == JsonValueKind.Null,
+                    $"{source}: abstention control must not assert any timing expectation.");
+                break;
+            default:
+                throw new InvalidOperationException($"Unhandled control kind {kind}");
+        }
+    }
+
+    /// <summary>
+    /// The sparse/unresolved control contract: the pipeline MUST abstain —
+    /// resolving tempo, meter, or downbeat on genuinely sparse evidence would
+    /// be a guess, exactly what this corpus forbids.
+    /// </summary>
+    private static void AssertExpectedAbstention(MusicalTimeMapBuildResult timing, string source)
+    {
+        TimingDiagnostics diagnostics = timing.Diagnostics;
+        Assert.False(diagnostics.TempoResolved,
+            $"{source}: expected abstention but the tracker resolved tempo.");
+        Assert.False(diagnostics.MeterKnown,
+            $"{source}: expected abstention but the tracker resolved a meter.");
+        Assert.False(diagnostics.DownbeatKnown,
+            $"{source}: expected abstention but the tracker resolved a downbeat.");
     }
 }

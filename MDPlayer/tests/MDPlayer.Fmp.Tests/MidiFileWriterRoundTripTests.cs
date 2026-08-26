@@ -21,8 +21,8 @@ public sealed class MidiFileWriterRoundTripTests
     public void Notes_RoundTrip_PreserveTickChannelNoteVelocity()
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiNoteEvent(480, 0, 3, 60, 95, NoteOn: true));
-        track.Events.Add(new MidiNoteEvent(720, 0, 3, 60, 0, NoteOn: false));
+        track.AddPacked(PackedMidiEvent.Note(480, 0, 3, 60, 95, noteOn: true));
+        track.AddPacked(PackedMidiEvent.Note(720, 0, 3, 60, 0, noteOn: false));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -52,7 +52,7 @@ public sealed class MidiFileWriterRoundTripTests
     public void Program_RoundTrip_PreservesNumberChannelTick()
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiProgramEvent(960, 0, 2, 40));
+        track.AddPacked(PackedMidiEvent.Program(960, 0, 2, 40));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -99,7 +99,7 @@ public sealed class MidiFileWriterRoundTripTests
     public void PitchBend_RoundTrip_MapsSignedTo14Bit(int signed, ushort expectedUnsigned)
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiPitchBendEvent(0, 0, 0, signed));
+        track.AddPacked(PackedMidiEvent.PitchBend(0, 0, 0, signed));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -113,7 +113,7 @@ public sealed class MidiFileWriterRoundTripTests
     public void PitchBend_OutOfRange_Throws(int signed)
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiPitchBendEvent(0, 0, 0, signed));
+        track.AddPacked(PackedMidiEvent.PitchBend(0, 0, 0, signed));
         var writer = new MidiFileWriter(Ppq);
         Assert.Throws<InvalidOperationException>(() => writer.Write(Array.Empty<MidiEventBase>(), new[] { track }));
     }
@@ -125,7 +125,7 @@ public sealed class MidiFileWriterRoundTripTests
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         // MidiBendRangeEvent(source, track, channel, semitones)
-        track.Events.Add(new MidiBendRangeEvent(0, 0, 0, 2));
+        track.AddPacked(PackedMidiEvent.BendRange(0, 0, 0, 2));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -176,8 +176,8 @@ public sealed class MidiFileWriterRoundTripTests
     public void SameTick_NoteOffPrecedesNoteOn_AtSharedTick()
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiNoteEvent(960, 0, 0, 60, 90, NoteOn: false));
-        track.Events.Add(new MidiNoteEvent(960, 0, 0, 60, 90, NoteOn: true));
+        track.AddPacked(PackedMidiEvent.Note(960, 0, 0, 60, 90, noteOn: false));
+        track.AddPacked(PackedMidiEvent.Note(960, 0, 0, 60, 90, noteOn: true));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -191,9 +191,9 @@ public sealed class MidiFileWriterRoundTripTests
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
         // ranks: NoteOff(0) < Bend(3) < NoteOn(4).
-        track.Events.Add(new MidiNoteEvent(0, 0, 0, 60, 90, NoteOn: true));   // rank 4
-        track.Events.Add(new MidiPitchBendEvent(0, 0, 0, 0));                 // rank 3
-        track.Events.Add(new MidiNoteEvent(0, 0, 0, 60, 90, NoteOn: false));  // rank 0
+        track.AddPacked(PackedMidiEvent.Note(0, 0, 0, 60, 90, noteOn: true));   // rank 4
+        track.AddPacked(PackedMidiEvent.PitchBend(0, 0, 0, 0));                 // rank 3
+        track.AddPacked(PackedMidiEvent.Note(0, 0, 0, 60, 90, noteOn: false));  // rank 0
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
@@ -209,8 +209,8 @@ public sealed class MidiFileWriterRoundTripTests
     public void Determinism_SameTimelineTwice_ByteIdentical()
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiNoteEvent(0, 0, 0, 60, 90, NoteOn: true));
-        track.Events.Add(new MidiNoteEvent(960, 0, 0, 60, 0, NoteOn: false));
+        track.AddPacked(PackedMidiEvent.Note(0, 0, 0, 60, 90, noteOn: true));
+        track.AddPacked(PackedMidiEvent.Note(960, 0, 0, 60, 0, noteOn: false));
         var writer = new MidiFileWriter(Ppq);
         byte[] a = writer.Write(Array.Empty<MidiEventBase>(), new[] { track });
         byte[] b = writer.Write(Array.Empty<MidiEventBase>(), new[] { track });
@@ -229,7 +229,7 @@ public sealed class MidiFileWriterRoundTripTests
         };
         // Note ticks are derived from the map calculation upstream (unchanged here).
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiNoteEvent(960, 0, 0, 60, 90, NoteOn: true));
+        track.AddPacked(PackedMidiEvent.Note(960, 0, 0, 60, 90, noteOn: true));
         byte[] bytes = Write(track, conductor);
 
         var chunk = MidiRoundTrip.TrackChunks(bytes)[0];
@@ -250,9 +250,9 @@ public sealed class MidiFileWriterRoundTripTests
     public void Pickup_NoNegativeTicks_RelativeDistancesPreserved()
     {
         var track = new MidiTrack { Name = "t", Endpoint = new MidiEndpoint(0, 0) };
-        track.Events.Add(new MidiPitchBendEvent(10, 0, 0, 500));   // earliest
-        track.Events.Add(new MidiNoteEvent(100, 0, 0, 60, 90, NoteOn: true));
-        track.Events.Add(new MidiNoteEvent(300, 0, 0, 60, 0, NoteOn: false));
+        track.AddPacked(PackedMidiEvent.PitchBend(10, 0, 0, 500));   // earliest
+        track.AddPacked(PackedMidiEvent.Note(100, 0, 0, 60, 90, noteOn: true));
+        track.AddPacked(PackedMidiEvent.Note(300, 0, 0, 60, 0, noteOn: false));
         byte[] bytes = Write(track);
 
         var chunk = LastMusicalChunk(bytes);
