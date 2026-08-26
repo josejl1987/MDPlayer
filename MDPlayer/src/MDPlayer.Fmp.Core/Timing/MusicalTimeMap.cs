@@ -163,6 +163,21 @@ internal sealed class MusicalTimeMap
         if (ppq <= 0)
             throw new ArgumentOutOfRangeException(nameof(ppq));
 
+        return decimal.ToInt64(
+            decimal.Round(SampleToElapsedTickExact(sample, ppq), 0,
+                MidpointRounding.AwayFromZero));
+    }
+
+    /// <summary>
+    /// Unrounded tempo-integrated tick for a source sample. Used by
+    /// quantization-loss diagnostics and PPQ raise-first resolution, which
+    /// need the exact rational tick before rounding.
+    /// </summary>
+    internal decimal SampleToElapsedTickExact(long sample, int ppq)
+    {
+        if (ppq <= 0)
+            throw new ArgumentOutOfRangeException(nameof(ppq));
+
         long clamped = Math.Clamp(sample, FirstSample, EndSample);
         decimal ticks = 0;
         foreach (TempoSegment segment in _segments)
@@ -177,7 +192,7 @@ internal sealed class MusicalTimeMap
             if (clamped <= segment.EndSample)
                 break;
         }
-        return decimal.ToInt64(decimal.Round(ticks, 0, MidpointRounding.AwayFromZero));
+        return ticks;
     }
 
     /// <summary>

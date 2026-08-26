@@ -17,10 +17,20 @@ Requires: librosa==0.11.0, numpy.
 
 import json
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
 import librosa
+
+# The oracle must be pinned: regenerating under a different librosa produces
+# different beat frames and silently invalidates the differential contract.
+EXPECTED_LIBROSA = "0.11.0"
+if librosa.__version__ != EXPECTED_LIBROSA:
+    raise RuntimeError(
+        f"librosa version mismatch: expected {EXPECTED_LIBROSA}, "
+        f"found {librosa.__version__}. Refusing to regenerate the fuzz corpus "
+        f"against a different oracle.")
 
 SEED = 20260825
 CASE_COUNT = 10_000
@@ -63,6 +73,11 @@ def main() -> None:
             "librosa.beat.beat_track 0.11.0, bpm fixed, tightness 100",
         "generator": "generate-librosa-fuzz.py",
         "seed": SEED,
+        # Intentionally reproducible: the exact toolchain that produced this
+        # corpus is recorded so any regeneration is auditable and byte-identical.
+        "pythonVersion": sys.version.split()[0],
+        "numpyVersion": np.__version__,
+        "librosaVersion": librosa.__version__,
         "caseCount": CASE_COUNT,
         "sampleRate": SR,
         "hopSamples": HOP,

@@ -106,6 +106,26 @@ public sealed class DbnMetricalDecoderTests
         Assert.NotEqual(result.TempoPath[0].Tempo.Bpm, result.TempoPath[^1].Tempo.Bpm);
     }
 
+    [Theory]
+    [InlineData(new[] { 0.80, 0.79, 0.10 }, 0, 0.01)]
+    [InlineData(new[] { 0.80, 0.50, 0.49 }, 0, 0.30)]
+    public void DownbeatMargin_IsWinnerLeadOverStrongestCompetitor(
+        double[] phaseScores, int phase, double expectedMargin)
+    {
+        Assert.Equal(expectedMargin, DbnMetricalDecoder.DownbeatMarginFor(phaseScores, phase), 12);
+    }
+
+    [Fact]
+    public void DownbeatMargin_WinnerAlwaysWins_OverEveryCompetingPhase()
+    {
+        // A close second-place phase must NOT produce a large margin; the old
+        // implementation returned max(winner - every phase) = 0.70 here.
+        double[] phaseScores = { 0.80, 0.79, 0.10 };
+        Assert.Equal(0.01, DbnMetricalDecoder.DownbeatMarginFor(phaseScores, 0), 12);
+        // A clearly isolated winner must produce a large margin.
+        Assert.Equal(0.30, DbnMetricalDecoder.DownbeatMarginFor(new[] { 0.80, 0.50, 0.49 }, 0), 12);
+    }
+
     private static DbnMetricalResult Decode(
         IReadOnlyList<(long Sample, double Strength)> surface,
         IReadOnlyList<(long Sample, double Strength)> accents,

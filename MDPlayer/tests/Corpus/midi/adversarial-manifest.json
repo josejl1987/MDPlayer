@@ -4,61 +4,131 @@
   "entries": [
     {
       "source": "21 Master Ninja.vgz",
-      "featuresToReview": ["fm-vibrato", "patch-changes", "loop-restart"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "fm-vibrato",
+        "patch-changes",
+        "loop-restart"
+      ],
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "Exact symbolic capture and the librosa reference disagree on tempo; dense FM evidence does not establish a unique meter or downbeat."
+      "reviewNotes": "Tracker emits 200/100 (half/double family) BPM; Exact symbolic capture and the librosa reference disagree on tempo; dense FM evidence does not establish a unique meter or downbeat."
     },
     {
       "source": "120 Smash Up.spc",
-      "featuresToReview": ["no-drums", "short-notes", "loop-restart"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "no-drums",
+        "short-notes",
+        "loop-restart"
+      ],
+      "controlId": "real-4-4-b",
+      "expected": {
+        "tempo": {
+          "bpm": 105.5,
+          "mustBeAmbiguous": false,
+          "mustBeResolved": true
+        },
+        "meter": {
+          "numerator": 4,
+          "denominator": 4,
+          "mustBeResolved": true
+        },
+        "downbeat": {
+          "mustBeResolved": true
+        }
+      },
       "captureMode": "native-spc-required",
-      "allowUnresolvedTempo": true,
-      "allowUnresolvedMeter": true,
-      "allowUnresolvedDownbeat": true,
-      "reviewStatus": "unresolved",
-      "reviewNotes": "Native SPC capture is required and the complete capture-to-SMF pitch/time pipeline passes. No-drums symbolic evidence does not prove a unique tempo, meter, or downbeat, so musical timing remains explicitly unresolved."
+      "allowUnresolvedTempo": false,
+      "allowUnresolvedMeter": false,
+      "allowUnresolvedDownbeat": false,
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Human review (2026-08-26) confirms 4/4 at 105.5 BPM. Tracker emits 105.5 with no alternative; the human confirms 105.5, so tempo is asserted EXACTLY (105.5) and meter EXACTLY (4/4). Downbeat phase is asserted resolved-only: the capture abstains and no independent phase reference was recorded, so pinning a specific quarter would be a guess."
     },
     {
       "source": "02 Stranger ~ Wandering Swordsman.vgz",
-      "featuresToReview": ["sparse-intro", "pickup"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "sparse-intro",
+        "pickup"
+      ],
+      "controlId": "real-sparse-unresolved",
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
+      "expectedAbstention": true,
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "unresolved",
-      "reviewNotes": "The available capture contains only sparse onset evidence, insufficient to assert tempo, meter, or downbeat."
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Human review (2026-08-26): GENUINELY sparse/unresolved — the available capture holds only sparse onset evidence, insufficient to assert tempo, meter, or downbeat, so expected abstention is confirmed. Tracker emits the 150/75 (half/double family) BPM and must keep abstaining."
     },
     {
       "source": "05 - Twilight Express.vgz",
-      "featuresToReview": ["portamento", "extreme-pitch"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "portamento",
+        "extreme-pitch"
+      ],
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "The exact source capture passes pitch/time checks, but symbolic and librosa tempo estimates disagree and no independent meter/downbeat consensus exists."
+      "reviewNotes": "Tracker emits 200/100 (half/double family) BPM; The exact source capture passes pitch/time checks, but symbolic and librosa tempo estimates disagree and no independent meter/downbeat consensus exists."
     },
     {
       "source": "18 U.S.A. (Ken) I.vgz",
-      "featuresToReview": ["4-4", "native-rhythm", "patch-changes"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
-      "allowUnresolvedTempo": true,
-      "allowUnresolvedMeter": true,
-      "allowUnresolvedDownbeat": true,
-      "reviewStatus": "unresolved",
-      "reviewNotes": "Native rhythm evidence is present, but the symbolic and librosa tempo estimates disagree; no unique musical grid is asserted."
+      "featuresToReview": [
+        "4-4",
+        "native-rhythm",
+        "patch-changes"
+      ],
+      "controlId": "real-4-4-a",
+      "expected": {
+        "tempo": {
+          "bpm": 125,
+          "mustBeAmbiguous": false,
+          "mustBeResolved": true
+        },
+        "meter": {
+          "numerator": 4,
+          "denominator": 4,
+          "mustBeResolved": true
+        },
+        "downbeat": {
+          "mustBeResolved": true
+        }
+      },
+      "allowUnresolvedTempo": false,
+      "allowUnresolvedMeter": false,
+      "allowUnresolvedDownbeat": false,
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Human review (2026-08-26) confirms 4/4 at 125 BPM. Tracker emits the 125/62.5 (half/double family) BPM; the human confirms the quarter-note pulse at 125, so tempo is asserted EXACTLY (125) and meter EXACTLY (4/4). Downbeat phase is asserted resolved-only: the capture abstains and no independent phase reference was recorded, so pinning a specific quarter would be a guess."
     },
     {
       "source": "20 Ninja Yashiki ~ Their Secrets Die With Them.vgz",
-      "featuresToReview": ["half-double-tempo", "native-rhythm", "loop-restart"],
+      "featuresToReview": [
+        "half-double-tempo",
+        "native-rhythm",
+        "loop-restart"
+      ],
+      "controlId": "real-half-double-ambiguous",
       "expected": {
         "tempo": {
-          "acceptedFamily": [56, 112],
+          "acceptedFamily": [
+            56,
+            112
+          ],
           "preferred": 112,
           "mustBeAmbiguous": true,
           "mustBeResolved": false
@@ -69,78 +139,163 @@
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
-      "reviewStatus": "unresolved",
-      "reviewNotes": "The exact capture retains an explicit 56/112 half/double tempo family; the implementation abstains from selecting a unique tempo, meter, or downbeat."
+      "reviewStatus": "reviewed",
+      "reviewNotes": "Human review (2026-08-26): GENUINE half/double tempo ambiguity — both 56 and 112 are defensible, preferred 112, mustBeAmbiguous=true (semantics kept from the previous unresolved assertion). Tracker emits the 56/112 family and must keep abstaining from a unique selection; meter and downbeat remain unresolved (no independent evidence)."
     },
     {
       "source": "28 - Smoking Head.vgz",
-      "featuresToReview": ["double-time-tempo", "native-rhythm"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "double-time-tempo",
+        "native-rhythm"
+      ],
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "The exact capture retains competing symbolic tempo hypotheses, including a half/double family; no independent review proves a unique tempo, meter, or downbeat, so the implementation abstains."
+      "reviewNotes": "Tracker emits 60/120 (half/double family) BPM; The exact capture retains competing symbolic tempo hypotheses, including a half/double family; no independent review proves a unique tempo, meter, or downbeat, so the implementation abstains."
     },
     {
       "source": "26 - Robotnik.vgz",
-      "featuresToReview": ["3-4-or-6-8", "short-notes"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "3-4-or-6-8",
+        "short-notes"
+      ],
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "The short DAC-heavy source produces conflicting symbolic and librosa tempo evidence; meter and downbeat are withheld."
+      "reviewNotes": "Tracker emits 75/150 (half/double family) BPM; The short DAC-heavy source produces conflicting symbolic and librosa tempo evidence; meter and downbeat are withheld."
     },
     {
       "source": "32 Arctic Wind.vgz",
-      "featuresToReview": ["tempo-change", "misleading-restart"],
-      "expected": { "tempo": null, "meter": null, "downbeat": null },
+      "featuresToReview": [
+        "tempo-change",
+        "misleading-restart"
+      ],
+      "expected": {
+        "tempo": null,
+        "meter": null,
+        "downbeat": null
+      },
       "allowUnresolvedTempo": true,
       "allowUnresolvedMeter": true,
       "allowUnresolvedDownbeat": true,
       "reviewStatus": "unresolved",
-      "reviewNotes": "Tempo-change and restart evidence require a segmented musical review; the available independent references do not prove a single grid or downbeat."
+      "reviewNotes": "Tracker emits 73 with no alternative BPM; Tempo-change and restart evidence require a segmented musical review; the available independent references do not prove a single grid or downbeat."
     },
     {
       "source": "positive-control-120-4-4.json",
-      "featuresToReview": ["deterministic-positive-control", "4-4", "octave-ambiguous"],
+      "featuresToReview": [
+        "deterministic-positive-control",
+        "4-4",
+        "octave-ambiguous"
+      ],
       "expected": {
         "tempo": {
-          "acceptedFamily": [40, 60, 120, 240],
+          "bpm": 120,
           "mustBeAmbiguous": false,
           "mustBeResolved": true
         },
-        "meter": { "numerator": 4, "denominator": 4, "mustBeResolved": true },
-        "downbeat": { "mustBeResolved": true }
+        "meter": {
+          "numerator": 4,
+          "denominator": 4,
+          "mustBeResolved": true
+        },
+        "downbeat": {
+          "quarter": 0,
+          "mustBeResolved": true
+        }
       },
       "captureMode": "deterministic-positive-control",
-      "positiveControl": { "sampleRate": 44100, "bpm": 120, "meter": "4/4" },
+      "positiveControl": {
+        "sampleRate": 44100,
+        "bpm": 120,
+        "meter": "4/4"
+      },
       "allowUnresolvedTempo": false,
       "allowUnresolvedMeter": false,
       "allowUnresolvedDownbeat": false,
       "reviewStatus": "reviewed",
-      "reviewNotes": "Deterministic control generated at 120 BPM in 4/4. The accent grid (kick on bar downbeat, snare on beats 2 & 4, hi-hat on every tatum) is OCTAVE/BEAT-SUBDIVISION SYMMETRIC: 40 (four-on-the-floor), 60 (double-kick), 120 (as generated) and 240 are all musically real readings the tracker can emit, and it resolves to 40. Exact 120 is therefore UNREACHABLE from this evidence alone, so the contract asserts the reviewed FAMILY {40,60,120,240} (family-mode), not a single BPM. The exact downbeat phase is withheld: the previously asserted quarter 0 was boundary luck (the loop restart marker acting as absent anti-evidence), not an accent fit. Meter is asserted exactly (4/4) because the accent grid does pin the 4/4 grid."
+      "reviewNotes": "Deterministic control generated at 120 BPM in 4/4. Evidence redesigned to be decisive: asymmetric backbeat (kick 2.0 on the bar downbeat, snare 1.0 on beat 2, snare 0.25 on beat 4, NO accent on beat 3, hi-hat on 8ths) plus bass on the bar downbeat. The asymmetry kills the half/double-tempo alternatives (Ellis 120 with no alternative), and the bar-periodic accent pins the downbeat. DBN fixes (resolved-candidate selection, downbeat snap to structural boundary, uniform-path override for the resolved tempo) make the exact reading 120 BPM / 4/4 / downbeat quarter 0, asserted EXACTLY here."
     },
     {
       "source": "positive-control-90-6-8.json",
-      "featuresToReview": ["deterministic-positive-control", "compound-meter", "beat-grouping-ambiguous"],
+      "featuresToReview": [
+        "deterministic-positive-control",
+        "compound-meter",
+        "beat-grouping-ambiguous"
+      ],
+"expected": {
+    "tempo": {
+     "bpm": 90,
+     "mustBeAmbiguous": false,
+     "mustBeResolved": true
+    },
+    "meter": {
+     "numerator": 6,
+     "denominator": 8,
+     "mustBeResolved": true
+    },
+    "downbeat": {
+     "quarter": 0,
+     "mustBeResolved": true
+    }
+   },
+   "captureMode": "deterministic-positive-control",
+   "positiveControl": {
+    "sampleRate": 44100,
+    "bpm": 90,
+    "meter": "6/8"
+   },
+   "allowUnresolvedTempo": false,
+   "allowUnresolvedMeter": false,
+   "allowUnresolvedDownbeat": false,
+   "reviewStatus": "reviewed",
+   "reviewNotes": "Deterministic control generated at exactly 90 BPM in 6/8, asserted EXACTLY (bpm 90, 6/8, downbeat quarter 0). WHY 90 IS HONEST AND REACHABLE: (1) librosa/Ellis half-BPM beat bins include 90, so tempo=90 IS a member of the hypothesis set — it is not hop-quantized away (the earlier '91 is the nearest reachable reading' premise was false); (2) with the PhaseScores normalization fix (integer division count/cycle inflated coarse-grid downbeat scores past 1.0) and the joint slow-tempo bias removed, the 90 BPM 6/8 hypothesis OUT-SCORES 91 and every slow-tempo alternative; (3) the control was generated at exactly 90 BPM, so the exact assertion tests the tracker's reading against ground truth — we assert exact truth, we do not adapt the assertion to the output. Evidence follows the reviewed recipe: strong accents at compound beats 1 and 4 (kick 1.5 / 0.8), subdivisions on eighths, bass at bar boundaries, no 4/4 backbeat symmetry."
+    },
+    {
+      "source": "positive-control-100-3-4.json",
+      "featuresToReview": [
+        "deterministic-positive-control",
+        "triple-meter"
+      ],
       "expected": {
         "tempo": {
-          "acceptedFamily": [40, 60, 91, 120, 182],
+          "bpm": 100,
           "mustBeAmbiguous": false,
           "mustBeResolved": true
         },
-        "meter": { "mustBeResolved": true },
-        "downbeat": { "mustBeResolved": true }
+        "meter": {
+          "numerator": 3,
+          "denominator": 4,
+          "mustBeResolved": true
+        },
+        "downbeat": {
+          "quarter": 0,
+          "mustBeResolved": true
+        }
       },
       "captureMode": "deterministic-positive-control",
-      "positiveControl": { "sampleRate": 44100, "bpm": 90, "meter": "6/8" },
+      "positiveControl": {
+        "sampleRate": 44100,
+        "bpm": 100,
+        "meter": "3/4"
+      },
       "allowUnresolvedTempo": false,
       "allowUnresolvedMeter": false,
       "allowUnresolvedDownbeat": false,
       "reviewStatus": "reviewed",
-      "reviewNotes": "Deterministic control generated at 90 BPM in 6/8. The nominal 90 BPM is UNREACHABLE: the tracker's hypothesis set is hop-quantized to 0.5-BPM bins, so its nearest reachable compound reading is 91 BPM in 6/8. Verified DBN output resolves this control to 60 BPM / 4/4 (with 91/6/8 and 182/6/8 as lower-scored alternatives), so neither exact 90 nor exact 91/6/8 is the emitted winner. The contract therefore asserts the reviewed FAMILY {40, 60, 91, 120, 182} (family-mode tempo), asserts that a meter IS resolved (the tracker reads 4/4 here, so the exact 6/8 grid is withheld), and asserts a downbeat IS resolved without an exact phase (also boundary luck here). This control proves the pipeline resolves a grid even though the synthetic compound evidence does not drive a decisive 6/8 meter decision."
+      "reviewNotes": "Deterministic control generated at 100 BPM in 3/4, asserted EXACTLY (bpm 100, 3/4, downbeat quarter 0). Evidence: kick 2.0 on beat 1, snare 1.0 on beats 2 and 3, hi-hat on beats with 8th subdivisions, bass on beat 1. The PhaseScores normalization fix (integer division count/cycle inflated coarse-grid downbeat scores past 1.0) and the pattern-primary meterEvidence (accent pattern flips 3/4 above the 6/8-at-half-tempo reading) remove the slow-tempo bias that previously read this as 6/8 at 50 BPM; the tracker now lands on the exact 100 BPM 3/4 reading with the downbeat on quarter 0."
     }
   ]
 }

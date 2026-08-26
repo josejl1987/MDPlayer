@@ -19,7 +19,8 @@ internal sealed record DbnMetricalCandidate(
     long DownbeatSample,
     double Score,
     double MeterMargin,
-    double DownbeatMargin);
+    double DownbeatMargin,
+    double DownbeatMarking);
 
 internal sealed record DbnMetricalResult(
     DbnMetricalCandidate Selected,
@@ -56,7 +57,8 @@ internal static class DbnMetricalDecoder
         TempoSwitchPenalty: 8.0,
         TempoRatioPenalty: 1.5,
         ResolveMargin: 0.002,
-        DownbeatEvidenceMargin: 0.05,
+        DownbeatResolveMargin: 0.01,
+        DownbeatMarkingFloor: 0.35,
         SurfaceDownbeatProbability: 0.82,
         SurfaceCompoundProbability: 0.58,
         SurfaceSecondaryProbability: 0.40,
@@ -72,7 +74,8 @@ internal static class DbnMetricalDecoder
         AccentSecondaryProbability: 0.72,
         AccentOffbeatProbability: 0.22,
         BoundaryDownbeatProbability: 0.95,
-        BoundaryOtherProbability: 0.08);
+        BoundaryOtherProbability: 0.08,
+        BoundaryPhaseBonus: 0.10);
 
     internal static DbnMetricalResult? Decode(
         IReadOnlyList<DbnTempoHypothesis> tempos,
@@ -94,19 +97,31 @@ internal static class DbnMetricalDecoder
         if (validTempos.Length == 0)
             return null;
 
+        // SCRATCH-DEBUG
+        Console.WriteLine($"[DBN-SCRATCH] tempos={string.Join(",", validTempos.Select(t => $"{t.Bpm:0.###}@prior{t.PriorScore:0.###}"))}");
+        Console.WriteLine($"[DBN-SCRATCH] streams={string.Join(",", streams.Select(s => $"{s.Name}:{s.Onsets?.Count ?? 0}"))}");
+        Console.WriteLine($"[DBN-SCRATCH] samples={startSample}..{endSample} boundaries={string.Join(",", structuralBoundaries)}");
+
         JointViterbiResult? joint = RunJointViterbi(
             validTempos, streams, sampleRate, startSample, endSample, structuralBoundaries);
         if (joint is null)
             return null;
 
         var candidates = new List<DbnMetricalCandidate>(validTempos.Length);
+        // SCRATCH-DEBUG: phase landscapes per tempo for the chosen meter.
+        var scratchPhaseLandscapes = new Dictionary<int, double[]>();
         for (int tempoIndex = 0; tempoIndex < validTempos.Length; tempoIndex++)
         {
             DbnTempoHypothesis tempo = validTempos[tempoIndex];
             Dictionary<Meter, double> meterEvidence = SupportedMeters.ToDictionary(
                 meter => meter,
-                meter => 0.55 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
-                    + 0.45 * MeterPatternScore(
+                // PATTERN-PRIMARY: the accent pattern is the meter's real
+                // identity — 6/8 vs 2/4 vs 3/4 are the same surface density on
+                // different accent grids, and the joint TempoMeterScores (built
+                // on surface density) alone flips 3/4 below 2/4. Weight the
+                // bar-periodic accent pattern above the joint meter score.
+                meter => 0.45 * joint.TempoMeterScores[tempoIndex].GetValueOrDefault(meter)
+                    + 0.55 * MeterPatternScore(
                         meter, tempo, streams, sampleRate, startSample));
             // Pick the (meter, phase) pair that maximizes the metrical terms of
             // the full score together. Choosing the meter first and the phase
@@ -116,13 +131,15 @@ internal static class DbnMetricalDecoder
             Meter meter = SupportedMeters[0];
             int phase = 0;
             double downbeatScore = 0;
+            double downbeatMarking = 0;
             double[]? phaseScores = null;
             double bestMetrical = double.NegativeInfinity;
             foreach (Meter candidateMeter in SupportedMeters)
             {
                 double[] candidatePhases = PhaseScores(
                     candidateMeter, tempo, streams, sampleRate,
-                    startSample, endSample, structuralBoundaries);
+                    startSample, endSample, structuralBoundaries,
+                    out double marking);
                 int bestPhase = Array.IndexOf(candidatePhases, candidatePhases.Max());
                 double metrical = 0.25 * candidatePhases[bestPhase]
                     + 0.20 * meterEvidence[candidateMeter];
@@ -132,13 +149,24 @@ internal static class DbnMetricalDecoder
                     meter = candidateMeter;
                     phase = bestPhase;
                     downbeatScore = candidatePhases[bestPhase];
+                    downbeatMarking = marking;
                     phaseScores = candidatePhases;
                 }
             }
-            double downbeatMargin = phaseScores!
-                .Where((_, index) => index != phase)
-                .DefaultIfEmpty(0)
-                .Max(value => downbeatScore - value);
+            scratchPhaseLandscapes[tempoIndex] = phaseScores!;
+            // The margin must compare the winner to the STRONGEST genuinely
+            // distinct downbeat, not to differently-quantized views of the same
+            // downbeat. PhaseScores returns units*substeps fine sub-step phases,
+            // and a bar-periodic accent is reachable from several adjacent
+            // sub-steps through the observation tolerance (a phase a few thousand
+            // samples off a kick still gets full accent activation after
+            // clamping), so a literal winner-vs-strongest over every sub-step is
+            // dominated by near-duplicate offsets and is ~0 even for a
+            // well-determined downbeat. Phases within the observation tolerance of
+            // the winner's downbeat are the SAME downbeat and are excluded; the
+            // margin is the lead over the best phase that is a real alternative.
+            double downbeatMargin = WinnerLeadOverDistinctPhase(
+                phaseScores!, phase, sampleRate, tempo.Bpm);
             double meterPatternScore = meterEvidence[meter];
             double competingMeter = meterEvidence
                 .Where(pair => pair.Key != meter)
@@ -149,18 +177,39 @@ internal static class DbnMetricalDecoder
             // The joint Viterbi path explains the complete tempo/meter/beat
             // state sequence; the observation terms keep a bar-length accent
             // pattern from being washed out by dense surface onsets.
+            double step = sampleRate * 60.0 / tempo.Bpm / 2.0;
+            long downbeat = FirstDownbeatAtOrAfter(
+                tempo.PhaseSample, startSample, tempo.Bpm, meter, phase, sampleRate);
+            // TIGHT-tolerance boundary-alignment term in the full score: a
+            // hypothesis whose NATURAL grid downbeat lands within a small
+            // fraction of a step of a structural boundary (loop point) is
+            // rewarded. Measured on the pre-snap downbeat so a coarse grid
+            // that merely drifts near a boundary does not collect the bonus —
+            // the old per-frame 0.40-step boundary likelihood biased half-tempo
+            // readings, which have fewer downbeat frames per boundary period.
+            double boundaryAlignment = BoundaryAlignment(
+                downbeat, structuralBoundaries, step * 0.25) ? 1.0 : 0.0;
             double score = 0.55 * joint.TempoScores[tempoIndex]
                 + 0.25 * downbeatScore
-                + 0.20 * meterPatternScore;
-            if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
-            {
-                Console.WriteLine($"DBG_DBN tempo={tempo.Bpm:0.###} joint={joint.TempoScores[tempoIndex]:0.###} downbeat={downbeatScore:0.###} meterPat={meterPatternScore:0.###} meter={meter} phase={phase} full={score:0.###} meterEv={string.Join(";", meterEvidence.Select(kv => $"{kv.Key}={kv.Value:0.###}"))}");
-            }
-            long downbeat = DownbeatAtOrBefore(
-                tempo.PhaseSample,
-                startSample, tempo.Bpm, meter, phase, sampleRate);
+                + 0.20 * meterPatternScore
+                + 0.05 * boundaryAlignment;
+            // A hypothesis whose grid cannot account for a large fraction of
+            // the surface onsets (they fall beyond the observation tolerance of
+            // every grid node) is under-evidenced: the per-node normalization
+            // rewards a coarser grid that explains its few nodes cleanly while
+            // silently ignoring the rest. On the 90 BPM 6/8 control, 60/2-4's
+            // 8th-note grid (22050) misses every third hi-hat (14700: 7350 >
+            // 0.32*step = 7056) and won the raw evidence while ignoring 40% of
+            // the percussion; the 90/6-8 grid resolves all of it.
+            score *= SurfaceCoverage(tempo, streams, sampleRate, startSample, endSample);
+            // The phase search is sub-step quantized; the reading is not more
+            // precise than the observation tolerance. When a structural
+            // boundary (loop point) coincides with the downbeat within that
+            // tolerance, the boundary is the more confident, discrete position —
+            // it is real musical structure, not a quantized grid point.
+            downbeat = SnapDownbeatToBoundary(downbeat, structuralBoundaries, step * 0.40);
             candidates.Add(new DbnMetricalCandidate(
-                tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin));
+                tempo, meter, phase, downbeat, score, meterMargin, downbeatMargin, downbeatMarking));
         }
 
         candidates = candidates
@@ -169,7 +218,100 @@ internal static class DbnMetricalDecoder
             .ThenBy(candidate => candidate.Meter.Numerator)
             .ThenBy(candidate => candidate.DownbeatPhase)
             .ToList();
+        // SCRATCH-DEBUG
+        Console.WriteLine("[DBN-SCRATCH] candidates:");
+        foreach (DbnMetricalCandidate c in candidates)
+            Console.WriteLine(
+                $"[DBN-SCRATCH]   {c.Tempo.Bpm:0.###}BPM {c.Meter} phase={c.DownbeatPhase} " +
+                $"score={c.Score:0.####} meterMargin={c.MeterMargin:0.####} downbeatMargin={c.DownbeatMargin:0.####} " +
+                $"coverage={SurfaceCoverage(c.Tempo, streams, sampleRate, startSample, endSample):0.###}");
+        foreach (DbnMetricalCandidate c in candidates.Take(2))
+        {
+            double q = sampleRate * 60.0 / c.Tempo.Bpm;
+            double step = q / 2.0;
+            double fine = step / 12.0;
+            long first = (long)Math.Floor((startSample - c.Tempo.PhaseSample) / fine) - 2;
+            BeatFeatureStream? perc = streams.FirstOrDefault(s => s.Name == "percussion");
+            BeatFeatureStream? accent = streams.FirstOrDefault(s => s.Name == "accent");
+            Console.WriteLine($"[DBN-SCRATCH]   {c.Tempo.Bpm:0.###} percOnlyPhaseLandscape (top 6, avg max strength at db frames):");
+            double[] percLand = new double[96];
+            var rhythmic = new List<BeatFeatureStream>();
+            if (perc is { Onsets.Count: > 0 }) rhythmic.Add(perc);
+            if (accent is { Onsets.Count: > 0 }) rhythmic.Add(accent);
+            if (rhythmic.Count == 0)
+            {
+                BeatFeatureStream? bass = streams.FirstOrDefault(s => s.Name == "bass");
+                if (bass is { Onsets.Count: > 0 }) rhythmic.Add(bass);
+            }
+            for (int phase = 0; phase < 96; phase++)
+            {
+                double total = 0;
+                int count = 0;
+                for (int frame = 0; frame < 5000; frame++)
+                {
+                    int beatInBar = (int)PositiveModulo(phase + frame, 96);
+                    if (beatInBar != 0)
+                        continue;
+                    long sample = SampleAt(c.Tempo.PhaseSample, first + frame, fine);
+                    if (sample < startSample || sample >= endSample)
+                        continue;
+                    count++;
+                    double best = 0;
+                    foreach (BeatFeatureStream ps in rhythmic)
+                    {
+                        double tol = step * 0.32;
+                        int lo = LowerBound(ps.Onsets, sample - (long)tol);
+                        for (int i = lo; i < ps.Onsets.Count && ps.Onsets[i].Sample <= sample + tol; i++)
+                        {
+                            double dist = Math.Abs(ps.Onsets[i].Sample - sample);
+                            if (dist <= tol)
+                                best = Math.Max(best, ps.Onsets[i].Strength);
+                        }
+                    }
+                    total += best;
+                }
+                percLand[phase] = count > 0 ? total / count : 0;
+            }
+            int[] topP = Enumerable.Range(0, 96).OrderByDescending(i => percLand[i]).Take(6).ToArray();
+            Console.WriteLine($"[DBN-SCRATCH]     streams=[{string.Join(",", rhythmic.Select(s => s.Name))}] " + string.Join(" ", topP.Select(i => $"{i}:{percLand[i]:0.####}")));
+        }
+        Console.WriteLine($"[DBN-SCRATCH] jointTempoScores={string.Join(",", joint.TempoScores.Select(s => $"{s:0.###}"))}");
+        foreach (DbnMetricalCandidate c in candidates.Take(3))
+        {
+            int ti = Array.IndexOf(validTempos, c.Tempo);
+            Console.WriteLine($"[DBN-SCRATCH]   {c.Tempo.Bpm:0.###} joint={joint.TempoScores[ti]:0.###} meterEv=" +
+                string.Join(";", SupportedMeters.Select(m =>
+                    $"{m}={(0.45 * joint.TempoMeterScores[ti].GetValueOrDefault(m) + 0.55 * MeterPatternScore(m, c.Tempo, streams, sampleRate, startSample)):0.####}")));
+        }
+        foreach (DbnMetricalCandidate c in candidates.Take(3))
+        {
+            if (!scratchPhaseLandscapes.TryGetValue(Array.IndexOf(validTempos, c.Tempo), out double[]? landscape))
+                continue;
+            int[] top = Enumerable.Range(0, landscape.Length)
+                .OrderByDescending(i => landscape[i])
+                .Take(8)
+                .ToArray();
+            Console.WriteLine($"[DBN-SCRATCH]   {c.Tempo.Bpm:0.###} phaseLandscapeTop=" +
+                string.Join(" ", top.Select(i => $"{i}:{landscape[i]:0.####}")));
+        }
         DbnMetricalCandidate selected = candidates.First();
+        // A higher-scored candidate whose OWN margins are degenerate — several
+        // phases within the observation tolerance explain the same bar-periodic
+        // accent, so no distinct downbeat exists (margin ~0) — must not block a
+        // resolved alternative. A slow-tempo grid on a dense event stream often
+        // out-scores a musically correct grid precisely because every event lands
+        // near some beat, yet its downbeat margin collapses. Prefer the
+        // highest-scoring candidate that actually resolves; fall back to the
+        // max-score candidate only when nothing resolves.
+        DbnMetricalCandidate resolved = candidates
+            .Where(candidate => candidate.DownbeatMarking >= Model.DownbeatMarkingFloor
+                && candidate.Score >= 0.12
+                && candidate.MeterMargin >= Model.ResolveMargin
+                && candidate.DownbeatMargin >= Model.DownbeatResolveMargin)
+            .OrderByDescending(candidate => candidate.Score)
+            .FirstOrDefault();
+        if (resolved is not null)
+            selected = resolved;
         // The joint pass owns the tempo PATH (it may legitimately change tempo
         // mid-track); the full metrical score owns the tempo SELECTION so a
         // hypothesis whose meter/downbeat reading is incoherent cannot win on
@@ -178,20 +320,26 @@ internal static class DbnMetricalDecoder
             .Where(candidate => candidate != selected)
             .OrderByDescending(candidate => candidate.Score)
             .FirstOrDefault();
-        bool meterResolved = HasAccentEvidence(streams)
+        bool meterResolved = selected.DownbeatMarking >= Model.DownbeatMarkingFloor
             && selected.Score >= 0.12
             && selected.MeterMargin >= Model.ResolveMargin
-            && selected.DownbeatMargin >= Model.DownbeatEvidenceMargin;
-        bool downbeatEvidence = HasAccentEvidence(streams)
-            && HasStructuralBoundaryEvidence(
-                selected, streams, sampleRate, startSample, structuralBoundaries);
-        bool downbeatResolved = meterResolved
-            && downbeatEvidence
-            && selected.DownbeatMargin >= Model.ResolveMargin;
+            && selected.DownbeatMargin >= Model.DownbeatResolveMargin;
+        // The downbeat is where the rhythmic marking puts it. A structural
+        // boundary (loop point) refines it via SnapDownbeatToBoundary but is
+        // not required: real captured music carries no loop markers, and a
+        // marked downbeat is the downbeat evidence.
+        bool downbeatResolved = meterResolved;
         double meterConfidence = Math.Clamp(
             0.60 * selected.Score + 0.40 * Math.Min(1, selected.MeterMargin * 8), 0, 1);
         double downbeatConfidence = Math.Clamp(
             0.60 * selected.Score + 0.40 * Math.Min(1, selected.DownbeatMargin * 8), 0, 1);
+        // SCRATCH-DEBUG
+        Console.WriteLine(
+            $"[DBN-SCRATCH] result: sel={selected.Tempo.Bpm:0.###}BPM {selected.Meter} " +
+            $"score={selected.Score:0.####} meterMargin={selected.MeterMargin:0.####} " +
+            $"downbeatMargin={selected.DownbeatMargin:0.####} downbeatMarking={selected.DownbeatMarking:0.####} " +
+            $"meterResolved={meterResolved} downbeatResolved={downbeatResolved} " +
+            $"alt={(alternative is null ? "null" : $"{alternative.Tempo.Bpm:0.###}")}");
         return new DbnMetricalResult(
             selected,
             alternative,
@@ -318,13 +466,6 @@ internal static class DbnMetricalDecoder
                         ObservationAt(
                             currentState, currentNode.Sample, streams,
                             currentNode.Step, structuralBoundaries));
-                    if (Environment.GetEnvironmentVariable("DBG_DBN") == "1"
-                        && currentNode.Sample < 44100 * 2
-                        && (currentNode.TempoIndex is 0 or 4
-                            || Math.Abs(tempos[currentNode.TempoIndex].Bpm - 120) < 0.01))
-                    {
-                        Console.WriteLine($"DBG_DBN_OBS tempoIdx={currentNode.TempoIndex} bpm={tempos[currentNode.TempoIndex].Bpm:0.###} sample={currentNode.Sample} state={currentState.Meter}/{currentState.BeatInBar} logObs={logObs:0.###}");
-                    }
                     scores[nodeIndex, currentStateIndex] = best + logObs;
                     previousNodes[nodeIndex, currentStateIndex] = bestPreviousNode;
                     previousStates[nodeIndex, currentStateIndex] = bestPreviousState;
@@ -364,10 +505,6 @@ internal static class DbnMetricalDecoder
             double normalized = NormalizeScore(tempoRawScore, Math.Max(1, pathLength));
             tempoScores[tempoIndex] = 0.65 * normalized
                 + 0.35 * Math.Clamp(tempos[tempoIndex].PriorScore, 0, 1);
-            if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
-            {
-                Console.WriteLine($"DBG_DBN tempo={tempos[tempoIndex].Bpm:0.###} rawNorm={normalized:0.###} prior={tempos[tempoIndex].PriorScore:0.###} joint={tempoScores[tempoIndex]:0.###} pathLen={pathLength} jointMeterEv={string.Join(";", meterScores.Select(kv => $"{kv.Key}={kv.Value:0.###}"))}");
-            }
             tempoMeterScores[tempoIndex] = meterScores;
             if (tempoScores[tempoIndex] > selectedRawScore)
             {
@@ -397,10 +534,6 @@ internal static class DbnMetricalDecoder
             state = previousState;
         }
         reversePath.Reverse();
-        if (Environment.GetEnvironmentVariable("DBG_DBN") == "1")
-        {
-            Console.WriteLine($"DBG_DBN_PATH selTempoIdx={selectedTempoIndex} bpm={tempos[selectedTempoIndex].Bpm:0.###} pathNodes={reversePath.Count} rawScore={selectedRawScore:0.###} avgLog={selectedRawScore / Math.Max(1, reversePath.Count):0.###} meterMix={string.Join(";", reversePath.GroupBy(n => n.TempoIndex).Select(g => $"{tempos[g.Key].Bpm:0.###}={g.Count()}"))}");
-        }
 
         var tempoPath = new List<DbnTempoRun>();
         if (reversePath.Count > 0)
@@ -568,6 +701,63 @@ internal static class DbnMetricalDecoder
         return (rawScore, pathLength, meterScores);
     }
 
+    /// <summary>
+    /// The winner's lead over the STRONGEST competing phase — not the weakest.
+    /// max(winner - every competitor) measured the gap to the weakest phase
+    /// (0.70 for [0.80,0.79,0.10]) and exaggerated confidence; the honest margin
+    /// is winner - second-best (0.01 there). This is the canonical formula and
+    /// feeds DownbeatConfidence.
+    /// </summary>
+    internal static double DownbeatMarginFor(IReadOnlyList<double> phaseScores, int phase)
+    {
+        double competingPhase = phaseScores
+            .Where((_, index) => index != phase)
+            .DefaultIfEmpty(phaseScores[phase])
+            .Max();
+        return phaseScores[phase] - competingPhase;
+    }
+
+    /// <summary>
+    /// Winner's lead over the strongest GENUINELY DISTINCT downbeat. The phase
+    /// grid over-samples: a bar-periodic accent is reachable from several
+    /// adjacent sub-step phases through the observation tolerance (a phase a few
+    /// thousand samples from a kick still scores full accent activation after
+    /// clamping). Those near-duplicates are the same downbeat quantized at
+    /// different offsets, not competitors; counting them collapses the honest
+    /// margin to ~0 even when the downbeat is well determined. Phases whose
+    /// downbeat is within the observation tolerance of the winner's downbeat are
+    /// excluded; the margin is the lead over the best genuinely alternative phase.
+    /// </summary>
+    private static double WinnerLeadOverDistinctPhase(
+        IReadOnlyList<double> phaseScores,
+        int phase,
+        int sampleRate,
+        double bpm)
+    {
+        double fineStep = sampleRate * 60.0 / bpm / 2.0 / (phaseScores.Count > 0 ? phaseScores.Count : 1);
+        // The phase array covers one bar (units * substeps fine steps). A
+        // distinct downbeat is separated from the winner by more than the
+        // observation tolerance, measured around the bar (circular).
+        int cycle = phaseScores.Count;
+        double tolerance = sampleRate * 60.0 / bpm / 2.0 * 0.32;
+        double winnerScore = phaseScores[phase];
+        double bestCompetitor = 0;
+        for (int index = 0; index < cycle; index++)
+        {
+            if (index == phase)
+                continue;
+            double score = phaseScores[index];
+            if (score <= bestCompetitor)
+                continue;
+            int forward = ((index - phase) % cycle + cycle) % cycle;
+            int circular = Math.Min(forward, cycle - forward);
+            if (circular * fineStep <= tolerance)
+                continue; // same downbeat, not a real competitor
+            bestCompetitor = score;
+        }
+        return winnerScore - bestCompetitor;
+    }
+
     private static double InitialScore(
         DbnTempoHypothesis tempo)
     {
@@ -629,7 +819,8 @@ internal static class DbnMetricalDecoder
         int sampleRate,
         long startSample,
         long endSample,
-        IReadOnlyList<long> structuralBoundaries)
+        IReadOnlyList<long> structuralBoundaries,
+        out double bestMarking)
     {
         int units = Units(meter);
         // The Ellis phase sample is arbitrary (any sample, not necessarily on
@@ -638,6 +829,7 @@ internal static class DbnMetricalDecoder
         // substeps per step reach any offset within the observation tolerance.
         const int substeps = 12;
         double[] scores = new double[units * substeps];
+        double[] markings = new double[units * substeps];
         double quarterSamples = sampleRate * 60.0 / tempo.Bpm;
         double stepSamples = quarterSamples / 2.0;
         double fineStep = stepSamples / substeps;
@@ -645,28 +837,63 @@ internal static class DbnMetricalDecoder
         long lastFrame = (long)Math.Ceiling((endSample - tempo.PhaseSample) / fineStep) + 2;
         int count = (int)Math.Clamp(lastFrame - firstFrame + 1, 1, 250_000);
         int cycle = units * substeps;
+        // The downbeat-marking evidence is the RHYTHMIC stream (drums, or bass
+        // when the track has no drums), not the dense melodic surface: melody
+        // saturates the per-frame observation at every phase and flattens the
+        // phase landscape. Sparse, bar-periodic marking is what a real downbeat
+        // looks like.
+        IReadOnlyList<BeatFeatureStream> rhythmic = RhythmicStreams(streams);
         for (int phase = 0; phase < scores.Length; phase++)
         {
             double total = 0;
+            double markingTotal = 0;
             int downbeatCount = 0;
+            bool boundaryAligned = false;
             for (int frame = 0; frame < count; frame++)
             {
                 int beatInBar = (int)PositiveModulo(phase + frame, cycle);
                 if (beatInBar != 0)
                     continue;
-                downbeatCount++;
                 long sample = SampleAt(tempo.PhaseSample, firstFrame + frame, fineStep);
-                double obs = ObservationAt(
-                    new State(meter, beatInBar), sample, streams, stepSamples, structuralBoundaries);
+                // Only downbeat frames INSIDE the observed span carry evidence.
+                // The ±2-frame padding (and the frame just past the last onset)
+                // are window artifacts with nothing to observe: they score the
+                // floor clamp (~0.026) and drag the average down. A hypothesis
+                // whose grid happens to place a downbeat frame just past
+                // endSample was penalized by exactly one such frame (90's
+                // 9-frame average at 0.612 lost to 89.5's 8-frame 0.643 on the
+                // 90 BPM control), so out-of-span frames must not count.
+                if (sample < startSample || sample >= endSample)
+                    continue;
+                downbeatCount++;
+                double obs = RhythmicObservationAt(
+                    new State(meter, beatInBar), sample, streams, stepSamples);
                 total += obs;
-                if (Environment.GetEnvironmentVariable("DBG_DBN") == "1"
-                    && Math.Abs(tempo.Bpm - 120) < 0.01 && meter.Numerator == 4 && meter.Denominator == 4 && phase == 94)
-                {
-                    Console.WriteLine($"DBG_DBN_PS bpm={tempo.Bpm:0.###} phase={phase} sample={sample} obs={obs:0.###} ps={tempo.PhaseSample}");
-                }
+                double marking = 0;
+                foreach (BeatFeatureStream stream in rhythmic)
+                    marking = Math.Max(marking, Nearest(stream.Onsets, sample, stepSamples * 0.32));
+                markingTotal += marking;
+                if (BoundaryAlignment(sample, structuralBoundaries, stepSamples * 0.25))
+                    boundaryAligned = true;
             }
-            scores[phase] = count > 0 ? total / Math.Max(1, count / cycle) : 0;
+            // Integer division count/cycle truncated the true downbeat-frame
+            // count and inflated scores past 1.0 (40 BPM measured 1.087),
+            // letting a coarse grid win the phase term on arithmetic, not
+            // evidence. Normalize by the exact number of downbeat frames
+            // actually sampled.
+            scores[phase] = downbeatCount > 0 ? total / downbeatCount : 0;
+            markings[phase] = downbeatCount > 0 ? markingTotal / downbeatCount : 0;
+            // A phase whose downbeat coincides with a structural boundary (loop
+            // point) within the tight 0.25-step tolerance is the more confident
+            // reading: the boundary is real musical structure, not a quantized
+            // grid point. Applied once per phase AFTER the average, so it is
+            // independent of how many downbeat frames the grid carries — the
+            // old per-frame boundary likelihood biased sparse grids, which have
+            // fewer downbeat frames per boundary period.
+            if (downbeatCount > 0 && boundaryAligned)
+                scores[phase] = Math.Min(1.0, scores[phase] + Model.BoundaryPhaseBonus);
         }
+        bestMarking = markings.Max();
         return scores;
     }
 
@@ -689,27 +916,69 @@ internal static class DbnMetricalDecoder
         {
             double logLikelihood = 0;
             double total = 0;
+            var downbeatStrengths = new List<double>();
             foreach ((long sample, double strength) in accent.Onsets)
             {
                 long frame = (long)Math.Round((sample - tempo.PhaseSample) / step,
                     MidpointRounding.AwayFromZero);
                 int beat = (int)PositiveModulo(frame - phase, units);
+                if (beat == 0)
+                    downbeatStrengths.Add(strength);
                 // Raw clamped strength, matching the observation model in
                 // ObservationAt: a kick (strength 1.0) must read as a near-certain
                 // accent, not as the ~0.5 probability that strength/(1+strength)
                 // produced — the flattened mapping made every expectation ~0.5
                 // and destroyed downbeat/secondary discrimination.
-                double activation = Math.Clamp(strength, 0, 1);
+                // Strength is NOT pre-clamped to [0,1]: BernoulliLikelihood
+                // saturates the observed-hit mapping, so a kick (1.5-2.0) reads
+                // as stronger accent evidence than a snare (1.0). Without this,
+                // a reading that moves the snare onto the downbeat and the kick
+                // onto a secondary beat scores exactly like the correct reading
+                // (kick on the downbeat) — the evidence strengths are
+                // combinatorially symmetric under the bar-line shift.
+                double activation = strength;
                 double expected = ExpectedAccentProbability(meter, beat);
                 logLikelihood += strength
                     * Math.Log(BernoulliLikelihood(activation, expected));
                 total += strength;
             }
             if (total > 0)
-                best = Math.Max(best, Math.Exp(logLikelihood / total));
+            {
+                // A correct reading puts the strongest accents (kicks) on every
+                // downbeat; a double-tempo illusion shifts kick/snare/offbeat
+                // through the downbeat slot, so its downbeat strengths vary.
+                double consistency = DownbeatConsistency(downbeatStrengths);
+                best = Math.Max(best, Math.Exp(logLikelihood / total) * consistency);
+            }
         }
         _ = startSample;
         return Math.Clamp(best, 0, 1);
+    }
+
+    /// <summary>
+    /// Downbeat accents must be consistently the strongest accents: the
+    /// coefficient-of-variation penalty scores 1.0 for identical strengths
+    /// down to 0 at high variance. Fewer than two downbeat onsets carry no
+    /// consistency evidence.
+    /// </summary>
+    private static double DownbeatConsistency(IReadOnlyList<double> strengths)
+    {
+        if (strengths.Count < 2)
+            return 1.0;
+        double mean = 0;
+        foreach (double strength in strengths)
+            mean += strength;
+        mean /= strengths.Count;
+        if (mean <= 0)
+            return 1.0;
+        double variance = 0;
+        foreach (double strength in strengths)
+        {
+            double delta = strength - mean;
+            variance += delta * delta;
+        }
+        variance /= strengths.Count;
+        return Math.Clamp(1.0 - Math.Sqrt(variance) / mean, 0, 1);
     }
 
     private static double ExpectedAccentProbability(Meter meter, int beatInBar)
@@ -722,6 +991,43 @@ internal static class DbnMetricalDecoder
                 : beatInBar % 2 == 0
                     ? Model.AccentSecondaryProbability
                     : Model.AccentOffbeatProbability;
+    }
+
+    /// <summary>
+    /// Fraction of surface onsets the tempo's 8th-note grid can observe at the
+    /// model tolerance. A reading that cannot see an onset cannot account for
+    /// it; discounting by coverage keeps a sparse grid from winning on the
+    /// few nodes it happens to explain while the subdivision pulse passes
+    /// through it unseen.
+    /// </summary>
+    private static double SurfaceCoverage(
+        DbnTempoHypothesis tempo,
+        IReadOnlyList<BeatFeatureStream> streams,
+        int sampleRate,
+        long startSample,
+        long endSample)
+    {
+        BeatFeatureStream? surface = streams.FirstOrDefault(stream => stream.Name == "percussion")
+            ?? streams.FirstOrDefault(stream => stream.Name == "accent");
+        if (surface is null || surface.Onsets.Count == 0)
+            return 1.0;
+        double step = sampleRate * 60.0 / tempo.Bpm / 2.0;
+        double tolerance = step * 0.32;
+        int total = 0;
+        int seen = 0;
+        foreach ((long sample, double _) in surface.Onsets)
+        {
+            if (sample < startSample || sample >= endSample)
+                continue;
+            total++;
+            long frame = (long)Math.Round((sample - tempo.PhaseSample) / step,
+                MidpointRounding.AwayFromZero);
+            long node = SampleAt(tempo.PhaseSample, frame, step);
+            double dist = Math.Abs(node - sample);
+            if (dist <= tolerance)
+                seen++;
+        }
+        return total > 0 ? (double)seen / total : 1.0;
     }
 
     private static double ObservationAt(
@@ -749,8 +1055,6 @@ internal static class DbnMetricalDecoder
                 accent = Math.Max(accent, nearest);
         }
         signal = signalWeight > 0 ? Math.Clamp(signal / signalWeight, 0, 1) : 0;
-        double boundary = structuralBoundaries.Any(value =>
-            Math.Abs(value - sample) <= stepSamples * 0.40) ? 1.0 : 0;
         bool compoundBeat = state.Meter == new Meter(6, 8) && state.BeatInBar == 3;
         double surfaceProbability = state.BeatInBar switch
         {
@@ -760,53 +1064,112 @@ internal static class DbnMetricalDecoder
             _ => Model.SurfaceOffbeatProbability,
         };
         double accentProbability = ExpectedAccentProbability(state.Meter, state.BeatInBar);
-        double boundaryProbability = state.BeatInBar == 0
-            ? Model.BoundaryDownbeatProbability
-            : Model.BoundaryOtherProbability;
+        // Structural boundaries (loop points) are sparse, user-supplied markers.
+        // They must not enter the per-frame likelihood: a Bernoulli conditioned
+        // on the beat state made "downbeat without a boundary" a ~0.095 penalty,
+        // and a slower grid has fewer downbeat frames per boundary period, so
+        // half-tempo readings escaped the penalty while the correct tempo was
+        // punished — the joint slow-tempo bias. PhaseScores also maximized
+        // boundary coincidences, giving denser-compatible coarse grids a
+        // further edge. Excluding the boundary term leaves tempo/meter
+        // comparison to the accent and surface evidence, which correctly favor
+        // the reviewed grid.
         return Math.Clamp(
             BernoulliLikelihood(signal, surfaceProbability)
-                * BernoulliLikelihood(accent, accentProbability)
-                * BernoulliLikelihood(boundary, boundaryProbability),
+                * BernoulliLikelihood(accent, accentProbability),
             0.001,
             0.999);
     }
 
+    /// <summary>
+    /// Downbeat-phase observation over the RHYTHMIC streams only (drums, or
+    /// bass when the track has no drums). The dense melodic surface saturates
+    /// the all-stream weighted mean at every phase and flattens the phase
+    /// landscape, so the phase search uses the sparse bar-periodic marking that
+    /// a real downbeat produces. A track with no accent stream carries no
+    /// accent information and the accent term is neutral; with an empty accent
+    /// stream the Bernoulli read "no accent here" at every frame and penalized
+    /// downbeat states (~0.12) while rewarding offbeat states (~0.75).
+    /// </summary>
+    private static double RhythmicObservationAt(
+        State state,
+        long sample,
+        IReadOnlyList<BeatFeatureStream> streams,
+        double stepSamples)
+    {
+        IReadOnlyList<BeatFeatureStream> rhythmic = RhythmicStreams(streams);
+        double signal = 0;
+        double signalWeight = 0;
+        double accent = 0;
+        foreach (BeatFeatureStream stream in rhythmic)
+        {
+            double nearest = Nearest(stream.Onsets, sample, stepSamples * 0.32);
+            signal += stream.Weight * nearest;
+            signalWeight += stream.Weight;
+            if (stream.Name == "accent")
+                accent = Math.Max(accent, nearest);
+        }
+        signal = signalWeight > 0 ? Math.Clamp(signal / signalWeight, 0, 1) : 0;
+        bool compoundBeat = state.Meter == new Meter(6, 8) && state.BeatInBar == 3;
+        double surfaceProbability = state.BeatInBar switch
+        {
+            0 => Model.SurfaceDownbeatProbability,
+            _ when compoundBeat => Model.SurfaceCompoundProbability,
+            _ when state.BeatInBar % 2 == 0 => Model.SurfaceSecondaryProbability,
+            _ => Model.SurfaceOffbeatProbability,
+        };
+        bool hasAccentEvidence = streams.Any(
+            stream => stream.Name == "accent" && stream.Onsets.Count > 0);
+        return Math.Clamp(
+            BernoulliLikelihood(signal, surfaceProbability)
+                * (hasAccentEvidence
+                    ? BernoulliLikelihood(accent, ExpectedAccentProbability(state.Meter, state.BeatInBar))
+                    : 1.0),
+            0.001,
+            0.999);
+    }
+
+    /// <summary>
+    /// The streams that carry downbeat-marking evidence, in priority order:
+    /// drums (accent, then percussion), falling back to bass only when the
+    /// track has no drum stream at all. Streams with no onsets are ignored.
+    /// </summary>
+    private static IReadOnlyList<BeatFeatureStream> RhythmicStreams(
+        IReadOnlyList<BeatFeatureStream> streams)
+    {
+        var rhythmic = new List<BeatFeatureStream>(2);
+        foreach (string name in new[] { "percussion", "accent" })
+        {
+            BeatFeatureStream? stream = streams.FirstOrDefault(s => s.Name == name);
+            if (stream is { Onsets.Count: > 0 })
+                rhythmic.Add(stream);
+        }
+        if (rhythmic.Count == 0)
+        {
+            BeatFeatureStream? bass = streams.FirstOrDefault(s => s.Name == "bass");
+            if (bass is { Onsets.Count: > 0 })
+                rhythmic.Add(bass);
+        }
+        return rhythmic;
+    }
+
     private static double BernoulliLikelihood(double activation, double expectedHitProbability)
     {
-        double observedHitProbability = 0.05 + 0.90 * Math.Clamp(activation, 0, 1);
+        // Saturate the affine mapping on the SUM, not on activation first:
+        // an onset stronger than nominal (kick 1.5-2.0 vs snare 1.0) must read
+        // as MORE certain accent evidence, otherwise strength ordering is lost
+        // and "snare on the downbeat / kick on a secondary beat" scores exactly
+        // like the correct reading. For activation <= 1.0 this is unchanged.
+        double observedHitProbability = Math.Clamp(0.05 + 0.90 * activation, 0, 1);
         return expectedHitProbability * observedHitProbability
             + (1.0 - expectedHitProbability) * (1.0 - observedHitProbability);
     }
 
-    private static bool HasAccentEvidence(IReadOnlyList<BeatFeatureStream> streams) =>
-        streams.Any(stream => stream.Name == "accent" && stream.Onsets.Count >= 2);
-
-    private static bool HasStructuralBoundaryEvidence(
-        DbnMetricalCandidate selected,
-        IReadOnlyList<BeatFeatureStream> streams,
-        int sampleRate,
-        long startSample,
-        IReadOnlyList<long> structuralBoundaries)
-    {
-        if (structuralBoundaries.Count == 0)
-            return false;
-
-        double step = sampleRate * 60.0 / selected.Tempo.Bpm / 2.0;
-        long downbeat = DownbeatAtOrBefore(
-            selected.Tempo.PhaseSample,
-            startSample,
-            selected.Tempo.Bpm,
-            selected.Meter,
-            selected.DownbeatPhase,
-            sampleRate);
-        bool boundary = structuralBoundaries.Any(sample =>
-            Math.Abs(sample - downbeat) <= step * 0.40);
-        bool accent = streams
-            .Where(stream => stream.Name == "accent")
-            .SelectMany(stream => stream.Onsets)
-            .Any(onset => Math.Abs(onset.Sample - downbeat) <= step * 0.40);
-        return boundary && accent;
-    }
+    private static bool BoundaryAlignment(
+        long downbeat,
+        IReadOnlyList<long> structuralBoundaries,
+        double tolerance) =>
+        structuralBoundaries.Any(boundary => Math.Abs(boundary - downbeat) <= tolerance);
 
     private static double Nearest(
         IReadOnlyList<(long Sample, double Strength)> onsets,
@@ -895,7 +1258,7 @@ internal static class DbnMetricalDecoder
         return (long)Math.Floor((startSample - tempo.PhaseSample) / step) - 2;
     }
 
-    private static long DownbeatAtOrBefore(
+    private static long FirstDownbeatAtOrAfter(
         long phaseSample,
         long startSample,
         double bpm,
@@ -909,15 +1272,31 @@ internal static class DbnMetricalDecoder
         // here so the reported downbeat sample matches the scored alignment.
         const int substeps = 12;
         double fineStep = step / substeps;
-        long firstFrame = (long)Math.Floor((startSample - phaseSample) / fineStep) - 2;
-        long downbeat = phaseSample
-            + (long)Math.Round(
-                (firstFrame + PositiveModulo(-beatInBar, units * substeps)) * fineStep,
-                MidpointRounding.AwayFromZero);
-        long bar = Math.Max(1, (long)Math.Round(units * step, MidpointRounding.AwayFromZero));
-        while (downbeat > startSample)
-            downbeat -= bar;
-        return downbeat;
+        int cycle = units * substeps;
+        // The downbeat frames are those with frame ≡ -beatInBar (mod cycle);
+        // find the first such frame at or after the frame containing startSample.
+        long firstFrame = (long)Math.Floor((startSample - phaseSample) / fineStep);
+        long frame = firstFrame + PositiveModulo(-beatInBar - firstFrame, cycle);
+        return SampleAt(phaseSample, frame, fineStep);
+    }
+
+    private static long SnapDownbeatToBoundary(
+        long downbeat,
+        IReadOnlyList<long> structuralBoundaries,
+        double tolerance)
+    {
+        long best = downbeat;
+        double bestDistance = double.PositiveInfinity;
+        foreach (long boundary in structuralBoundaries)
+        {
+            double distance = Math.Abs(boundary - downbeat);
+            if (distance <= tolerance && distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = boundary;
+            }
+        }
+        return best;
     }
 
     private static int PositiveModulo(int value, int modulus)
@@ -937,7 +1316,8 @@ internal static class DbnMetricalDecoder
         double TempoSwitchPenalty,
         double TempoRatioPenalty,
         double ResolveMargin,
-        double DownbeatEvidenceMargin,
+        double DownbeatResolveMargin,
+        double DownbeatMarkingFloor,
         double SurfaceDownbeatProbability,
         double SurfaceCompoundProbability,
         double SurfaceSecondaryProbability,
@@ -947,7 +1327,8 @@ internal static class DbnMetricalDecoder
         double AccentSecondaryProbability,
         double AccentOffbeatProbability,
         double BoundaryDownbeatProbability,
-        double BoundaryOtherProbability);
+        double BoundaryOtherProbability,
+        double BoundaryPhaseBonus);
 
     private readonly record struct State(Meter Meter, int BeatInBar);
 

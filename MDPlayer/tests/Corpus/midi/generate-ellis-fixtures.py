@@ -15,10 +15,20 @@ Deterministic: the fixture set below is static; no randomness is involved.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import librosa
+
+# The oracle must be pinned: regenerating under a different librosa produces
+# different beat frames and silently invalidates the parity contract.
+EXPECTED_LIBROSA = "0.11.0"
+if librosa.__version__ != EXPECTED_LIBROSA:
+    raise RuntimeError(
+        f"librosa version mismatch: expected {EXPECTED_LIBROSA}, "
+        f"found {librosa.__version__}. Refusing to regenerate the fixtures "
+        f"against a different oracle.")
 
 SR = 100  # sample rate used by every fixture (frame rate == SR / hop)
 HOP = 1
@@ -133,6 +143,13 @@ def main() -> None:
         "reference":
             "librosa.beat.beat_track 0.11.0, bpm fixed, tightness 100, trim false",
         "generator": "generate-ellis-fixtures.py",
+        # Intentionally reproducible: the exact toolchain that produced these
+        # fixtures is recorded. The fixture set is static (no randomness), so
+        # there is no RNG seed to pin.
+        "pythonVersion": sys.version.split()[0],
+        "numpyVersion": np.__version__,
+        "librosaVersion": librosa.__version__,
+        "seed": None,
         "fixtures": fixtures,
     }
     out = Path(__file__).resolve().parent / "ellis-reference-fixtures.json"

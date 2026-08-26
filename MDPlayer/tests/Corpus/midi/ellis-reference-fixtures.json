@@ -1,6 +1,10 @@
 {
   "reference": "librosa.beat.beat_track 0.11.0, bpm fixed, tightness 100, trim false",
   "generator": "generate-ellis-fixtures.py",
+  "pythonVersion": "3.14.6",
+  "numpyVersion": "2.4.5",
+  "librosaVersion": "0.11.0",
+  "seed": null,
   "fixtures": [
     {
       "name": "periodic-120",

@@ -58,7 +58,15 @@ internal readonly record struct MetricalTiming(
     long? DownbeatSample,
     double? AlternativeBpm,
     double? AlternativeScore,
-    IReadOnlyList<DbnTempoRun>? TempoPath = null);
+    IReadOnlyList<DbnTempoRun>? TempoPath = null)
+{
+    /// <summary>True when the DBN metrical decoder resolved BOTH meter and
+    /// downbeat with margins. A decisive decode outranks the Ellis-fallback
+    /// grid: Ellis is a coarse onset-grid scorer whose reading the decode
+    /// explicitly out-scored, so its disagreement must not manufacture
+    /// ambiguity or block resolution.</summary>
+    public bool MetricallyDecoded { get; init; }
+}
 
 internal readonly record struct BeatLevelScore(
     int TatumsPerBeat,
@@ -148,6 +156,29 @@ internal static class SymbolicTempoInference
         Meter? meter = decoded.MeterResolved ? selected.Meter : null;
         int? downbeatPhase = decoded.DownbeatResolved ? selected.DownbeatPhase : null;
         long? downbeatSample = decoded.DownbeatResolved ? selected.DownbeatSample : null;
+        // The joint pass owns the tempo path, but its observation terms favor a
+        // slower grid that explains more events as beats; when the metrical
+        // hierarchy resolves a DIFFERENT tempo on an otherwise-uniform path, the
+        // resolved reading is the authoritative answer (the path's slow drift is
+        // a degenerate artifact, not a real tempo change). A path with genuine
+        // switches is preserved — mid-track tempo changes are legitimate.
+        IReadOnlyList<DbnTempoRun>? tempoPath = decoded.TempoPath;
+        if (decoded.MeterResolved && decoded.DownbeatResolved && tempoPath is not null
+            && tempoPath.Count > 0)
+        {
+            double pathBpm = tempoPath[0].Tempo.Bpm;
+            bool uniform = tempoPath.All(run => Math.Abs(run.Tempo.Bpm - pathBpm) < 0.01);
+            if (uniform && Math.Abs(pathBpm - selected.Tempo.Bpm) >= 0.01)
+            {
+                tempoPath = new[]
+                {
+                    new DbnTempoRun(
+                        timeline.StartSample,
+                        Math.Max(timeline.EndSample, timeline.StartSample + 1),
+                        selected.Tempo),
+                };
+            }
+        }
         double? alternativeBpm = decoded.Alternative is { } alternative
             && IsMetricalFamilyRatio(alternative.Tempo.Bpm / selected.Tempo.Bpm)
             ? alternative.Tempo.Bpm
@@ -170,7 +201,10 @@ internal static class SymbolicTempoInference
             downbeatSample,
             alternativeBpm,
             alternativeScore,
-            decoded.TempoPath);
+            tempoPath)
+        {
+            MetricallyDecoded = decoded.MeterResolved && decoded.DownbeatResolved,
+        };
     }
 
     /// <summary>Relative tie epsilon for phase-selection comparisons (TI-HOIST).
@@ -409,7 +443,16 @@ internal static class SymbolicTempoInference
         diagnostics.SelectedScore = bestScore;
         diagnostics.TempoEvidenceStreamCount = trackedSelected?.ActiveStreams ?? 0;
         diagnostics.TempoAgreeingStreamCount = trackedSelected?.AgreeingStreams ?? 0;
-        if (hierarchyResolved && !hierarchyAgreesWithFallback)
+        if (hierarchy.MetricallyDecoded)
+        {
+            // A decisive metrical decode (meter AND downbeat resolved) is
+            // authoritative: the alternative lost to genuine metrical evidence
+            // (the downbeat-consistency discriminator defeats the double-tempo
+            // illusion), so no half/double competitor is retained.
+            diagnostics.AlternativeBpm = null;
+            diagnostics.AlternativeScore = null;
+        }
+        else if (hierarchyResolved && !hierarchyAgreesWithFallback)
         {
             diagnostics.AlternativeBpm = hierarchy.AlternativeBpm;
             diagnostics.AlternativeScore = hierarchy.AlternativeScore;
@@ -448,13 +491,19 @@ internal static class SymbolicTempoInference
 
         // Tempo resolution is owned by the complete multi-stream tracker and
         // metrical decoder. Classified kick/snare roles are evidence streams;
-        // they never manufacture a BPM or bypass the ambiguity gate.
+        // they never manufacture a BPM or bypass the ambiguity gate. A decisive
+        // DBN metrical decode (meter AND downbeat resolved) resolves the tempo
+        // even when the coarse Ellis fallback grid picked a different level —
+        // the decode out-scored that reading on the full metrical evidence.
         bool tempoResolved = trackedSelected is not null
             && trackedSelected.ActiveStreams >= 2
             && trackedSelected.AgreeingStreams >= 2
             && hierarchyResolved
-            && hierarchyAgreesWithFallback
-            && fallbackAlternativeBpm is null;
+            && (hierarchy.MetricallyDecoded || hierarchyAgreesWithFallback)
+            // The Ellis fallback's half/double alternative does not block
+            // resolution when the DBN decode decisively resolved the hierarchy;
+            // the metrical evidence out-scored that reading.
+            && (fallbackAlternativeBpm is null || hierarchy.MetricallyDecoded);
 
         // Phase sign convention (Patch D): phaseSample is the source sample where
         // musical quarter 0 occurs; if it is after the source start, the quarter at
@@ -689,6 +738,9 @@ internal static class SymbolicTempoInference
         VisualizationTimeline timeline,
         IReadOnlyList<PercussiveOnset> percussionEvidence)
     {
+        // SCRATCH-DEBUG
+        if (timeline.Rhythm is { Count: > 0 })
+            PercussionEvidenceBuilder.DumpRoles(timeline);
         var percussion = new List<(long Sample, double Strength)>();
         var accented = new List<(long Sample, double Strength)>();
         foreach (PercussiveOnset onset in percussionEvidence)
@@ -887,7 +939,10 @@ internal static class SymbolicTempoInference
             downbeatPhase,
             downbeatSample,
             alternativeBpm,
-            alternativeScore);
+            alternativeScore)
+        {
+            MetricallyDecoded = decoded is { MeterResolved: true, DownbeatResolved: true },
+        };
     }
 
     private static TatumLevel InferTatum(double[] intervals, Onset[] onsets)
@@ -2004,6 +2059,12 @@ internal static class SymbolicTempoInference
     private static bool IsMetricalFamilyRatio(double ratio)
     {
         if (!double.IsFinite(ratio) || ratio <= 0)
+            return false;
+        // A ratio within 1% of 1.0 is the SAME musical reading at a slightly
+        // different grid phase (89.5 vs 90 BPM is a 0.56% drift), not an
+        // octave/beat-grouping family member; only a genuinely different
+        // metrical level (half, double, ...) is family-ambiguous.
+        if (Math.Abs(ratio - 1.0) <= 0.01)
             return false;
         double nearestPowerOfTwo = Math.Pow(2, Math.Round(Math.Log2(ratio)));
         return Math.Abs(ratio - nearestPowerOfTwo) < 0.01;
