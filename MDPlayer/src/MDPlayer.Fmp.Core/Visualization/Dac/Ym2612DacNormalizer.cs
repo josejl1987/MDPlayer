@@ -33,7 +33,7 @@ internal sealed class Ym2612DacNormalizer
     /// Feeds one chip write to the normalizer, emitting the corresponding
     /// normalized DAC operations into <paramref name="ops"/>.
     /// </summary>
-    public void Process(long samplePosition, int port, int address, int value, List<DacOperation> ops)
+    public void Process(long samplePosition, int port, int address, int value, List<DacOperation> ops, long? sourceOffset = null)
     {
         if (port != 0)
             return;
@@ -78,7 +78,8 @@ internal sealed class Ym2612DacNormalizer
                     samplePosition,
                     DacSourceId,
                     Position: _cursor,
-                    Value: (byte)value));
+                    Value: (byte)value,
+                    SourceOffset: sourceOffset));
                 _cursor++;
                 _lastTimestamp = samplePosition;
                 return;
@@ -108,7 +109,8 @@ internal sealed class Ym2612DacNormalizer
                 samplePosition,
                 DacSourceId,
                 Position: _cursor,
-                Value: (byte)value));
+                Value: (byte)value,
+                SourceOffset: sourceOffset));
             _cursor++;
             _lastTimestamp = samplePosition;
             return;

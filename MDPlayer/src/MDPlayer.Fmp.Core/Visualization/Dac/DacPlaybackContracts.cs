@@ -7,7 +7,9 @@ namespace Fmp.Core.Visualization;
 internal sealed record DacSourceReference(
     int SourceId,
     long StartPosition,
-    long EndPosition);
+    long EndPosition,
+    long? StartSourceOffset = null,
+    long? EndSourceOffset = null);
 
 /// <summary>
 /// A completed playback session reduced to a candidate sample payload plus the
@@ -45,7 +47,9 @@ internal sealed record DacPlaybackEvent(
     IReadOnlyList<DacRatePoint> RatePoints,
     double? Gain,
     double? Pan,
-    bool WasImplicit = false);
+    bool WasImplicit = false,
+    long? SourceOffset = null,
+    IReadOnlyList<long?> SourceOffsets = null);
 
 /// <summary>A structured diagnostic for malformed or unsupported DAC input.</summary>
 internal sealed record DacDiagnostic(

@@ -690,20 +690,20 @@ public sealed class MidiTranscriberFidelityTests
             ],
             DacHits =
             [
-                new DacHitEvent("ym2612.0.pcm.dac", 0, 1000, "dac:0", "kick-a", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.5f),
-                new DacHitEvent("ym2612.0.pcm.dac", 2000, 3000, "dac:0", "kick-a", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.8f),
-                new DacHitEvent("ym2612.0.pcm.dac", 4000, 5000, "dac:0", "kick-a", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.3f),
+                new DacHitEvent("ym2612.0.pcm.dac", 0, 1000, "dac:0", "kick-slice-a", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.5f, IdentityId: "dacid:0"),
+                new DacHitEvent("ym2612.0.pcm.dac", 2000, 3000, "dac:0", "kick-slice-b", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.8f, IdentityId: "dacid:0"),
+                new DacHitEvent("ym2612.0.pcm.dac", 4000, 5000, "dac:0", "kick-slice-c", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.3f, IdentityId: "dacid:0"),
             ],
         };
 
         MidiTranscriptionResult result = Transcriber.Transcribe(timeline);
         Assert.Equal(3, result.Diagnostics.SamplePlaybackCount);
         Assert.Equal(3, result.Diagnostics.UniqueAudibleAttackCount);
-        Assert.Equal(1, result.Diagnostics.SampleIdentityCount); // byte-identical content -> ONE identity
+        Assert.Equal(1, result.Diagnostics.SampleIdentityCount); // resolved identity -> ONE identity
         var track = Track(result.Bytes, 1);
         var ons = track.Where(e => e.Event is NoteOnEvent).ToArray();
         Assert.Equal(3, ons.Length);
-        Assert.All(ons, e => Assert.Equal(36, ((NoteOnEvent)e.Event).NoteNumber)); // same content -> same note
+        Assert.All(ons, e => Assert.Equal(36, ((NoteOnEvent)e.Event).NoteNumber)); // same identity -> same note
         Assert.All(ons, e => Assert.Equal(9, ((NoteOnEvent)e.Event).Channel));     // channel 10
         // Peak amplitude maps to velocity; distinct peaks -> distinct velocities.
         int[] velocities = ons.Select(e => (int)((NoteOnEvent)e.Event).Velocity).ToArray();
@@ -714,9 +714,10 @@ public sealed class MidiTranscriberFidelityTests
     [Fact]
     public void DacHits_DistinctContent_MapsToDistinctNotes()
     {
-        // The MIDI identity is the hit CONTENT, not the stream asset id:
-        // byte-distinct slices (kick vs snare) must map to different notes.
-        // Regression for 01 Open Mind (226 hits, all previously note 36).
+        // The MIDI identity is the resolved HIT IDENTITY, not the stream asset
+        // id and not the raw content hash: distinct identities (kick vs snare)
+        // must map to different notes. Regression for 01 Open Mind (226 hits,
+        // all previously note 36).
         var timeline = new VisualizationTimeline
         {
             SampleRate = Sr,
@@ -728,9 +729,9 @@ public sealed class MidiTranscriberFidelityTests
             ],
             DacHits =
             [
-                new DacHitEvent("ym2612.0.pcm.dac", 0, 1000, "dac:0", "kick-slice", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.5f),
-                new DacHitEvent("ym2612.0.pcm.dac", 2000, 3000, "dac:0", "snare-slice", 0, 1000, DacHitClass.Snare, DacHitIdentityKind.Inferred, 0.9f, 0.5f),
-                new DacHitEvent("ym2612.0.pcm.dac", 4000, 5000, "dac:0", "tom-slice", 0, 1000, DacHitClass.Tom, DacHitIdentityKind.Inferred, 0.9f, 0.5f),
+                new DacHitEvent("ym2612.0.pcm.dac", 0, 1000, "dac:0", "kick-slice", 0, 1000, DacHitClass.Kick, DacHitIdentityKind.Inferred, 0.9f, 0.5f, IdentityId: "dacid:0"),
+                new DacHitEvent("ym2612.0.pcm.dac", 2000, 3000, "dac:0", "snare-slice", 0, 1000, DacHitClass.Snare, DacHitIdentityKind.Inferred, 0.9f, 0.5f, IdentityId: "dacid:1"),
+                new DacHitEvent("ym2612.0.pcm.dac", 4000, 5000, "dac:0", "tom-slice", 0, 1000, DacHitClass.Tom, DacHitIdentityKind.Inferred, 0.9f, 0.5f, IdentityId: "dacid:2"),
             ],
         };
 
@@ -742,7 +743,7 @@ public sealed class MidiTranscriberFidelityTests
             .OrderBy(note => note)
             .ToArray();
         Assert.Equal(3, notes.Length);
-        Assert.Equal(3, notes.Distinct().Count()); // distinct content -> distinct notes
+        Assert.Equal(3, notes.Distinct().Count()); // distinct identities -> distinct notes
     }
 
     [Fact]

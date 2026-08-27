@@ -13,7 +13,8 @@ internal sealed record VgmRegisterWrite(
     int Port,
     int Address,
     int Data,
-    long Sequence = 0) : VgmExecutionEvent(SourceSample, Sequence);
+    long Sequence = 0,
+    long? DacSourceOffset = null) : VgmExecutionEvent(SourceSample, Sequence);
 
 internal sealed record VgmDacStreamControl(
     long SourceSample,
@@ -481,7 +482,8 @@ internal sealed class VgmDocument
                             new DeviceId(ChipType.Ym2612, 0),
                             0,
                             0x2A,
-                            dacByte));
+                            dacByte,
+                            DacSourceOffset: legacyDacCursor));
                         legacyDacCursor++;
                     }
                     else if (!warnedAboutMissingDacData)
@@ -1030,7 +1032,8 @@ internal sealed class VgmCaptureSession : IPlaybackCaptureSession
                         write.Device,
                         write.Port,
                         write.Address,
-                        write.Data);
+                        write.Data,
+                        DacSourceOffset: write.DacSourceOffset);
                     _events.OnChipWrite(normalized);
                     audio?.Write(normalized);
                 }

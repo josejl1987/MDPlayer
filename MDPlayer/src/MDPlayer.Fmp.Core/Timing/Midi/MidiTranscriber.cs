@@ -340,10 +340,11 @@ internal sealed class MidiTranscriber
     /// per-trigger view ("one continuous stream can contain many audible
     /// hits"); without it, a whole song's DAC stream would serialize as a
     /// single NoteOn. Each expanded trigger is identified by the hit's
-    /// CONTENT hash (SHA-256 of the hit slice), not the stream asset id: two
-    /// byte-identical slices are the same underlying sample and share one MIDI
-    /// note, while different content maps to a different note. Non-DAC
-    /// playbacks (NES DPCM, Oki) are kept as-is.
+    /// resolved IDENTITY id (<see cref="DacHitEvent.IdentityId"/>), which the
+    /// visualization layer assigned after canonical waveform deduplication
+    /// (exact then fuzzy). The raw content hash stays in the timeline as
+    /// forensic metadata; MIDI never uses it as identity. Non-DAC playbacks
+    /// (NES DPCM, Oki) are kept as-is.
     /// </summary>
     private static IReadOnlyList<SamplePlaybackEvent> ExpandDacHits(
         VisualizationTimeline timeline,
@@ -369,7 +370,7 @@ internal sealed class MidiTranscriber
                     sample.VoiceId,
                     hit.StartSample,
                     hit.EndSample,
-                    hit.ContentHash,
+                    hit.IdentityId ?? hit.ContentHash,
                     MidiPitch: null,
                     PlaybackRate: 1.0,
                     Gain: hit.PeakLevel,
@@ -556,7 +557,8 @@ internal sealed class MidiTranscriber
     /// </summary>
     private static int SampleVelocity(SamplePlaybackEvent sample)
     {
-        if (sample.SampleId.StartsWith("dac:", StringComparison.Ordinal))
+        if (sample.SampleId.StartsWith("dac:", StringComparison.Ordinal)
+            || sample.SampleId.StartsWith("dacid:", StringComparison.Ordinal))
         {
             return sample.Gain > 0f && sample.Gain < 1f
                 ? DrumVelocity(sample.Gain)

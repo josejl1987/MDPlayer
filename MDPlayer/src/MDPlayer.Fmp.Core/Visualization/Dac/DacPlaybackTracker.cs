@@ -175,7 +175,7 @@ internal sealed class DacPlaybackTracker
             return;
         }
 
-        _active.Append(op.Value, op.Position);
+        _active.Append(op.Value, op.Position, op.SourceOffset);
         _active.ExpectedPosition = op.Position + 1;
 
         if (_active.HasConsumedDeclaredLength)
@@ -196,7 +196,7 @@ internal sealed class DacPlaybackTracker
             null,
             null,
             wasImplicit: true);
-        _active.Append(op.Value, op.Position);
+        _active.Append(op.Value, op.Position, op.SourceOffset);
     }
 
     private void ChangeRate(long timestamp, double rateHz)
@@ -235,7 +235,9 @@ internal sealed class DacPlaybackTracker
         DacSourceReference sourceRef = new(
             active.Source.SourceId,
             active.StartPosition,
-            active.EndPosition);
+            active.EndPosition,
+            active.StartSourceOffset,
+            active.EndSourceOffset);
         var candidate = new DacSampleCandidate(
             payload,
             active.Source.Format,
@@ -258,7 +260,9 @@ internal sealed class DacPlaybackTracker
             active.RatePoints.ToArray(),
             Gain: null,
             Pan: null,
-            WasImplicit: active.WasImplicit));
+            WasImplicit: active.WasImplicit,
+            SourceOffset: active.StartSourceOffset,
+            SourceOffsets: active.SourceOffsets));
 
         if (truncated)
             Diagnose(timestamp, "truncated-input", "DAC playback ended before its declared length was available.");
@@ -303,6 +307,7 @@ internal sealed class DacPlaybackTracker
     private sealed class ActivePlayback
     {
         private readonly List<byte> _bytes = [];
+        private readonly List<long?> _sourceOffsets = [];
         private readonly List<DacRatePoint> _ratePoints = [];
         private ActivePlayback(
             long instanceId,
@@ -344,19 +349,28 @@ internal sealed class DacPlaybackTracker
         public long StartPosition { get; }
         public long EndPosition => StartPosition + PayloadLength;
         public long ExpectedPosition { get; set; }
+        public long? StartSourceOffset { get; private set; }
+        public long? EndSourceOffset { get; private set; }
         public long? DeclaredLength { get; }
         public double? InitialRateHz { get; }
         public double? CurrentRateHz { get; private set; }
         public bool WasImplicit { get; }
         public int PayloadLength => _bytes.Count;
+        public IReadOnlyList<long?> SourceOffsets => _sourceOffsets;
         public IReadOnlyList<DacRatePoint> RatePoints => _ratePoints;
         public bool HasConsumedDeclaredLength =>
             DeclaredLength is long length && PayloadLength >= length;
 
-        public void Append(byte value, long position)
+        public void Append(byte value, long position, long? sourceOffset = null)
         {
             _bytes.Add(value);
+            _sourceOffsets.Add(sourceOffset);
             ExpectedPosition = position + 1;
+            if (sourceOffset is long offset)
+            {
+                StartSourceOffset ??= offset;
+                EndSourceOffset = offset;
+            }
         }
 
         public void SetRate(long timestamp, double rateHz)

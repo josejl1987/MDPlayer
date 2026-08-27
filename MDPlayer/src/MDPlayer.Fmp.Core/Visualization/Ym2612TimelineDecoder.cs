@@ -70,13 +70,13 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         _registers[write.Port * RegisterBankSize + write.Address] = (byte)write.Data;
         if (write.Port == 0 && write.Address == 0x2B)
         {
-            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data);
+            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data, write.DacSourceOffset);
             Fm6DacGate(write.SamplePosition);
             return;
         }
         if (write.Port == 0 && write.Address == 0x2A)
         {
-            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data);
+            ProcessDacRegisters(write.SamplePosition, write.Port, write.Address, write.Data, write.DacSourceOffset);
             return;
         }
         if (write.Port == 0 && write.Address == 0x27)
@@ -151,7 +151,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
     /// playback tracker. FM channel 6 gating on DAC enable is applied
     /// separately by <see cref="Fm6DacGate"/>.
     /// </summary>
-    private void ProcessDacRegisters(long sample, int port, int address, int value)
+    private void ProcessDacRegisters(long sample, int port, int address, int value, long? sourceOffset = null)
     {
         if (port == 0
             && address == 0x2A
@@ -163,7 +163,7 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
                 $"{_device.Id}: explicit YM2612 DAC stream wrote while DAC enable (0x2B bit 7) was off; chip write preserved and sample tracking skipped");
             _warnedExplicitDacDisabled = true;
         }
-        _dacNormalizer.Process(sample, port, address, value, _dacOps);
+        _dacNormalizer.Process(sample, port, address, value, _dacOps, sourceOffset);
         DrainDacOperations();
     }
 
@@ -220,25 +220,50 @@ internal sealed class Ym2612TimelineDecoder : IChipTimelineDecoder
         }
         string lastEmittedSampleId = null;
 
+        // Stage A: detect every audible hit across all playback events. Hits
+        // are collected with their payload slices so identity resolution can
+        // compare canonical waveforms before any hit is added to the timeline.
+        var hitCandidates = new List<DacIdentityResolver.Candidate>();
         foreach (DacPlaybackEvent evt in _dacTracker.PlaybackEvents)
         {
-            if (evt.SampleId is string sampleId
-                && assetsById.TryGetValue(sampleId, out DacSampleAsset asset))
+            if (evt.SampleId is not string sampleId
+                || !assetsById.TryGetValue(sampleId, out DacSampleAsset asset))
             {
-                foreach (DacHitEvent hit in DacHitDetector.Detect(
-                    asset.Payload.Span,
-                    evt.StartSample,
-                    Math.Max(evt.StartSample + 1, evt.EndSample),
-                    sampleId,
-                    evt.InitialRateHz,
-                    _timeline.SampleRate))
-                {
-                    _timeline.AddDacHit(hit);
-                }
+                continue;
             }
+            foreach (DacHitEvent hit in DacHitDetector.Detect(
+                asset.Payload.Span,
+                evt.StartSample,
+                Math.Max(evt.StartSample + 1, evt.EndSample),
+                sampleId,
+                evt.InitialRateHz,
+                _timeline.SampleRate))
+            {
+                int start = (int)Math.Clamp(hit.SourceStartOffset, 0, asset.Payload.Length);
+                int end = (int)Math.Clamp(hit.SourceEndOffset, start, asset.Payload.Length);
+                long? hitSourceOffset = evt.SourceOffsets is { Count: > 0 } offsets
+                    && hit.SourceStartOffset >= 0 && hit.SourceStartOffset < offsets.Count
+                        ? offsets[(int)hit.SourceStartOffset]
+                        : evt.SourceOffset;
+                hitCandidates.Add(new DacIdentityResolver.Candidate(
+                    hit with { SourceOffset = hitSourceOffset },
+                    asset.Payload.Slice(start, end - start)));
+            }
+        }
 
-            // An implicit register stream that spans the entire capture is an
-            // activity placeholder, not a recognized sample trigger.
+        // Stage B: resolve stable identities, then stamp each hit and add it.
+        IReadOnlyList<string> identities = DacIdentityResolver.Resolve(hitCandidates);
+        for (int index = 0; index < hitCandidates.Count; index++)
+        {
+            DacIdentityResolver.Candidate candidate = hitCandidates[index];
+            _timeline.AddDacHit(candidate.Hit with
+            {
+                IdentityId = identities[index],
+            });
+        }
+
+        foreach (DacPlaybackEvent evt in _dacTracker.PlaybackEvents)
+        {
             if (evt.WasImplicit && evt.StartSample <= 0 && evt.EndSample >= endSample)
                 continue;
             if (evt.SampleId is null)

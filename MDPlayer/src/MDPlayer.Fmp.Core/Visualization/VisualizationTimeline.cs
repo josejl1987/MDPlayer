@@ -237,7 +237,9 @@ internal sealed record DacHitEvent(
     DacHitClass Classification,
     DacHitIdentityKind IdentityKind,
     float Confidence,
-    float PeakLevel);
+    float PeakLevel,
+    string IdentityId = null,
+    long? SourceOffset = null);
 
 /// <summary>Authoritative S-DSP voice-state transition retained for SPC panels.</summary>
 internal sealed record SpcVoiceStateEvent(

@@ -237,7 +237,8 @@ internal readonly record struct TimedChipWrite(
     DeviceId Device,
     int Port,
     int Address,
-    int Data)
+    int Data,
+    long? DacSourceOffset = null)
 {
     public TimedChipWrite Validate()
     {

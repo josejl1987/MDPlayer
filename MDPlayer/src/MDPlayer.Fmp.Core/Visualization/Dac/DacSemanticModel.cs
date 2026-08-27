@@ -37,7 +37,8 @@ internal abstract record DacOperation(long Timestamp)
         long Timestamp,
         int SourceId,
         long Position,
-        byte Value)
+        byte Value,
+        long? SourceOffset = null)
         : DacOperation(Timestamp);
 
     internal sealed record DacRateChanged(
